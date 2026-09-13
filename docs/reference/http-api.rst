@@ -61,8 +61,8 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                         | the harness release catalog, oldest first         |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, what         |
-|                                                        | changed, verdict, setup, chain                    |
+| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, design, what |
+|                                                        | changed, review, verdict, setup, chain            |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
 +--------------------------------------------------------+---------------------------------------------------+
@@ -196,6 +196,21 @@ that answered a request carries, for example:
    {"training_request": {"id": "change-001", "text": "Text me when the run is blocked",
                          "session": "session-1", "release_id": "release-1",
                          "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}]}}
+
+When the backend dropped an item the method added (malformed, or credential
+or directive shaped), ``training_request.refused_requires`` lists each as
+``{"item": <the item as written>, "reason": "..."}``; the key is absent when
+nothing was dropped. A method may also record notes beside its proposal;
+they land under ``proposal_notes``, a JSON mapping the backend writes as
+given and never reads, present only when non-empty. Reefine writes
+``design`` (the proposer's plan, a few sentences), ``review``
+(``{"verdict": "complete" | "partial", "covered": [...], "uncovered": [...]}``,
+the proposer's own reading of its entries against the request; absent when
+the review call failed), ``refused_requires`` (the items the method itself
+dropped, in the same ``{item, reason}`` shape) and ``undeclared_env`` (the
+variables a written extension reads through ``process.env`` that no
+``requires`` item names; nothing adds them, the version page shows them).
+Other methods may write other keys.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
@@ -593,8 +608,10 @@ that error and leave mode switching to the caller.
 The existing trainer delivers the request to a proposer that explicitly
 accepts ``requests``, then evaluates and publishes under the same policy as
 automatic evolution. Its commit metrics carry ``training_request:
-{id, text, session, release_id, requires}``, visible through the release
-catalog.
+{id, text, session, release_id, requires}`` (with ``refused_requires`` when
+the backend dropped an item the method added) and, for a method that records
+notes beside its proposal, ``proposal_notes``, both visible through the
+release catalog.
 
 Rollback
 ~~~~~~~~
@@ -629,21 +646,33 @@ page (``text/html``, no asset, its data inline) for one catalog row. ``step``
 is the row's position in ``GET /reef/harness/releases`` oldest first, the
 creation row being 0, which is the commit step: a rejected step publishes
 nothing and its row carries the head's release id, so the step is what names
-it. The page has five sections in this order: Why (the request the step read,
-else the claimed proposal's reason, else a failure in the batch), What changed
-(the step's mutations; an extension's file as text for a create, and for an
-update a line diff against the release the candidate ran on when that release
-is restorable, else the new text), Verdict (the verdict with ``selected``,
-``wins``, ``losses``, ``ties``, ``current_score``, ``candidate_score``,
-``episode_failures``, and the step record directory when
+it. The page has up to seven sections in this order: Why (the request the
+step read, else the claimed proposal's reason, else a failure in the batch),
+Design (the proposer's plan, ``proposal_notes.design``; only when the method
+recorded one), What changed (the step's mutations; an extension's file as
+text for a create, and for an update a line diff against the release the
+candidate ran on when that release is restorable, else the new text), Review
+(``proposal_notes.review``: the proposer's verdict on its entries against the
+request, ``complete`` or ``partial``, then the points it covered and the ones
+it left uncovered, then one line naming ``proposal_notes.undeclared_env``,
+the variables a written extension reads that no ``requires`` item names;
+only when the row carries a review or that list), Verdict (the verdict with
+``selected``, ``wins``, ``losses``, ``ties``, ``passed``, ``failed``,
+``floor_score``, ``gate_sides``, ``current_score``, ``candidate_score`` and
+``episode_failures``, each when the row carries it, so a ``floor`` gate,
+which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
+and no ``current_score``, and the step record directory when
 ``evolution.step_record_dir`` is set), Setup (the request's ``requires`` with
 name, kind and check, then the items the release carries from earlier steps
 in its chain, the same union the install script and ``reef-<adapter> setup``
 read; a rejected or skipped row lists only its own items, since its release
-id is the head's; nothing when both are empty) and Chain (the parent
-release, this release, and its children: the steps gated on it, won, lost or
-pending, and a promote or rollback made on it; a rejected or skipped step
-published nothing, so its Chain names the head it ran on and no children).
+id is the head's; then, under "refused by the step", the items the step
+dropped from ``training_request.refused_requires`` and
+``proposal_notes.refused_requires``, each as written with its reason;
+nothing when all are empty) and Chain (the parent release, this release,
+and its children: the steps gated on it, won, lost or pending, and a promote
+or rollback made on it; a rejected or skipped step published nothing, so its
+Chain names the head it ran on and no children).
 The line under the title marks the served head as ``current``: the newest
 row that is neither pending nor a rejected or skipped step. A pending row
 that a later ``promote`` row names in ``rollback_target_release_id`` reads
