@@ -54,9 +54,11 @@ from reef.service.deploy.deployment_config import (
     component_config_arguments,
     normalize_component_config,
     normalize_component_layout,
+    reject_null_settings,
     translate_layout,
     translate_references,
 )
+from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
 from reef.service.deploy.service_config import (
@@ -425,6 +427,8 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        if versioned or standard:
+            reject_null_settings(config, arguments)
         if standard:
             if "services" in config.get("execution", {}):
                 raise DeployConfigError("execution.services belongs to legacy process stacks")
@@ -443,16 +447,30 @@ def resolve_deployment_config(
     return normalized_config, source_root
 
 
+def _config_source(config_path: Path | None, versioned: bool) -> str:
+    """Name the selected file, profile or command line and its layout for the startup log."""
+    if config_path is None:
+        return "config: command line"
+    layout = "schema-version 2" if versioned else "unversioned layout"
+    if config_path.parent == PROFILES_DIR.resolve():
+        return f"config: profile {config_path.stem} at {config_path} ({layout})"
+    return f"config: {config_path} ({layout})"
+
+
 def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None = None) -> int:
     resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
     config = (
         load_config(resolved_config_path, interpolate_env=False) if config_path else command_line_config(os.environ)
     )
     versioned = config.get("schema-version") == 2
-    _log(f"config: {resolved_config_path}" if config_path else "config: command line")
+    _log(_config_source(resolved_config_path if config_path else None, versioned))
     normalized_config, source_root = resolve_deployment_config(
         config, overrides, resolved_config_path, standard=config_path is None
     )
+    for line in startup_report(
+        config, normalized_config, overrides or {}, environ=os.environ, from_file=config_path is not None
+    ):
+        _log(line)
     settings_changed = normalized_config != config
     config = normalized_config
     services = validate_services(config, resolved_config_path)

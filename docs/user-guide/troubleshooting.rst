@@ -13,6 +13,8 @@ Starting Reef
 
 **reef serve cannot find the config.** A relative ``-c`` path is resolved against the Reef checkout root, not the current directory. Pass an absolute path, or run from the checkout root.
 
+**A setting is not what the config says.** The first lines of the launcher log list every resolved setting with its source (``file``, ``command line``, ``environment``, ``automatic``, ``default``), so a command-line flag or ``REEF_*`` variable that overrode the file shows up there. A ``schema-version: 2`` file that repeats a key, spells one field two ways, or sets ``null`` on a field that is not optional is refused before startup, naming the field and lines.
+
 **A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits ``ready_timeout`` seconds (3600 by default) before giving up. Read that service's log under ``run_dir``. For a training stack, the usual causes are a model that is still downloading, a ``reef.inference_url`` override that does not match where Slime bound its router (leave it unset; Reef takes the address from the training actor), or GPUs already in use.
 
 **Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; ``harness_evolve`` takes none in the flat section and is configured through a preset.
