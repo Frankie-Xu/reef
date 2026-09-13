@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
+import reef
+from reef.cli import main as cli_main
 from reef.service.deploy import orchestrator
 from reef.service.deploy.diagnostics import mask_secrets, startup_report
 from reef.service.deploy.inference import command_line_config
@@ -139,3 +143,58 @@ def test_serve_names_a_profile_and_an_unversioned_file(tmp_path, monkeypatch, ca
     assert (
         orchestrator._config_source(profile, True) == f"config: profile demo-profile at {profile} (schema-version 2)"
     )
+
+
+@pytest.mark.usefixtures("idle_stack")
+def test_print_config_lists_every_setting_and_starts_nothing(tmp_path, monkeypatch, capsys):
+    def must_not_run(*args, **kwargs):
+        pytest.fail("--print-config must not download models or start services")
+
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", must_not_run)
+    monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "stack.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {"schema-version": 2, "reef": {"token": "file-secret"}, "inference": {"model-path": "org/model"}}
+        )
+    )
+    with pytest.raises(SystemExit) as result:
+        cli_main(["serve", "-c", str(path), "--print-config", "--reef.port", "9000"])
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    lines = output.out.splitlines()
+    assert lines[0] == f"config: {path} (schema-version 2)"
+    assert "  reef.port = 9000  (command line)" in lines
+    assert "  inference.model-path = org/model  (file)" in lines
+    assert "  reef.token = ****  (file)" in lines
+    assert "  reef.ready-timeout = 30  (default)" in lines
+    assert "  inference.timeout-s = 300.0  (default)" in lines
+    assert "file-secret" not in output.out + output.err
+    assert not (tmp_path / ".reef").exists()
+
+
+def test_print_config_for_a_provider_needs_no_training_imports(tmp_path):
+    (tmp_path / "sitecustomize.py").write_text(
+        "import sys\n"
+        "class NoTrainingImports:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname.split('.')[0] in {'torch', 'slime', 'ray', 'sglang', 'megatron'}:\n"
+        "            raise RuntimeError('unexpected training import: ' + fullname)\n"
+        "sys.meta_path.insert(0, NoTrainingImports())\n"
+    )
+    env = {key: value for key, value in os.environ.items() if not key.startswith("REEF_")}
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(reef.__file__).resolve().parents[1])))
+    completed = subprocess.run(
+        [sys.executable, "-m", "reef.cli", "serve", "--model", "ollama/demo", "--print-config"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines()[0] == "config: command line"
+    assert "  inference.upstream-model = demo  (command line)" in completed.stdout
+    assert "  inference.upstream-api-key = ****  (command line)" in completed.stdout
+    assert not (tmp_path / ".reef").exists()

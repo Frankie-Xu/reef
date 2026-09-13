@@ -88,11 +88,13 @@ def startup_report(
     *,
     environ: Mapping[str, str],
     from_file: bool,
+    include_defaults: bool = False,
 ) -> list[str]:
     """Lines describing each explicitly supplied, automatically chosen or key default setting.
 
     ``base`` is the loaded file or the command-line seed config and ``resolved``
-    the normalized deployment config after component assembly.
+    the normalized deployment config after component assembly. With
+    ``include_defaults`` every declared setting is listed, defaults included.
     """
     arguments = (*service_config_arguments(), *component_config_arguments(resolved))
     supplied = translate_layout(base) if from_file else base
@@ -115,7 +117,7 @@ def startup_report(
         )
         if source is None:
             if value is _MISSING or value == argument.default or value == seed:
-                if argument.path not in _ALWAYS_REPORTED:
+                if not include_defaults and argument.path not in _ALWAYS_REPORTED:
                     continue
                 source = "default"
                 value = argument.default if value is _MISSING else value

@@ -457,19 +457,33 @@ def _config_source(config_path: Path | None, versioned: bool) -> str:
     return f"config: {config_path} ({layout})"
 
 
-def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None = None) -> int:
+def _run_orchestrator(
+    config_path: str | None, overrides: dict[str, str] | None = None, *, print_config: bool = False
+) -> int:
     resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
     config = (
         load_config(resolved_config_path, interpolate_env=False) if config_path else command_line_config(os.environ)
     )
     versioned = config.get("schema-version") == 2
-    _log(_config_source(resolved_config_path if config_path else None, versioned))
+    source = _config_source(resolved_config_path if config_path else None, versioned)
+    _log(source)
     normalized_config, source_root = resolve_deployment_config(
         config, overrides, resolved_config_path, standard=config_path is None
     )
-    for line in startup_report(
-        config, normalized_config, overrides or {}, environ=os.environ, from_file=config_path is not None
-    ):
+    report = startup_report(
+        config,
+        normalized_config,
+        overrides or {},
+        environ=os.environ,
+        from_file=config_path is not None,
+        include_defaults=print_config,
+    )
+    if print_config:
+        # Settings are final here; a model path is shown as written, since
+        # downloads and hardware checks happen only at a real start.
+        print("\n".join([source, *report]))
+        return 0
+    for line in report:
         _log(line)
     settings_changed = normalized_config != config
     config = normalized_config
@@ -635,7 +649,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         config_path = _resolve_config(args.config, args.recipe)
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ, overrides)
-        exit_code = _run_orchestrator(config_path, overrides)
+        exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
     sys.exit(exit_code)

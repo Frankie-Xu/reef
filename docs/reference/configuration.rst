@@ -234,7 +234,18 @@ variables a configuration-free start reads, or a field's declared fallback
 variable), ``automatic`` for a choice Reef made because the field was omitted,
 and ``default``. Settings left at their defaults are not listed except the
 recipe and the HTTP bind. Tokens, API keys, passwords and database URLs are
-masked by key name at any depth, including inside native ``options`` objects. Relative state paths still use
+masked by key name at any depth, including inside native ``options`` objects.
+
+``reef serve ... --print-config`` prints the same report on standard output,
+defaults included, and exits with status 0 (or 2 for an invalid config)
+without downloading a model, allocating GPUs or starting a process. It takes
+the same ``-c``, ``--recipe``, ``--model`` and override flags as a real start,
+so it shows exactly what that start would use. A Hugging Face model path is
+shown as written; the snapshot is resolved only at startup.
+
+.. code:: bash
+
+   reef serve -c stack.yaml --reef.port 9000 --print-config Relative state paths still use
 the launch directory. Unversioned legacy stacks can use ``services[].cwd``
 to override a process working directory.
 
