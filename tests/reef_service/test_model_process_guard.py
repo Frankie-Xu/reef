@@ -36,7 +36,10 @@ pid = os.fork()
 if pid == 0:
     time.sleep(60)
 else:
-    Path(sys.argv[1]).write_text(json.dumps({"child": pid}))
+    # Publish the pid atomically: the test polls for the file and must never read it half-written.
+    pending = Path(sys.argv[1] + ".tmp")
+    pending.write_text(json.dumps({"child": pid}))
+    os.replace(pending, sys.argv[1])
     time.sleep(60)
 """
     owner = subprocess.Popen([sys.executable, "-c", script, str(info)], env={**os.environ, DEPLOYMENT_ENV: token})
