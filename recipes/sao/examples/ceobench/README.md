@@ -298,13 +298,50 @@ docker run -d --name reef-ceobench-baseline --network host --ipc host --shm-size
   reef serve -c /workspace/Reef/recipes/sao/examples/ceobench/serve-baseline.yaml
 ```
 
+### Untrained baseline, seed 42
+
+`results/2026-09-13-baseline-qwen3.6-27b-seed42/` holds the manifest, the
+run configuration, and `weeks.csv` (cash, individual subscribers, and
+enterprise seats at every weekly dashboard). The benchmark rounds 500 days
+down to 71 whole weeks (497 days).
+
+| | |
+| --- | --- |
+| Policy | `Qwen3.6-27B`, no training (`serve-baseline.yaml`), simulator roles as above |
+| Outcome | bankrupt on day 255 (week 37); final cash -$66, `reward` -0.00007 |
+| Turns | 695 in 35 minutes, 11.5M input / 228k output tokens; every turn recorded, 36 weeks reported online |
+| Engine | no errors; the agent's shell ran as the unprivileged user throughout |
+
+| Week | Day | Cash | Subscribers |
+| ---: | ---: | ---: | ---: |
+| 1 | 7 | $977,614 | 19 |
+| 11 | 77 | $902,073 | 671 |
+| 17 | 119 | $877,846 | 466 |
+| 18 | 126 | $707,937 | 404 |
+| 20 | 140 | $364,051 | 310 |
+| 25 | 175 | $8,343 | 208 |
+| 30 | 210 | $3,900 | 28 |
+| 37 | 255 | -$66 | 0 |
+
+The agent priced low from the start (A/B/C at $15/$49/$99, then $15/$29/$69,
+$9/$19/$39, and $4/$24/$49 by day 161), grew to 671 subscribers by week 11
+while losing $4,000 to $7,000 a week, and never closed an enterprise deal.
+When subscribers started churning it bought R&D: tier 1 on day 119
+($170,000), tier 2 on day 133 ($340,000), and tiers 3, 2, and 1 again on
+day 168 ($334,000), all with negative cash flow and payoffs 35 to 380 days
+out. Cash was under $10,000 by week 25 and the company went bankrupt on day
+255. For scale, the leaderboard's Haiku 4.5 finishes at $59,600 and its
+rule-based baseline at $15.8M; this run is not comparable with either
+because the simulator roles are local stand-ins.
+
 ### Not yet run
 
-- The untrained 500-day baseline with the benchmark's Anthropic simulator
-  roles, at least three seeds (issue #428, acceptance criterion 1). The cost
-  of one such episode sizes the seed count.
-- Training runs long enough to compare against the untrained base and the
-  paper's rule-based baseline.
+- The untrained baseline with the benchmark's Anthropic simulator roles and
+  more seeds (issue #428, acceptance criterion 1).
+- A trained 500-day episode on the same seed: the test-time-training number
+  this baseline exists for. It needs the training step to keep pace with the
+  game (the smoke run's step took about five minutes, most of it in the
+  actor/critic offload cycle and the per-commit critic checkpoint).
 
 ## Open items
 
