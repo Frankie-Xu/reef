@@ -7,16 +7,14 @@ startup recovery and the commit barrier. It imports no backend implementation.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager, suppress
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol
+from typing import Any
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
-from reef.runtime.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
 from reef.runtime.training_job.admission import (
     _admission_runtime_load_id_groups,
     _scenario_staleness_admission,
@@ -32,96 +30,12 @@ from reef.runtime.training_job.execution import (
     uses_staleness_admission,
 )
 from reef.runtime.training_job.marker import marker_path, marker_result, read_marker, write_marker
+from reef.runtime.training_job.operations import InferenceOperations, TrainingOperations
 from reef.runtime.training_job.publication import TrainingPublication
 from reef.runtime.training_job.scenarios import ScenarioHistory
+from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
+from reef.runtime.weights.version import RuntimeLoadId
 from reef.surface.adapter import adapter_name, parse_adapter_name
-
-
-@dataclass(frozen=True)
-class TrainingCoordinationConfig:
-    """Deployment policy interpreted only by Reef's coordinator."""
-
-    save_hf_template: str | None
-    colocate: bool = False
-    lora: bool = False
-    adapter_capacity: int | None = None
-    keep_lora_base_resident: bool = False
-
-
-def _initial_runtime_load_id() -> str:
-    return str(RuntimeLoadId(new_runtime_load_id_incarnation(), 0))
-
-
-@dataclass
-class TrainingContext:
-    """Scheduling state available to backend preparation without control handles."""
-
-    next_rollout_id: int = 0
-    runtime_load_id: str = field(default_factory=_initial_runtime_load_id)
-    history: ScenarioHistory | None = None
-
-
-class TrainingOperations(Protocol):
-    """Training-only preparation, checkpoint I/O and native weight sending.
-
-    Sender methods must never pause, resume, offload or restart inference.
-    Reef supplies the exact identity for each transfer. The sender must echo
-    that identity; Reef independently verifies every receiver before commit.
-    """
-
-    config: TrainingCoordinationConfig
-    context: TrainingContext
-
-    def start(self) -> None: ...
-
-    def check_health(self) -> None: ...
-
-    def prepare_training_step(
-        self, batch: Any, step_preparer: str, algorithm_state: Mapping[str, Any]
-    ) -> PreparedTrainingStep: ...
-
-    def prepare(
-        self, payload: Mapping[str, Any], *, job_id: str, rollout_id: int, prior_marker: Mapping[str, Any] | None
-    ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]: ...
-
-    def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
-        """Prepare a sender while colocated inference resources are released."""
-
-    def send_weights(self, runtime_load_id: str, *, force_full: bool) -> str: ...
-
-    def initialize_version(self, runtime_load_id: str) -> None: ...
-
-    def activate_scenario(self, scenario: str) -> None: ...
-
-    def send_adapter(self, scenario: str, name: str) -> None: ...
-
-    def close(self) -> None: ...
-
-
-class InferenceOperations(Protocol):
-    """Receiver operations with acknowledged completion and no commit policy."""
-
-    def initialize_version(self, runtime_load_id: str) -> None: ...
-
-    def inference_url(self) -> str: ...
-
-    def runtime_load_ids(self) -> Sequence[str]: ...
-
-    def pause(self) -> None: ...
-
-    def resume(self) -> None: ...
-
-    def recover(self) -> None: ...
-
-    def abort(self) -> None: ...
-
-    def offload(self, tags: tuple[str, ...] | None) -> None: ...
-
-    def onload_weights(self) -> None: ...
-
-    def onload_kv(self) -> None: ...
-
-    def unload_adapter(self, name: str) -> None: ...
 
 
 @dataclass(frozen=True)

@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.training_job.coordinator import TrainingContext, TrainingCoordinationConfig, TrainingCoordinator
+from reef.runtime.training_job.coordinator import TrainingCoordinator
 from reef.runtime.training_job.execution import TrainingCheckpoint, TrainingMetrics
 from reef.runtime.training_job.marker import marker_path, read_marker
+from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
 
 
 class Receiver:

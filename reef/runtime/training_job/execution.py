@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from reef.runtime.base import TrainingJobResult
 from reef.runtime.training_job.marker import (
+    TrainingJobState,
     marker_checkpoint_result,
     marker_disposition,
     marker_result,
@@ -21,7 +22,6 @@ from reef.runtime.training_job.marker import (
     transition_marker,
     write_marker,
 )
-from reef.runtime.training_job.state import TrainingJobState
 
 
 def max_staleness(payload: Mapping[str, Any]) -> int:

@@ -12,8 +12,8 @@ from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.dispatcher import Dispatcher
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult
-from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
+from reef.runtime.weights.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 

@@ -424,7 +424,7 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert "reef" not in settings and "services" not in settings
     assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["recipe"]["config"]["evolution"]["tasks"]
     # Boot the real recipe; a retained selector without its profile would fail here.
-    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+    from reef.runtime.adapters.http import InferenceProxyRuntime
 
     recipe = CordisRecipe.from_environment(
         {},

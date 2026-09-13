@@ -14,8 +14,8 @@ from reef.artifact.artifact import Artifact
 from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.runtime.inference import InferenceBackend
+from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 
 
 class RuntimeContractError(ReefError):
@@ -25,6 +25,10 @@ class RuntimeContractError(ReefError):
     correctly configured deployment would never produce — distinct from user
     input errors, which surface as more specific ``ReefError`` subclasses.
     """
+
+
+class TrainingRuntimeError(ReefError):
+    """Raised when a training backend violates the runtime contract."""
 
 
 @dataclass(frozen=True, slots=True)

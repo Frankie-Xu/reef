@@ -2,8 +2,8 @@
 
 import pytest
 
-from reef.runtime.inference_control import InferenceControl
-from reef.runtime.weight_update import WeightUpdateLock
+from reef.runtime.control.inference import InferenceControl
+from reef.runtime.weights.lock import WeightUpdateLock
 
 
 class MemoryEngines:

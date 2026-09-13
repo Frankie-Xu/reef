@@ -28,7 +28,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import (

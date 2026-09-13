@@ -21,7 +21,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer

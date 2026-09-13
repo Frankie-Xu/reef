@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from reef.runtime.adapter_residency import (
+from reef.runtime.weights.residency import (
     AdapterCapacityExhausted,
     AdapterEvictionFailed,
     AdapterNotActive,

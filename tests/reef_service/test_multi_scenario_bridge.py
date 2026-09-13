@@ -12,9 +12,9 @@ pytest.importorskip("ray")
 from reef_service.slime_coordinator import build_slime_coordinator
 from reef_service.test_sao_bridge import _RecordingGroup
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
-from reef.runtime.inference_memory import InferenceMemory
+from reef.runtime.control.memory import InferenceMemory
 from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
+from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
 
 from .test_sao_bridge import _FakeRank, _FakeRolloutManager, _payload, _RemoteMethod, _sao_row

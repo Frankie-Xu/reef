@@ -36,7 +36,7 @@ from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
 from reef.service.install_script import (

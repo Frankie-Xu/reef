@@ -36,7 +36,7 @@ def test_importing_the_recipe_registers_the_reused_preparer():
 
 def test_group_size_floor():
     recipe_cls = _recipe_cls()
-    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+    from reef.runtime.adapters.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000")
     with pytest.raises(ValueError, match="at least two"):

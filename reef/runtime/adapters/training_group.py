@@ -1,4 +1,4 @@
-"""Training semantics shared by executor-backed and in-process backends."""
+"""Coordinator RPC connections shared by training and inference adapters."""
 
 from __future__ import annotations
 
@@ -8,13 +8,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.batches import TrainingBatch
-from reef.core.errors import ReefError
-from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
+from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntimeError
 from reef.runtime.executor import Executor
-
-
-class TrainingRuntimeError(ReefError):
-    """Raised when a training backend violates the runtime contract."""
 
 
 class TrainingGroupHandle(ABC):

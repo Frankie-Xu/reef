@@ -5,7 +5,7 @@ import pytest
 from reef.recipe.config import load_recipe_config
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_named_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 
 
 def test_recipe_loader_preserves_environment_references(tmp_path, monkeypatch) -> None:

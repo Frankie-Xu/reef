@@ -13,10 +13,13 @@ contracts. Backends supply native model operations and weight transport.
 
 ``model_config.ModelConfig`` is the in-memory model selection shared by a
 scenario and its recipe. It has no file paths or persistence behavior.
-``inference_control`` coordinates engine pause/recovery and transport reconnect;
-``health_monitor`` drains engine probes before lifecycle changes;
-``inference_memory`` pairs acknowledged memory release/resume operations;
-``weight_update`` supplies transport-lock failure and phase semantics.
+
+``control`` groups inference pause/recovery, health probes and memory handoffs.
+``weights`` groups version identity, candidates, LoRA residency and transfer locks.
+``training_job`` owns job execution and publication; its ``operations`` module
+defines the backend-facing contracts independently of the coordinator.
+``adapters`` implements generic HTTP and executor connections and their config.
+``executor`` launches and controls workers without choosing a model framework.
 
 Concrete inference implementations live in ``reef.inference`` and training
 implementations in ``reef.train``. This package imports neither integration
@@ -35,18 +38,23 @@ it with ``@register_runtime_kind`` in a module imported at boot. A config
 """
 
 from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
-from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.adapters.ray_runtime import (
+from reef.runtime.adapters.executor_training import ExecutorTrainingRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime, resolve_proxy_runtime
+from reef.runtime.adapters.ray import (
     RayRuntimeError,
     RayTrainGroupHandle,
     RemoteRayTrainGroupHandle,
     connect_ray_runtime,
 )
-from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
-from reef.runtime.candidates import ActivatedModel, ModelCandidate
+from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle
+from reef.runtime.base import (
+    InferenceRuntime,
+    PreparedTrainingStep,
+    TrainingJobResult,
+    TrainingRuntime,
+    TrainingRuntimeError,
+)
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
-from reef.runtime.proxy import resolve_proxy_runtime
 from reef.runtime.registry import (
     RuntimeConfigError,
     RuntimeFactory,
@@ -55,7 +63,7 @@ from reef.runtime.registry import (
     runtime_factory_for,
     runtime_kinds,
 )
-from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
+from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 
 __all__ = [
     "ActivatedModel",

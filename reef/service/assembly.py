@@ -21,10 +21,10 @@ from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.config import RuntimeConnectionConfig
+from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.registry import RuntimeRegistry
-from reef.runtime.settings import TrainingRuntimeSettings
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
@@ -75,7 +75,7 @@ def _connect_training_runtime(
     connector: Any = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Build the selected integration's runtime, independently of its process topology."""
-    TrainingRuntimeSettings(
+    RuntimeConnectionConfig(
         inference_timeout_s=settings.inference_timeout_s,
         train_timeout_s=settings.train_timeout_s,
         max_staleness=max_staleness,

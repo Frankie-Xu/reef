@@ -1,6 +1,6 @@
 """Durable training-job marker: Reef's crash-recovery state machine.
 
-One marker file (:data:`reef.runtime.names.LATEST_JOB_MARKER_FILENAME`) lives
+One marker file (:data:`LATEST_JOB_MARKER_FILENAME`) lives
 next to the HF checkpoints and records the latest training job's identity and
 stage:
 
@@ -19,13 +19,23 @@ stage:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from reef.runtime.base import TrainingJobResult
-from reef.runtime.names import LATEST_JOB_MARKER_FILENAME
 from reef.runtime.training_job.durable_io import read_json
 from reef.runtime.training_job.durable_io import write_json as write_marker
+
+LATEST_JOB_MARKER_FILENAME = ".reef-latest-job.json"
+
+
+@dataclass
+class TrainingJobState:
+    """Health phase; durable recovery decisions always come from the job marker."""
+
+    phase: str = "serving"
+
 
 MarkerDisposition = Literal["replay", "resume", "conflict", "fresh"]
 MarkerStatus = Literal[
@@ -51,8 +61,10 @@ _MARKER_TRANSITIONS: dict[MarkerStatus, frozenset[MarkerStatus]] = {
 }
 
 __all__ = [
+    "LATEST_JOB_MARKER_FILENAME",
     "MarkerDisposition",
     "MarkerStatus",
+    "TrainingJobState",
     "marker_checkpoint_result",
     "marker_disposition",
     "marker_path",

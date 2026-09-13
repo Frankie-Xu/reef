@@ -595,7 +595,7 @@ def test_native_trainer_attaches_to_inference_without_pushing_batch_config(monke
 )
 def test_sender_prepares_the_next_reef_assigned_identity(monkeypatch, current, target, expected):
     module = _load_module(monkeypatch, "base.py")
-    from reef.runtime.runtime_load_id import RuntimeLoadId
+    from reef.runtime.weights.version import RuntimeLoadId
 
     updater = module.SynchronizedWeightUpdateMixin()
     updater.runtime_load_id = RuntimeLoadId.parse(current)
@@ -606,7 +606,7 @@ def test_sender_prepares_the_next_reef_assigned_identity(monkeypatch, current, t
 @pytest.mark.parametrize("target", ["engine:0", "engine:5", "other:3"])
 def test_live_sender_rejects_invalid_reef_transfer_sequence(monkeypatch, target):
     module = _load_module(monkeypatch, "base.py")
-    from reef.runtime.runtime_load_id import RuntimeLoadId
+    from reef.runtime.weights.version import RuntimeLoadId
 
     updater = module.SynchronizedWeightUpdateMixin()
     updater.runtime_load_id = RuntimeLoadId.parse("engine:2")

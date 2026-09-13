@@ -8,7 +8,7 @@ import pytest
 from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.inference.sglang.service import RayHealthProbe
-from reef.runtime.adapters.ray_runtime import NamedRayTrainGroupHandle
+from reef.runtime.adapters.ray import NamedRayTrainGroupHandle
 from reef.service.training_driver import ModelDeployment, supervise_deployment
 
 from .test_model_deployment import plan_for
@@ -148,7 +148,7 @@ def test_explicit_endpoint_is_not_replaced():
 
 
 def test_named_handle_rediscovers_and_never_replays_a_submitted_write(monkeypatch):
-    from reef.runtime.adapters import ray_runtime
+    from reef.runtime.adapters import ray as ray_runtime
 
     class ActorDied(Exception):
         pass

@@ -23,7 +23,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
-from reef.runtime.candidates import StaleCandidate
+from reef.runtime.weights.candidates import StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend

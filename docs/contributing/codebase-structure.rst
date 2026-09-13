@@ -159,11 +159,14 @@ with surface contracts, while checkpoint cadence is recipe policy.
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
 ``runtime/scheduler.py`` coordinates recipe-facing candidate and commit operations.
 ``runtime/training_job/`` owns job identity/replay, staleness admission,
-train/checkpoint ordering, LoRA residency and commit-gated publication. Concrete
-training integrations retain model operations, checkpoint and tensor I/O.
-``runtime/inference_control.py`` owns inference pause/recovery and reconnect
-ordering; ``runtime/health_monitor.py`` owns probe scheduling and drain barriers.
-``runtime/weight_update.py`` owns the transport lock's failure state.
+train/checkpoint ordering and commit-gated publication. Its ``operations.py``
+defines the separate training and inference contracts consumed by the coordinator.
+Concrete training integrations retain model operations, checkpoint and tensor I/O.
+``runtime/control/`` groups inference pause/recovery, health probes and memory
+handoffs. ``runtime/weights/`` groups version identity, candidates, LoRA residency
+and transport locking. ``runtime/adapters/`` connects the runtime interfaces to
+HTTP providers and executor workers; its connection configuration lives alongside
+those adapters. ``runtime/executor/`` owns worker launch and control.
 ``inference/sglang/`` owns SGLang engine launch, capture and control independently
 of training. ``train/slime_backend/inference.py`` only translates Slime options
 into plain launch data; the selected inference factory constructs its own configuration.

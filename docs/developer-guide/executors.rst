@@ -12,6 +12,11 @@ An ``Executor`` owns worker launch, ordered control RPC, health and shutdown.
 Configuration selects a concrete executor while callers use the same methods.
 The managed model driver creates Reef's ``TrainingCoordinator`` through this
 interface; backend implementations supply its training and inference operations.
+These contracts live in ``reef.runtime.training_job.operations``, separately
+from the coordinator implementation. Generic service connections and their
+configuration live in ``reef.runtime.adapters``; shared inference control lives
+in ``reef.runtime.control``, and weight versions, residency and transfer locks
+live in ``reef.runtime.weights``.
 
 .. code:: mermaid
 
@@ -486,7 +491,7 @@ backend pair. Further deployment and backend combinations are tracked in
 Inference recovery and reconnect
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.inference_control.InferenceControl`` owns pause intent and
+``reef.runtime.control.inference.InferenceControl`` owns pause intent and
 recovery/reconnect ordering through three backend contracts: ``InferenceEngines``
 for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
 and replacement, and ``InferenceMonitor`` for background recovery. The SGLang
@@ -509,7 +514,7 @@ The training publication coordinator retains the durable commit gate. An
 external deployment with an uncertain lock requires operator restart, and the
 shared controller never terminates borrowed engines.
 
-``reef.runtime.weight_update.WeightUpdateLock`` owns lock poisoning and transport
+``reef.runtime.weights.lock.WeightUpdateLock`` owns lock poisoning and transport
 phase-result bookkeeping without Slime or Ray imports. The legacy
 ``ReefRolloutLock`` entrypoint wraps it as a serial Ray actor. Existing weight
 updaters use the same lock methods and continue transferring directly between
@@ -604,7 +609,7 @@ transfers the update and restores KV/graphs. Commit acknowledgement permits
 generation to resume. Keeping the base resident still requires enough physical
 memory for that base and the active training workload.
 
-``reef.runtime.inference_memory`` tracks acknowledged release/resume operations
+``reef.runtime.control.memory`` tracks acknowledged release/resume operations
 per engine. Repeated operations skip regions already in the requested state.
 A failed operation leaves memory state uncertain and prevents reuse until that
 engine is replaced. SGLang supplies the concrete memory API adapter. This also
@@ -680,7 +685,7 @@ checkpoint performance still require the supported GPU environment.
 Engine health monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.health_monitor.EngineHealthMonitor`` owns probe scheduling.
+``reef.runtime.control.health.EngineHealthMonitor`` owns probe scheduling.
 ``pause()`` disables new checks and waits for the active probe or retirement to
 finish before the owner can replace, offload or terminate engines. A late probe
 failure after pause begins is discarded. A drain timeout leaves checks disabled,
@@ -883,7 +888,7 @@ Independent SGLang backend
 engine process, router, Ray engine groups and inference lifecycle. Native
 ``ServerArgs`` and ``launch_server`` come directly from SGLang; Reef no longer
 calls Slime's ``start_rollout_servers`` or inherits its ``SGLangEngine``.
-The runtime-load-ID value type lives in ``reef.runtime.runtime_load_id``.
+The runtime-load-ID value type lives in ``reef.runtime.weights.version``.
 
 Install ``reef-infra[sglang]`` for Python-side inference dependencies and install
 native SGLang in the selected GPU environment. This extra does not install

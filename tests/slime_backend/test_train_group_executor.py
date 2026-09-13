@@ -289,7 +289,7 @@ def test_disk_update_preserves_flags_version_and_recreate_sequence(
 def test_disk_recovery_and_retry_load_the_directory_written_for_reef_target(
     make_group, monkeypatch, tmp_path, release_train
 ):
-    from reef.runtime.runtime_load_id import RuntimeLoadId
+    from reef.runtime.weights.version import RuntimeLoadId
 
     def assign(worker, value):
         worker.version = value
@@ -513,7 +513,7 @@ def test_failure_observer_follows_recreated_training_workers(make_group):
 def test_prepared_disk_retry_reuses_export_and_recreates_only_before_a_new_prepare(
     make_group, monkeypatch, tmp_path, release_train
 ):
-    from reef.runtime.runtime_load_id import RuntimeLoadId
+    from reef.runtime.weights.version import RuntimeLoadId
 
     exports = []
     loads = []

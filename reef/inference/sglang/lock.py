@@ -2,7 +2,7 @@
 
 import ray
 
-from reef.runtime.weight_update import WeightUpdateLock
+from reef.runtime.weights.lock import WeightUpdateLock
 
 ReefRolloutLock = ray.remote(WeightUpdateLock)
 

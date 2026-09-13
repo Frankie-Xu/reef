@@ -364,7 +364,7 @@ def test_rebuild_assigns_a_new_weight_transfer_session():
 
 def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
     from dataclasses import replace
-    from reef.runtime.training_job.coordinator import TrainingContext, TrainingCoordinationConfig
+    from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
 
     plan, events = plan_for()
     plan.training.config = TrainingCoordinationConfig(save_hf_template=None)

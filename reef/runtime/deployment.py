@@ -15,7 +15,8 @@ from uuid import uuid4
 
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
 from reef.runtime.executor.failure import ExecutorFailedError
-from reef.runtime.training_job.coordinator import InferenceOperations, TrainingCoordinator, TrainingOperations
+from reef.runtime.training_job.coordinator import TrainingCoordinator
+from reef.runtime.training_job.operations import InferenceOperations, TrainingOperations
 
 
 class DeploymentResources(Protocol):

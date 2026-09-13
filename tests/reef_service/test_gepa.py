@@ -29,7 +29,7 @@ from reef.harness.episodes.run import EpisodeError, EpisodeResult
 from reef.harness.tree.mutations import Mutation
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend.strategies import resolve_episode_scorer

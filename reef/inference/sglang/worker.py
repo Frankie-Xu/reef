@@ -10,9 +10,9 @@ import ray
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.health import SGLangEngineHealthChecks
 from reef.inference.sglang.launch import SGLangCluster, engine_environment
-from reef.runtime.health_monitor import EngineHealthMonitor, HealthMonitorConfig
-from reef.runtime.inference_control import InferenceControl
-from reef.runtime.weight_update import WeightUpdateLock
+from reef.runtime.control.health import EngineHealthMonitor, HealthMonitorConfig
+from reef.runtime.control.inference import InferenceControl
+from reef.runtime.weights.lock import WeightUpdateLock
 
 
 def recover_server(server) -> None:

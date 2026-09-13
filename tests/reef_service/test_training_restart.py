@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.runtime.control.inference import InferenceControl
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.inference_control import InferenceControl
 from reef.runtime.training_job.marker import read_marker, write_marker
 from reef.runtime.training_job.publication import TrainingPublication
 

@@ -307,7 +307,8 @@ class TestCheckpointStorage:
 
     def test_lora_control_files_are_owned_not_unknown(self, tmp_path: Path) -> None:
         """The scenario history and adapter-slot snapshots live in the managed roots by design."""
-        from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, SCENARIO_HISTORY_FILENAME
+        from reef.runtime.training_job.scenarios import SCENARIO_HISTORY_FILENAME
+        from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 
         storage = _storage(tmp_path)
         _complete(storage, 0)

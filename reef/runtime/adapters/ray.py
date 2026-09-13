@@ -15,15 +15,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_option
-from reef.runtime.adapters.executor_runtime import connect_executor_runtimes
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
+from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE, RuntimeConnectionConfig
+from reef.runtime.adapters.executor_training import connect_executor_runtimes
+from reef.runtime.adapters.http import build_http_inference_backend
+from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle
+from reef.runtime.base import InferenceRuntime, TrainingRuntime, TrainingRuntimeError
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
-from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
-from reef.runtime.settings import TrainingRuntimeSettings
-from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
 RayRuntimeError = TrainingRuntimeError
 RayTrainGroupHandle = TrainingGroupHandle
@@ -146,7 +146,7 @@ def connect_ray_runtime(
 
 
 @dataclass(frozen=True)
-class RayRuntimeSettings(TrainingRuntimeSettings):
+class RayRuntimeConfig(RuntimeConnectionConfig):
     actor_name: str = config_option(DEFAULT_ACTOR_NAME, help="Training coordinator actor name.")
     namespace: str = config_option(DEFAULT_NAMESPACE, help="Ray namespace containing the coordinator.")
     ray_address: str | None = config_option(None, help="Ray cluster address.")
@@ -164,7 +164,7 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
     kind = "ray_training"
 
     def config_type(self) -> type:
-        return RayRuntimeSettings
+        return RayRuntimeConfig
 
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
         # Existing Python assembly can inject these objects. They are not YAML

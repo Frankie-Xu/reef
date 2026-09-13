@@ -121,12 +121,17 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   adaptation, weight reception, and framework imports inside that package.
   ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
   it must not import a concrete inference or training implementation.
+  Implement the applicable contracts in
+  ``reef/runtime/training_job/operations.py`` when integrating with managed
+  training and publication. Import those contracts instead of the coordinator.
+  Shared engine control belongs in ``runtime/control/`` and shared version,
+  residency and transfer-lock mechanisms in ``runtime/weights/``.
 - For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
   and load the selected integration from service assembly. Generic runtime
   adapters may stay under ``reef/runtime/adapters/`` when they contain no
   backend-specific behavior.
-- A ``RuntimeFactory`` can expose ``config_type()`` returning a settings
+- A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the
   dataclass's validation before calling the factory. Keep schema imports

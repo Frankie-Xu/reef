@@ -10,7 +10,7 @@ from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
-from reef.runtime.runtime_load_id import RuntimeLoadId
+from reef.runtime.weights.version import RuntimeLoadId
 
 TOKEN_RUNTIME_LOAD_IDS_KEY = "_reef_token_runtime_load_ids"
 SGLANG_PLUGIN_NAME = "reef"

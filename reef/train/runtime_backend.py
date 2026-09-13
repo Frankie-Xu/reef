@@ -13,8 +13,8 @@ from reef.runtime.base import (
     TrainingJobResult,
     TrainingRuntime,
 )
-from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.runtime.scheduler import RuntimeScheduler
+from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.types import TrainingBatch, TrainStepResult
 

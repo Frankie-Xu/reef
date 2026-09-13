@@ -419,9 +419,9 @@ def test_inference_recovery_and_update_lock_require_no_model_framework() -> None
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.inference_control import InferenceControl; "
-        "from reef.runtime.health_monitor import EngineHealthMonitor; "
-        "from reef.runtime.weight_update import WeightUpdateLock"
+        "from reef.runtime.control.inference import InferenceControl; "
+        "from reef.runtime.control.health import EngineHealthMonitor; "
+        "from reef.runtime.weights.lock import WeightUpdateLock"
     )
 
 
@@ -437,6 +437,22 @@ def test_runtime_coordination_never_imports_concrete_model_backends() -> None:
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         for dependency in ("reef.inference", "reef.train", "slime", "sglang", "megatron"):
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
+
+
+def test_runtime_scheduler_does_not_depend_on_connection_adapters() -> None:
+    module = importlib.import_module("reef.runtime.scheduler")
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.runtime")
+    assert _imports_of(imported, "reef.runtime.adapters") == []
+
+
+def test_backend_operations_do_not_depend_on_coordinator_implementation() -> None:
+    paths = [REPO_ROOT / "reef/runtime/training_job/operations.py"]
+    for directory in ("reef/train", "reef/inference"):
+        paths.extend(sorted((REPO_ROOT / directory).rglob("*.py")))
+    for path in paths:
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        assert _imports_of(imported, "reef.runtime.training_job.coordinator") == [], str(path.relative_to(REPO_ROOT))
 
 
 def test_inference_backends_never_import_training_implementations() -> None:

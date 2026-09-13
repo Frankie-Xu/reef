@@ -10,10 +10,10 @@ from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
+from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.inference import InferenceBackendFactory
-from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.deployment import TrainingDeployment, TrainingDeploymentPlan
 
 _NATIVE_INFERENCE = "reef.inference.sglang.chat.SGLangChatTrainingInferenceBackend"

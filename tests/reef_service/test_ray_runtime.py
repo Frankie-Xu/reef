@@ -11,7 +11,7 @@ from reef_service.runtime_stubs import ExecutorRuntimeFixture
 from reef.artifact import LiveWeightArtifactRef
 from reef.core import RuntimeLoadSpan
 from reef.runtime import PreparedTrainingStep, RayRuntimeError, RayTrainGroupHandle, TrainingJobResult, TrainingRuntime
-from reef.runtime.adapters.ray_runtime import RemoteRayTrainGroupHandle
+from reef.runtime.adapters.ray import RemoteRayTrainGroupHandle
 from reef.runtime.base import InferenceAdmissionController
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.inference import InferenceBackend, InferenceStream

@@ -14,7 +14,7 @@ from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 
 
 class _Response(io.BytesIO):

@@ -16,7 +16,7 @@ from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
 from reef.runtime.model_config import ModelConfig
 from reef.storage.model_config import read_model_config, write_model_config

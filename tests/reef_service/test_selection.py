@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef.runtime.candidates import ActivatedModel, ModelCandidate
+from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 from reef.train.backend import TrainingBackend
 from reef.train.cordis_backend import ScoreComparisonMixin, ScoreComparisonPlugin
 from reef.train.evaluation import (

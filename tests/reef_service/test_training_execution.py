@@ -8,7 +8,7 @@ from reef.runtime.base import TrainingJobResult
 from reef.runtime.training_job import execution
 from reef.runtime.training_job import marker as markers
 from reef.runtime.training_job.execution import TrainingCheckpoint, TrainingExecution, TrainingMetrics, training_job_id
-from reef.runtime.training_job.state import TrainingJobState
+from reef.runtime.training_job.marker import TrainingJobState
 
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 

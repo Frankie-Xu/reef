@@ -19,10 +19,10 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
+from reef.runtime.adapters.http import resolve_proxy_runtime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.runtime.model_config import ModelConfig
-from reef.runtime.proxy import resolve_proxy_runtime
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
 from reef.surface.weights import create_weight_surface

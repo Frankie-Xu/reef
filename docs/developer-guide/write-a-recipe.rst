@@ -260,8 +260,17 @@ candidate activation, rejection and durable acknowledgement to
 ``TrainingRuntime`` and ``InferenceRuntime`` objects; neither inherits the other
 and there is no aggregate ``ModelRuntime``.
 
-Inside the worker coordinator, ``TrainingOperations`` exposes batch preparation,
-training, checkpoints and separate weight preparation/sending. ``InferenceOperations`` exposes pause,
+For a native trainer such as Slime or MLX, the backend integration interface is
+``TrainingOperations`` in ``reef/runtime/training_job/operations.py``. It exposes
+batch preparation, training, checkpoints and separate weight preparation/sending.
+Slime implements it with ``SlimeTrainingOperations`` in
+``reef/train/slime_backend/reef_adapters/bridge.py``. This is distinct from
+``TrainingBackend`` in ``reef/train/backend.py``: that recipe-facing interface
+prepares, evaluates and settles candidates, including harness updates that need
+no model trainer. ``RuntimeTrainingBackend`` connects that recipe interface to
+the runtime scheduler.
+
+Alongside ``TrainingOperations``, ``InferenceOperations`` exposes pause,
 resume, recovery, version verification, adapter unload and memory operations.
 ``TrainingCoordinator`` owns staleness admission, LoRA residency and colocated
 handoffs. The native sender transfers weights directly to receiver workers;
@@ -278,7 +287,7 @@ acknowledged. Retrying a partial transfer reuses its target; republication of
 unchanged weights preserves the committed identity. A failed restore or
 ambiguous optimizer step cannot reopen serving.
 
-Inference backends can compose ``reef.runtime.inference_control.InferenceControl``
+Inference backends can compose ``reef.runtime.control.inference.InferenceControl``
 with concrete engine, monitoring and update-connection adapters. Serialize calls
 in the owning actor, and route legacy monitoring controls through the same pause
 state. Its ``resume`` is an internal operation authorized by the training commit

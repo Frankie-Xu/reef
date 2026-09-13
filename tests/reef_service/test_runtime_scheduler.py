@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 from reef.core.batches import TrainingBatch
 from reef.core.evaluation import EvaluationResult, SelectionDecision
 from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingRuntime
-from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.runtime.scheduler import RuntimeScheduler
+from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
 
 class CheckpointTrainer(TrainingRuntime):

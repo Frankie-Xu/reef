@@ -17,7 +17,6 @@ from slime.utils.reloadable_process_group import destroy_process_groups, reload_
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
 
-from reef.runtime.names import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.megatron.adapter_slots import AdapterSlotSwitcher
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
@@ -25,6 +24,7 @@ from reef.train.slime_backend.reef_adapters.megatron.lora import (
     zero_megatron_lora_adapters,
 )
 from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_lora_adapter_to_path
+from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     _loss_family_spec,
     drain_worker_metrics,

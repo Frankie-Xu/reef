@@ -6,7 +6,7 @@ import pytest
 from reef_service.runtime_stubs import ExecutorRuntimeFixture, runtime_bindings
 
 from recipes.sao import SAORecipe
-from reef.runtime.adapters.ray_runtime import RayRuntimeError
+from reef.runtime.adapters.ray import RayRuntimeError
 
 from .test_ray_runtime import DeferredWeightUpdateTrainGroupHandle
 

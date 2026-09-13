@@ -1,4 +1,4 @@
-"""Configuration declarations shared by training runtime adapters."""
+"""Connection configuration shared by executor and Ray runtime adapters."""
 
 from __future__ import annotations
 
@@ -9,10 +9,13 @@ from typing import Any
 
 from reef.core.config import config_metadata, config_option
 
+DEFAULT_ACTOR_NAME = "reef-train-bridge"
+DEFAULT_NAMESPACE = "reef"
+
 
 @dataclass(frozen=True)
-class TrainingRuntimeSettings:
-    """Connection and request settings; model-worker topology stays with the backend."""
+class RuntimeConnectionConfig:
+    """Connection and request options; model-worker topology stays with the backend."""
 
     inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
     inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")

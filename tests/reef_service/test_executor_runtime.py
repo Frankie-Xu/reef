@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 from reef_service.runtime_stubs import ExecutorRuntimeFixture, runtime_bindings, runtime_fixture
 
+import reef.runtime as public_runtime
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
@@ -27,9 +28,10 @@ from reef.runtime import (
     TrainingRuntimeError,
     WorkerSpec,
 )
-from reef.runtime.adapters import ray_runtime
+from reef.runtime.adapters import ray as ray_runtime
 from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
-from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
+from reef.runtime.adapters.executor_training import ExecutorTrainingRuntime
+from reef.runtime.base import TrainingRuntimeError as ContractTrainingRuntimeError
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import assembly
@@ -60,8 +62,11 @@ class Coordinator(DeferredWeightUpdateTrainGroupHandle):
 
 
 def test_ray_public_names_remain_compatible_aliases():
-    assert ExecutorRuntimeFixture is ExecutorRuntimeFixture
-    assert RayRuntimeError is TrainingRuntimeError
+    assert public_runtime.ExecutorTrainingRuntime is ExecutorTrainingRuntime
+    assert public_runtime.ExecutorInferenceRuntime is ExecutorInferenceRuntime
+    assert public_runtime.RemoteRayTrainGroupHandle is ray_runtime.RemoteRayTrainGroupHandle
+    assert public_runtime.connect_ray_runtime is ray_runtime.connect_ray_runtime
+    assert RayRuntimeError is TrainingRuntimeError is ContractTrainingRuntimeError
     assert RayTrainGroupHandle is TrainingGroupHandle
 
 

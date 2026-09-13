@@ -10,18 +10,20 @@ from typing import Any
 from reef.core.batches import TrainingBatch, policy_samples
 from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
-from reef.runtime.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
-from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
-from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
-from reef.runtime.settings import TrainingRuntimeSettings
-from reef.runtime.training_group import (
-    ExecutorTrainGroupHandle,
-    TrainingGroupHandle,
+from reef.runtime.adapters.config import RuntimeConnectionConfig
+from reef.runtime.adapters.http import build_http_inference_backend
+from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, training_job_status
+from reef.runtime.base import (
+    InferenceRuntime,
+    PreparedTrainingStep,
+    TrainingJobResult,
+    TrainingRuntime,
     TrainingRuntimeError,
-    training_job_status,
 )
+from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.runtime.inference import InferenceBackendFactory
+from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
+from reef.runtime.weights.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
 
 class ExecutorTrainingRuntime(TrainingRuntime):
@@ -216,7 +218,7 @@ def _executor_config(value: Mapping[str, Any]) -> ExecutorConfig:
 
 
 @dataclass(frozen=True)
-class ExecutorRuntimeSettings(TrainingRuntimeSettings):
+class ExecutorRuntimeConfig(RuntimeConnectionConfig):
     coordinator_rank: int = config_option(0, help="Rank of the training coordinator worker.")
 
     def __post_init__(self) -> None:
@@ -238,7 +240,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
     kind = "executor_training"
 
     def config_type(self) -> type:
-        return ExecutorRuntimeSettings
+        return ExecutorRuntimeConfig
 
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
         injected = {

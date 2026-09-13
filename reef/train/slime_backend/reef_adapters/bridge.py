@@ -18,10 +18,10 @@ from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure
 from reef.runtime.training_job.admission import _producing_runtime_load_ids
-from reef.runtime.training_job.coordinator import TrainingContext, TrainingCoordinationConfig
 from reef.runtime.training_job.execution import PreparedTrainingJob, TrainingCheckpoint, TrainingMetrics
 from reef.runtime.training_job.execution import max_staleness as _max_staleness
 from reef.runtime.training_job.marker import marker_rollouts
+from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
 from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm

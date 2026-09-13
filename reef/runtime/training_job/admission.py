@@ -97,7 +97,7 @@ def _staleness_admission(
     serving_runtime_load_id: str,
     max_staleness: int,
 ) -> _StalenessDecision:
-    from reef.runtime.runtime_load_id import RuntimeLoadId
+    from reef.runtime.weights.version import RuntimeLoadId
 
     try:
         serving = RuntimeLoadId.parse(serving_runtime_load_id)
@@ -171,7 +171,7 @@ def _scenario_staleness_admission(
     lag is the number of *this* scenario's publications that postdate the
     version its tokens were produced under.
     """
-    from reef.runtime.runtime_load_id import RuntimeLoadId
+    from reef.runtime.weights.version import RuntimeLoadId
 
     if _uses_staleness_admission(payload):
         producing_groups = _admission_runtime_load_id_groups(payload)

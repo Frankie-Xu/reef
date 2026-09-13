@@ -2,7 +2,7 @@
 
 import pytest
 
-from reef.runtime.inference_memory import InferenceMemory
+from reef.runtime.control.memory import InferenceMemory
 
 
 class _Memory:

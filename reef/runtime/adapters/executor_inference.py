@@ -6,14 +6,14 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.adapters.backend_runtime import BackendInferenceRuntime
-from reef.runtime.base import InferenceAdmissionHandle, TrainingJobResult
-from reef.runtime.candidates import ActivatedModel, ModelCandidate
-from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
-from reef.runtime.training_group import TrainingGroupHandle, TrainingRuntimeError, training_job_status
+from reef.runtime.adapters.http import build_http_inference_backend
+from reef.runtime.adapters.training_group import TrainingGroupHandle, training_job_status
+from reef.runtime.base import InferenceAdmissionHandle, InferenceRuntime, TrainingJobResult, TrainingRuntimeError
+from reef.runtime.inference import InferenceBackend, InferenceBackendFactory
+from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 
 
-class ExecutorInferenceRuntime(BackendInferenceRuntime):
+class ExecutorInferenceRuntime(InferenceRuntime):
     """Own request/serving state; borrow the deployment's control connection."""
 
     def __init__(
@@ -32,20 +32,22 @@ class ExecutorInferenceRuntime(BackendInferenceRuntime):
             inference_url = training_job_status(control).get("inference_url")
             if not isinstance(inference_url, str) or not inference_url:
                 raise TrainingRuntimeError("inference_url is unset and the deployment does not report one")
-        super().__init__(
-            base_url=inference_url,
-            inference_timeout_s=inference_timeout_s,
-            backend=inference_backend_factory(
-                inference_url.rstrip("/"),
-                model_path=model_path,
-                timeout_s=inference_timeout_s,
-                **dict(inference_backend_config or {}),
-            ),
+        backend = inference_backend_factory(
+            inference_url.rstrip("/"),
+            model_path=model_path,
+            timeout_s=inference_timeout_s,
+            **dict(inference_backend_config or {}),
         )
+        super().__init__(base_url=inference_url, inference_timeout_s=inference_timeout_s)
+        self._backend = backend
         self._model_path = model_path
         # Only the coordinator can reconcile pending publication with Reef's
         # durable head and authorize requests after attachment.
         self.pause_admission()
+
+    @property
+    def inference_backend(self) -> InferenceBackend:
+        return self._backend
 
     @property
     def model_path(self) -> str:

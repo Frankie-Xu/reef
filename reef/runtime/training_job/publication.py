@@ -8,9 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed
-from reef.runtime.training_job.marker import read_marker, transition_marker, write_marker
-from reef.runtime.training_job.state import TrainingJobState
+from reef.runtime.training_job.marker import TrainingJobState, read_marker, transition_marker, write_marker
+from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed
 
 
 class WeightPublisher(Protocol):

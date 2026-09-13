@@ -7,7 +7,7 @@ from typing import Any
 
 from reef.runtime.deployment import DeploymentResources, WeightTransferSession
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.training_job.coordinator import TrainingOperations
+from reef.runtime.training_job.operations import TrainingOperations
 from reef.train.slime_backend.reef_adapters.bridge import (
     BridgePreparation,
     create_train_groups,

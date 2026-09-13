@@ -7,13 +7,13 @@ from pathlib import Path
 from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.core.config import config_option
+from reef.runtime.adapters.config import RuntimeConnectionConfig
 from reef.runtime.registry import RuntimeFactory
-from reef.runtime.settings import TrainingRuntimeSettings
 from reef.train.deployment import InProcessTrainingDeployment
 
 
 @dataclass(frozen=True)
-class Options(TrainingRuntimeSettings):
+class Options(RuntimeConnectionConfig):
     lora_rank: int = config_option(8)
     learning_rate: float = config_option(0.00001)
     checkpoint_layers: bool = config_option(False)

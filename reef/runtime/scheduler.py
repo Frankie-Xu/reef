@@ -22,9 +22,9 @@ from reef.runtime.base import (
     RuntimeContractError,
     TrainingJobResult,
     TrainingRuntime,
+    TrainingRuntimeError,
 )
-from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
-from reef.runtime.training_group import TrainingRuntimeError
+from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
 
 class RuntimeScheduler:

@@ -15,7 +15,7 @@ from uuid import uuid4
 import pytest
 
 from reef.inference.sglang.service import RayHealthProbe
-from reef.runtime.adapters.ray_runtime import connect_ray_runtime
+from reef.runtime.adapters.ray import connect_ray_runtime
 from reef.runtime.deployment import ComponentHealth, InferenceConnection, ModelDeploymentPlan
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.training_job.marker import read_marker, write_marker
@@ -426,7 +426,7 @@ class ScheduledSender:
 
 class ScheduledTrainingOperations:
     def __init__(self, sender, receiver, directory):
-        from reef.runtime.training_job.coordinator import TrainingContext, TrainingCoordinationConfig
+        from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
 
         self.sender = sender
         self.receiver = receiver
