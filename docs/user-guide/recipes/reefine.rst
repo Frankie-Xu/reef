@@ -32,7 +32,11 @@ From the ask to the install
    original words with the answers as clarifications; ``--direct`` as the
    first word files at once. From the shell, ``reef-pi harness "<text>"``
    posts the same training instruction to ``POST /reef/train``; add
-   ``--wait`` to stay until the step settles.
+   ``--wait`` to stay until the step settles. Either ask prints the
+   request's page link (``GET /reef/harness/requests/<id>/page`` with the
+   scenario and the token as query parameters): open it in a browser and it
+   reloads every five seconds, naming the step's state, until the verdict is
+   on it.
 2. Step. In ``training-mode: manual`` the deployment runs one evolve step
    for each accepted instruction. The served model designs the change first
    (it restates the request, names what triggers the behavior and what state
@@ -124,7 +128,7 @@ proposers, seeds, execution settings, and publication policies.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
 call budgets. Defaults are 120 seconds and 16384 reply tokens for an
-instruction, 60 seconds and 2048 tokens for its review, and 60 seconds and
+instruction, 60 seconds and 8192 tokens for its review, and 60 seconds and
 4096 tokens for failure-driven proposals; the reply budgets are sized for a
 thinking model, which spends part of the budget on its reasoning before the
 JSON. The tutorial's ``run.sh`` raises the timeout to 900 seconds for its

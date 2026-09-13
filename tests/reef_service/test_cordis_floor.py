@@ -6,19 +6,29 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from reef_service.test_harness_recipe import backend, batch, make_binary, run_backend_step
+from reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.core.training_request import TrainingRequest
+from reef.harness.adapters import get_adapter
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
-from reef.train.cordis_backend import FloorPlugin, Mutation, StepProposal
+from reef.train.cordis_backend import (
+    CordisBackend,
+    FloorPlugin,
+    Mutation,
+    ScoreComparisonPlugin,
+    StepProgress,
+    StepProposal,
+)
 from reef.train.cordis_backend.backend import RECORD_TEXT_CAP
 from reef.train.cordis_backend.manifest import FailureObservation, advance
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch
 
@@ -289,3 +299,72 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
     dropped = [record.getMessage() for record in caplog.records if "it added" in record.getMessage()]
     assert len(dropped) == 2 and "kind must be one of" in dropped[0] and "instruction override" in dropped[1]
     json.loads(json.dumps(result.metrics, allow_nan=False))
+
+
+# -- step progress, for the request page -----------------------------------------------------------
+
+
+def _instruction(text: str = "add a rule", request_id: str = "req-1") -> TraceBatch:
+    return replace(batch(), request=TrainingRequest(text=text, session="s", release_id="rel-0", id=request_id))
+
+
+def test_step_progress_names_the_phase_while_a_step_runs_and_clears_when_it_settles(tmp_path: Path) -> None:
+    seen: list[StepProgress | None] = []
+    held: dict[str, CordisBackend] = {}
+
+    def propose(nodes, samples, models, *, requests=()):
+        seen.append(held["backend"].step_progress)
+        return MARKER
+
+    b = held["backend"] = backend(tmp_path, propose)
+    assert b.step_progress is None
+    before = time.time()
+    prepared = b.prepare_step(_instruction(), b.initial_state(), 0)
+    # The proposer ran under "proposing" with the instruction's id; a candidate now waits for the gate.
+    assert seen == [StepProgress("req-1", "proposing", seen[0].started_at, None)]
+    assert before <= seen[0].started_at <= time.time()
+    gating = b.step_progress
+    assert gating == replace(seen[0], phase="gating") and gating.episodes_total is None
+    candidate = prepared.candidate
+    assert candidate is not None
+    evaluation = b.evaluate(candidate)
+    # One task, one repeat, both sides: the gate's size once the episodes are laid out.
+    assert b.step_progress == replace(gating, episodes_total=2)
+    b.settle_step(prepared, ScoreComparisonPlugin(b).decide(candidate, evaluation))
+    assert b.step_progress is None
+
+    # An automatic step names no request; an abort clears the progress too.
+    prepared = b.prepare_step(batch(), b.initial_state(), 0)
+    assert seen[-1].request_id is None and b.step_progress is not None and b.step_progress.phase == "gating"
+    b.abort_step(prepared)
+    assert b.step_progress is None
+
+
+def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_step_record(tmp_path: Path) -> None:
+    skipping = backend(tmp_path, lambda n, s, m, requests=(): None)
+    prepared = skipping.prepare_step(_instruction(), skipping.initial_state(), 0)
+    assert prepared.outcome == "skip" and skipping.step_progress is None
+
+    def raising(nodes, samples, models, *, requests=()):
+        raise RuntimeError("poison proposer")
+
+    failing = backend(tmp_path, raising)
+    with pytest.raises(RuntimeError, match="poison proposer"):
+        failing.prepare_step(_instruction(), failing.initial_state(), 0)
+    assert failing.step_progress is None
+
+    recorded = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(lambda n, s, m, requests=(): MARKER),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        step_record_dir=str(tmp_path / "steps"),
+    )
+    prepared = recorded.prepare_step(_instruction(), recorded.initial_state(), 0)
+    progress = recorded.step_progress
+    assert progress is not None and progress.step_record == str(tmp_path / "steps" / "1")
+    assert prepared.metrics["step_record"] == progress.step_record
+    recorded.abort_step(prepared)
+    assert recorded.step_progress is None

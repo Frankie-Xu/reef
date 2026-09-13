@@ -359,7 +359,8 @@ def _review(
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2),
     )
-    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(2048), timeout_s=_timeout_s(60.0))
+    # A reasoning model spends the budget on its reasoning first; 2048 came back with no text live.
+    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(8192), timeout_s=_timeout_s(60.0))
     return None if reply is None else _parse_review(reply)
 
 

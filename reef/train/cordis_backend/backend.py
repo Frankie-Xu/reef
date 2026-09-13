@@ -208,6 +208,24 @@ RECORD_EPISODE_FILE = "episode.json"
 GATE_SIDES: tuple[str, ...] = ("candidate", "current")
 
 
+@dataclass(frozen=True)
+class StepProgress:
+    """Where the running step stands, for a page a person watches: its phase, its start, its record directory.
+
+    ``request_id`` names the instruction the step answers, ``None`` for an
+    automatic step or an agent's proposal. ``phase`` is ``proposing`` from
+    the moment the step claims its directory until a candidate exists, then
+    ``gating`` while the episodes run; ``episodes_total`` is the gate's
+    episode count once ``evaluate`` has laid the episodes out, else ``None``.
+    """
+
+    request_id: str | None
+    phase: str
+    started_at: float
+    step_record: str | None
+    episodes_total: int | None = None
+
+
 def _clip(text: str) -> str:
     """``text`` with credential-shaped literals redacted, cut at the record cap with a marker naming how much was dropped.
 
@@ -689,6 +707,9 @@ class CordisBackend(TrainingBackend):
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         self._current_step_record: Path | None = None
+        # Written by the training thread, read by the service's request page from another: each write is one
+        # assignment of a frozen value, which is all the synchronization a reader that tolerates a stale phase needs.
+        self._step_progress: StepProgress | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -765,6 +786,11 @@ class CordisBackend(TrainingBackend):
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0, "entries": [dict(entry) for entry in self._seed]}
 
+    @property
+    def step_progress(self) -> StepProgress | None:
+        """The running step's phase and start, ``None`` between steps (see ``StepProgress``)."""
+        return self._step_progress
+
     def prepare_step(
         self,
         batch: TrainingBatch,
@@ -772,6 +798,26 @@ class CordisBackend(TrainingBackend):
         scenario_step: int,
     ) -> PreparedStep:
         self._current_step_record = None
+        self._step_progress = None
+        try:
+            prepared = self._prepare_step(batch, state, scenario_step)
+        except BaseException:
+            self._step_progress = None
+            raise
+        progress = self._step_progress
+        if prepared.outcome != "candidate" or progress is None:
+            # A skip ends the step here: neither settle_step nor abort_step follows it.
+            self._step_progress = None
+        else:
+            self._step_progress = replace(progress, phase="gating")
+        return prepared
+
+    def _prepare_step(
+        self,
+        batch: TrainingBatch,
+        state: Mapping[str, Any],
+        scenario_step: int,
+    ) -> PreparedStep:
         if not isinstance(batch, TraceBatch):
             raise TypeError(f"harness evolution requires TraceBatch, got {type(batch).__name__}")
         if self._model_resolver is not None:
@@ -872,6 +918,13 @@ class CordisBackend(TrainingBackend):
         self._current_step_record = step_dir
         if step_dir is not None:
             metrics["step_record"] = str(step_dir)
+        # From here the step is under way for the request page; the proposer runs next.
+        self._step_progress = StepProgress(
+            request_id=None if batch.request is None else batch.request.id,
+            phase="proposing",
+            started_at=time.time(),
+            step_record=None if step_dir is None else str(step_dir),
+        )
         # Re-gate the last-good tree against the published one on cadence or when the served model changed.
         drifted = rollback_gated_against is not None and rollback_gated_against != self._gated_against()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
@@ -1030,6 +1083,10 @@ class CordisBackend(TrainingBackend):
             for repeat in range(self._episode_repeats)
             for side in sides
         ]
+        progress = self._step_progress
+        if progress is not None:
+            # The gate's size for the page; the pool answers all at once, so no per-episode count is kept.
+            self._step_progress = replace(progress, phase="gating", episodes_total=len(pairings))
         scored = self._evaluate_pairings(pairings)
         runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
         scores = {side: tuple(run.score for run in runs[side]) for side in sides}
@@ -1058,6 +1115,9 @@ class CordisBackend(TrainingBackend):
         prepared: PreparedStep,
         decision: SelectionDecision,
     ) -> TrainStepResult:
+        # The verdict is in: the page reads the committed row from here on, the trainer's reserved batch covering
+        # the commit window.
+        self._step_progress = None
         candidate = self._candidate_from(prepared)
         metrics = dict(prepared.metrics)
 
@@ -1178,6 +1238,7 @@ class CordisBackend(TrainingBackend):
             artifact.discard()
 
     def abort_step(self, prepared: PreparedStep) -> None:
+        self._step_progress = None
         candidate = self._candidate_from(prepared)
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
         if candidate.proposal_id is not None and self.proposals is not None:
