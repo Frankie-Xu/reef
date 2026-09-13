@@ -170,9 +170,9 @@ the first request of a new week closes the week before it, reports it, and
 waits until every batch the reported weeks filled has committed a training
 release. Week N is therefore always played by a policy trained on weeks 0
 to N-1, whatever the ratio of step time to play time; a wait longer than
-`CEOBENCH_PACE_TIMEOUT_S` (30 minutes) is forgiven so a batch the recipe
-declined cannot hold the game forever. The untrained baseline runs with the
-pacer off.
+`CEOBENCH_PACE_TIMEOUT_S` (20 minutes, about four steps) is forgiven so a
+batch the recipe declined cannot hold the game forever. The untrained
+baseline runs with the pacer off.
 
 Turns of one week share the week's score; the critic's skip-observation GAE
 does the credit assignment inside each turn. A weekly delta is dense enough
@@ -214,7 +214,8 @@ the base model, one stack each (`docker compose down` between them, or a
 fresh `RUN_DIR`): a Reef process trains one scenario for its lifetime, so a
 second seed on the same stack would start from the first seed's adapter.
 After the episode `run.py` waits for the scenario's training releases to
-stop growing, so the adapter on disk is the one the episode ended with:
+stop growing (fifteen quiet minutes, longer than one step), so the adapter
+on disk is the one the episode ended with:
 
 ```bash
 curl -sS -H "Authorization: Bearer $(cat work/token)" \
@@ -290,13 +291,23 @@ Earlier attempts, same harness:
   three minutes of a five-minute step in the smoke run), checkpoints the
   critic every eighth commit (`--critic-save-interval`) instead of at every
   one, and trains 16 turns per step (`batch-size: 16`), about a week of
-  play, so training keeps pace with the game. Full-parameter training of the 27B pair would need about
-  216 GB for weights and gradients alone. The engine serves a 128k window;
-  the trainer's is 48k, bounded by its fp32 full-vocabulary logits (248k
-  entries per token), so the harness reports only turns that fit
-  (`CEOBENCH_TRAIN_MAX_TOKENS` in `run.sh`). A turn that has read the
-  benchmark's docs sits at 40k tokens after four calls, so early-week turns
-  train and late-week ones are recorded only.
+  play, so training keeps pace with the game. Full-parameter training of
+  the 27B pair would need about 216 GB for weights and gradients alone.
+
+  The memory budget with both bases resident: 47 GB per GPU idle, and a
+  step adds about 1 GB per thousand tokens of its largest micro-batch (the
+  fp32 full-vocabulary logits, 248k entries per token, with their softmax
+  and gradient). Micro-batches are capped at 16k tokens
+  (`--max-tokens-per-gpu`; the 48k ones of the first resident attempt
+  killed a critic rank, and the other three then waited in a collective
+  for good), a resident model returns its cached blocks after each step so
+  the other model's step can use them, and the container sets
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against fragmentation.
+  A step over turns of up to 32k tokens peaked at 78 GB of the H100's 81 GB,
+  so the harness reports only turns of up to 24k tokens
+  (`CEOBENCH_TRAIN_MAX_TOKENS` in `run.sh`); the engine still serves a 128k
+  window. Across 95 recorded turns the cut drops 14, all doc-reading turns
+  of 36k to 41k tokens, and the rest sit under 20k.
 
 ### Untrained baseline
 
@@ -355,9 +366,12 @@ because the simulator roles are local stand-ins.
 - The untrained baseline with the benchmark's Anthropic simulator roles and
   more seeds (issue #428, acceptance criterion 1).
 - A trained 500-day episode on the same seed: the test-time-training number
-  this baseline exists for. It needs the training step to keep pace with the
-  game (the smoke run's step took about five minutes, most of it in the
-  actor/critic offload cycle and the per-commit critic checkpoint).
+  this baseline exists for. The resident stack's step was validated on a
+  short paced episode (2026-09-13): 16 turns in about 7.5 minutes on first
+  use, compile warm-up included (critic forward 2.2 min, critic train 3.0
+  min, the second critic step 1 min, the actor step 1 min, the LoRA save
+  under a minute), peak 78 GB per GPU with turns of up to 32k tokens. The
+  episode is running with the 24k window; its result follows.
 
 ## Open items
 
