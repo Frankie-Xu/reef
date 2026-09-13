@@ -162,6 +162,9 @@ class TrainingExecution:
                 return prepared
             checkpoint = prepared.checkpoint
             running: dict[str, Any] = {"status": "RUNNING", "job_id": job_id, "rollout_id": checkpoint.rollout_id}
+            parent_runtime_load_id = payload.get("expected_runtime_load_id")
+            if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
+                running["parent_runtime_load_id"] = parent_runtime_load_id
             if checkpoint.scenario is not None:
                 running.update(scenario=checkpoint.scenario, scenario_step=checkpoint.scenario_step)
             write_marker(self._path, running)

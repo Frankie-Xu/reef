@@ -82,8 +82,11 @@ import a concrete integration.
 | ``reef/train/``      | the trainer loop, processor engines, batch               | HTTP endpoints, deployment                 |
 |                      | types, backend integrations                              | configuration parsing                      |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/runtime/``    | backend-neutral inference and training                   | a concrete training stack                  |
-|                      | contracts                                                | integration                                |
+| ``reef/runtime/``    | backend-neutral runtime contracts, scheduling,           | concrete inference and training            |
+|                      | weight synchronization and publication coordination      | integrations                               |
++----------------------+----------------------------------------------------------+--------------------------------------------+
+| ``reef/inference/``  | concrete inference backends, native engine control,      | training algorithms and publication        |
+|                      | request adaptation and weight reception                  | decisions                                  |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/surface/``   | delivering a published artifact to the                   | proposing, evaluating, or                   |
 |                      | process or client that uses it                           | selecting updates                          |
@@ -129,10 +132,12 @@ package's own submodules and third-party libraries):
      - ``artifact``, ``core``
    * - ``runtime``
      - ``surface``, ``artifact``, ``core``
+   * - ``inference``
+     - ``runtime``, ``artifact``, ``core``
    * - ``harness``
      - ``runtime``, ``core``
    * - ``train``
-     - ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``harness``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
      - ``train``, ``harness``, ``runtime``, ``surface``, ``storage``, ``observability``, ``core``
    * - ``scenario``
@@ -140,7 +145,7 @@ package's own submodules and third-party libraries):
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``cli``
      - ``service``, ``core``
 
@@ -150,16 +155,18 @@ interpretation live in ``core/requirements.py``. Storage owns commit record
 encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with surface contracts, while checkpoint cadence is recipe policy.
 ``recipe/cordis.py`` assembles the harness training backend, and
-``service/training_driver.py`` owns model-component startup and shutdown.
-``runtime/training_job/`` owns job identity/replay, train/checkpoint ordering,
-durable markers and commit-gated publication; concrete training integrations
-retain admission, model operations, checkpoint and tensor I/O.
+``service/training_driver.py`` independently selects training and inference
+definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
+``runtime/scheduler.py`` coordinates recipe-facing candidate and commit operations.
+``runtime/training_job/`` owns job identity/replay, staleness admission,
+train/checkpoint ordering, LoRA residency and commit-gated publication. Concrete
+training integrations retain model operations, checkpoint and tensor I/O.
 ``runtime/inference_control.py`` owns inference pause/recovery and reconnect
 ordering; ``runtime/health_monitor.py`` owns probe scheduling and drain barriers.
 ``runtime/weight_update.py`` owns the transport lock's failure state.
-``runtime/sglang/`` owns SGLang engine launch, capture and control independently
+``inference/sglang/`` owns SGLang engine launch, capture and control independently
 of training. ``train/slime_backend/inference.py`` only translates Slime options
-into that backend's configuration.
+into plain launch data; the selected inference factory constructs its own configuration.
 ``train/slime_backend/driver.py`` supplies Slime component definitions;
 ``service/slime_driver.py`` preserves the legacy explicit-process entrypoint.
 
@@ -209,8 +216,10 @@ The extension points those packages expose are in `Python API
   ``reef/artifact/``. If it decides how consumers activate those bytes, put
   that behavior in ``reef/surface/`` instead.
 - Does it define a backend-neutral model-service contract? Put it in
-  ``reef/runtime/``. Put implementation tied to a concrete training stack in
-  its own ``reef/train/<integration>/`` subtree.
+  ``reef/runtime/``, alongside Reef's scheduling and publication coordination.
+  Put concrete inference engines and their request/control adapters in
+  ``reef/inference/<integration>/``; put implementation tied to a concrete
+  training stack in its own ``reef/train/<integration>/`` subtree.
   ``reef/train/cordis_backend/`` is the general harness evolution engine;
   the shared composition engine lives in ``reef/harness/compose/``. It derives
   from cordis 4.0.0-rc.8; see ``reef/harness/compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the

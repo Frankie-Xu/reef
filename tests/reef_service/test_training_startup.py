@@ -394,4 +394,4 @@ def test_managed_driver_cannot_override_resolved_inference_with_direct_flags(tmp
 
     monkeypatch.setattr(slime_driver, "_parse_slime_args", unexpected)
     with pytest.raises(RuntimeError, match="pass options through reef serve"):
-        slime_driver.create_model_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")
+        slime_driver.create_training_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")

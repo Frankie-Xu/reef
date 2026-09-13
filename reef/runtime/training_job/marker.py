@@ -98,6 +98,10 @@ def read_marker(path: Path) -> dict[str, Any] | None:
     commit_acknowledged = value.get("commit_acknowledged")
     if commit_acknowledged is not None and not isinstance(commit_acknowledged, bool):
         raise RuntimeError(f"invalid training marker commit acknowledgement: {path}")
+    if "target_runtime_load_id" in value and (
+        not isinstance(value["target_runtime_load_id"], str) or not value["target_runtime_load_id"]
+    ):
+        raise RuntimeError(f"invalid training marker target runtime load ID: {path}")
     if value["status"] == "HEAD_COMMITTED" and commit_acknowledged is not True:
         raise RuntimeError(f"training marker state requires a commit acknowledgement: {path}")
     if value["status"] != "RUNNING" and (

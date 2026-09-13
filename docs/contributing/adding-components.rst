@@ -78,8 +78,9 @@ Implementation
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
 - Implement ``TrainingDeployment`` in the integration to describe process preparation
-  and its runtime connection. Implement ``create_model_plan`` when using Reef's
-  shared model driver; return unstarted components and let Reef own their lifecycle. In-process integrations can extend
+  and its runtime connection. Implement ``create_training_plan`` when using Reef's
+  shared model driver; return an unstarted trainer and launch data. Reef selects
+  the inference factory independently and owns both lifecycles. In-process integrations can extend
   ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
   ``reef.training_backends`` entry-point group; see `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
@@ -115,10 +116,16 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - For an external runtime, expose a factory as
   ``package.module:factory_name`` and use that dotted value as the runtime
   ``type``.
-- For an accepted bundled runtime, add an adapter under
-  ``reef/runtime/adapters/``. Subclass ``RuntimeFactory``, set its ``kind``,
+- For a concrete inference backend, add its native implementation under
+  ``reef/inference/<integration>/``. Keep native engine launch, request
+  adaptation, weight reception, and framework imports inside that package.
+  ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
+  it must not import a concrete inference or training implementation.
+- For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
-  and import its module from ``reef/runtime/adapters/__init__.py``.
+  and load the selected integration from service assembly. Generic runtime
+  adapters may stay under ``reef/runtime/adapters/`` when they contain no
+  backend-specific behavior.
 - A ``RuntimeFactory`` can expose ``config_type()`` returning a settings
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the

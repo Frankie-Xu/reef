@@ -56,7 +56,7 @@ class SGLangConfig:
     health_first_wait: float = 60
     request_timeout: float = 600
     startup_timeout: float = 14400
-    executor: str | type[Executor] = "reef.runtime.sglang.executor:SGLangExecutor"
+    executor: str | type[Executor] = "reef.inference.sglang.executor:SGLangExecutor"
     executor_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

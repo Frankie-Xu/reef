@@ -9,15 +9,19 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.sglang import plugin as sglang_plugin
-from reef.runtime.sglang.config import SGLangConfig
-from reef.runtime.sglang.lora_schema import require_lora_distributed_request_schema, require_lora_tensor_request_schema
-from reef.runtime.sglang.plugin import (
+from reef.inference.sglang import plugin as sglang_plugin
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.deployment import create_inference
+from reef.inference.sglang.launch import engine_environment
+from reef.inference.sglang.lora_schema import (
+    require_lora_distributed_request_schema,
+    require_lora_tensor_request_schema,
+)
+from reef.inference.sglang.plugin import (
     REEF_SGLANG_PLUGIN_ENV,
     install_colocated_retract_offload,
     install_scheduler_runtime_load_id_tracking,
 )
-from reef.train.slime_backend.reef_adapters.preflight import configure_sglang_runtime
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
 
 
@@ -87,7 +91,7 @@ def _load_sglang_engine_module(monkeypatch: pytest.MonkeyPatch):
     raw_engine.SGLangEngine = BaseEngine  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "slime.backends.sglang_utils.sglang_engine", raw_engine)
 
-    path = Path(__file__).parents[2] / "reef" / "runtime" / "sglang" / "engine.py"
+    path = Path(__file__).parents[2] / "reef" / "inference" / "sglang" / "engine.py"
     spec = importlib.util.spec_from_file_location("_reef_test_sglang_engine", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -314,17 +318,23 @@ def test_disk_weight_update_does_not_implicitly_flush_kv_cache(monkeypatch: pyte
 
 
 def _training_inference_config(**options):
+    return SGLangConfig(**_training_inference_values(**options))
+
+
+def _training_inference_values(**options):
     from reef.train.slime_backend.inference import inference_config
 
     return inference_config(
         types.SimpleNamespace(
-            hf_checkpoint="model",
-            rollout_num_gpus=1,
-            rollout_num_gpus_per_engine=1,
-            num_gpus_per_node=1,
-            actor_num_nodes=1,
-            actor_num_gpus_per_node=1,
-            **options,
+            **{
+                "hf_checkpoint": "model",
+                "rollout_num_gpus": 1,
+                "rollout_num_gpus_per_engine": 1,
+                "num_gpus_per_node": 1,
+                "actor_num_nodes": 1,
+                "actor_num_gpus_per_node": 1,
+                **options,
+            },
         )
     )
 
@@ -380,34 +390,25 @@ def test_reef_config_selects_pause_mode_and_disables_shared_prefix_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
-    disjoint = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
-    configure_sglang_runtime(disjoint)
+    disjoint = create_inference(_training_inference_values()).config
+    assert disjoint.options["disable_radix_cache"] is True
+    assert disjoint.options["incremental_streaming_output"] is True
+    assert disjoint.pause_mode == "in_place"
+    assert engine_environment(disjoint)[REEF_SGLANG_PLUGIN_ENV] == "1"
+    assert engine_environment(disjoint)["SGLANG_PLUGINS"] == "telemetry,reef"
+    assert os.environ["SGLANG_PLUGINS"] == "telemetry"
 
-    assert disjoint.sglang_disable_radix_cache is True
-    assert disjoint.sglang_incremental_streaming_output is True
-    assert disjoint.weight_update_pause_mode == "in_place"
-    assert os.environ[REEF_SGLANG_PLUGIN_ENV] == "1"
-    assert os.environ["SGLANG_PLUGINS"] == "telemetry,reef"
-
-    colocated = types.SimpleNamespace(
-        colocate=True,
-        megatron_lora_rank=0,
-        prefill_num_servers=0,
-        sglang_config=None,
-    )
-    configure_sglang_runtime(colocated)
-    assert colocated.weight_update_pause_mode == "retract"
-    assert colocated.sglang_incremental_streaming_output is True
+    colocated = create_inference(_training_inference_values(colocate=True, offload_rollout=True)).config
+    assert colocated.pause_mode == "retract"
+    assert colocated.options["incremental_streaming_output"] is True
 
 
 @pytest.mark.unit
 def test_reef_config_enables_sglang_plugin_without_preexisting_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SGLANG_PLUGINS", raising=False)
-    args = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
-
-    configure_sglang_runtime(args)
-
-    assert os.environ["SGLANG_PLUGINS"] == "reef"
+    config = create_inference(_training_inference_values()).config
+    assert engine_environment(config)["SGLANG_PLUGINS"] == "reef"
+    assert "SGLANG_PLUGINS" not in os.environ
 
 
 @pytest.mark.unit
@@ -462,10 +463,8 @@ sglang:
 """,
         encoding="utf-8",
     )
-    args = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=str(config))
-
     with pytest.raises(ValueError, match="disable_radix_cache=true"):
-        configure_sglang_runtime(args)
+        create_inference(_training_inference_values(sglang_config=str(config)))
 
 
 @pytest.mark.unit
@@ -483,15 +482,12 @@ sglang:
 """,
         encoding="utf-8",
     )
-    args = types.SimpleNamespace(
-        colocate=True,
-        megatron_lora_rank=0,
-        prefill_num_servers=0,
-        sglang_config=str(config),
-    )
-
-    with pytest.raises(ValueError, match="regular SGLang engine"):
-        configure_sglang_runtime(args)
+    with pytest.raises(ValueError, match="regular engines"):
+        create_inference(
+            _training_inference_values(
+                colocate=True, offload_rollout=True, rollout_num_gpus=2, sglang_config=str(config)
+            )
+        )
 
 
 @pytest.mark.unit

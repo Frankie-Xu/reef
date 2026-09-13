@@ -93,13 +93,16 @@ or training backend determine the processes, dependencies and connections.
 native training flags belong in ``training.options`` and engine flags in ``inference.options``.
 
 With the default Slime backend, Reef starts a local driver, waits for its healthy
-bridge, then starts HTTP and obtains the inference connection from that bridge.
+coordinator, then starts HTTP and obtains the inference connection from that coordinator.
 For managed full-weight and LoRA training, including colocated configurations,
 the backend-neutral Reef model driver owns separate
-resource, inference and training components. Training workers connect directly
-to the inference controller; batch processing stays local to the training
-coordinator. Training does not launch or shut down inference.
-Slime's launch/placement helpers still implement the engine integration.
+resource, inference and training components. Reef selects the two backend
+definitions independently, starts each component, then attaches a weight-transfer
+session. Training workers send directly to inference workers; batch processing
+uses Slime's adapter inside Reef's coordinator. Publication, version verification,
+LoRA residency and colocated memory handoffs live in ``reef.runtime``.
+Native engine launch and control live in ``reef.inference.sglang``. Slime's
+placement helper still reserves the coordinated model allocation once.
 External-engine paths use the same component lifecycle while borrowing their
 external engines; automatic cold-rebuild supervision remains disabled for them.
 HTTP and the driver share the Ray address, namespace, actor name and resolved
@@ -184,9 +187,9 @@ for those legacy deployments. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
 
-The training-capable SGLang implementation lives in ``reef.runtime.sglang``.
+The training-capable SGLang implementation lives in ``reef.inference.sglang``.
 Its native engine launch and control do not depend on Slime. Slime converts its
-training requirements to ``SGLangConfig`` and supplies the weight transport;
+training requirements to plain configuration data and supplies the weight transport;
 the inference component receives ordinary configuration and borrowed GPU
 reservations. Custom inference executors now receive ``config`` and ``pg``
 instead of Slime's argument namespace. See `Worker executors

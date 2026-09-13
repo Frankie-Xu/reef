@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from reef.inference.sglang.config import SGLangConfig
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.sglang.config import SGLangConfig
 
 torch = pytest.importorskip("torch")
 
@@ -134,7 +134,7 @@ def _load_manager_module(monkeypatch: pytest.MonkeyPatch, *, serving: bool = Fal
     raw_rollout = _load_rollout_module(monkeypatch)
     path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "batches.py"
     if serving:
-        path = Path(__file__).parents[2] / "reef" / "runtime" / "sglang" / "worker.py"
+        path = Path(__file__).parents[2] / "reef" / "inference" / "sglang" / "worker.py"
     name = "reef.train.slime_backend.reef_adapters._rollout_manager_recovery_test"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -165,7 +165,7 @@ class _RecordingRolloutExecutor(DelegatingExecutor):
 
 
 def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
-    from reef.runtime.sglang.control import SGLangControl
+    from reef.inference.sglang.control import SGLangControl
 
     args = SGLangConfig("model", 1, 1, 1, executor=_RecordingRolloutExecutor)
     manager = SGLangControl(args, "placement")
@@ -195,13 +195,6 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
     assert executor.calls[-2:] == [("onload", (["weights"],), {}), ("check_weights", ("snapshot",), {})]
     manager.shutdown()
     assert executor.closed
-
-
-def test_rollout_executor_rejects_uni_before_gpu_startup(monkeypatch):
-    from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
-
-    with pytest.raises(ValueError, match="Slime-compatible"):
-        slime_executor_class("uni", role="rollout")
 
 
 def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
@@ -284,7 +277,7 @@ class _RemoteMethod:
 @pytest.mark.unit
 def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_rollout_module(monkeypatch)
-    from reef.runtime.sglang.worker import recover_server
+    from reef.inference.sglang.worker import recover_server
 
     group = _ServerGroup([object(), object()], num_new_engines=2)
     server = module.RolloutServer(server_groups=[group])
@@ -298,7 +291,7 @@ def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: py
 @pytest.mark.unit
 def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_rollout_module(monkeypatch)
-    from reef.runtime.sglang.worker import recover_server
+    from reef.inference.sglang.worker import recover_server
 
     group = _ServerGroup([object(), None], num_new_engines=0)
     server = module.RolloutServer(server_groups=[group])
@@ -720,7 +713,7 @@ def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(mo
 
 @pytest.mark.parametrize("offload", [False, True])
 def test_inference_owner_prepares_memory_before_training_attaches(monkeypatch, offload):
-    from reef.runtime.sglang.control import SGLangControl
+    from reef.inference.sglang.control import SGLangControl
 
     args = SGLangConfig(
         "model",
@@ -752,7 +745,7 @@ def test_inference_owner_prepares_memory_before_training_attaches(monkeypatch, o
 
 @pytest.mark.parametrize("failure", ["check_weights", "offload"])
 def test_inference_preparation_failure_is_not_acknowledged(monkeypatch, failure):
-    from reef.runtime.sglang.control import SGLangControl
+    from reef.inference.sglang.control import SGLangControl
 
     args = SGLangConfig(
         "model",

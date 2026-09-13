@@ -6,9 +6,9 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from reef.inference.sglang import service as inference_service
+from reef.inference.sglang.config import SGLangConfig
 from reef.runtime.deployment import ModelDeploymentPlan
-from reef.runtime.sglang import service as inference_service
-from reef.runtime.sglang.config import SGLangConfig
 from reef.service.training_driver import ModelDeployment
 from reef.train.slime_backend import resources
 
@@ -68,7 +68,7 @@ def resource_runtime(monkeypatch):
 
         @classmethod
         def from_workers(cls, workers):
-            return SimpleNamespace(workers=workers, owned=False)
+            return SimpleNamespace(workers=workers, owned=False, rpc=lambda rank, method, **kwargs: event(method))
 
     monkeypatch.setattr(inference_service, "RayExecutor", Executor)
     return state
@@ -84,12 +84,15 @@ def plan_for(state, *, colocate=False):
     )
 
     class Training:
-        inference_protocol = inference_service.INFERENCE_PROTOCOL
+        weight_transfer_protocol = inference_service.INFERENCE_PROTOCOL
 
-        def start(self, supplied, inference):
+        def start(self, supplied):
             assert supplied is allocation
-            assert inference.control.owned is False
             state.events.append("training-start")
+
+        def attach_weight_transport(self, session):
+            assert session.receiver.owned is False
+            state.events.append("training-attach")
 
         def check_health(self):
             pass
@@ -131,7 +134,9 @@ def test_deployment_allocates_once_and_closes_training_inference_then_reservatio
         "allocate",
         "create-inference",
         "check_health",
+        "prepare_training_connection",
         "training-start",
+        "training-attach",
         "check_health",
         "training-close",
         "shutdown",
@@ -141,7 +146,9 @@ def test_deployment_allocates_once_and_closes_training_inference_then_reservatio
     ]
 
 
-@pytest.mark.parametrize("failure", ["allocate", "create-inference", "check_health", "release-shared"])
+@pytest.mark.parametrize(
+    "failure", ["allocate", "create-inference", "check_health", "prepare_training_connection", "release-shared"]
+)
 def test_partial_failure_always_disconnects_the_owned_ray_job(resource_runtime, failure):
     resource_runtime.failure = failure
     owner = ModelDeployment(plan_for(resource_runtime))
@@ -185,78 +192,25 @@ def test_failed_component_shutdown_requires_process_retirement(resource_runtime,
     assert resource_runtime.events[-2:] == ["retire-processes", "disconnect"]
 
 
-def test_training_worker_loss_fails_health_without_waiting_for_another_job():
-    from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure
-    from reef.train.slime_backend.training import SlimeTrainingService
+def test_training_worker_loss_fails_operations_health_without_waiting_for_another_job():
+    from reef.runtime.executor.failure import ExecutorFailedError
+    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingOperations
 
-    service = SlimeTrainingService(
-        SimpleNamespace(),
-        preparation=SimpleNamespace(),
-        loss_family_config=None,
-        actor_name="bridge",
-        namespace="test",
-    )
-    service.on_executor_failure(ExecutorFailure("test", "worker died", rank=1))
-    with pytest.raises(ExecutorFailedError, match="worker died"):
-        service.check_health()
-    with pytest.raises(ExecutorFailedError, match="worker died"):
-        service.poll()
+    class TrainingGroup:
+        def __init__(self):
+            self.executor = UniProcExecutor.from_workers([object()])
 
+        def register_failure_listener(self, listener):
+            self.executor.register_failure_listener(listener)
 
-@pytest.mark.parametrize("failure", [None, "health", "shutdown"])
-def test_training_adapter_attaches_without_allocating_or_closing_inference(resource_runtime, monkeypatch, failure):
-    from reef.train.slime_backend import training
-
-    allocation = plan_for(resource_runtime).resources
-    allocation.start()
-    borrowed = SimpleNamespace(owned=False)
-    connection = inference_service.InferenceConnection(inference_service.INFERENCE_PROTOCOL, borrowed)
-
-    def shutdown():
-        resource_runtime.events.append("training-close")
-        if failure == "shutdown":
-            raise RuntimeError("shutdown failed")
-
-    bridge = SimpleNamespace(
-        health=SimpleNamespace(remote=lambda: {"ok": failure != "health"}),
-        shutdown=SimpleNamespace(remote=shutdown),
-    )
-
-    def start(args, **kwargs):
-        assert kwargs["serving"] is borrowed
-        assert kwargs["placement_groups"] is allocation.placement_groups
-        return bridge
-
-    monkeypatch.setattr(training, "start_bridge", start)
-
-    def get(result, **kwargs):
-        if isinstance(result, dict):
-            assert "timeout" not in kwargs  # Startup health waits for checkpoint recovery.
-        return result
-
-    monkeypatch.setattr(training.ray, "get", get)
-    monkeypatch.setattr(training.ray, "kill", lambda *args, **kwargs: resource_runtime.events.append("kill-training"))
-    service = training.SlimeTrainingService(
-        allocation.args,
-        preparation=SimpleNamespace(),
-        loss_family_config=None,
-        actor_name="test",
-        namespace="test",
-    )
-    with pytest.raises(ValueError, match="existing inference connection"):
-        service.start(allocation, None)
-    service.start(allocation, connection)
-    if failure == "health":
-        with pytest.raises(RuntimeError, match="health check"):
-            service.check_health()
-    else:
-        service.check_health()
-    service.close()
-    service.close()
-    assert resource_runtime.events == [
-        "connect",
-        "allocate",
-        "training-close",
-        "kill-training",
-    ]
-    allocation.close()
+    group = TrainingGroup()
+    operations = SlimeTrainingOperations(group, batch_processor=SimpleNamespace(), save_hf_template=None)
+    try:
+        operations.start()
+        operations.check_health()
+        group.executor._fail("worker died", rank=0)
+        with pytest.raises(ExecutorFailedError, match="worker died"):
+            operations.check_health()
+    finally:
+        group.executor.shutdown()

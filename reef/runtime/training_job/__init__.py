@@ -1,7 +1,7 @@
-"""Durable training-step coordination and commit-gated weight publication.
+"""Reef coordination across independent training and inference operations.
 
-Backends retain admission, data preparation, optimizer execution, checkpoint I/O
-and tensor transport. Reef owns job identity/replay, RUNNING/CHECKPOINT ordering,
-publication ordering, unchanged-weight republication and fenced startup recovery without
-importing a concrete model framework.
+Reef owns admission, job identity/replay, checkpoint ordering, publication
+identity, adapter residency, resource handoff and fenced recovery. Backend
+adapters implement data preparation, optimizer execution, checkpoint I/O and
+native sender/receiver operations without controlling each other's lifecycle.
 """

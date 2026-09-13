@@ -14,15 +14,15 @@ from uuid import uuid4
 
 import pytest
 
+from reef.inference.sglang.service import RayHealthProbe
 from reef.runtime.adapters.ray_runtime import connect_ray_runtime
-from reef.runtime.deployment import InferenceConnection, ModelDeploymentPlan
+from reef.runtime.deployment import ComponentHealth, InferenceConnection, ModelDeploymentPlan
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.sglang.service import RayHealthProbe
 from reef.runtime.training_job.marker import read_marker, write_marker
 from reef.runtime.training_job.publication import TrainingPublication
 from reef.service.training_driver import run_deployment
 from reef.train.runtime_backend import RuntimeTrainingBackend
-from reef.train.slime_backend.resources import SlimeDeploymentHealth, SlimeDeploymentResources
+from reef.train.slime_backend.resources import SlimeDeploymentResources
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -141,6 +141,9 @@ class Inference:
         )
         return InferenceConnection(self.connection_protocol, RayExecutor.from_workers([self.actor]))
 
+    def prepare_weight_transfer(self, connection):
+        connection.control.rpc(0, "pause", timeout=30)
+
     def check_health(self):
         import ray
 
@@ -158,20 +161,23 @@ class Inference:
 
 
 class Training:
-    inference_protocol = "cpu-test-v1"
+    weight_transfer_protocol = "cpu-test-v1"
 
     def __init__(self, directory, namespace):
         self.directory, self.namespace = directory, namespace
         self.actor = None
         self.probe = RayHealthProbe()
 
-    def start(self, resources, inference):
+    def start(self, resources):
+        pass
+
+    def attach_weight_transport(self, session):
         import ray
 
         self.actor = (
             ray.remote(num_cpus=0, max_restarts=0)(Coordinator)
             .options(name="training", namespace=self.namespace)
-            .remote(str(self.directory), inference.control.workers[0])
+            .remote(str(self.directory), session.receiver.workers[0])
         )
 
     def check_health(self):
@@ -207,7 +213,7 @@ class Source:
         # Exercise the production process owner without allocating model GPUs.
         resources._process_lease = uuid4().hex
         inference, training = Inference(self.directory, self.namespace), Training(self.directory, self.namespace)
-        return ModelDeploymentPlan(resources, inference, training, SlimeDeploymentHealth(inference, training))
+        return ModelDeploymentPlan(resources, inference, training, ComponentHealth(inference, training))
 
 
 def engine(directory):
@@ -384,6 +390,220 @@ def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployme
         training.shutdown()
 
     asyncio.run(check_gate())
+
+
+class ScheduledReceiver:
+    def __init__(self):
+        self.paused = False
+        self.value = 0
+        self.version = "boot"
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def load(self, value, version):
+        if not self.paused:
+            raise RuntimeError("weights require a fenced receiver")
+        self.value, self.version = value, version
+
+    def status(self):
+        return {"paused": self.paused, "value": self.value, "version": self.version, "pid": os.getpid()}
+
+
+class ScheduledSender:
+    def send(self, receiver, runtime_load_id):
+        import ray
+
+        ray.get(receiver.load.remote(7, runtime_load_id), timeout=30)
+        return runtime_load_id
+
+    def pid(self):
+        return os.getpid()
+
+
+class ScheduledTrainingOperations:
+    def __init__(self, sender, receiver, directory):
+        from reef.runtime.training_job.coordinator import TrainingContext, TrainingCoordinationConfig
+
+        self.sender = sender
+        self.receiver = receiver
+        self.directory = Path(directory)
+        self.config = TrainingCoordinationConfig(save_hf_template=str(self.directory / "hf/{rollout_id}"))
+        self.context = TrainingContext()
+
+    def start(self):
+        pass
+
+    def check_health(self):
+        pass
+
+    def prepare_weights(self, runtime_load_id, *, force_full):
+        # Preparing sender state must not load the receiver before Reef has
+        # restored its resources. Keep the exact target for the later send.
+        self.prepared_version = runtime_load_id
+
+    def send_weights(self, runtime_load_id, *, force_full):
+        import ray
+
+        assert runtime_load_id == self.prepared_version
+        return ray.get(self.sender.send.remote(self.receiver, runtime_load_id), timeout=30)
+
+    def close(self):
+        import ray
+
+        (self.directory / "operations-closed").write_text(str(os.getpid()))
+        ray.kill(self.sender, no_restart=True)
+
+
+class ScheduledInferenceOperations:
+    def __init__(self, receiver):
+        self.receiver = receiver
+
+    def inference_url(self):
+        return "http://cpu-inference"
+
+    def runtime_load_ids(self):
+        import ray
+
+        return [ray.get(self.receiver.status.remote(), timeout=30)["version"]]
+
+    def pause(self):
+        import ray
+
+        ray.get(self.receiver.pause.remote(), timeout=30)
+
+    def resume(self):
+        import ray
+
+        ray.get(self.receiver.resume.remote(), timeout=30)
+
+    def abort(self):
+        self.pause()
+
+
+class ScheduledInferenceService:
+    connection_protocol = "scheduled-cpu-v1"
+
+    def __init__(self):
+        self.receiver = None
+
+    def start(self, resources):
+        import ray
+
+        self.receiver = ray.remote(num_cpus=0)(ScheduledReceiver).remote()
+        return InferenceConnection(self.connection_protocol, RayExecutor.from_workers([self.receiver]))
+
+    def prepare_weight_transfer(self, connection):
+        connection.control.rpc(0, "pause", timeout=30)
+
+    def operations(self, connection):
+        return ScheduledInferenceOperations(connection.control.workers[0])
+
+    def check_health(self):
+        import ray
+
+        ray.get(self.receiver.status.remote(), timeout=30)
+
+    def close(self):
+        import ray
+
+        ray.kill(self.receiver, no_restart=True)
+
+
+class ScheduledTrainingService:
+    weight_transfer_protocol = "scheduled-cpu-v1"
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.sender = None
+        self.receiver = None
+
+    def start(self, resources):
+        import ray
+
+        assert self.receiver is None
+        self.sender = ray.remote(num_cpus=0)(ScheduledSender).remote()
+
+    def attach_weight_transport(self, session):
+        self.receiver = session.receiver.workers[0]
+
+    def operations(self):
+        return ScheduledTrainingOperations(self.sender, self.receiver, self.directory)
+
+    def check_health(self):
+        import ray
+
+        ray.get(self.sender.pid.remote(), timeout=30)
+
+    def close(self):
+        import ray
+
+        ray.kill(self.sender, no_restart=True)
+
+
+class BorrowedRayResources:
+    def start(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_generic_named_coordinator_serializes_operations_and_retires_owned_workers(tmp_path, monkeypatch):
+    import ray
+
+    from reef.runtime.deployment import CoordinatorConfig, ModelDeployment
+
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    namespace = "generic-coordinator-" + uuid4().hex
+    root = Path(__file__).resolve().parents[2]
+    ray.init(
+        address="local",
+        num_cpus=2,
+        include_dashboard=False,
+        namespace=namespace,
+        runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join((str(root), str(root / "tests")))}},
+    )
+    inference = ScheduledInferenceService()
+    training = ScheduledTrainingService(str(tmp_path))
+    owner = ModelDeployment(
+        ModelDeploymentPlan(
+            BorrowedRayResources(),
+            inference,
+            training,
+            coordinator=CoordinatorConfig(
+                backend="ray",
+                options={"name": "generic-training", "namespace": namespace, "max_concurrency": 64, "num_cpus": 0},
+            ),
+        )
+    )
+    try:
+        owner.start()
+        coordinator = ray.get_actor("generic-training", namespace=namespace)
+        assert ray.get(coordinator.health.remote(), timeout=30)["ok"]
+        state = ray.get(inference.receiver.status.remote(), timeout=30)
+        assert state["value"] == 7
+        assert state["paused"] is False
+        assert state["version"] == ray.get(coordinator.serving_runtime_load_id.remote(), timeout=30)
+        owner.close()
+        assert int((tmp_path / "operations-closed").read_text()) != os.getpid()
+        for actor, method in ((coordinator, "health"), (training.sender, "pid"), (inference.receiver, "status")):
+
+            def retired(actor=actor, method=method):
+                try:
+                    ray.get(getattr(actor, method).remote(), timeout=5)
+                except ray.exceptions.RayActorError:
+                    return True
+                return False
+
+            wait_until(retired, timeout=30)
+        assert ray.is_initialized()
+    finally:
+        owner.close()
+        ray.shutdown()
 
 
 if __name__ == "__main__":

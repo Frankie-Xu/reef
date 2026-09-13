@@ -93,6 +93,23 @@ def test_publication_waits_for_durable_head_and_replays_without_transfer(publica
     assert len(publisher.events) == count
 
 
+@pytest.mark.parametrize("target", [None, "", 7, False, []])
+def test_invalid_persisted_transfer_target_is_not_replaced_by_a_new_version(publication, target):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    markers.write_marker(path, {**marker, "status": "UPDATING_WEIGHTS", "target_runtime_load_id": target})
+    with pytest.raises(RuntimeError, match="target runtime load ID"):
+        coordinator.publish("job-1")
+    assert publisher.events == []
+
+
+def test_pending_transfer_target_remains_compatible_with_opaque_version_ids(publication):
+    _, _, path = publication
+    marker = markers.read_marker(path)
+    markers.write_marker(path, {**marker, "status": "UPDATING_WEIGHTS", "target_runtime_load_id": "version-7"})
+    assert markers.read_marker(path)["target_runtime_load_id"] == "version-7"
+
+
 @pytest.mark.parametrize("failure,status", [("pause", "CHECKPOINT"), ("transfer", "UPDATING_WEIGHTS")])
 def test_failed_publication_retries_at_the_durable_stage(publication, failure, status):
     coordinator, publisher, path = publication

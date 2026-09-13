@@ -9,10 +9,10 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from reef.runtime.sglang.config import SGLangConfig, SGLangGroupConfig
-from reef.runtime.sglang.engine import ReefSGLangEngine
-from reef.runtime.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
-from reef.runtime.sglang.process import launch_router, node_address_and_port, wait_ready
+from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
+from reef.inference.sglang.engine import ReefSGLangEngine
+from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
+from reef.inference.sglang.process import launch_router, node_address_and_port, wait_ready
 
 
 def engine_environment(config: SGLangConfig) -> dict[str, str]:

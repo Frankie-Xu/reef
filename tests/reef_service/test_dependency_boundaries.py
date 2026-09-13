@@ -331,15 +331,15 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
     )
 
 
-def test_slime_bridge_actor_import_does_not_load_megatron_stack() -> None:
+def test_slime_training_operations_import_does_not_load_megatron_stack() -> None:
     _assert_isolated_import(
         "import sys, types; "
         "ray = types.ModuleType('ray'); "
         "ray.remote = lambda **kwargs: lambda actor: actor; "
         "sys.modules['ray'] = ray; "
         "from reef.train.slime_backend.reef_adapters.bridge "
-        "import TrainBridgeActorImpl; "
-        "assert TrainBridgeActorImpl; "
+        "import SlimeTrainingOperations; "
+        "assert SlimeTrainingOperations; "
         "assert 'slime.ray.placement_group' not in sys.modules"
     )
 
@@ -427,5 +427,38 @@ def test_inference_recovery_and_update_lock_require_no_model_framework() -> None
 
 def test_ray_update_lock_wrapper_does_not_import_slime() -> None:
     _assert_isolated_import(
-        "import sys; sys.modules['slime'] = None; from reef.runtime.sglang.lock import ReefRolloutLock"
+        "import sys; sys.modules['slime'] = None; from reef.inference.sglang.lock import ReefRolloutLock"
     )
+
+
+def test_runtime_coordination_never_imports_concrete_model_backends() -> None:
+    for path in sorted((REPO_ROOT / "reef/runtime").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        for dependency in ("reef.inference", "reef.train", "slime", "sglang", "megatron"):
+            assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
+
+
+def test_inference_backends_never_import_training_implementations() -> None:
+    for path in sorted((REPO_ROOT / "reef/inference").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        for dependency in ("reef.train", "slime", "slime_plugins", "megatron"):
+            assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
+
+
+def test_runtime_and_inference_packages_import_without_loading_backends() -> None:
+    _assert_isolated_import(
+        "import sys; "
+        "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron', 'reef.inference.sglang'))); "
+        "import reef.runtime; import reef.inference; "
+        "assert not [name for name in sys.modules "
+        "if name.startswith(('reef.inference.sglang.', 'reef.train.slime_backend'))]"
+    )
+
+
+def test_training_backends_never_import_inference_implementations() -> None:
+    for path in sorted((REPO_ROOT / "reef/train").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))

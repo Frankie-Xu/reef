@@ -20,77 +20,19 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.config import config_value
+from reef.inference.deployment import inference_service_for
 from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
+from reef.runtime.deployment import ComponentHealth
+from reef.runtime.deployment import ModelDeployment as ModelDeployment
 from reef.runtime.deployment import ModelDeploymentPlan, ModelPlanSource
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.training import training_deployment_for
+from reef.train.deployment import TrainingDeploymentPlan
 
 READY_MARKER = "reef-training-ready"
 DEFAULT_READY_FILE = "/tmp/reef-training.ready"
 _logger = logging.getLogger(__name__)
-
-
-class ModelDeployment:
-    """Own the lifecycle of a validated plan, including partial-start cleanup."""
-
-    def __init__(self, plan: ModelDeploymentPlan) -> None:
-        self.plan = plan
-        self._started = False
-        self._closed = False
-        self._resources_started = False
-        self._inference_started = False
-        self._training_started = False
-
-    def start(self) -> None:
-        if self._started or self._closed:
-            raise RuntimeError("model deployment can only be started once")
-        self.plan.validate()
-        self._started = True
-        try:
-            self._resources_started = True
-            self.plan.resources.start()
-            connection = None
-            if self.plan.inference is not None:
-                self._inference_started = True
-                connection = self.plan.inference.start(self.plan.resources)
-                if connection.protocol != self.plan.training.inference_protocol:
-                    raise ValueError("inference returned a connection with an incompatible protocol")
-                self.plan.inference.check_health()
-            else:
-                _logger.info("Selected backend uses its combined inference/training compatibility lifecycle")
-            self._training_started = True
-            self.plan.training.start(self.plan.resources, connection)
-            self.plan.training.check_health()
-            # Training initialization may modify engine state. Do not advertise
-            # deployment readiness based only on the pre-training engine probe.
-            if self.plan.inference is not None:
-                self.plan.inference.check_health()
-        except BaseException:
-            try:
-                self.close()
-            except Exception:
-                _logger.exception("Failed to clean up model deployment after startup failure")
-            raise
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        errors = []
-        for started, component in (
-            (self._training_started, self.plan.training),
-            (self._inference_started, self.plan.inference),
-            (self._resources_started, self.plan.resources),
-        ):
-            if started and component is not None:
-                try:
-                    component.close()
-                except Exception as exc:
-                    errors.append(exc)
-                    _logger.exception("Failed to close deployment component %s", type(component).__name__)
-        if errors:
-            raise errors[0]
 
 
 def _required_environment(name: str) -> str:
@@ -130,7 +72,22 @@ class ConfiguredModelPlanSource:
 
     def create(self) -> ModelDeploymentPlan:
         backend = training_deployment_for(self.config.get("reef", {}).get("training_backend"))
-        return backend.create_model_plan(self.config, loss_family=self.loss_family)
+        training = backend.create_training_plan(self.config, loss_family=self.loss_family)
+        return assemble_model_plan(self.config, training)
+
+
+def assemble_model_plan(config: Mapping[str, Any], training: TrainingDeploymentPlan) -> ModelDeploymentPlan:
+    """Select inference independently and validate the pair before allocation."""
+    inference = inference_service_for(config.get("reef", {}).get("inference_backend"), training.inference_config)
+    plan = ModelDeploymentPlan(
+        resources=training.resources,
+        training=training.training,
+        inference=inference,
+        coordinator=training.coordinator,
+        health=ComponentHealth(inference, training.training) if training.monitor_components else None,
+    )
+    plan.validate()
+    return plan
 
 
 def supervise_deployment(
@@ -149,11 +106,10 @@ def supervise_deployment(
     restarts: deque[float] = deque()
     try:
         while not stopping.wait(1):
-            health = deployment.plan.health
-            if health is None:
+            if deployment.plan.health is None:
                 continue
             try:
-                health.poll()
+                deployment.poll()
             except Exception as failure:
                 ready_file.unlink(missing_ok=True)
                 _logger.exception("Model component failed; retiring deployment before recovery")

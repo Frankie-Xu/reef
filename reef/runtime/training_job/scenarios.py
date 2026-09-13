@@ -1,6 +1,6 @@
-"""Durable per-scenario history for a bridge that trains several adapters.
+"""Durable per-scenario history for a coordinator that trains several adapters.
 
-The bridge's marker records one job at a time. When several scenarios share
+The coordinator's marker records one job at a time. When several scenarios share
 the training group, each also needs its own publication history — the
 serving runtime load ID is engine-global and advances whenever *any*
 scenario publishes, so a scenario's staleness is the number of *its own*

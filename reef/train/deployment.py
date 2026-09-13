@@ -5,12 +5,28 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import ModelDeploymentPlan
+from reef.runtime.deployment import CoordinatorConfig, DeploymentResources, TrainingService
 from reef.runtime.executor.arguments import normalize_native_options
 from reef.runtime.registry import runtime_factory_for
+
+
+@dataclass(frozen=True)
+class TrainingDeploymentPlan:
+    """Unallocated trainer and its launch requirements for Reef's assembler.
+
+    Native inference options are data passed to the separately selected inference
+    factory. The trainer never constructs or owns an inference service.
+    """
+
+    resources: DeploymentResources
+    training: TrainingService
+    inference_config: Mapping[str, Any] = field(default_factory=dict)
+    coordinator: CoordinatorConfig | None = None
+    monitor_components: bool = True
 
 
 class TrainingDeployment(ABC):
@@ -30,12 +46,12 @@ class TrainingDeployment(ABC):
     ) -> dict[str, Any]:
         """Describe the runtime for RuntimeRegistry, without constructing it."""
 
-    def create_model_plan(self, config: Mapping[str, Any], *, loss_family: str) -> ModelDeploymentPlan:
-        """Provide unstarted components for Reef's optional model driver.
+    def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
+        """Provide an unstarted trainer for Reef's optional model driver.
 
         Integrations using their own process entrypoint or an in-process runtime
-        need not implement this method. Plan construction validates the selected
-        combination before Reef starts any of the returned components.
+        need not implement this method. Reef selects the inference definition
+        separately and validates the pair before allocating either component.
         """
         raise NotImplementedError("this backend does not use Reef's model deployment driver")
 

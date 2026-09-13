@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.executor import Executor, ExecutorConfig, resolve
+from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.runtime_load_id import RuntimeLoadId
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
 )
@@ -60,7 +62,7 @@ class SlimeTrainGroup:
         self._world_size = num_nodes * num_gpus_per_node
         backend = executor_backend if executor_backend is not None else getattr(args, "reef_executor_backend", "auto")
         # Resolve before reserving or launching any workers.
-        executor_class = slime_executor_class(backend, role="training")
+        executor_class = slime_executor_class(backend)
         self._executor_config = ExecutorConfig(
             backend=executor_class,
             options={
@@ -77,10 +79,12 @@ class SlimeTrainGroup:
             },
         )
         self._executor: Executor | None = None
+        self._failure_listener: ExecutorFailureListener | None = None
         self._rollout_manager: Any = None
         self.train_parallel_config: dict[str, Any] = {}
         self._disk_weight_version = getattr(args, "update_weight_start_version", 0)
         self._released_runtime_load_id: str | None = None
+        self._prepared_disk_update: tuple[Path, int, str] | None = None
 
     @property
     def executor(self) -> Executor:
@@ -97,6 +101,8 @@ class SlimeTrainGroup:
         executor = Executor.create(self._executor_config)
         self._executor = executor
         try:
+            if self._failure_listener is not None:
+                executor.register_failure_listener(self._failure_listener)
             start_ids = executor.collective_rpc(
                 "init",
                 args=(self.args, self.role),
@@ -119,6 +125,12 @@ class SlimeTrainGroup:
         if executor is not None:
             executor.shutdown()
             self._executor = None
+
+    def register_failure_listener(self, listener: ExecutorFailureListener) -> None:
+        """Observe current and replacement workers from the operations owner."""
+        self._failure_listener = listener
+        if self._executor is not None:
+            self._executor.register_failure_listener(listener)
 
     def check_health(self) -> None:
         self.executor.check_health()
@@ -182,9 +194,9 @@ class SlimeTrainGroup:
             and self.args.update_weight_transport == "disk"
         )
 
-    def restore_runtime_load_id_for_republication(self, runtime_load_id: str):
+    def set_runtime_load_id_for_update(self, runtime_load_id: str):
         return self.executor.collective_rpc(
-            "restore_runtime_load_id_for_republication", args=(runtime_load_id,), timeout=TRAIN_RPC_TIMEOUT_S
+            "set_runtime_load_id_for_update", args=(runtime_load_id,), timeout=TRAIN_RPC_TIMEOUT_S
         )
 
     def async_pop_rank0_metrics(self):
@@ -197,12 +209,10 @@ class SlimeTrainGroup:
             raise RuntimeError(f"actors disagree about prior state for scenario {scenario!r}: {existed!r}")
         return bool(existed[0])
 
-    def sync_serving_runtime_load_id(self) -> str:
-        """Stamp the group's current runtime-load-ID token on the engines."""
-        versions = self.executor.collective_rpc("sync_serving_runtime_load_id", timeout=TRAIN_RPC_TIMEOUT_S)
-        if len(set(versions)) != 1:
-            raise RuntimeError(f"Slime workers disagree on the runtime load ID: {versions!r}")
-        return str(versions[0])
+    def initialize_runtime_load_id(self, runtime_load_id: str) -> None:
+        self.executor.collective_rpc(
+            "initialize_runtime_load_id", args=(runtime_load_id,), timeout=TRAIN_RPC_TIMEOUT_S
+        )
 
     def publish_adapter(self, scenario: str, lora_name: str) -> None:
         """Re-register one scenario's adapter without a serving version bump."""
@@ -215,6 +225,51 @@ class SlimeTrainGroup:
             return self._released_runtime_load_id
         return self.executor.rpc(0, "get_runtime_load_id", non_block=True)
 
+    def prepare_weight_update(self, runtime_load_id: str, *, force_full: bool) -> None:
+        """Prepare sender state while Reef has released colocated inference.
+
+        Full-disk publication completes its export and releases trainer workers
+        here. A failed receive can reuse that immutable file without recreating
+        workers or repeating model export under an already-onloaded receiver.
+        """
+        prepared = self._prepared_disk_update
+        if prepared is not None and prepared[2] == runtime_load_id and prepared[0].is_dir():
+            return
+        if self._executor is None and self._release_train_enabled():
+            self.create()
+        self.set_runtime_load_id_for_update(runtime_load_id)
+        if not self._full_disk_weight_update_enabled():
+            return
+        self.executor.collective_rpc(
+            "update_weights",
+            kwargs={"manage_generation": False, "force_full": force_full},
+            timeout=TRAIN_RPC_TIMEOUT_S,
+        )
+        exported = str(resolve(self.async_get_rank0_runtime_load_id(), timeout=TRAIN_RPC_TIMEOUT_S))
+        if exported != runtime_load_id:
+            raise RuntimeError(f"disk sender exported {exported!r}; expected {runtime_load_id!r}")
+        sequence = RuntimeLoadId.parse(exported).sequence
+        directory = Path(self.args.update_weight_disk_dir) / f"weight_v{sequence:06d}"
+        if directory.is_symlink() or not directory.is_dir():
+            raise RuntimeError(f"prepared weight checkpoint is missing or unsafe: {directory}")
+        self._disk_weight_version = sequence
+        self._prepared_disk_update = (directory, sequence, exported)
+        if self._release_train_enabled():
+            self._released_runtime_load_id = exported
+            self.release()
+
+    def send_prepared_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
+        """Send the prepared target after Reef has restored receiver memory."""
+        if not self._full_disk_weight_update_enabled():
+            self.update_weights(manage_generation=False, force_full=force_full)
+            return
+        prepared = self._prepared_disk_update
+        if prepared is None or prepared[2] != runtime_load_id:
+            raise RuntimeError(f"weight checkpoint was not prepared for {runtime_load_id!r}")
+        directory, sequence, exported = prepared
+        self._reload_rollout_weights_from_disk(directory, sequence, exported, manage_generation=False)
+        self._prepared_disk_update = None
+
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         kwargs = (
             {}
@@ -224,11 +279,13 @@ class SlimeTrainGroup:
         if not self._full_disk_weight_update_enabled():
             return self.executor.collective_rpc("update_weights", kwargs=kwargs, timeout=TRAIN_RPC_TIMEOUT_S)
 
-        disk_sequence = self._disk_weight_version + 1
-        disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{disk_sequence:06d}"
         self.executor.collective_rpc("update_weights", kwargs=kwargs, timeout=TRAIN_RPC_TIMEOUT_S)
-        self._disk_weight_version = disk_sequence
         serving_runtime_load_id = str(resolve(self.async_get_rank0_runtime_load_id(), timeout=TRAIN_RPC_TIMEOUT_S))
+        # The native writer uses the Reef-assigned sequence. A cold restore or
+        # retry may reuse an existing target instead of this group's next count.
+        disk_sequence = RuntimeLoadId.parse(serving_runtime_load_id).sequence
+        disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{disk_sequence:06d}"
+        self._disk_weight_version = disk_sequence
         if self._release_train_enabled():
             self._released_runtime_load_id = serving_runtime_load_id
             self.release()
@@ -250,7 +307,9 @@ class SlimeTrainGroup:
         if self._rollout_manager is None:
             raise RuntimeError("disk weight update requires a rollout manager")
         manager = RayExecutor.from_workers([self._rollout_manager])
-        if self.args.offload_rollout:
+        if manage_generation and self.args.offload_rollout:
+            # Standalone native calls retain their lifecycle. Reef's sender
+            # path has already restored receiver memory through its scheduler.
             manager.rpc(0, "onload_weights", timeout=TRAIN_RPC_TIMEOUT_S)
         engines, *_ = manager.rpc(0, "get_updatable_engines_and_lock", timeout=TRAIN_RPC_TIMEOUT_S)
         if not engines:

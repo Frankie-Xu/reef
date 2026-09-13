@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.sglang.config import SGLangConfig, SGLangGroupConfig
-from reef.runtime.sglang.engine import ReefSGLangEngine
-from reef.runtime.sglang.launch import SGLangEngineGroup, SGLangModel
+from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
+from reef.inference.sglang.engine import ReefSGLangEngine
+from reef.inference.sglang.launch import SGLangEngineGroup, SGLangModel
 
 
 def test_sglang_imports_with_training_packages_blocked():
@@ -22,7 +22,7 @@ def test_sglang_imports_with_training_packages_blocked():
             """
 import sys
 sys.modules.update(dict.fromkeys(('slime', 'megatron', 'reef.train.slime_backend')))
-from reef.runtime.sglang import chat, config, control, engine, executor, health, launch, plugin, service
+from reef.inference.sglang import chat, config, control, engine, executor, health, launch, plugin, service
 assert engine.ReefSGLangEngine.__bases__ == (object,)
 assert not any(name.startswith('slime.') or name.startswith('reef.train.slime_backend.') for name in sys.modules)
 """,
@@ -35,7 +35,7 @@ assert not any(name.startswith('slime.') or name.startswith('reef.train.slime_ba
 
 @pytest.fixture
 def native_engine(monkeypatch):
-    from reef.runtime.sglang import engine as module
+    from reef.inference.sglang import engine as module
 
     fields = [
         "model_path",
@@ -133,7 +133,7 @@ def test_external_engine_refuses_incompatible_capture_settings(native_engine, mo
 
 
 def test_group_preserves_shared_gpu_placement_and_multinode_rendezvous(monkeypatch):
-    from reef.runtime.sglang import launch
+    from reef.inference.sglang import launch
 
     calls, initialized = [], []
 
@@ -188,7 +188,7 @@ def test_group_rejects_noncontiguous_gpu_reservations_before_launch(monkeypatch)
 
 
 def test_native_control_preserves_weight_checker_and_checkpoint_pull_wire(monkeypatch):
-    from reef.runtime.sglang import engine as module
+    from reef.inference.sglang import engine as module
 
     calls = []
 
@@ -212,14 +212,14 @@ def test_native_control_preserves_weight_checker_and_checkpoint_pull_wire(monkey
 
 @pytest.mark.parametrize("visible,physical,expected", [("4,5,6,7", 6, 2), ("4,5,6,7", 2, 2), ("", 3, 3)])
 def test_native_launch_maps_physical_placement_to_visible_gpu(monkeypatch, visible, physical, expected):
-    from reef.runtime.sglang.process import local_gpu_id
+    from reef.inference.sglang.process import local_gpu_id
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     assert local_gpu_id(physical) == expected
 
 
 def test_sglang_enables_capture_plugin_without_training_preflight(monkeypatch):
-    from reef.runtime.sglang.launch import engine_environment
+    from reef.inference.sglang.launch import engine_environment
 
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
     config = SGLangConfig("model", 1, 1, 1)

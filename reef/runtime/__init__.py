@@ -1,46 +1,37 @@
-"""Runtime contracts and adapters for external model services.
+"""Reef's model scheduling contracts and coordination.
 
 ``InferenceRuntime`` owns request execution and admission. ``TrainingRuntime``
-prepares training jobs and exports checkpoints without requiring inference.
-Neither inherits the other. The existing training backend coordinates their
-candidate lifecycle: training exports a checkpoint, Reef selects activation or
-rejection, and serving resumes only after durable publication.
+prepares training jobs and exports checkpoints. Neither inherits the other.
+``scheduler.RuntimeScheduler`` coordinates candidate selection and durable
+artifact commit acknowledgement across the two interfaces.
 
-``model_config.ModelConfig`` is the concrete, in-memory model selection shared
-by a scenario and its recipe. It has no file paths or persistence behavior.
+``deployment.ModelDeployment`` owns component startup, weight-transport
+attachment, health and reverse-order cleanup. ``training_job.coordinator``
+implements publication, recovery, LoRA residency and colocated resource
+handoffs through separate ``TrainingOperations`` and ``InferenceOperations``
+contracts. Backends supply native model operations and weight transport.
 
-``deployment`` defines the minimal resource, inference-connection and training
-component contracts used by Reef's model driver. ``training_job`` owns durable
-job identity/replay, training/checkpoint ordering and commit-gated inference
-resumption; concrete backends provide model operations and weight transport.
+``model_config.ModelConfig`` is the in-memory model selection shared by a
+scenario and its recipe. It has no file paths or persistence behavior.
 ``inference_control`` coordinates engine pause/recovery and transport reconnect;
 ``health_monitor`` drains engine probes before lifecycle changes;
-``inference_memory`` pairs acknowledged engine memory release/resume operations;
-``weight_update`` supplies the transport lock's failure/phase semantics.
+``inference_memory`` pairs acknowledged memory release/resume operations;
+``weight_update`` supplies transport-lock failure and phase semantics.
 
-``sglang`` owns native SGLang launch, capture, engine control and inference
-lifecycle without depending on Slime or Megatron.
+Concrete inference implementations live in ``reef.inference`` and training
+implementations in ``reef.train``. This package imports neither integration
+package, including from function bodies. Protocol adapters and executors here
+connect Reef to those implementations without choosing a model framework.
 
-Training batches and candidate evaluation contracts come from ``reef.core``.
-This package never imports ``reef.train``.
+Malformed results and missing capabilities surface as contract errors, never
+as silent fallbacks. The default ``restore_checkpoint`` refuses rather than
+moving the artifact head under an engine that kept newer weights. Surfaces
+consume runtimes structurally through ``ServingRuntime`` and ``WeightRuntime``
+in ``surface/base.py``.
 
-Boundaries this package holds:
-
-- No concrete training backend is imported here. Backends implement
-  ``TrainingGroupHandle`` and ``ExecutorTrainingRuntime`` drives only the
-  handle; ``reef.train.slime`` never appears at module scope.
-- Malformed results and missing capabilities surface as contract errors
-  (``RuntimeContractError``, ``TrainingRuntimeError``), never as silent fallbacks.
-  The default ``restore_checkpoint`` refuses rather than moving the artifact
-  head under an engine that kept newer weights.
-- Surfaces see runtimes only structurally, through ``ServingRuntime`` and
-  ``WeightRuntime`` in ``surface/base.py``; nothing in ``surface/`` imports
-  this package.
-
-Adding a runtime kind: subclass ``RuntimeFactory``, set its ``kind``, and
-decorate the class with ``@register_runtime_kind`` in a module imported at
-boot. Or set the config ``type`` to a dotted ``package.module:factory_name``
-reference, which ``runtime_factory_for`` imports on resolution.
+To add a runtime kind, subclass ``RuntimeFactory``, set ``kind`` and register
+it with ``@register_runtime_kind`` in a module imported at boot. A config
+``type`` may also name a dotted ``package.module:factory_name`` reference.
 """
 
 from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime

@@ -211,56 +211,73 @@ Training backend deployment
 ----------------------------
 
 
-Managed model components can use Reef's shared process entrypoint,
-``python -m reef.service.training_driver``. Implement
-``TrainingDeployment.create_model_plan(config, *, loss_family)`` to return a
-``reef.runtime.deployment.ModelDeploymentPlan`` with configured, unstarted
-resource, inference and training components. Reef resolves the recipe; each
-backend decides how to interpret its declared loss family. Constructing the
-plan must validate the combination without allocating model resources.
+Managed model components use Reef's shared process entrypoint,
+``python -m reef.service.training_driver``. A training integration implements
+``TrainingDeployment.create_training_plan(config, *, loss_family)`` and returns
+``reef.train.deployment.TrainingDeploymentPlan``: an unstarted trainer, resource
+reservations, native inference launch data and coordinator options. It must not
+construct an inference service or allocate model resources.
 
-``DeploymentResources`` owns coordinated reservations and runtime connections.
-``InferenceService`` starts engines in supplied resources and returns an
-``InferenceConnection`` with a borrowed executor and a versioned control
-protocol. ``TrainingService`` declares the required protocol and attaches to
-that connection and those resources. Framework-specific arguments, engine
-handles and placement types stay inside the adapters. An HTTP provider URL
-alone does not establish weight-update compatibility.
+The service assembler selects inference independently through
+``reef.inference.deployment.inference_service_for``. A factory takes the launch
+mapping and returns an unstarted ``InferenceService``. Built-ins resolve lazily;
+external integrations can expose a ``module:factory`` reference or register a
+``reef.inference_backends`` entry point. The concrete factory owns parsing its
+native configuration. Reef combines both definitions into ``ModelDeploymentPlan``
+and rejects incompatible weight-transfer protocols before allocating anything.
+A new backend still needs an implementation of a transport supported by its peer;
+factory discovery does not make arbitrary backend pairs compatible.
 
-Reef starts these components in dependency order, probes readiness and closes
-them in reverse order. Every component's ``close`` must be idempotent and handle
-partial startup. A plan with no separate inference component explicitly selects
-a combined compatibility lifecycle; startup failure never selects it implicitly.
-Other deployment definitions, including in-process integrations, may keep their
-existing entrypoint and need not implement ``create_model_plan``. These startup
-contracts do not replace training, weight-update or version-commit contracts.
+``reef.runtime.deployment.ModelDeployment`` owns startup and shutdown:
 
-A backend with checkpoint-first candidate training can use
-``reef.runtime.training_job.publication.TrainingPublication`` for publication
-and commit gating. Implement ``WeightPublisher`` with engine barriers and direct
-weight transport. Its ``publish`` must verify the returned runtime load ID on
-all engines and must leave requests paused. Serialize coordinator calls with
-training and shutdown; acknowledge only after Reef has durably committed its
-head. Reuse the runtime's durable marker format, while keeping checkpoint
-production and any backend-specific tensor/adapter restoration in the backend.
-Use ``TrainingExecution`` with ``TrainingJobBackend`` for checkpoint-first
-execution. Its preparation context must retain reservations until Reef records
-the checkpoint and must never suppress execution failures. Return a
-``PreparedTrainingJob`` with a ``TrainingCheckpoint``, ``train`` and
-``save_checkpoint``. Training returns ``TrainingMetrics``; saving must persist
-all required optimizer/model state and recovery metadata synchronously. Reef
-owns job-marker writes. Share the publication coordinator's ``state`` with
-execution and serialize both with the same operation lock.
-The publisher's ``republish(runtime_load_id, marker)`` resends unchanged trainer
-weights with a complete transfer, preserving the requested identity without
-resuming generation. Use ``TrainingPublication.republish`` to coordinate this
-operation after an engine replacement; it validates marker eligibility and
-resumes only through the durable commit gate. Retain the last verified runtime
-load ID if a transfer fails or returns a different one.
-Wrap backend startup reconstruction in ``TrainingPublication.recovery(marker)``
-and call ``finish_recovery`` inside the scope after verifying engine identities.
-This reasserts pause even for a committed marker and aborts failed checkpoint
-restoration before serving can reopen.
+1. Start ``DeploymentResources`` and the selected ``InferenceService``.
+2. Verify the receiver and prepare weight transfer. Colocated inference releases
+   its initial device allocations before training workers initialize.
+3. Call ``TrainingService.start(resources)`` without an inference connection.
+4. Attach a ``WeightTransferSession`` to the trainer's native sender. Its protocol,
+   borrowed receiver executor and fresh session identity describe one attachment.
+5. Start Reef's ``TrainingCoordinator`` with separate ``TrainingOperations`` and
+   ``InferenceOperations``, then verify readiness after durable recovery.
+
+Shutdown closes the coordinator's active operations, training, inference and
+reservations in reverse order. Every close operation must handle partial startup
+and repeated calls. Serialized training operations must release any workers they
+replace; the training service also cleans up initial or partially started groups.
+Reef never closes borrowed external inference engines. In-process integrations
+may retain their own entrypoint instead of using ``create_training_plan``.
+
+The coordination code belongs in ``reef/runtime/``. Concrete inference code
+belongs in ``reef/inference/<integration>/`` and training code in
+``reef/train/<integration>/``. Neither integration imports the other. For the
+current native pair, Slime converts legacy argument values into plain launch
+options; the SGLang factory constructs ``SGLangConfig`` and checks receiver
+capabilities. The ``slime-sglang-control-v2`` attachment remains an explicitly
+scoped native protocol, not a universal tensor format.
+
+At the recipe boundary, ``RuntimeTrainingBackend`` maps batches and delegates
+candidate activation, rejection and durable acknowledgement to
+``reef.runtime.scheduler.RuntimeScheduler``. The scheduler receives separate
+``TrainingRuntime`` and ``InferenceRuntime`` objects; neither inherits the other
+and there is no aggregate ``ModelRuntime``.
+
+Inside the worker coordinator, ``TrainingOperations`` exposes batch preparation,
+training, checkpoints and separate weight preparation/sending. ``InferenceOperations`` exposes pause,
+resume, recovery, version verification, adapter unload and memory operations.
+``TrainingCoordinator`` owns staleness admission, LoRA residency and colocated
+handoffs. The native sender transfers weights directly to receiver workers;
+weight tensors never pass through the HTTP service or the scheduler.
+
+The coordinator composes ``TrainingExecution`` for durable job ordering and
+``TrainingPublication`` for commit gating. Training adapters return a
+``PreparedTrainingJob`` whose ``train`` returns ``TrainingMetrics`` and whose
+``save_checkpoint`` synchronously persists model/optimizer state and recovery
+metadata. Reef writes the durable markers. Reef selects and persists a target
+runtime load ID before sending a checkpoint, verifies the sender and every
+receiver, and keeps generation paused until the matching artifact commit is
+acknowledged. Retrying a partial transfer reuses its target; republication of
+unchanged weights preserves the committed identity. A failed restore or
+ambiguous optimizer step cannot reopen serving.
+
 Inference backends can compose ``reef.runtime.inference_control.InferenceControl``
 with concrete engine, monitoring and update-connection adapters. Serialize calls
 in the owning actor, and route legacy monitoring controls through the same pause
@@ -269,8 +286,8 @@ gate, not a public serving action. Backend handles and weight transport remain
 inside adapters; an HTTP URL alone is not an update connection.
 After the deployment owner retires a prior trainer, use
 ``InferenceControl.prepare_training_connection`` to require a fresh attachment
-and keep inference paused even when the engines are already healthy. Slime's
-v2 control RPC forwards this handshake before replacement workers are created.
+and keep inference paused even when the engines are already healthy. Reef's
+deployment owner invokes this handshake before replacement workers are created.
 Monitoring must drain active probes and retirement before engine mutation.
 ``EngineHealthMonitor`` provides this barrier using backend ``EngineHealthChecks``
 snapshots. Each ``EngineHealthTarget`` must bound its probe/retirement operations

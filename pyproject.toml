@@ -96,7 +96,7 @@ reef-native = "reef.harness.runners.native.__main__:main"
 reef-terminus = "reef.harness.runners.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
-reef = "reef.runtime.sglang.plugin:install_sglang_plugin"
+reef = "reef.inference.sglang.plugin:install_sglang_plugin"
 
 [tool.setuptools]
 include-package-data = true

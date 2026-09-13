@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.sglang import health
+from reef.inference.sglang import health
 
 
 class Engine:

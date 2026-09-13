@@ -297,15 +297,21 @@ jobs:
           source_root = Path(os.environ["GITHUB_WORKSPACE"])
           expected_backend_files = {
               str(path.relative_to(source_root))
-              for directory in ("reef/train/slime_backend", "reef/runtime/sglang")
+              for directory in ("reef/train/slime_backend", "reef/inference/sglang")
               for path in (source_root / directory).rglob("*")
               if path.suffix in {".cu", ".md", ".py"}
           }
           expected_backend_files.add("reef/train/__init__.py")
+          expected_backend_files.add("reef/inference/__init__.py")
           installed_files = {str(path) for path in reef.files or ()}
           assert expected_backend_files <= installed_files
           assert "reef/runtime/runtime_load_id.py" in installed_files
+          assert not any(path.startswith("reef/runtime/sglang/") for path in installed_files)
           assert not any(path.startswith("reef/train/slime_backend/reef_adapters/sglang/") for path in installed_files)
+          assert {
+              entry.value for entry in reef.entry_points
+              if entry.group == "sglang.srt.plugins" and entry.name == "reef"
+          } == {"reef.inference.sglang.plugin:install_sglang_plugin"}
           inference = {
               canonicalize_name(requirement.name)
               for requirement in requirements

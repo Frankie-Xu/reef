@@ -7,11 +7,12 @@ from typing import Any, Protocol, runtime_checkable
 
 import ray
 
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.launch import engine_environment
+from reef.inference.sglang.operations import SGLangInferenceOperations
 from reef.runtime.deployment import DeploymentResources, InferenceConnection
 from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.sglang.config import SGLangConfig
-from reef.runtime.sglang.launch import engine_environment
 
 # Keep the existing wire identifier while removing its implementation dependency.
 INFERENCE_PROTOCOL = "slime-sglang-control-v2"
@@ -64,7 +65,7 @@ class SGLangInferenceService:
                 backend=RayExecutor,
                 workers=(
                     WorkerSpec(
-                        worker_cls="reef.runtime.sglang.control:SGLangControl",
+                        worker_cls="reef.inference.sglang.control:SGLangControl",
                         args=(self.config, resources.inference_placement),
                     ),
                 ),
@@ -77,6 +78,18 @@ class SGLangInferenceService:
             )
         )
         return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._inference.workers))
+
+    def operations(self, connection: InferenceConnection) -> SGLangInferenceOperations:
+        """Adapt a compatible borrowed connection for Reef's coordinator."""
+        if connection.protocol != self.connection_protocol:
+            raise ValueError(f"incompatible SGLang inference connection: {connection.protocol!r}")
+        return SGLangInferenceOperations(connection.control)
+
+    def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
+        """Fence engines and release shared memory before trainer allocation."""
+        if connection.protocol != self.connection_protocol:
+            raise ValueError(f"incompatible SGLang inference connection: {connection.protocol!r}")
+        connection.control.rpc(0, "prepare_training_connection", timeout=14_400)
 
     def check_health(self) -> None:
         if self._inference is None or self._closed:

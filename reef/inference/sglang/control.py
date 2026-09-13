@@ -9,8 +9,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from reef.inference.sglang.config import SGLangConfig
 from reef.runtime.executor import Executor, ExecutorConfig
-from reef.runtime.sglang.config import SGLangConfig
 
 
 class SGLangControl:

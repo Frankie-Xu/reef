@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.config import config_value
-from reef.runtime.deployment import ModelDeploymentPlan
+from reef.runtime.deployment import CoordinatorConfig
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.algos.registry import loss_family_refs
+from reef.train.deployment import TrainingDeploymentPlan
 from reef.train.slime_backend.launch import driver_arguments
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
@@ -180,9 +181,9 @@ def _job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]
     return {"env_vars": {"PYTHONPATH": pythonpath}}
 
 
-def create_model_plan(
+def create_training_plan(
     config: Mapping[str, Any], direct_args: Sequence[str] = (), *, loss_family: str
-) -> ModelDeploymentPlan:
+) -> TrainingDeploymentPlan:
     ray_address = os.environ.get("RAY_ADDRESS", "").strip()
     if not ray_address:
         raise RuntimeError("RAY_ADDRESS is required")
@@ -213,31 +214,39 @@ def create_model_plan(
     _stamp_loss_family_reference(args, loss_family)
     from reef.train.slime_backend.reef_adapters.bridge import prepare_bridge
     from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
-    from reef.train.slime_backend.resources import SlimeDeploymentHealth, SlimeDeploymentResources
+    from reef.train.slime_backend.resources import SlimeDeploymentResources
     from reef.train.slime_backend.training import SlimeTrainingService
 
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
-    from reef.runtime.sglang.service import SGLangInferenceService
     from reef.train.slime_backend.inference import inference_config
 
-    inference = SGLangInferenceService(inference_config(args))
     training = SlimeTrainingService(
         args,
         preparation=prepared,
         loss_family_config=loss_family_config,
-        actor_name=actor_name,
-        namespace=namespace,
     )
-    return ModelDeploymentPlan(
+    return TrainingDeploymentPlan(
         resources=SlimeDeploymentResources(
             args,
             ray_address=ray_address,
             namespace=namespace,
             runtime_env=_job_runtime_env(),
         ),
-        inference=inference,
+        inference_config=inference_config(args),
         training=training,
-        health=None if getattr(args, "rollout_external", False) else SlimeDeploymentHealth(inference, training),
+        coordinator=CoordinatorConfig(
+            options={
+                "name": actor_name,
+                "namespace": namespace,
+                "max_concurrency": 64,
+                **(
+                    {"enable_tensor_transport": True}
+                    if getattr(args, "rollout_data_transport", "object-store") == "nixl"
+                    else {}
+                ),
+            }
+        ),
+        monitor_components=not getattr(args, "rollout_external", False),
     )

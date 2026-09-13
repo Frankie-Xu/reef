@@ -5,8 +5,8 @@ adapters. Several scenarios may each evolve an independent adapter runtime load 
 that engine, so the capacity accounting cannot live with any single scenario:
 two scenarios with private residency windows would overcommit the same slots
 and evict each other's current revision. :class:`AdapterResidencyManager` is
-the one accounting point for every adapter an engine holds — the training
-bridge owns one per engine, and every scenario's publication, restart
+the one accounting point for every adapter an engine holds — the Reef
+coordinator owns one per engine, and every scenario's publication, restart
 recovery, and eviction goes through it.
 
 The manager owns names, slots, and protection; the engine owns bytes. It

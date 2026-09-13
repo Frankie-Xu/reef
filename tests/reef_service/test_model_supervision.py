@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
+from reef.inference.sglang.service import RayHealthProbe
 from reef.runtime.adapters.ray_runtime import NamedRayTrainGroupHandle
-from reef.runtime.sglang.service import RayHealthProbe
 from reef.service.training_driver import ModelDeployment, supervise_deployment
 
 from .test_model_deployment import plan_for

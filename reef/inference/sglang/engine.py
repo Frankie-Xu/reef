@@ -12,10 +12,13 @@ from typing import Any
 import requests
 from urllib3.exceptions import NewConnectionError
 
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.lora_schema import (
+    require_lora_distributed_request_schema,
+    require_lora_tensor_request_schema,
+)
+from reef.inference.sglang.process import launch_engine, local_gpu_id, node_address_and_port, wait_ready
 from reef.runtime.inference_memory import InferenceMemory
-from reef.runtime.sglang.config import SGLangConfig
-from reef.runtime.sglang.lora_schema import require_lora_distributed_request_schema, require_lora_tensor_request_schema
-from reef.runtime.sglang.process import launch_engine, local_gpu_id, node_address_and_port, wait_ready
 
 logger = logging.getLogger(__name__)
 

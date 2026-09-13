@@ -15,7 +15,7 @@ class SGLangExecutor(DelegatingExecutor):
     """
 
     def _init_executor(self) -> None:
-        from reef.runtime.sglang.worker import SGLangWorker
+        from reef.inference.sglang.worker import SGLangWorker
 
         self._worker = SGLangWorker(**dict(self.config.options))
         self._rpc = UniProcExecutor.from_workers([self._worker], owned=True)

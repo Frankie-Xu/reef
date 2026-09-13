@@ -17,7 +17,12 @@ from typing import Any
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.service.deploy.config_utils import load_config
 from reef.service.training_driver import _driver_options as model_driver_options
-from reef.service.training_driver import _required_environment, _resolve_training_recipe, run_deployment
+from reef.service.training_driver import (
+    _required_environment,
+    _resolve_training_recipe,
+    assemble_model_plan,
+    run_deployment,
+)
 
 READY_MARKER = "reef-slime-bridge-ready"
 DEFAULT_READY_FILE = "/tmp/reef-slime-bridge.ready"
@@ -62,13 +67,12 @@ def _healthcheck(ready_file: Path) -> int:
 
 def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     ready_file.unlink(missing_ok=True)
-    from reef.train.slime_backend.driver import create_model_plan
+    from reef.train.slime_backend.driver import create_training_plan
 
     config = load_config(_required_environment("REEF_CONFIG"))
     loss_family, _ = _resolve_training_recipe(config)
-    return run_deployment(
-        create_model_plan(config, direct_args, loss_family=loss_family), ready_file, marker=READY_MARKER
-    )
+    training = create_training_plan(config, direct_args, loss_family=loss_family)
+    return run_deployment(assemble_model_plan(config, training), ready_file, marker=READY_MARKER)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

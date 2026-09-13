@@ -122,19 +122,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         slots = self.adapter_slots
         return () if slots is None else slots.scenarios
 
-    def sync_serving_runtime_load_id(self) -> str:
-        """Stamp the updater's current version token on every engine, publishing nothing.
-
-        A LoRA bridge that has not trained yet serves the frozen base; the
-        engines still need Reef's canonical ``<incarnation>:<sequence>``
-        token so rollouts carry an admissible producing version.
-        """
-        version = str(self.weight_updater.runtime_load_id)
-        if dist.get_rank() == 0:
-            engines, *_ = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
-            ray.get([engine.set_runtime_load_id.remote(version) for engine in engines])
-        dist.barrier(group=get_gloo_group())
-        return version
+    def initialize_runtime_load_id(self, runtime_load_id: str) -> None:
+        """Initialize only the sender's metadata; Reef initializes receivers."""
+        self.weight_updater.initialize_exact_runtime_load_id(runtime_load_id)
 
     def publish_adapter(self, scenario: str, lora_name: str) -> None:
         """Make ``scenario``'s current adapter resident under ``lora_name``.
@@ -193,8 +183,8 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     def get_runtime_load_id(self) -> str:
         return str(self.weight_updater.exact_runtime_load_id)
 
-    def restore_runtime_load_id_for_republication(self, runtime_load_id: str) -> None:
-        self.weight_updater.restore_exact_runtime_load_id(runtime_load_id)
+    def set_runtime_load_id_for_update(self, runtime_load_id: str) -> None:
+        self.weight_updater.prepare_exact_runtime_load_id(runtime_load_id)
 
     def pop_metrics(self) -> dict[str, float]:
         metrics = drain_worker_metrics()
@@ -204,7 +194,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         return metrics
 
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False) -> Any:
-        """Pass bridge-owned generation policy through Slime's actor hook."""
+        """Pass Reef-owned lifecycle policy through the native actor hook."""
         updater = self.weight_updater
         original_update = updater.update_weights
         supported = inspect.signature(original_update).parameters
@@ -224,11 +214,19 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         previous = instance_attributes.get("update_weights")
         had_previous = "update_weights" in instance_attributes
         updater.update_weights = update_with_generation_policy
+        fault_tolerance = getattr(self.args, "use_fault_tolerance", False)
+        if not manage_generation and fault_tolerance:
+            # Pinned Slime's actor hook otherwise recovers inference itself.
+            # Keep its training memory/transport setup while Reef exclusively
+            # decides when a failed receiver is replaced and republished.
+            self.args.use_fault_tolerance = False
         try:
             if not megatron_lora_enabled(self.args):
                 return super().update_weights()
             return self._update_lora_weights()
         finally:
+            if not manage_generation and fault_tolerance:
+                self.args.use_fault_tolerance = fault_tolerance
             if had_previous:
                 updater.update_weights = previous
             else:
@@ -306,11 +304,6 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         """Run ``publish`` with rollout engines connected and the actor readable."""
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
-
-        if self.args.use_fault_tolerance:
-            if dist.get_rank() == 0:
-                ray.get(self.rollout_manager.recover_updatable_engines.remote())
-            dist.barrier(group=get_gloo_group())
 
         (
             rollout_engines,

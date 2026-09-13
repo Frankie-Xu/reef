@@ -11,19 +11,7 @@ from uuid import uuid4
 
 import ray
 
-from reef.runtime.deployment import DeploymentHealth
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
-
-
-class SlimeDeploymentHealth:
-    """Poll both components without blocking behind long model operations."""
-
-    def __init__(self, *components: DeploymentHealth) -> None:
-        self.components = components
-
-    def poll(self) -> None:
-        for component in self.components:
-            component.poll()
 
 
 class SlimeDeploymentResources:

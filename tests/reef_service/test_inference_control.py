@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.control import SGLangControl
 from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.sglang.config import SGLangConfig
-from reef.runtime.sglang.control import SGLangControl
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -41,6 +41,9 @@ class CpuServingWorker:
     def get_updatable_engines_and_lock(self):
         return [self.engine], None, 0, [1], [0], [{}]
 
+    def prepare_training_connection(self):
+        self.prepared = True
+
     def shutdown(self):
         import ray
 
@@ -53,7 +56,10 @@ class CpuServingExecutor(DelegatingExecutor):
 
 
 class TrainingControl:
-    def __init__(self, serving):
+    def __init__(self, serving=None):
+        self._serving = serving
+
+    def attach_receiver(self, serving):
         self._serving = serving
 
     def check_health(self):
@@ -124,9 +130,9 @@ def test_remote_training_borrows_inference_and_transfers_directly_to_engine(monk
 
 
 def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monkeypatch):
+    from reef.inference.sglang.config import SGLangConfig
+    from reef.inference.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
     from reef.runtime.deployment import ModelDeploymentPlan
-    from reef.runtime.sglang.config import SGLangConfig
-    from reef.runtime.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
     from reef.service.training_driver import ModelDeployment
     from reef.train.slime_backend.resources import SlimeDeploymentResources
 
@@ -147,19 +153,22 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
             self.placement_groups["rollout"] = (None, [], [])
 
     class CpuTraining:
-        inference_protocol = INFERENCE_PROTOCOL
+        weight_transfer_protocol = INFERENCE_PROTOCOL
         actor = None
         engine = None
         inference_survived = False
 
-        def start(self, resources, inference):
+        def start(self, resources):
             self.actor = RayExecutor(
                 ExecutorConfig(
                     backend=RayExecutor,
                     options={"num_cpus": 1, "num_gpus": 0},
-                    workers=(WorkerSpec(TrainingControl, args=(inference.control,)),),
+                    workers=(WorkerSpec(TrainingControl),),
                 )
             )
+
+        def attach_weight_transport(self, session):
+            self.actor.rpc(0, "attach_receiver", args=(session.receiver,), timeout=30)
             engines, *_ = self.actor.rpc(0, "get_updatable_engines_and_lock", timeout=30)
             self.engine = engines[0]
             ray.get(self.engine.update_weight.remote(7), timeout=30)
@@ -198,8 +207,8 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
 
 
 def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
+    from reef.inference.sglang.lock import ReefRolloutLock
     from reef.runtime.inference_control import InferenceControl
-    from reef.runtime.sglang.lock import ReefRolloutLock
 
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
@@ -283,7 +292,7 @@ def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
 def test_real_ray_probe_timeout_does_not_wait_for_engine_response(monkeypatch):
     from threading import Event
 
-    from reef.runtime.sglang.health import SGLangEngineHealthChecks
+    from reef.inference.sglang.health import SGLangEngineHealthChecks
 
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)

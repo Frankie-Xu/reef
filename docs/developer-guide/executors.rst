@@ -1,42 +1,46 @@
 Worker executors
 ================
 
-Reef separates service orchestration and model semantics from worker execution. Training and inference runtimes own
-checkpoint production and serving respectively; the existing training backend
-coordinates activation with durable commit acknowledgement.
+Reef separates backend operations from scheduling and worker execution.
+``TrainingRuntime`` prepares training and produces checkpoint candidates;
+``InferenceRuntime`` controls request admission and served weights.
+``reef.runtime.scheduler.RuntimeScheduler`` orders their operations and reconciles
+publication with the durable scenario commit. ``RuntimeTrainingBackend`` adapts
+Recipe prepare/evaluate/select steps to this scheduler.
+
 An ``Executor`` owns worker launch, ordered control RPC, health and shutdown.
-The interface follows vLLM's executor pattern: configuration selects a concrete
-class, while callers use the same methods for each backend.
+Configuration selects a concrete executor while callers use the same methods.
+The managed model driver creates Reef's ``TrainingCoordinator`` through this
+interface; backend implementations supply its training and inference operations.
 
 .. code:: mermaid
 
    flowchart TD
-       D[reef serve / dependency graph] --> SE[Service Executor]
-       SE --> LW[Local ProcessWorker]
-       SE --> RW[Ray ProcessWorker]
-       SE --> CW[Custom executor]
-       LW --> SV[Inference / training driver / Reef]
-       RW --> SV
-       T[ExecutorTrainingRuntime] --> H[TrainingGroupHandle]
-       R[ExecutorInferenceRuntime] --> H
-       H --> C[Coordinator Executor]
-       C --> B[Training coordinator / Slime bridge]
-       B --> G[SlimeTrainGroup: train, checkpoint, publish]
-       G --> E[Worker Executor]
-       E --> S[SlimeRayExecutor]
-       E --> P[Custom Slime-compatible Executor]
-       S --> W[Megatron workers]
-       B --> BP[Local batch processor: tensorization / DP partitioning]
-       B --> I[Inference control actor]
-       W --> I
-       I --> RE[Rollout Executor]
-       RE --> SR[SGLangExecutor: SGLang engines / routers / update lock]
-       RE --> CR[Custom rollout executor]
+       D[reef serve] --> M[ModelDeployment: resources and lifecycle]
+       M --> TS[SlimeTrainingService]
+       M --> IS[SGLangInferenceService]
+       M --> C[Reef TrainingCoordinator]
+       R[Recipe / RuntimeTrainingBackend] --> S[Reef RuntimeScheduler]
+       S --> T[TrainingRuntime]
+       S --> I[InferenceRuntime]
+       T --> C
+       I --> C
+       C --> TO[TrainingOperations: train, checkpoint, send]
+       C --> IO[InferenceOperations: pause, load, resume]
+       TO --> W[Slime workers / worker executor]
+       IO --> E[SGLang engines / inference executor]
+       W -. Native weight transport .-> E
+       S --> V[Scenario commit acknowledgement]
+
+The recipe-facing scheduler completes the handshake with durable scenario
+commits. The remote coordinator owns training-job serialization, worker resource
+handoff, weight publication and recovery. Its operation lock protects the one
+journal shared by training and publication. Neither object implements inference
+requests or combines the two Runtime contracts into a third Runtime.
 
 The coordinator executor targets one worker for each training-job RPC. The
-training executor dispatches rank operations to the model workers. This keeps
-checkpoint/publication transactions from being accidentally broadcast and
-executed more than once.
+training executor dispatches rank operations to model workers. Publication
+transactions therefore execute once, rather than once per model rank.
 
 Built-in executors
 ------------------
@@ -144,7 +148,7 @@ Training runtime configuration
 ------------------------------
 
 Existing ``type: ray_training`` configurations keep discovering a named Ray
-bridge in the selected namespace and return separate ``ExecutorTrainingRuntime``
+coordinator in the selected namespace and return separate ``ExecutorTrainingRuntime``
 and ``ExecutorInferenceRuntime`` instances. ``RayTrainGroupHandle`` remains a
 compatibility alias for ``TrainingGroupHandle``.
 
@@ -182,8 +186,8 @@ their runtime is no longer in use.
 Slime integration
 -----------------
 
-``SlimeTrainGroup`` owns role-specific training, checkpoint arguments, LoRA
-activation and weight publication. Its default ``SlimeRayExecutor`` uses the
+``SlimeTrainGroup`` implements role-specific training, checkpoint arguments,
+LoRA tensor export and native weight sending. Its default ``SlimeRayExecutor`` uses the
 pinned Slime allocator for GPU placement, rank-zero rendezvous, memory-saver
 environment and tensor-transport options. RPC goes through the shared
 ``RayExecutor``. Group release keeps the shared actor/critic/rollout placement
@@ -200,9 +204,11 @@ The Slime driver accepts:
 The custom executor receives ``args``, node/GPU counts, ``pg``, per-actor GPU
 allocation, ``role``, reference/teacher flags and ``actor_cls`` in
 ``ExecutorConfig.options``. Its constructor launches workers; ``SlimeTrainGroup``
-then calls their collective ``init`` and connects the inference control actor.
-Workers return their training parallel configuration from ``set_rollout_manager``
-instead of sending batch configuration to inference. The group validates the
+then calls collective ``init`` without an inference connection. Reef prepares
+the receiver first and attaches a ``WeightTransferSession`` after worker
+allocation. The current native sender uses ``set_rollout_manager`` during this
+explicit attachment and returns its training parallel configuration; inference
+does not receive batch configuration. The group validates the
 returned layouts and passes them to the coordinator's batch processor. It must
 preserve rank order and support Slime's worker methods and rollout payloads.
 Critic output is passed to the actor worker at the same rank, including empty
@@ -210,7 +216,7 @@ outputs on non-final pipeline stages.
 
 The inference control actor owns the serving ``Executor`` selected by ``execution.rollout`` or
 ``--reef-rollout-executor-backend``. The default ``ray`` selection maps to
-``reef.runtime.sglang.executor:SGLangExecutor``. Its independent SGLang backend
+``reef.inference.sglang.executor:SGLangExecutor``. Its independent SGLang backend
 owns native engine launch, routers, health monitors, update locks, memory
 operations and recovery. It never imports Slime or a concrete training backend.
 Custom inference executors receive ``config`` (``SGLangConfig``) and ``pg``
@@ -220,7 +226,7 @@ through ``TrainingBatchProcessor``; there is no batch-manager Ray actor or
 inference RPC relay. NIXL tensor transport is enabled on the training coordinator
 when selected. This removes one Ray actor and its CPU reservation.
 
-Slime's training coordinator, inference control actor and weight transport use Ray.
+The managed coordinator, inference control actor and native weight transport use Ray.
 Alternative rollout executors must support the existing Slime weight-transport
 contract (including engine/lock handles); selecting a backend does not rewrite
 that data plane. There is no built-in torchrun, Slurm or Kubernetes backend,
@@ -403,63 +409,78 @@ address and only local controllers, Reef passes the address through and the
 drivers connect after their readiness dependencies are satisfied. Stacks
 without Ray services or declared Ray training/rollout roles do not start Ray.
 
-Slime inference ownership
-~~~~~~~~~~~~~~~~~~~~~~~~~
+Model deployment ownership
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.service.training_driver`` owns model deployment lifecycle through
-``ModelDeployment``. The selected training definition returns a
-``ModelDeploymentPlan`` containing unstarted resources, inference and training
-components. The owner checks their declared connection protocols before
-allocation, then starts resources, inference and training in order. It checks
-inference readiness before attachment and again after training initialization;
-the readiness file is published only when both components are ready.
+``reef.runtime.deployment.ModelDeployment`` owns model startup and shutdown.
+The service layer resolves a ``TrainingDeployment`` and calls
+``create_training_plan``. Its ``TrainingDeploymentPlan`` contains unstarted
+resources, a training service, coordinator executor options and inference
+configuration values. The training definition does not construct inference.
+``reef.service.training_driver.assemble_model_plan`` independently selects the
+inference service factory and validates the resulting ``ModelDeploymentPlan``
+before allocating resources.
 
-The Slime integration supplies ``SlimeDeploymentResources`` and
-``SlimeTrainingService``. Inference is supplied by the independent
-``reef.runtime.sglang.service.SGLangInferenceService``. Argument parsing and
-preflight live in ``reef.train.slime_backend.driver``. Its ``inference_config``
-adapter translates training requirements into a serializable ``SGLangConfig``;
-no Slime namespace or Megatron object is passed to inference. The service layer resolves
-the recipe and passes its declared loss family into that integration, keeping
-recipe discovery out of the training package.
+For the native pair, the training integration supplies
+``SlimeDeploymentResources`` and ``SlimeTrainingService``; inference supplies
+``reef.inference.sglang.service.SGLangInferenceService``. Recipe resolution and
+backend selection remain in service assembly. Slime argument parsing and
+training preflight remain in its integration. Receiver configuration reaches
+the inference factory as values, without a Slime namespace, training runtime or
+Megatron object.
 
-For managed full-weight and LoRA training, including colocated deployments,
-resources connect one Ray client job
-and use Slime's existing placement helper once for coordinated model allocation.
-Inference borrows those reservations and owns ``SGLangControl`` as a
-separate Ray control actor. It reserves one CPU and zero model GPUs; model
-placement groups account for engine GPUs separately. Training receives the
-existing inference connection and reservations and calls ``start_bridge`` with
-both. The coordinator retains tensorization, DP partitions and micro-batch
-scheduling in a local processor. Native training workers receive the inference
-actor handle directly. Training never creates or closes inference or reservations.
+The startup sequence is:
 
-The owner closes training, inference and resources in reverse dependency order,
-including components whose startup failed partway through. Cleanup failures do
-not skip later components, and the original startup error remains authoritative.
-Shared reservations are released once. Disconnecting the owned Ray client job
-leaves an external cluster running; an already initialized client session is
-rejected without disconnecting it.
+#. Allocate the shared resources once.
+#. Start inference and check its health.
+#. Call ``prepare_weight_transfer`` to fence generation, drain monitoring and
+   release inference memory before colocated training allocation.
+#. Call ``TrainingService.start(resources)`` to initialize actor/critic workers
+   without an inference argument.
+#. Create a fresh ``WeightTransferSession`` and explicitly attach the sender.
+#. Build training and inference operations and create Reef's named
+   ``TrainingCoordinator`` through the configured executor.
+#. Finish coordinator checkpoint/publication recovery and check inference
+   health again before publishing readiness.
 
-The minimal shared ``InferenceConnection`` contains a borrowed executor and a
-versioned control-protocol identifier. Engine handles and Ray placement
-representations stay inside the concrete inference and training adapters. Weight transfer remains directly
-between training workers and engines. This protocol identifies the supported
-attachment vocabulary; it is not a general engine capability negotiation API.
+``TrainingOperations`` implements training preparation, checkpoint storage,
+optimizer execution and native sending. ``InferenceOperations`` implements
+receiver pause/resume, memory operations, recovery and version observation.
+The generic coordinator owns their ordering, publication journal, scenario
+adapter residency and commit barrier. The Slime adapter has no inference
+lifecycle object and does not own the publication state machine.
 
-All Slime entrypoints use the same resource, inference and training ownership,
-including external-engine mode. External engines remain borrowed and are not
-stopped by Reef. ``reef.service.slime_driver`` retains legacy argument-file and
-healthcheck syntax but uses this same lifecycle. Direct ``start_bridge`` calls
-require supplied inference and placement groups; the old self-allocating
-combined path has been removed.
+The native placement helper still reserves training and inference GPUs in one
+call. Inference borrows its reservation and owns a separate control actor;
+its CPU reservation does not duplicate engine GPU reservations. The local
+training batch processor performs tensorization and DP partitioning without
+an inference RPC relay. NIXL tensor transport remains an executor option on
+the named coordinator when selected.
 
-Managed configurations use ``inference.num-gpus``,
-``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
-Checkpoint production and backend-specific startup recovery remain in the
-Slime adapters. Managed process recovery is described below. Independent
-replacement that preserves surviving components and validation of additional
-backend combinations remain in
+Shutdown first asks the coordinator to close its training operations, including
+workers recreated inside that process. The training service then releases its
+original handles and partially started groups, followed by inference and shared
+resources. Cleanup attempts every component even after a failure; the original
+startup error remains authoritative. External engines stay borrowed, and closing
+the owned Ray client job leaves the external cluster running.
+
+``InferenceConnection`` identifies a borrowed receiver control connection.
+``WeightTransferSession`` adds a unique identity generated by Reef for each
+startup. The current native ``slime-sglang-control-v2`` protocol still carries
+engine/lock handles consumed by the sender; this is an explicit transport
+integration, not universal tensor-format or backend capability negotiation.
+A rebuilt deployment creates a new session. The previous trainer must be
+retired before attachment; the session is not a multi-writer election protocol.
+
+``reef.service.slime_driver`` retains the legacy argument-file and healthcheck
+syntax and delegates to the same assembly and lifecycle. ``start_bridge`` and
+the Slime-owned coordinator actor are removed. Managed full-weight, LoRA,
+colocated and external-engine modes all use the separate service contracts.
+Configurations continue to use ``inference.num-gpus``,
+``inference.tensor-parallel-size`` and ``inference.options``.
+
+Transport compatibility and GPU acceptance remain specific to the selected
+backend pair. Further deployment and backend combinations are tracked in
 `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
 
 Inference recovery and reconnect
@@ -468,8 +489,8 @@ Inference recovery and reconnect
 ``reef.runtime.inference_control.InferenceControl`` owns pause intent and
 recovery/reconnect ordering through three backend contracts: ``InferenceEngines``
 for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
-and replacement, and ``InferenceMonitor`` for background recovery. The Slime
-serving worker supplies these adapters; engine handles, GPU topology and Ray
+and replacement, and ``InferenceMonitor`` for background recovery. The SGLang
+inference worker supplies these adapters; engine handles, GPU topology and Ray
 fan-out remain private to it. The existing training-side RPC vocabulary and
 six-field engine/lock attachment tuple are unchanged.
 
@@ -494,17 +515,17 @@ phase-result bookkeeping without Slime or Ray imports. The legacy
 updaters use the same lock methods and continue transferring directly between
 workers and engines. There is no tensor relay through the shared controller.
 
-This extraction does not make the Slime launch helper or attachment tuple a
-universal inference API. Backend-neutral engine launch and real GPU combinations
-remain separate work. A failed managed controller uses deployment reconstruction
-as described below.
+The native attachment tuple remains specific to the supported weight transport.
+The service contracts let Reef select and start backends independently; another
+pair still needs compatible tensor formats and sender/receiver implementations.
+A failed managed controller uses deployment reconstruction as described below.
 
 Standalone serving republication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``TrainingPublication.republish(runtime_load_id)`` restores unchanged weights to
-replaced inference engines through the same commit gate. The Slime bridge's
-internal ``republish_serving`` delegates to it. Reef reasserts the pause barrier,
+replaced inference engines through the same commit gate. The Reef coordinator's
+``republish_serving`` delegates to it. Reef reasserts the pause barrier,
 recovers engines and update connections, and requests a complete transfer under
 the original runtime load ID. A cached bridge pause never substitutes for the
 controller barrier. Known missing engine slots are skipped while pausing the
@@ -522,7 +543,8 @@ markers reject standalone republication before model operations. The trainer
 may contain a candidate rather than the incumbent, so those states must use
 their existing training-job recovery path. Republication never runs an optimizer
 step, increments training counters or creates a new publication version.
-Slime retains tensor transfer and restoration of other scenarios' adapters.
+Slime implements tensor sending; Reef schedules restoration of other scenarios'
+adapters through the receiver contract.
 This is in-process engine recovery. Controller-process failure uses the managed
 deployment recovery path below; GPU validation remains separate work.
 
@@ -531,9 +553,9 @@ Training-coordinator restart attachment
 
 The attachment protocol retains the wire identifier ``slime-sglang-control-v2``
 for compatibility; its inference implementation is now independent of Slime. Its additional
-``prepare_training_connection`` RPC is called by ``start_bridge`` before creating
-training workers when inference and reservations are supplied by the deployment
-owner. It records pause intent, drains monitoring, recovers engines/connections
+``prepare_training_connection`` RPC is called by the inference adapter's
+``prepare_weight_transfer`` when Reef prepares startup, before allocating
+training workers. It records pause intent, drains monitoring, recovers engines/connections
 and requires worker attachment even when every engine and the update lock are
 healthy. The existing attachment tuple carries that requirement through its
 new-engine count; acknowledgement clears it only after workers have connected.
@@ -545,8 +567,9 @@ reservations; startup failure leaves borrowed resources with their owner.
 Custom Slime serving executors must implement the additional RPC.
 
 ``TrainingPublication.recovery(marker)`` fences the entire backend startup
-restoration, including committed and marker-free startup. The bridge restores
-checkpoint identity and adapters inside that scope, with updater-controlled
+restoration, including committed and marker-free startup. Reef restores
+checkpoint identity and adapters through the backend operations inside that
+scope, with updater-controlled
 generation resumption disabled. ``finish_recovery`` preserves the commit gate:
 uncommitted candidates stay paused; committed identities resume generation and
 monitoring only after verification. Version discovery, checkpoint seeding and
@@ -599,9 +622,13 @@ The managed driver automatically supervises separate inference and training
 plans for full-weight, LoRA, colocated and LoRA-plus-colocated deployments.
 A plan supplies a nonblocking ``DeploymentHealth.poll()`` and a
 ``ModelPlanSource`` rebuilds components from the original resolved configuration.
-Slime probes retain one outstanding health RPC per component. An operation that
+Inference and coordinator probes retain one outstanding health RPC per component. An operation that
 queues behind a long weight transfer is not treated as a dead actor. Training
-executor failures also notify the owner, including idle worker loss.
+executor failures also notify the owner, including idle worker loss. Training
+operations start monitoring after they are deserialized in the coordinator;
+``SlimeTrainGroup`` attaches the observer to each replacement executor. The
+driver does not keep observing original worker handles after this handoff, so
+intentional ``release_train`` retirement does not trigger deployment restart.
 
 On component failure, Reef removes readiness, closes training and inference,
 confirms process cleanup and releases the old allocation. It reruns checkpoint
@@ -661,7 +688,7 @@ raises to the owner and prevents the engine operation; shutdown retains the
 monitor so draining can be retried. An internal monitoring failure is reported
 by deployment health checks and prevents monitoring from resuming.
 
-The Slime adapter supplies ``EngineHealthChecks`` snapshots with one target per
+The SGLang adapter supplies ``EngineHealthChecks`` snapshots with one target per
 logical engine, including every node that must retire together. Both health and
 graceful-shutdown RPC waits are bounded. Retirement uses captured actor handles
 and clears a slot only if it still contains the captured actor. A stale probe
@@ -679,24 +706,27 @@ Training-step coordination
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``reef.runtime.training_job.execution.TrainingExecution`` owns job identity,
-retry classification and the order of training and checkpoint recording. The
-Slime bridge invokes it under the same operation lock used by publication and
-shutdown. Execution and ``TrainingPublication`` share ``TrainingJobState`` for
+retry classification and the order of training and checkpoint recording. Reef's
+``TrainingCoordinator`` invokes it under the same operation lock used by
+publication and shutdown. Execution and ``TrainingPublication`` share ``TrainingJobState`` for
 health reporting; recovery decisions always use the durable marker.
 
 ``TrainingJobBackend.prepare`` performs admission, scoring and data packing
 before yielding a ``PreparedTrainingJob``. Its context holds the checkpoint
 reservation through the final marker write. It may return a stale or
-storage-blocked result without starting a job. Slime retains scenario/staleness
-admission, teacher scoring, tensorization and DP packing in this adapter.
+storage-blocked result without starting a job. Reef applies shared
+scenario/staleness admission. Slime implements checkpoint capacity checks,
+teacher scoring, tensorization and DP packing in its preparation adapter.
 
 Reef records ``RUNNING`` before calling ``train``, then invokes
 ``save_checkpoint`` and verifies the checkpoint directory. Training metrics and
 method telemetry are recorded together with ``CHECKPOINT`` in one durable write,
 so a crash cannot leave a replayable checkpoint without its training metrics.
-Slime's prepared job performs colocated offload and scenario activation, runs
-the optimizer, saves the actor/critic pair and updates its retention/scenario
-metadata. Neither prepared operation publishes inference weights.
+The coordinator performs colocated inference offload and selects the scenario
+before calling the training operation. Slime runs the optimizer, saves the
+actor/critic pair and updates checkpoint retention metadata. Reef records
+scenario history after the checkpoint. Preparation and checkpoint production
+do not publish inference weights.
 
 Preparation failure is retryable without a new job identity. Once ``RUNNING``
 is recorded, a training/save failure is ambiguous and requires operator
@@ -710,11 +740,20 @@ Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``reef.runtime.training_job.publication.TrainingPublication`` owns the shared
-checkpoint-publication transaction. The Slime bridge delegates publication,
-candidate rejection, commit acknowledgement and startup commit gating to it.
-``WeightPublisher`` supplies concrete engine operations: pause, recover,
-transfer and verify weights, resume, restore incumbent resources and abort.
+checkpoint-publication transaction. Reef's ``TrainingCoordinator`` delegates
+publication, candidate rejection, commit acknowledgement and startup commit
+gating to it. Its ``WeightPublisher`` implementation coordinates the two
+operations contracts: pause the receiver, send weights, verify receiver versions,
+restore resources and resume only after durable acknowledgement.
 Tensors continue to travel directly from training workers to inference engines.
+
+Reef chooses the initial incarnation and each publication's target runtime load
+ID. It persists the target before preparing or sending weights. Sender
+preparation runs before receiver memory is restored, so a full disk sender can
+export its checkpoint and release training workers first. Transfer then consumes
+that prepared version. A retry can replay the prepared disk checkpoint even
+when the original training workers are gone; it must not allocate a new version
+or reinitialize a trainer on GPUs still held by colocated inference.
 
 Publication crosses the pause barrier before persisting ``UPDATING_WEIGHTS``.
 A failed pause leaves ``CHECKPOINT`` retryable. A partial transfer or failed
@@ -732,11 +771,12 @@ incumbent resources and records ``REJECTED`` only on success. Plain LoRA capacit
 refusal preserves unrelated engines; failed eviction follows engine recovery.
 
 Marker and durable JSON helpers now live in ``reef.runtime.training_job``.
-The on-disk filename, checkpoint-derived location, fields and transitions are
-unchanged. Slime retains checkpoint layout, optimizer execution, scenario/LoRA
-restoration and tensor transport. Callers serialize the shared publication
-coordinator with training and shutdown; it does not allocate a new actor or own
-an independent process lifecycle.
+The on-disk filename, checkpoint-derived location and transitions are unchanged.
+An optional ``target_runtime_load_id`` records a pending transfer; older markers
+remain readable. Slime retains checkpoint layout, optimizer execution and native
+sender implementation. Reef owns scenario/LoRA restoration order and verifies
+receiver acknowledgements. The publication transaction shares its coordinator's
+operation lock and process; it does not allocate another actor.
 
 The service stack keeps the runtime alive through service shutdown, publishes
 the actual address as ``reef.ray_address`` in runtime snapshots, and supplies
@@ -795,8 +835,8 @@ cancel peer readiness waits and join launch tasks before closing already-created
 executors, preventing a late launch from escaping cleanup. Shutdown attempts every dependent before
 its dependencies, even if an RPC fails. Borrowed external rollout engines and
 shared Slime placement groups are not deleted by an individual rollout/training
-executor. The Slime driver asks the bridge to release owned workers before
-retiring its actor.
+executor. Reef closes the coordinator's backend operations before retiring
+its actor, then releases service-owned handles and reservations.
 
 Custom service executors
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -839,7 +879,7 @@ multi-machine networking benchmark.
 Independent SGLang backend
 --------------------------
 
-``reef/runtime/sglang/`` owns the chat/capture backend, SGLang plugin, native
+``reef/inference/sglang/`` owns the chat/capture backend, SGLang plugin, native
 engine process, router, Ray engine groups and inference lifecycle. Native
 ``ServerArgs`` and ``launch_server`` come directly from SGLang; Reef no longer
 calls Slime's ``start_rollout_servers`` or inherits its ``SGLangEngine``.
@@ -857,7 +897,7 @@ the configuration boundary. Checkpoint pull RPCs receive explicit source and
 local directories from the training updater; inference does not read training
 checkpoint arguments. Existing configs and plugin name ``reef`` are preserved;
 custom import paths pointing into the former Slime SGLang subtree must move to
-``reef.runtime.sglang``. Maintained examples use the new paths.
+``reef.inference.sglang``. Maintained examples use the new paths.
 
 CPU tests cover native launch bindings, multi-node rendezvous, shared placement,
 external engine validation/ownership, capture, LoRA requirements and recovery.

@@ -37,7 +37,9 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/dispatcher.py`, `reef/scenario/` | Coordination, scenario state, commit ordering, and recovery |
 | `reef/service/` | HTTP, authentication, streaming, and deployment |
 | `reef/recipe/`, `reef/train/` | Recipe contracts, processors, training, evaluation, and backend integrations |
-| `reef/runtime/`, `reef/surface/` | Runtime contracts and delivery of published artifacts |
+| `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
+| `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
+| `reef/surface/` | Delivery of published artifacts |
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |

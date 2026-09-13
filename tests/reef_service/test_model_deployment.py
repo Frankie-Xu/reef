@@ -6,10 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.deployment import InferenceConnection, ModelDeploymentPlan
+from reef.runtime.deployment import CoordinatorConfig, InferenceConnection, ModelDeploymentPlan
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import training_driver
 from reef.service.training_driver import ModelDeployment
+from reef.train.deployment import TrainingDeploymentPlan
 
 
 class Resources:
@@ -45,11 +46,37 @@ class Inference:
         self.engine = Engine()
         self.executor = UniProcExecutor.from_workers([self.engine])
         self.probes = 0
+        self.version = "engine:0"
 
     def start(self, resources):
         assert resources is self.resources
         resources.event("inference-start")
         return InferenceConnection(self.connection_protocol, self.executor)
+
+    def prepare_weight_transfer(self, connection):
+        self.resources.event("transfer-prepare")
+
+    def operations(self, connection):
+        self.resources.event("inference-operations")
+        return self
+
+    def inference_url(self):
+        return "http://inference"
+
+    def runtime_load_ids(self):
+        return [self.version]
+
+    def initialize_version(self, runtime_load_id):
+        self.version = runtime_load_id
+
+    def pause(self):
+        self.resources.event("inference-pause")
+
+    def resume(self):
+        self.resources.event("inference-resume")
+
+    def abort(self):
+        self.resources.event("inference-abort")
 
     def check_health(self):
         self.probes += 1
@@ -59,20 +86,29 @@ class Inference:
         self.resources.event("inference-close")
         self.executor.shutdown()
 
+    def poll(self):
+        self.resources.event("inference-poll")
+
 
 class Training:
-    inference_protocol = "test-weights-v1"
+    weight_transfer_protocol = "test-weights-v1"
 
     def __init__(self, resources):
         self.resources = resources
         self.inference = None
 
-    def start(self, resources, inference):
+    def start(self, resources):
         assert resources is self.resources
-        self.inference = inference
         resources.event("training-start")
-        if inference is not None:
-            inference.control.rpc(0, "update", args=(7,))
+
+    def attach_weight_transport(self, session):
+        self.inference = session
+        self.resources.event("training-attach")
+        session.receiver.rpc(0, "update", args=(7,))
+
+    def operations(self):
+        self.resources.event("training-operations")
+        return self
 
     def check_health(self):
         self.resources.event("training-health")
@@ -80,15 +116,17 @@ class Training:
     def close(self):
         self.resources.event("training-close")
 
+    def poll(self):
+        self.resources.event("training-poll")
+
 
 class OtherTraining(Training):
     """Second implementation consumes the same connection through another RPC API."""
 
-    def start(self, resources, inference):
-        assert inference is not None
-        self.inference = inference
-        resources.event("training-start")
-        inference.control.collective_rpc("update", args=(9,))
+    def attach_weight_transport(self, session):
+        self.inference = session
+        self.resources.event("training-attach")
+        session.receiver.collective_rpc("update", args=(9,))
 
 
 def plan_for(*failures, training_type=Training):
@@ -103,14 +141,16 @@ def test_owner_composes_backends_and_shuts_down_in_dependency_order(training_typ
     owner = ModelDeployment(plan)
     owner.start()
     assert plan.inference.engine.weight == weight
-    assert plan.training.inference.control is plan.inference.executor
+    assert plan.training.inference.receiver is plan.inference.executor
     owner.close()
     owner.close()
     assert events == [
         "allocate",
         "inference-start",
         "inference-health-1",
+        "transfer-prepare",
         "training-start",
+        "training-attach",
         "training-health",
         "inference-health-2",
         "training-close",
@@ -127,7 +167,9 @@ def test_owner_composes_backends_and_shuts_down_in_dependency_order(training_typ
         ("allocate", ["release"]),
         ("inference-start", ["inference-close", "release"]),
         ("inference-health-1", ["inference-close", "release"]),
+        ("transfer-prepare", ["inference-close", "release"]),
         ("training-start", ["training-close", "inference-close", "release"]),
+        ("training-attach", ["training-close", "inference-close", "release"]),
         ("training-health", ["training-close", "inference-close", "release"]),
         ("inference-health-2", ["training-close", "inference-close", "release"]),
     ],
@@ -161,7 +203,7 @@ def test_startup_error_survives_cleanup_error():
 
 def test_incompatible_control_protocol_fails_before_allocation():
     plan, events = plan_for()
-    plan.training.inference_protocol = "another-protocol"
+    plan.training.weight_transfer_protocol = "another-protocol"
     with pytest.raises(ValueError, match="incompatible inference control protocol"):
         ModelDeployment(plan).start()
     assert events == []
@@ -169,7 +211,7 @@ def test_incompatible_control_protocol_fails_before_allocation():
 
 def test_combined_compatibility_is_explicit_not_a_startup_fallback():
     plan, events = plan_for()
-    plan.training.inference_protocol = None
+    plan.training.weight_transfer_protocol = None
     owner = ModelDeployment(ModelDeploymentPlan(plan.resources, None, plan.training))
     owner.start()
     owner.close()
@@ -206,7 +248,7 @@ def test_driver_selects_backend_plan_and_clears_stale_readiness_on_preflight_err
     monkeypatch.setattr(training_driver, "load_config", lambda path: config)
 
     class Definition:
-        def create_model_plan(self, received, *, loss_family):
+        def create_training_plan(self, received, *, loss_family):
             assert loss_family == "sao"
             assert received is config
             assert not ready.exists()
@@ -302,7 +344,178 @@ def test_legacy_cli_delegates_lifecycle_and_preserves_its_native_arguments(tmp_p
 
     monkeypatch.setenv("REEF_CONFIG", "unused")
     monkeypatch.setattr(slime_driver, "load_config", lambda path: config)
-    monkeypatch.setattr(driver, "create_model_plan", create)
+    monkeypatch.setattr(driver, "create_training_plan", create)
+    monkeypatch.setattr(slime_driver, "assemble_model_plan", lambda config, training: training)
     monkeypatch.setattr(slime_driver, "run_deployment", run)
     assert slime_driver.main(["serve", "--ready-file", str(tmp_path / "ready"), "--lr=1e-6"]) == 0
     assert captured["arguments"] == ["--lr=1e-6"]
+
+
+def test_rebuild_assigns_a_new_weight_transfer_session():
+    sessions = []
+    for _ in range(2):
+        plan, _ = plan_for()
+        deployment = ModelDeployment(plan)
+        deployment.start()
+        sessions.append(deployment.weight_transfer_session.session_id)
+        deployment.close()
+    assert sessions[0] != sessions[1]
+
+
+def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
+    from dataclasses import replace
+    from reef.runtime.training_job.coordinator import TrainingContext, TrainingCoordinationConfig
+
+    plan, events = plan_for()
+    plan.training.config = TrainingCoordinationConfig(save_hf_template=None)
+    plan.training.context = TrainingContext()
+
+    # The native operations may recreate workers inside the coordinator.
+    # Its shutdown closes that copy; the service still handles partial starts.
+    class Operations:
+        config = plan.training.config
+        context = plan.training.context
+
+        def start(self):
+            pass
+
+        def check_health(self):
+            pass
+
+        def initialize_version(self, runtime_load_id):
+            self.context.runtime_load_id = runtime_load_id
+
+        def close(self):
+            events.append("operations-close")
+
+    plan.training.operations = lambda: Operations()
+    plan = replace(plan, coordinator=CoordinatorConfig(backend="uni"))
+    deployment = ModelDeployment(plan)
+    deployment.start()
+    assert events.index("transfer-prepare") < events.index("training-start")
+    deployment.poll()
+    deployment.close()
+    assert events.count("training-close") == 1
+    assert events.index("operations-close") < events.index("training-close")
+    assert events[-3:] == ["training-close", "inference-close", "release"]
+
+
+def test_coordinator_construction_failure_releases_started_backends(monkeypatch):
+    from dataclasses import replace
+    from reef.runtime.executor import Executor
+
+    plan, events = plan_for()
+    plan = replace(plan, coordinator=CoordinatorConfig(backend="uni"))
+
+    def fail(config):
+        assert config.workers[0].worker_cls.__module__ == "reef.runtime.training_job.coordinator"
+        assert events[-2:] == ["training-operations", "inference-operations"]
+        raise RuntimeError("coordinator recovery failed")
+
+    monkeypatch.setattr(Executor, "create", fail)
+    with pytest.raises(RuntimeError, match="coordinator recovery failed"):
+        ModelDeployment(plan).start()
+    assert events[-3:] == ["training-close", "inference-close", "release"]
+
+
+def test_reef_assembles_independently_selected_backend_definitions(monkeypatch):
+    existing, events = plan_for()
+    config = {"reef": {"training_backend": "another-trainer", "inference_backend": "another-receiver"}}
+    native_options = {"model": "tiny", "parallel": 2}
+
+    class Definition:
+        def create_training_plan(self, received, *, loss_family):
+            assert received is config
+            assert loss_family == "custom-loss"
+            return TrainingDeploymentPlan(existing.resources, existing.training, native_options)
+
+    def training_definition(name):
+        assert name == "another-trainer"
+        return Definition()
+
+    def inference_definition(name, options):
+        assert name == "another-receiver"
+        assert options is native_options
+        return existing.inference
+
+    monkeypatch.setattr(training_driver, "training_deployment_for", training_definition)
+    monkeypatch.setattr(training_driver, "inference_service_for", inference_definition)
+    plan = training_driver.ConfiguredModelPlanSource(config, "custom-loss").create()
+    assert events == []
+    assert plan.training is existing.training
+    assert plan.inference is existing.inference
+    plan.health.poll()
+    assert events == ["inference-poll", "training-poll"]
+
+
+def test_assembler_rejects_incompatible_backend_pair_before_allocation(monkeypatch):
+    existing, events = plan_for()
+    existing.training.weight_transfer_protocol = "unsupported-transport"
+    monkeypatch.setattr(training_driver, "inference_service_for", lambda name, config: existing.inference)
+    with pytest.raises(ValueError, match="incompatible inference control protocol"):
+        training_driver.assemble_model_plan({}, TrainingDeploymentPlan(existing.resources, existing.training))
+    assert events == []
+
+
+def test_pending_coordinator_probe_does_not_trigger_restart_or_queue_more_work():
+    class Probe:
+        result_value = None
+
+        def result(self, timeout):
+            if self.result_value is None:
+                raise TimeoutError("still training")
+            return self.result_value
+
+    class Coordinator:
+        failure = None
+
+        def __init__(self):
+            self.probe = Probe()
+            self.submitted = 0
+
+        def rpc(self, rank, method, *, non_block):
+            self.submitted += 1
+            return self.probe
+
+    plan, _ = plan_for()
+    deployment = ModelDeployment(plan)
+    coordinator = Coordinator()
+    deployment._coordinator = coordinator
+    for _ in range(5):
+        deployment.poll()
+    assert coordinator.submitted == 1
+    coordinator.probe.result_value = {"ok": False, "recoverable": True}
+    deployment.poll()
+    assert coordinator.submitted == 1
+    coordinator.probe.result_value = {"ok": False}
+    with pytest.raises(RuntimeError, match="health check"):
+        deployment.poll()
+    assert coordinator.submitted == 2
+
+
+def test_explicitly_disabled_supervision_stays_disabled_with_an_owned_coordinator(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    plan, _ = plan_for()
+    plan = replace(plan, coordinator=CoordinatorConfig(backend="uni"), health=None)
+    # This test isolates the supervisor selection from coordinator execution,
+    # which the separate real-Ray deployment contract exercises.
+    monkeypatch.setattr(ModelDeployment, "_start_coordinator", lambda *args: None)
+    monkeypatch.setattr(
+        training_driver, "supervise_deployment", lambda *args, **kwargs: pytest.fail("supervision enabled")
+    )
+    ready = tmp_path / "ready"
+
+    class Stopping:
+        def set(self):
+            pass
+
+        def is_set(self):
+            return False
+
+        def wait(self):
+            assert ready.exists()
+
+    monkeypatch.setattr(training_driver, "threading", SimpleNamespace(Event=Stopping))
+    assert training_driver.run_deployment(plan, ready, source=SimpleNamespace()) == 0
+    assert not ready.exists()

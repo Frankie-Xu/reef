@@ -10,6 +10,7 @@ across the job boundary itself.
 from __future__ import annotations
 
 import pytest
+import ray
 
 from reef.train.slime_backend.driver import _job_runtime_env
 
@@ -52,7 +53,7 @@ def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path
     monkeypatch.setattr(slime_driver, "resolve_loss_family", lambda name: Algorithm())
     monkeypatch.setattr(slime_driver, "_parse_slime_args", parse)
     with pytest.raises(StopBeforeRuntime):
-        slime_driver.create_model_plan({"reef": reef}, [] if managed else ["--lr=2e-6"], loss_family="loss")
+        slime_driver.create_training_plan({"reef": reef}, [] if managed else ["--lr=2e-6"], loss_family="loss")
     assert captured == [
         "--lr=1e-06",
         "--use-critic",
@@ -69,6 +70,8 @@ def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path
 )
 def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode):
     from types import SimpleNamespace
+
+    from reef.service.training_driver import assemble_model_plan
     from reef.train.slime_backend import driver
     from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
 
@@ -112,12 +115,14 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
     def unexpected(**kwargs):
         pytest.fail("plan construction must not connect or allocate resources")
 
-    monkeypatch.setattr(bridge.ray, "init", unexpected)
-    plan = driver.create_model_plan({}, loss_family="loss")
+    monkeypatch.setattr(ray, "init", unexpected)
+    training = driver.create_training_plan({}, loss_family="loss")
+    assert not hasattr(training, "inference")
+    plan = assemble_model_plan({}, training)
     plan.validate()
     assert plan.inference is not None
     assert plan.resources.allocate_models
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert plan.training.inference_protocol is not None
+    assert plan.training.weight_transfer_protocol is not None

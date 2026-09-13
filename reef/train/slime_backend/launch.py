@@ -10,14 +10,13 @@ from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import ModelDeploymentPlan
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
-from reef.train.deployment import TrainingDeployment
+from reef.train.deployment import TrainingDeployment, TrainingDeploymentPlan
 
-_NATIVE_INFERENCE = "reef.runtime.sglang.chat.SGLangChatTrainingInferenceBackend"
+_NATIVE_INFERENCE = "reef.inference.sglang.chat.SGLangChatTrainingInferenceBackend"
 _READY_PROBE = (
     "import os, pathlib, sys; "
     "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "
@@ -172,7 +171,7 @@ class SlimeDeployment(TrainingDeployment):
                 "automatic weight training discovers its runtime and inference connection from the bridge"
             )
         if settings["inference_backend"] not in (None, "sglang"):
-            raise DeployConfigError("Slime-managed inference currently requires inference.backend: sglang")
+            raise DeployConfigError("Slime weight transfer currently requires inference.backend: sglang")
 
         execution = config.setdefault("execution", {})
         for role in ("training", "rollout"):
@@ -215,10 +214,10 @@ class SlimeDeployment(TrainingDeployment):
         }
         return (driver,)
 
-    def create_model_plan(self, config: Mapping[str, Any], *, loss_family: str) -> ModelDeploymentPlan:
-        from reef.train.slime_backend.driver import create_model_plan
+    def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
+        from reef.train.slime_backend.driver import create_training_plan
 
-        return create_model_plan(config, loss_family=loss_family)
+        return create_training_plan(config, loss_family=loss_family)
 
     def runtime_config(
         self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None

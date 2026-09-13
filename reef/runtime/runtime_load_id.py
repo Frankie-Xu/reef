@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 
 def new_runtime_load_id_incarnation() -> str:
-    """Return a training-group-lifetime namespace for runtime loads."""
+    """Return a fresh namespace for Reef's serving-version sequence."""
     return uuid.uuid4().hex
 
 

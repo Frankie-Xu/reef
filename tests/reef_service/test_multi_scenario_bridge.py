@@ -5,16 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import ray
 
 pytest.importorskip("ray")
 
+from reef_service.slime_coordinator import build_slime_coordinator
 from reef_service.test_sao_bridge import _RecordingGroup
 
 from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
 from reef.runtime.inference_memory import InferenceMemory
-from reef.train.slime_backend.reef_adapters import bridge
+from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 
 from .test_sao_bridge import _FakeRank, _FakeRolloutManager, _payload, _RemoteMethod, _sao_row
 
@@ -69,8 +70,23 @@ class _SlottedGroup:
         self.version.sequence += 1
         self.publications.append((self.active or "?", str(self.version)))
 
-    def sync_serving_runtime_load_id(self) -> str:
-        return str(self.version)
+    def register_failure_listener(self, listener):
+        pass
+
+    def initialize_runtime_load_id(self, runtime_load_id):
+        self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1])
+
+    def next_runtime_load_id(self):
+        return f"{INCARNATION}:{self.version.sequence + 1}"
+
+    def prepare_weight_update(self, runtime_load_id, *, force_full):
+        self.set_runtime_load_id_for_update(runtime_load_id)
+
+    def send_prepared_weights(self, runtime_load_id, *, force_full):
+        self.update_weights(manage_generation=False, force_full=force_full)
+
+    def set_runtime_load_id_for_update(self, runtime_load_id):
+        self.restore_runtime_load_id_for_republication(runtime_load_id)
 
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1]) - 1
@@ -208,7 +224,7 @@ def _actor(
     template = str(tmp_path / "hf" / "checkpoint-{rollout_id}")
     manager = _ColocatedManager(version) if colocate else _Manager(version)
     group = _ColocatedGroup(template, version, manager) if colocate else _SlottedGroup(template, version)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         manager,
         batch_processor=manager,
@@ -243,7 +259,7 @@ def _run(actor, payload):
 
 @pytest.fixture
 def _local_ray_get(monkeypatch):
-    monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
+    monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
 
 
 @pytest.mark.unit
@@ -506,11 +522,11 @@ def test_keeping_the_base_resident_releases_only_kv_and_graphs(tmp_path, _local_
 
     _run(actor, _job("a", 0, "inc:0"))
 
-    assert manager.release_tags == [("kv_cache", "cuda_graph")]
+    assert manager.release_tags == [("kv_cache", "cuda_graph"), ("kv_cache", "cuda_graph")]
     # SGLang resumes a region by removing its tag from the set release added it
     # to, so resuming weights that were never released raises. The restore has
     # to drop the same half the release did.
-    assert manager.memory_calls == ["offload", "onload_kv"]
+    assert manager.memory_calls == ["offload", "offload", "onload_kv"]
 
 
 @pytest.mark.unit
@@ -521,8 +537,8 @@ def test_the_default_still_releases_everything_and_restores_both_halves(tmp_path
 
     _run(actor, _job("a", 0, "inc:0"))
 
-    assert manager.release_tags == [None]
-    assert manager.memory_calls == ["offload", "onload_weights", "onload_kv"]
+    assert manager.release_tags == [None, None]
+    assert manager.memory_calls == ["offload", "offload", "onload_weights", "onload_kv"]
 
 
 @pytest.mark.unit

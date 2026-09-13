@@ -24,7 +24,7 @@ class _RemoteMethod:
 def _worker(rank):
     return SimpleNamespace(
         init=_RemoteMethod(0),
-        restore_runtime_load_id_for_republication=_RemoteMethod(f"restore-{rank}"),
+        set_runtime_load_id_for_update=_RemoteMethod(f"prepare-{rank}"),
         pop_metrics=_RemoteMethod({"rank": rank}),
         get_runtime_load_id=_RemoteMethod("incarnation:4"),
         update_weights=_RemoteMethod(f"updated-{rank}"),
@@ -65,14 +65,14 @@ def test_bridge_facing_train_group_methods_fan_out(ray_group) -> None:
 
     assert ray_train_groups.ReefRayTrainGroup is SlimeTrainGroup
     assert isinstance(group.executor, SlimeRayExecutor)
-    assert group.restore_runtime_load_id_for_republication("incarnation:4") == ["restore-0", "restore-1"]
+    assert group.set_runtime_load_id_for_update("incarnation:5") == ["prepare-0", "prepare-1"]
+    assert workers[0].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]
+    assert workers[1].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]
     metrics = group.async_pop_rank0_metrics()
     version = group.async_get_rank0_runtime_load_id()
     assert isinstance(metrics, ExecutorFuture)
     assert resolve(metrics) == {"rank": 0}
     assert resolve(version) == "incarnation:4"
-    assert workers[0].restore_runtime_load_id_for_republication.calls == [(("incarnation:4",), {})]
-    assert workers[1].restore_runtime_load_id_for_republication.calls == [(("incarnation:4",), {})]
     assert workers[1].pop_metrics.calls == []
     assert workers[1].get_runtime_load_id.calls == []
 
