@@ -662,7 +662,8 @@ zero.
 
    evolution.propose | a ``Proposer``, a plain callable, or a dotted ``module:attribute``
    evolution.evaluate | an ``EpisodeScorer``, likewise
-   evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
+   evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every gate task; the current release is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a dotted reference to an object with ``decide``
+   evolution.floor_score | 1.0 | the score every gate task must reach under ``selection: floor``; a positive number, refused with any other selection, as ``min_win_margin`` is outside ``score_comparison``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node or, as code, a ``native_loop`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
