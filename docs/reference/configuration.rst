@@ -311,7 +311,42 @@ internal way the launcher passes effective settings to its HTTP child.
 A selected missing or invalid file is an error, even when provider flags are
 present. Reef reports the selected config source and does not search the Reef
 installation for your config. From outside a checkout,
-pass an absolute path to a cookbook config. Relative state paths still use
+pass an absolute path to a cookbook config.
+
+Before any model download or process start, the launcher logs the selected
+source (file, profile, or command line, with its layout) and then every
+resolved setting with where its value came from:
+
+.. code:: text
+
+   [reef] config: /srv/reef/stack.yaml (schema-version 2)
+   [reef] resolved settings:
+   [reef]   recipe.implementation = recipes.sao.recipe:SAORecipe  (file)
+   [reef]   reef.host = 127.0.0.1  (default)
+   [reef]   reef.port = 9000  (command line)
+   [reef]   reef.tokens = ["****"]  (file)
+   [reef]   inference.model-path = /models/demo  (file)
+   [reef]   inference.backend = sglang  (automatic)
+   [reef]   recipe.config.batch-size = 4  (environment REEF_SAO_BATCH_SIZE)
+   [reef]   training.backend = slime  (automatic)
+
+Sources are ``file``, ``command line``, ``environment`` (the ``REEF_*``
+variables a configuration-free start reads, or a field's declared fallback
+variable), ``automatic`` for a choice Reef made because the field was omitted,
+and ``default``. Settings left at their defaults are not listed except the
+recipe and the HTTP bind. Tokens, API keys, passwords and database URLs are
+masked by key name at any depth, including inside native ``options`` objects.
+
+``reef serve ... --print-config`` prints the same report on standard output,
+defaults included, and exits with status 0 (or 2 for an invalid config)
+without downloading a model, allocating GPUs or starting a process. It takes
+the same ``-c``, ``--recipe``, ``--model`` and override flags as a real start,
+so it shows exactly what that start would use. A Hugging Face model path is
+shown as written; the snapshot is resolved only at startup.
+
+.. code:: bash
+
+   reef serve -c stack.yaml --reef.port 9000 --print-config Relative state paths still use
 the launch directory. Unversioned legacy stacks can use ``services[].cwd``
 to override a process working directory.
 
@@ -371,9 +406,12 @@ objects are preserved, and an explicit container replaces the YAML value:
      --inference.handler-config '{"tool_call_parser": "qwen25"}'
 
 The parsed public values are also supplied to service commands and the HTTP
-child's config. Existing empty/null service values retain their defaulting
-behavior. ``reef.token`` and ``reef.tokens`` remain distinct inputs whose
-credentials are combined. The selected Recipe, runtime adapter and executor
+child's config. An empty string, as an unset ``${VAR}`` reference expands to,
+is treated as an omitted service value and keeps its default. In
+``schema-version: 2`` files an explicit ``null`` is a value: optional fields
+resolve to null and any other field rejects it (see below). Unversioned files
+keep treating null as omitted. ``reef.token`` and ``reef.tokens`` remain
+distinct inputs whose credentials are combined. The selected Recipe, runtime adapter and executor
 settings use the same field parser. Only undeclared custom-stack mappings
 retain generic YAML coercion; the ``services`` layout is unchanged.
 
@@ -407,9 +445,17 @@ wins, and boolean fields support ``--no-...``. A declaration that conflicts
 with a public option is rejected. The normalized values retain their types
 when handed to the HTTP child.
 
-For compatibility, an empty/null flat weight-recipe key remains omitted.
-Structured component fields accept null only if their annotation is optional;
-the literal string ``null`` remains text for string fields. Recipe floats
+In ``schema-version: 2`` files, ``null`` is distinct from omission for every
+declared field: an optional field (``str | None`` and similar) resolves to
+null, and writing ``null`` for any other field is an error naming the field,
+rather than a silent fall back to its default. Omit the field to use the
+default. The literal string ``null`` remains text for string fields. A version
+2 file that repeats a YAML key, ``reef.port`` twice for example, is rejected
+with both line numbers instead of the last occurrence silently winning, and
+two spellings of one field (``model-path`` and ``model_path``) are a duplicate
+field error. For compatibility, unversioned files keep YAML's
+last-occurrence-wins reading and an empty/null flat weight-recipe key remains
+omitted there. Recipe floats
 retain their historical non-finite support; a recipe can declare
 ``allow_nonfinite=False`` to require finite values. Service fields and backend
 resource/timeouts require finite values. Errors identify the field and expected

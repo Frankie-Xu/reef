@@ -183,6 +183,46 @@ def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, mon
     assert yaml.safe_load(path.read_text()) == raw
 
 
+def test_versioned_files_reject_repeated_yaml_keys_with_their_lines(tmp_path):
+    text = "reef:\n  port: 8000\n  port: 9000\ninference:\n  options:\n    lr: 1\n    lr: 2\n"
+    versioned = tmp_path / "config.yaml"
+    versioned.write_text("schema-version: 2\n" + text)
+    with pytest.raises(
+        DeployConfigError, match=r"reef\.port \(lines 3 and 4\); inference\.options\.lr \(lines 7 and 8\)"
+    ):
+        load_config(versioned)
+    legacy = tmp_path / "legacy.yaml"
+    legacy.write_text(text)
+    assert load_config(legacy)["reef"]["port"] == 9000
+
+
+@pytest.mark.parametrize(
+    "section, field",
+    [("reef", "port"), ("reef", "host"), ("inference", "timeout-s"), ("training", "ready-timeout")],
+)
+def test_versioned_null_is_rejected_where_the_field_is_not_optional(tmp_path, section, field):
+    raw = {"schema-version": 2, section: {field: None}}
+    with pytest.raises(DeployConfigError, match=rf"{section}\.{field} does not accept null"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
+
+
+def test_versioned_null_is_kept_for_optional_fields_and_legacy_null_still_defaults(tmp_path):
+    raw = {
+        "schema-version": 2,
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001", "upstream-api-key": None},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": None}},
+    }
+    with pytest.raises(DeployConfigError, match=r"recipe\.config\.batch-size does not accept null"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
+    raw["recipe"]["config"] = {"checkpoint-every-n-versions": None}
+    raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
+    config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
+    assert config["reef"]["checkpoint_every_n_versions"] is None
+    legacy = {"reef": {"recipe": "recipe", "port": None}, "services": []}
+    config, _ = orchestrator.resolve_deployment_config(legacy, None, tmp_path / "legacy.yaml")
+    assert service_config_from_mapping(config).port == 8900
+
+
 def test_automatic_stack_rejects_unused_training_options(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({"schema-version": 2, "training": {"options": {"lr": 1e-6}}}))
