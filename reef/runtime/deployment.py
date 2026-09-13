@@ -1,4 +1,14 @@
-"""Deployment plans, resource ownership, connection configuration, and runtime selection."""
+"""Deployment plans, resource ownership, connection configuration, and runtime selection.
+
+- Component contracts: what a deployment's resources, inference service and
+  training service each own, and how their health is observed.
+- :class:`ModelDeployment`: starts those components in dependency order,
+  attaches the weight-transfer session, and runs Reef's coordinator.
+- Runtime factories: the ``type`` table that turns a config section into
+  runtimes, with bundled kinds resolved lazily so importing contracts loads
+  no integration.
+- Connection settings shared by the executor- and Ray-backed factories.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +29,10 @@ from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPA
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
 from reef.runtime.scheduler import TrainingCoordinator
+
+_logger = logging.getLogger(__name__)
+
+# -- Component contracts ------------------------------------------------------
 
 
 class DeploymentResources(ABC):
@@ -167,6 +181,9 @@ class TrainingService(DeploymentHealth):
         """Release owned training objects, including partial starts, idempotently."""
 
 
+# -- Deployment lifecycle -----------------------------------------------------
+
+
 @dataclass(frozen=True)
 class CoordinatorConfig:
     """Executor selection for Reef's coordinator, independent of backend code."""
@@ -201,11 +218,13 @@ class ModelDeploymentPlan:
             )
 
 
-_logger = logging.getLogger(__name__)
-
-
 class ModelDeployment:
-    """Own allocation, backend attachment and the generic coordinator process."""
+    """Own allocation, backend attachment and the generic coordinator process.
+
+    Start order is resources, inference, training, coordinator; close order
+    is the reverse, and close runs for every component that was started even
+    when a later one failed.
+    """
 
     def __init__(self, plan: ModelDeploymentPlan) -> None:
         self.plan = plan
@@ -226,34 +245,40 @@ class ModelDeployment:
         try:
             self._resources_started = True
             self.plan.resources.start()
-            connection = None
-            if self.plan.inference is not None:
-                self._inference_started = True
-                connection = self.plan.inference.start(self.plan.resources)
-                if connection.protocol != self.plan.training.weight_transfer_protocol:
-                    raise ValueError("inference returned a connection with an incompatible protocol")
-                self.plan.inference.check_health()
-                # Colocated trainers cannot initialize until inference has
-                # acknowledged releasing its initial device allocations.
-                self.plan.inference.prepare_weight_transfer(connection)
-                self.weight_transfer_session = WeightTransferSession(
-                    connection.protocol, connection.control, uuid4().hex
-                )
-            self._training_started = True
-            self.plan.training.start(self.plan.resources)
-            if self.weight_transfer_session is not None:
-                self.plan.training.attach_weight_transport(self.weight_transfer_session)
-            self.plan.training.check_health()
+            connection = self._start_inference()
+            self._start_training()
             if connection is not None:
                 self._start_coordinator(connection)
-            if self.plan.inference is not None:
-                self.plan.inference.check_health()
+                self.plan.inference.check_health()  # type: ignore[union-attr]
         except BaseException:
             try:
                 self.close()
             except Exception:
                 _logger.exception("Failed to clean up model deployment after startup failure")
             raise
+
+    def _start_inference(self) -> InferenceConnection | None:
+        """Start the receiver and fence it for the trainer; ``None`` without a separate component."""
+        inference = self.plan.inference
+        if inference is None:
+            return None
+        self._inference_started = True
+        connection = inference.start(self.plan.resources)
+        if connection.protocol != self.plan.training.weight_transfer_protocol:
+            raise ValueError("inference returned a connection with an incompatible protocol")
+        inference.check_health()
+        # Colocated trainers cannot initialize until inference has
+        # acknowledged releasing its initial device allocations.
+        inference.prepare_weight_transfer(connection)
+        self.weight_transfer_session = WeightTransferSession(connection.protocol, connection.control, uuid4().hex)
+        return connection
+
+    def _start_training(self) -> None:
+        self._training_started = True
+        self.plan.training.start(self.plan.resources)
+        if self.weight_transfer_session is not None:
+            self.plan.training.attach_weight_transport(self.weight_transfer_session)
+        self.plan.training.check_health()
 
     def _start_coordinator(self, connection: InferenceConnection) -> None:
         config = self.plan.coordinator
@@ -339,6 +364,11 @@ class ModelDeployment:
             raise errors[0]
 
 
+# -- Runtime factories --------------------------------------------------------
+
+RuntimeBuild = InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]
+
+
 class RuntimeConfigError(ReefError):
     """Raised when runtime configuration is invalid or required keys are missing."""
 
@@ -377,9 +407,9 @@ class RuntimeFactory(ABC):
             )
             # Component constructors retain range and cross-field validation.
             settings_type(**values)
-            return {"type": config.get("type", self.kind), **values}
         except ValueError as exc:
             raise RuntimeConfigError(str(exc)) from exc
+        return {"type": config.get("type", self.kind), **values}
 
     @abstractmethod
     def __call__(
@@ -388,7 +418,7 @@ class RuntimeFactory(ABC):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+    ) -> RuntimeBuild:
         """Build inference alone or separate training and inference components."""
 
 
@@ -402,7 +432,7 @@ class _CallableRuntimeFactory(RuntimeFactory):
 
     kind = ""
 
-    def __init__(self, fn: Callable[..., InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]]) -> None:
+    def __init__(self, fn: Callable[..., RuntimeBuild]) -> None:
         self._fn = fn
 
     def __call__(
@@ -411,16 +441,11 @@ class _CallableRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+    ) -> RuntimeBuild:
         return self._fn(config, model_path, recipe_config, environ)
 
 
-_runtime_kinds: dict[str, RuntimeFactory] = {}
-
-
-"""Explicitly registered extensions and cached instances of selected builtin factories."""
-
-
+#: Bundled kinds, resolved on first use so importing contracts loads no integration.
 _BUILTIN_FACTORIES = {
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
@@ -429,17 +454,19 @@ _BUILTIN_FACTORIES = {
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
 }
 
+#: Explicitly registered extensions, plus cached instances of resolved builtins.
+_runtime_kinds: dict[str, RuntimeFactory] = {}
+
+
+def _register(factory: RuntimeFactory) -> None:
+    if factory.kind in _runtime_kinds or factory.kind in _BUILTIN_FACTORIES:
+        raise ValueError(f"runtime kind {factory.kind!r} is already registered")
+    _runtime_kinds[factory.kind] = factory
+
 
 def register_runtime_kind(cls: type[RuntimeFactory]) -> type[RuntimeFactory]:
-    """Register an extension factory when its owning module is explicitly loaded.
-
-    Builtins use lazy references so importing runtime contracts loads no integration.
-    """
-    instance = cls()
-    kind = instance.kind
-    if kind in _runtime_kinds or kind in _BUILTIN_FACTORIES:
-        raise ValueError(f"runtime kind {kind!r} is already registered")
-    _runtime_kinds[kind] = instance
+    """Register an extension factory when its owning module is explicitly loaded."""
+    _register(cls())
     return cls
 
 
@@ -447,10 +474,7 @@ def register_runtime_factory(factory: RuntimeFactory) -> RuntimeFactory:
     """Register an external runtime factory (module-level convenience)."""
     if not isinstance(factory, RuntimeFactory):
         raise TypeError(f"a runtime factory registers a RuntimeFactory, got {type(factory).__name__}")
-    kind = factory.kind
-    if kind in _runtime_kinds or kind in _BUILTIN_FACTORIES:
-        raise ValueError(f"runtime kind {kind!r} is already registered")
-    _runtime_kinds[kind] = factory
+    _register(factory)
     return factory
 
 
@@ -461,7 +485,7 @@ def runtime_kinds() -> tuple[str, ...]:
 def runtime_factory_for(kind: str) -> RuntimeFactory | None:
     """Return the runtime factory for ``kind``.
 
-    A kind is either a registered name or a dotted reference
+    A kind is a registered name, a bundled name, or a dotted reference
     ``package.module:factory_name`` to a factory reef does not bundle —
     the config path's way of serving deployment-specific runtimes without a
     hand-rolled service assembly.
@@ -492,6 +516,8 @@ def runtime_factory_for(kind: str) -> RuntimeFactory | None:
 
 
 class RuntimeRegistry:
+    """Build runtimes from config sections; injected factories shadow registered kinds."""
+
     def __init__(self, factories: Mapping[str, RuntimeFactory] | None = None) -> None:
         self._factories: dict[str, RuntimeFactory] = dict(factories or {})
 
@@ -506,21 +532,23 @@ class RuntimeRegistry:
         model_path: str,
         recipe_config: Mapping[str, Any] | None = None,
         environ: Mapping[str, str] | None = None,
-    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+    ) -> RuntimeBuild:
         runtime_type = config.get("type")
         if not isinstance(runtime_type, str) or not runtime_type:
             raise RuntimeConfigError("runtime.type must be a non-empty string")
-        factory = self._factories.get(runtime_type)
+        factory = self._factories.get(runtime_type) or runtime_factory_for(runtime_type)
         if factory is None:
-            factory = runtime_factory_for(runtime_type)
-        if factory is None:
-            available = ", ".join(self.names)
-            raise RuntimeConfigError(f"unknown runtime type {runtime_type!r}; available runtimes: {available}")
-        recipe_context = {} if recipe_config is None else recipe_config
+            raise RuntimeConfigError(
+                f"unknown runtime type {runtime_type!r}; available runtimes: {', '.join(self.names)}"
+            )
         values = os.environ if environ is None else environ
         if isinstance(factory, RuntimeFactory):
+            # Injected entries may be plain callables that parse nothing.
             config = factory.parse_config(config, values)
-        return factory(config, model_path, recipe_context, values)
+        return factory(config, model_path, recipe_config or {}, values)
+
+
+# -- Config section helpers ---------------------------------------------------
 
 
 def config_string(config: Mapping[str, Any], name: str) -> str:
@@ -538,17 +566,11 @@ def config_secret(
     env_name: str,
 ) -> str | None:
     """An optional secret: literal ``name`` wins, else the variable named by ``env_name``."""
-    value = config.get(name)
-    if value is not None:
-        if not isinstance(value, str) or not value:
-            raise RuntimeConfigError(f"runtime.{name} must be a non-empty string")
-        return value
-    configured_env = config.get(env_name)
-    if configured_env is None:
+    if config.get(name) is not None:
+        return config_string(config, name)
+    if config.get(env_name) is None:
         return None
-    if not isinstance(configured_env, str) or not configured_env:
-        raise RuntimeConfigError(f"runtime.{env_name} must be a non-empty string")
-    return environ.get(configured_env)
+    return environ.get(config_string(config, env_name))
 
 
 @dataclass(frozen=True)

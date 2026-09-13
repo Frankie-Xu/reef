@@ -1,4 +1,25 @@
-"""Shared training and inference contracts, values, and default request admission."""
+"""Shared training and inference contracts, values, and default request admission.
+
+Who implements what:
+
+- Recipes and the dispatcher *use* ``InferenceRuntime`` and ``TrainingRuntime``
+  and the values they exchange (``ModelCandidate``, ``ActivatedModel``,
+  ``PreparedTrainingStep``, ``TrainingJobResult``). These are the backbone.
+- A training integration *implements* ``TrainingBackend`` (with
+  ``PreparedTrainingJob``) so Reef's coordinator can drive it.
+- An inference integration *implements* ``InferenceHandler`` for requests,
+  ``InferenceBackend`` for weight receipt, and the engine supervision hooks
+  (``InferenceEngines``, ``InferenceMonitor``, ``WeightUpdateConnection``,
+  ``EngineHealthTarget``/``EngineHealthChecks``, ``InferenceMemoryOperations``,
+  ``AdapterEngine``) that ``recovery`` and ``publication`` call back into.
+- Reef itself implements the durable stores (``TrainingJobStore``,
+  ``ScenarioHistoryStore``); they are abstract here only so ``publication``
+  and ``recovery`` can share them without importing each other.
+
+The module reads top-down in that order: identities and errors, training
+values, request admission, request handling, runtime contracts, native
+backend contracts, engine supervision, durable stores.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +39,8 @@ from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
 from reef.core.evaluation import SelectionDecision, UpdateCandidate
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
+
+# -- Identities and errors ----------------------------------------------------
 
 
 def new_runtime_load_id_incarnation() -> str:
@@ -51,6 +74,35 @@ class RuntimeLoadId:
         return cls(incarnation, int(sequence))
 
 
+class RuntimeContractError(ReefError):
+    """A runtime or backend violated its contract with Reef.
+
+    Raised for malformed runtime results and missing capabilities that a
+    correctly configured deployment would never produce — distinct from user
+    input errors, which surface as more specific ``ReefError`` subclasses.
+    """
+
+
+class TrainingRuntimeError(ReefError):
+    """Raised when a training backend violates the runtime contract."""
+
+
+class UpstreamStatusError(ReefError):
+    """An upstream service answered an inference request with an error status.
+
+    Carries ``status`` so the service can hand the caller the upstream's own
+    4xx and message rather than collapsing both into an opaque 500. That
+    distinction is load-bearing: agents correct themselves from these bodies
+    (shrinking ``max_tokens`` when the engine reports a context overflow, for
+    instance), and an opaque 500 leaves them retrying the identical request
+    until they give up.
+    """
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class CandidateTrainingDeferred(Exception):
     """A candidate was not produced, but retrying the same batch is safe."""
 
@@ -67,6 +119,14 @@ class StaleCandidate(Exception):
         self.metrics = dict(metrics or {})
 
 
+# -- Training values ----------------------------------------------------------
+
+
+def _require_non_empty(value: object, name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string")
+
+
 @dataclass(frozen=True, kw_only=True)
 class ModelCandidate(UpdateCandidate):
     """A checkpointed model update that has not changed serving weights."""
@@ -78,10 +138,8 @@ class ModelCandidate(UpdateCandidate):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.training_job_id, str) or not self.training_job_id:
-            raise ValueError("training_job_id must be a non-empty string")
-        if not isinstance(self.checkpoint_path, str) or not self.checkpoint_path:
-            raise ValueError("checkpoint_path must be a non-empty string")
+        _require_non_empty(self.training_job_id, "training_job_id")
+        _require_non_empty(self.checkpoint_path, "checkpoint_path")
         if self.current_runtime_load_id is not None and (
             not isinstance(self.current_runtime_load_id, str) or not self.current_runtime_load_id
         ):
@@ -96,23 +154,8 @@ class ActivatedModel:
     runtime_load_id: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.candidate_id, str) or not self.candidate_id:
-            raise ValueError("candidate_id must be a non-empty string")
-        if not isinstance(self.runtime_load_id, str) or not self.runtime_load_id:
-            raise ValueError("runtime_load_id must be a non-empty string")
-
-
-class RuntimeContractError(ReefError):
-    """A runtime or backend violated its contract with Reef.
-
-    Raised for malformed runtime results and missing capabilities that a
-    correctly configured deployment would never produce — distinct from user
-    input errors, which surface as more specific ``ReefError`` subclasses.
-    """
-
-
-class TrainingRuntimeError(ReefError):
-    """Raised when a training backend violates the runtime contract."""
+        _require_non_empty(self.candidate_id, "candidate_id")
+        _require_non_empty(self.runtime_load_id, "runtime_load_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +252,9 @@ class TrainingJobState:
     phase: str = "serving"
 
 
+# -- Request admission --------------------------------------------------------
+
+
 class InferenceAdmissionHandle(InferenceLease):
     """A handle for one admitted inference, released after model execution."""
 
@@ -220,7 +266,7 @@ class InferenceAdmissionHandle(InferenceLease):
         if self._released:
             return
         self._released = True
-        self._controller._release()
+        self._controller.release()
 
 
 class InferenceAdmissionController:
@@ -240,22 +286,14 @@ class InferenceAdmissionController:
         self._open_event: asyncio.Event | None = None
 
     async def acquire(self) -> InferenceAdmissionHandle:
+        """Wait until admission is open, then count one active request."""
         loop = asyncio.get_running_loop()
         while True:
             with self._condition:
-                if self._loop is None or self._loop.is_closed():
-                    self._loop = loop
-                    self._open_event = asyncio.Event()
-                    if self._open:
-                        self._open_event.set()
-                elif self._loop is not loop:
-                    raise RuntimeError("inference admission cannot span concurrent event loops")
+                event = self._bind_loop(loop)
                 if self._open:
                     self._active += 1
                     return InferenceAdmissionHandle(self)
-                if self._open_event is None:
-                    raise RuntimeError("closed inference admission has no loop event")
-                event = self._open_event
             await event.wait()
             # ``close`` clears the asyncio event on its owning loop. If this
             # task raced the thread-safe callback, a still-set event would
@@ -263,15 +301,24 @@ class InferenceAdmissionController:
             # clear callback from ever running.
             await asyncio.sleep(0)
 
+    def _bind_loop(self, loop: asyncio.AbstractEventLoop) -> asyncio.Event:
+        """Return the open event for ``loop``, creating it on first use. Caller holds the lock."""
+        if self._loop is None or self._loop.is_closed():
+            self._loop = loop
+            self._open_event = asyncio.Event()
+            if self._open:
+                self._open_event.set()
+        elif self._loop is not loop:
+            raise RuntimeError("inference admission cannot span concurrent event loops")
+        if self._open_event is None:
+            raise RuntimeError("closed inference admission has no loop event")
+        return self._open_event
+
     def close(self, *, wait: bool = False, timeout: float | None = None) -> None:
         """Reject new admissions and optionally drain already admitted work."""
         with self._condition:
             self._open = False
-            loop, event = self._loop, self._open_event
-            if loop is not None and event is not None and not loop.is_closed():
-                # The loop can close between is_closed() and scheduling.
-                with suppress(RuntimeError):
-                    loop.call_soon_threadsafe(event.clear)
+            self._signal_loop(is_open=False)
             if wait and not self._condition.wait_for(lambda: self._active == 0, timeout=timeout):
                 raise TimeoutError("timed out waiting for admitted inference requests to drain")
 
@@ -279,18 +326,25 @@ class InferenceAdmissionController:
         """Admit queued and future requests."""
         with self._condition:
             self._open = True
-            loop, event = self._loop, self._open_event
             self._condition.notify_all()
-        if loop is not None and event is not None and not loop.is_closed():
-            with suppress(RuntimeError):
-                loop.call_soon_threadsafe(event.set)
+            self._signal_loop(is_open=True)
+
+    def _signal_loop(self, *, is_open: bool) -> None:
+        """Mirror the open flag onto the loop's event, if a loop is still running."""
+        loop, event = self._loop, self._open_event
+        if loop is None or event is None or loop.is_closed():
+            return
+        # The loop can close between is_closed() and scheduling.
+        with suppress(RuntimeError):
+            loop.call_soon_threadsafe(event.set if is_open else event.clear)
 
     @property
     def status(self) -> Mapping[str, Any]:
         with self._condition:
             return {"open": self._open, "active": self._active}
 
-    def _release(self) -> None:
+    def release(self) -> None:
+        """Count one admitted request as finished; wakes a draining ``close``."""
         with self._condition:
             if self._active <= 0:
                 raise RuntimeError("inference admission handle released without an active request")
@@ -299,72 +353,7 @@ class InferenceAdmissionController:
                 self._condition.notify_all()
 
 
-class UpstreamStatusError(ReefError):
-    """An upstream service answered an inference request with an error status.
-
-    Carries ``status`` so the service can hand the caller the upstream's own
-    4xx and message rather than collapsing both into an opaque 500. That
-    distinction is load-bearing: agents correct themselves from these bodies
-    (shrinking ``max_tokens`` when the engine reports a context overflow, for
-    instance), and an opaque 500 leaves them retrying the identical request
-    until they give up.
-    """
-
-    def __init__(self, message: str, *, status: int) -> None:
-        super().__init__(message)
-        self.status = status
-
-
-class InferenceHandler(ABC):
-    """Execute inference for a selected artifact without implicitly materializing it."""
-
-    @classmethod
-    def from_config(
-        cls,
-        upstream_url: str,
-        *,
-        model_path: str,
-        timeout_s: float,
-        **config: Any,
-    ) -> InferenceHandler:
-        """Construct a configured handler; direct injection needs only inference()."""
-        raise ValueError(f"{cls.__name__} does not support deployment configuration")
-
-    def reconnect(self, upstream_url: str) -> None:
-        """Retarget a managed endpoint, preserving handler-specific configuration."""
-        raise RuntimeError(f"{type(self).__name__} does not support inference endpoint replacement")
-
-    @abstractmethod
-    async def inference(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return the provider response for one native request payload."""
-
-    async def inference_stream(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> InferenceStream:
-        """Return a stream for one native request payload.
-
-        Custom handlers that only implement buffered inference keep working: the
-        default implementation exposes their JSON response as one chunk. HTTP
-        handlers override this method to preserve provider-native streaming.
-        """
-        value = await self.inference(artifact, path, payload)
-
-        async def chunks() -> AsyncIterator[bytes]:
-            yield json.dumps(value, ensure_ascii=False).encode()
-
-        return InferenceStream(
-            status=200,
-            headers={"Content-Type": "application/json"},
-            chunks=chunks(),
-        )
+# -- Request handling ---------------------------------------------------------
 
 
 class InferenceStream:
@@ -400,6 +389,47 @@ class InferenceStream:
             await self._close()
 
 
+class InferenceHandler(ABC):
+    """Execute inference for a selected artifact without implicitly materializing it."""
+
+    @classmethod
+    def from_config(
+        cls,
+        upstream_url: str,
+        *,
+        model_path: str,
+        timeout_s: float,
+        **config: Any,
+    ) -> InferenceHandler:
+        """Construct a configured handler; direct injection needs only inference()."""
+        raise ValueError(f"{cls.__name__} does not support deployment configuration")
+
+    def reconnect(self, upstream_url: str) -> None:
+        """Retarget a managed endpoint, preserving handler-specific configuration."""
+        raise RuntimeError(f"{type(self).__name__} does not support inference endpoint replacement")
+
+    @abstractmethod
+    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return the provider response for one native request payload."""
+
+    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+        """Return a stream for one native request payload.
+
+        Custom handlers that only implement buffered inference keep working: the
+        default implementation exposes their JSON response as one chunk. HTTP
+        handlers override this method to preserve provider-native streaming.
+        """
+        value = await self.inference(artifact, path, payload)
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield json.dumps(value, ensure_ascii=False).encode()
+
+        return InferenceStream(status=200, headers={"Content-Type": "application/json"}, chunks=chunks())
+
+
+# -- Runtime contracts --------------------------------------------------------
+
+
 class InferenceRuntime(AdapterWeightRuntime):
     """Own inference requests, serving weights and admission.
 
@@ -408,12 +438,7 @@ class InferenceRuntime(AdapterWeightRuntime):
     training and optimizer state belong to a separate TrainingRuntime.
     """
 
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        inference_timeout_s: float = 300.0,
-    ) -> None:
+    def __init__(self, *, base_url: str, inference_timeout_s: float = 300.0) -> None:
         if not base_url:
             raise ValueError("base_url must be non-empty")
         if inference_timeout_s <= 0:
@@ -423,6 +448,8 @@ class InferenceRuntime(AdapterWeightRuntime):
         self._inference_admission = InferenceAdmissionController()
         self._current_runtime_load_id: str | None = None
 
+    # -- Requests
+
     @property
     def base_url(self) -> str:
         return self._base_url
@@ -430,6 +457,28 @@ class InferenceRuntime(AdapterWeightRuntime):
     @property
     def inference_timeout_s(self) -> float:
         return self._inference_timeout_s
+
+    @property
+    @abstractmethod
+    def inference_handler(self) -> InferenceHandler:
+        """The inference request handler owned by this runtime."""
+
+    def reconnect(self, base_url: str) -> None:
+        """Retarget the request handler after managed inference recovery."""
+        if not base_url:
+            raise ValueError("base_url must be non-empty")
+        self.inference_handler.reconnect(base_url)
+        self._base_url = base_url.rstrip("/")
+
+    def shutdown(self) -> None:
+        """Release owned resources after all users of this runtime have stopped.
+
+        Shared or injected runtimes are closed by their owner, never by an
+        individual scenario. Proxy-only runtimes have no local resources.
+        """
+        return
+
+    # -- Admission
 
     async def acquire_inference(self) -> InferenceAdmissionHandle:
         """Wait until this runtime may freeze and execute a new inference."""
@@ -447,25 +496,7 @@ class InferenceRuntime(AdapterWeightRuntime):
         """Reopen request admission after the coordinator permits serving."""
         self._inference_admission.open()
 
-    def reconnect(self, base_url: str) -> None:
-        """Retarget the request handler after managed inference recovery."""
-        if not base_url:
-            raise ValueError("base_url must be non-empty")
-        self.inference_handler.reconnect(base_url)
-        self._base_url = base_url.rstrip("/")
-
-    @property
-    @abstractmethod
-    def inference_handler(self) -> InferenceHandler:
-        """The inference request handler owned by this runtime."""
-
-    def shutdown(self) -> None:
-        """Release owned resources after all users of this runtime have stopped.
-
-        Shared or injected runtimes are closed by their owner, never by an
-        individual scenario. Proxy-only runtimes have no local resources.
-        """
-        return
+    # -- Serving version
 
     def serving_runtime_load_id(self) -> str | None:
         """The runtime load ID the serving engine currently reports, if knowable.
@@ -481,6 +512,16 @@ class InferenceRuntime(AdapterWeightRuntime):
         update; it does not make that update's bytes durable.
         """
         return None
+
+    def current_runtime_load_id(self) -> str | None:
+        """Return the version acknowledged as published by Reef."""
+        return self._current_runtime_load_id
+
+    def mark_published(self) -> None:
+        """Record the loaded version after the durable publication handshake."""
+        self._current_runtime_load_id = self.serving_runtime_load_id()
+
+    # -- Adapters
 
     def serving_adapter_name(self) -> str | None:
         """Name of the one adapter the serving engine applies, if it serves one.
@@ -502,6 +543,11 @@ class InferenceRuntime(AdapterWeightRuntime):
         """
         return None
 
+    def adapter_residency_status(self) -> Mapping[str, Any] | None:
+        return None
+
+    # -- Weight updates
+
     def restore_checkpoint(self, artifact: Artifact) -> str:
         """Restore served weights from a durable artifact.
 
@@ -511,17 +557,6 @@ class InferenceRuntime(AdapterWeightRuntime):
         corrupt serving-version records.
         """
         raise ReefError(f"{type(self).__name__} does not support checkpoint restore")
-
-    def current_runtime_load_id(self) -> str | None:
-        """Return the version acknowledged as published by Reef."""
-        return self._current_runtime_load_id
-
-    def mark_published(self) -> None:
-        """Record the loaded version after the durable publication handshake."""
-        self._current_runtime_load_id = self.serving_runtime_load_id()
-
-    def adapter_residency_status(self) -> Mapping[str, Any] | None:
-        return None
 
     def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
         """Load a selected checkpoint/adapter without authorizing new requests."""
@@ -581,7 +616,8 @@ class TrainingRuntime(ABC):
         scenario_step: int,
         *,
         serving_runtime_load_id: str | None = None,
-    ) -> PreparedTrainingStep: ...
+    ) -> PreparedTrainingStep:
+        """Turn one reserved batch into backend work, or a state-only skip."""
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         """Execute a backend-native durable job through checkpoint export."""
@@ -604,6 +640,9 @@ class TrainingRuntime(ABC):
         return
 
 
+# -- Native backend contracts -------------------------------------------------
+
+
 class PreparedTrainingJob(ABC):
     """A prepared job whose reservation stays held through checkpoint recording.
 
@@ -622,26 +661,6 @@ class PreparedTrainingJob(ABC):
 
     @abstractmethod
     def save_checkpoint(self) -> None: ...
-
-
-class TrainingJobBackend(ABC):
-    """Prepare/admit jobs without changing model or optimizer state.
-
-    Validation, scoring, data packing and storage admission finish before the
-    prepared job is yielded. The context retains resource reservations until
-    Reef records the checkpoint (including on failure); it must not suppress
-    exceptions. An early result may only be stale or storage-blocked.
-    """
-
-    @abstractmethod
-    def prepare(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        job_id: str,
-        rollout_id: int,
-        prior_marker: Mapping[str, Any] | None,
-    ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]: ...
 
 
 @dataclass(frozen=True)
@@ -701,8 +720,20 @@ class TrainingBackend(ABC):
 
     @abstractmethod
     def prepare(
-        self, payload: Mapping[str, Any], *, job_id: str, rollout_id: int, prior_marker: Mapping[str, Any] | None
-    ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]: ...
+        self,
+        payload: Mapping[str, Any],
+        *,
+        job_id: str,
+        rollout_id: int,
+        prior_marker: Mapping[str, Any] | None,
+    ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]:
+        """Admit and prepare one job without changing model or optimizer state.
+
+        Validation, scoring, data packing and storage admission finish before
+        the prepared job is yielded. The context retains resource reservations
+        until Reef records the checkpoint (including on failure); it must not
+        suppress exceptions. An early result may only be stale or storage-blocked.
+        """
 
     @abstractmethod
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
@@ -759,6 +790,35 @@ class InferenceBackend(ABC):
 
     @abstractmethod
     def unload_adapter(self, name: str) -> None: ...
+
+
+class AdapterEngine(ABC):
+    """Engine-side adapter operations the residency manager drives.
+
+    ``load_adapter`` must return only once the engine can serve requests that
+    name ``name``; raising means the adapter never became resident.
+    ``payload`` is the caller's opaque description of the bytes to load.
+    ``unload_adapter`` raising means the slot may still be occupied.
+    """
+
+    @abstractmethod
+    def load_adapter(self, name: str, payload: Any) -> None: ...
+
+    @abstractmethod
+    def unload_adapter(self, name: str) -> None: ...
+
+
+class InferenceMemoryOperations(ABC):
+    """Synchronous engine operations; return only after every region is changed."""
+
+    @abstractmethod
+    def release(self, regions: Sequence[str]) -> None: ...
+
+    @abstractmethod
+    def resume(self, regions: Sequence[str]) -> None: ...
+
+
+# -- Engine supervision -------------------------------------------------------
 
 
 class InferenceEngines(ABC):
@@ -826,30 +886,7 @@ class EngineHealthChecks(ABC):
     def targets(self) -> Sequence[EngineHealthTarget]: ...
 
 
-class InferenceMemoryOperations(ABC):
-    """Synchronous engine operations; return only after every region is changed."""
-
-    @abstractmethod
-    def release(self, regions: Sequence[str]) -> None: ...
-
-    @abstractmethod
-    def resume(self, regions: Sequence[str]) -> None: ...
-
-
-class AdapterEngine(ABC):
-    """Engine-side adapter operations the residency manager drives.
-
-    ``load_adapter`` must return only once the engine can serve requests that
-    name ``name``; raising means the adapter never became resident.
-    ``payload`` is the caller's opaque description of the bytes to load.
-    ``unload_adapter`` raising means the slot may still be occupied.
-    """
-
-    @abstractmethod
-    def load_adapter(self, name: str, payload: Any) -> None: ...
-
-    @abstractmethod
-    def unload_adapter(self, name: str) -> None: ...
+# -- Durable stores -----------------------------------------------------------
 
 
 class ScenarioHistoryStore(ABC):

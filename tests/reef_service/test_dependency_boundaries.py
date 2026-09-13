@@ -413,7 +413,7 @@ def test_training_publication_import_requires_no_model_framework() -> None:
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
         "from reef.runtime.publication import TrainingPublication, WeightPublisher; "
-        "from reef.runtime.scheduler import TrainingExecution, TrainingJobBackend"
+        "from reef.runtime.scheduler import TrainingExecution, TrainingBackend"
     )
 
 

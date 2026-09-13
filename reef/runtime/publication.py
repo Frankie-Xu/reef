@@ -1,4 +1,17 @@
-"""Weight publication, commit gating, version allocation, and LoRA residency."""
+"""Weight publication, commit gating, version allocation, and LoRA residency.
+
+Three objects cooperate here, bottom-up:
+
+- :class:`AdapterResidencyManager` accounts for the LoRA adapters one shared
+  engine holds, so several scenarios cannot overcommit its slots.
+- :class:`BackendWeightPublisher` moves weights from a training sender to an
+  inference receiver, allocating each transfer's identity and verifying
+  every engine afterwards.
+- :class:`TrainingPublication` owns the durable job-marker transitions and
+  the barrier that keeps a published version unserved until Reef commits it.
+
+:class:`WeightUpdateLock` fences the native transport those objects drive.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +20,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Literal
 
@@ -26,8 +39,16 @@ from reef.surface.base import InferenceLease
 
 logger = logging.getLogger(__name__)
 
+# -- Adapter residency --------------------------------------------------------
 
 ResidentState = Literal["active", "leaked"]
+
+#: How many recovery actions ``status()`` keeps; enough to explain the most
+#: recent restart or capacity incident without growing with uptime.
+RECENT_ACTIONS = 32
+
+#: Order of a slot that only mirrors a stray engine name; never a real activation.
+STRAY_ORDER = -1
 
 
 class AdapterResidencyError(ReefError):
@@ -57,9 +78,6 @@ class AdapterNotActive(AdapterResidencyError):
     """A request resolved to an adapter revision the engine does not hold."""
 
 
-RECENT_ACTIONS = 32
-
-
 @dataclass(frozen=True)
 class ResidentAdapter:
     """One adapter the engine holds, with everything that protects it."""
@@ -82,18 +100,21 @@ class ResidentAdapter:
         return self.current or self.pinned or self.in_flight > 0
 
 
+@dataclass(eq=False)
 class _Slot:
-    __slots__ = ("in_flight", "name", "order", "pinned", "runtime_load_id", "runtime_load_ids", "scenario", "state")
+    """Mutable bookkeeping for one engine adapter name."""
 
-    def __init__(self, name: str, scenario: str, runtime_load_id: str, order: int) -> None:
-        self.name = name
-        self.scenario = scenario
-        self.runtime_load_id = runtime_load_id
-        self.runtime_load_ids: list[str] = [runtime_load_id]
-        self.order = order
-        self.state: ResidentState = "active"
-        self.pinned = False
-        self.in_flight = 0
+    name: str
+    scenario: str
+    runtime_load_id: str
+    order: int
+    runtime_load_ids: list[str] = field(init=False)
+    state: ResidentState = "active"
+    pinned: bool = False
+    in_flight: int = 0
+
+    def __post_init__(self) -> None:
+        self.runtime_load_ids = [self.runtime_load_id]
 
 
 class AdapterLease(InferenceLease):
@@ -112,7 +133,7 @@ class AdapterLease(InferenceLease):
         if self._released:
             return
         self._released = True
-        self._manager._release(self._name)
+        self._manager.release_lease(self._name)
 
 
 class AdapterResidencyManager:
@@ -145,27 +166,31 @@ class AdapterResidencyManager:
         self._capacity = capacity
         self._lock = RLock()
         self._slots: dict[str, _Slot] = {}
+        #: Scenario name -> engine adapter name of the revision it serves.
         self._current: dict[str, str] = {}
         self._next_order = 0
-        self._counters = {
-            "loads": 0,
-            "load_failures": 0,
-            "load_cleanups": 0,
-            "cleanup_failures": 0,
-            "unloads": 0,
-            "unload_failures": 0,
-            "evictions": 0,
-            "capacity_rejections": 0,
-            "strays_unloaded": 0,
-            "lost_dropped": 0,
-        }
+        self._counters = dict.fromkeys(
+            (
+                "loads",
+                "load_failures",
+                "load_cleanups",
+                "cleanup_failures",
+                "unloads",
+                "unload_failures",
+                "evictions",
+                "capacity_rejections",
+                "strays_unloaded",
+                "lost_dropped",
+            ),
+            0,
+        )
         self._actions: deque[dict[str, str]] = deque(maxlen=RECENT_ACTIONS)
 
     @property
     def capacity(self) -> int | None:
         return self._capacity
 
-    # -- Activation ------------------------------------------------------
+    # -- Activation
 
     def activate(
         self,
@@ -201,9 +226,7 @@ class AdapterResidencyManager:
                     f"succeeds: {unload_error}"
                 ) from unload_error
             self._make_room(scenario, engine, supersede=supersede)
-            slot = _Slot(name, scenario, runtime_load_id, self._next_order)
-            self._next_order += 1
-            self._slots[name] = slot
+            self._add_slot(name, scenario, runtime_load_id)
             try:
                 if engine is not None:
                     engine.load_adapter(name, payload)
@@ -256,15 +279,44 @@ class AdapterResidencyManager:
                         self._capacity,
                         len(self._slots) + 1,
                     )
-                slot = _Slot(name, scenario, runtime_load_id, self._next_order)
-                self._next_order += 1
-                self._slots[name] = slot
+                self._add_slot(name, scenario, runtime_load_id)
                 self._counters["loads"] += 1
             elif slot.state == "leaked":
                 slot.state = "active"
                 self._note("reclaimed", name, scenario)
             self._current[scenario] = name
             return name
+
+    def alias(self, scenario: str, runtime_load_id: str) -> str:
+        """Serve ``runtime_load_id`` through the adapter ``scenario`` currently holds.
+
+        Rollback republishes an older revision's bytes as a new artifact
+        runtime_load_id. The engine already holds those bytes under the source name,
+        so the new runtime_load_id routes there instead of loading a duplicate.
+        """
+        _require_scenario(scenario)
+        if not runtime_load_id:
+            raise ValueError("adapter alias requires a non-empty runtime load")
+        with self._lock:
+            slot = self._current_slot(scenario)
+            if slot is None or slot.state != "active":
+                raise AdapterNotActive(
+                    f"scenario {scenario!r} has no active adapter to alias runtime load {runtime_load_id!r} to"
+                )
+            if runtime_load_id not in slot.runtime_load_ids:
+                slot.runtime_load_ids.append(runtime_load_id)
+            return slot.name
+
+    def release_scenario(self, scenario: str) -> None:
+        """Forget which revision ``scenario`` serves; its adapters become evictable."""
+        with self._lock:
+            self._current.pop(scenario, None)
+
+    def _add_slot(self, name: str, scenario: str, runtime_load_id: str) -> _Slot:
+        slot = _Slot(name, scenario, runtime_load_id, self._next_order)
+        self._next_order += 1
+        self._slots[name] = slot
+        return slot
 
     def _cleanup_ambiguous_load(self, name: str, scenario: str, engine: AdapterEngine | None) -> None:
         """Make a failed load deterministic: the engine must not hold ``name``.
@@ -288,48 +340,28 @@ class AdapterResidencyManager:
         self._counters["load_cleanups"] += 1
         self._note("load_cleanup", name, scenario)
 
-    def alias(self, scenario: str, runtime_load_id: str) -> str:
-        """Serve ``runtime_load_id`` through the adapter ``scenario`` currently holds.
-
-        Rollback republishes an older revision's bytes as a new artifact
-        runtime_load_id. The engine already holds those bytes under the source name,
-        so the new runtime_load_id routes there instead of loading a duplicate.
-        """
-        _require_scenario(scenario)
-        if not runtime_load_id:
-            raise ValueError("adapter alias requires a non-empty runtime load")
-        with self._lock:
-            name = self._current.get(scenario)
-            slot = self._slots.get(name) if name is not None else None
-            if slot is None or slot.state != "active":
-                raise AdapterNotActive(
-                    f"scenario {scenario!r} has no active adapter to alias runtime load {runtime_load_id!r} to"
-                )
-            if runtime_load_id not in slot.runtime_load_ids:
-                slot.runtime_load_ids.append(runtime_load_id)
-            return slot.name
-
-    def release_scenario(self, scenario: str) -> None:
-        """Forget which revision ``scenario`` serves; its adapters become evictable."""
-        with self._lock:
-            self._current.pop(scenario, None)
-
-    # -- Routing ---------------------------------------------------------
+    # -- Routing
 
     def resolve(self, scenario: str, runtime_load_id: str) -> ResidentAdapter:
         """The active adapter serving ``runtime_load_id`` for ``scenario``; fail closed otherwise."""
         with self._lock:
-            slot = self._slot_for(scenario, runtime_load_id)
-            return self._describe(slot)
+            return self._describe(self._serving_slot(scenario, runtime_load_id))
 
     def lease(self, scenario: str, runtime_load_id: str) -> AdapterLease:
         """Resolve and protect the adapter for one in-flight request."""
         with self._lock:
-            slot = self._slot_for(scenario, runtime_load_id)
+            slot = self._serving_slot(scenario, runtime_load_id)
             slot.in_flight += 1
             return AdapterLease(self, slot.name)
 
-    def _slot_for(self, scenario: str, runtime_load_id: str) -> _Slot:
+    def release_lease(self, name: str) -> None:
+        """Drop one in-flight protection; :class:`AdapterLease` calls this once."""
+        with self._lock:
+            slot = self._slots.get(name)
+            if slot is not None and slot.in_flight > 0:
+                slot.in_flight -= 1
+
+    def _serving_slot(self, scenario: str, runtime_load_id: str) -> _Slot:
         current_name = self._current.get(scenario)
         if current_name is None:
             raise AdapterNotActive(
@@ -344,24 +376,20 @@ class AdapterResidencyManager:
             )
         return slot
 
-    def _release(self, name: str) -> None:
-        with self._lock:
-            slot = self._slots.get(name)
-            if slot is not None and slot.in_flight > 0:
-                slot.in_flight -= 1
+    def _current_slot(self, scenario: str) -> _Slot | None:
+        name = self._current.get(scenario)
+        return None if name is None else self._slots.get(name)
 
-    # -- Pinning ---------------------------------------------------------
+    # -- Pinning
 
     def pin(self, scenario: str, runtime_load_id: str) -> None:
         """Protect a resident revision from eviction until :meth:`unpin`."""
         with self._lock:
-            slot = self._resident_slot(scenario, runtime_load_id)
-            slot.pinned = True
+            self._resident_slot(scenario, runtime_load_id).pinned = True
 
     def unpin(self, scenario: str, runtime_load_id: str) -> None:
         with self._lock:
-            slot = self._resident_slot(scenario, runtime_load_id)
-            slot.pinned = False
+            self._resident_slot(scenario, runtime_load_id).pinned = False
 
     def _resident_slot(self, scenario: str, runtime_load_id: str) -> _Slot:
         for slot in self._slots.values():
@@ -371,7 +399,7 @@ class AdapterResidencyManager:
             f"scenario {scenario!r} has no resident adapter for runtime_load_id {runtime_load_id!r}"
         )
 
-    # -- Capacity --------------------------------------------------------
+    # -- Capacity
 
     def _make_room(self, scenario: str, engine: AdapterEngine | None, *, supersede: bool) -> None:
         if self._capacity is None:
@@ -381,18 +409,7 @@ class AdapterResidencyManager:
             victim = self._eviction_candidate(superseding)
             if victim is None:
                 self._counters["capacity_rejections"] += 1
-                protected = sorted(slot.name for slot in self._slots.values())
-                # Name the remedy: the usual cause is a capacity sized for one
-                # scenario on an engine that several now share, and the
-                # operator cannot infer the needed slot count from the names.
-                sharing = {slot.scenario for slot in self._slots.values()} | {scenario}
-                raise AdapterCapacityExhausted(
-                    f"engine adapter capacity {self._capacity} is exhausted and every resident adapter is "
-                    f"protected (current, pinned, or in flight): {protected}; scenario {scenario!r} cannot "
-                    f"activate. {len(sharing)} scenarios share this engine and each keeps its current "
-                    f"revision resident, so it needs at least {len(sharing) + 1} slots: raise "
-                    f"--max-loaded-loras. Nothing was unloaded; every scenario keeps serving."
-                )
+                raise self._capacity_exhausted(scenario)
             if (unload_error := self._unload(victim, engine)) is not None:
                 # The engine refused to let go; the slot stays occupied and
                 # the caller sees exhaustion rather than a silent overcommit.
@@ -407,6 +424,20 @@ class AdapterResidencyManager:
             self._counters["evictions"] += 1
             self._note("evicted", victim.name, victim.scenario, f"for scenario {scenario!r}")
 
+    def _capacity_exhausted(self, scenario: str) -> AdapterCapacityExhausted:
+        protected = sorted(self._slots)
+        # Name the remedy: the usual cause is a capacity sized for one
+        # scenario on an engine that several now share, and the operator
+        # cannot infer the needed slot count from the names.
+        sharing = {slot.scenario for slot in self._slots.values()} | {scenario}
+        return AdapterCapacityExhausted(
+            f"engine adapter capacity {self._capacity} is exhausted and every resident adapter is "
+            f"protected (current, pinned, or in flight): {protected}; scenario {scenario!r} cannot "
+            f"activate. {len(sharing)} scenarios share this engine and each keeps its current "
+            f"revision resident, so it needs at least {len(sharing) + 1} slots: raise "
+            f"--max-loaded-loras. Nothing was unloaded; every scenario keeps serving."
+        )
+
     def _eviction_candidate(self, superseding: str | None) -> _Slot | None:
         candidates = [
             slot for slot in self._slots.values() if not self._protected(slot, exempt_current=slot.name == superseding)
@@ -414,8 +445,7 @@ class AdapterResidencyManager:
         if not candidates:
             return None
         # Leaked slots are retried first: reclaiming one costs no live adapter.
-        candidates.sort(key=lambda slot: (slot.state != "leaked", slot.order))
-        return candidates[0]
+        return min(candidates, key=lambda slot: (slot.state != "leaked", slot.order))
 
     def _unload(self, slot: _Slot, engine: AdapterEngine | None) -> Exception | None:
         """Drop ``slot`` from the engine and the table; a returned failure leaves it ``leaked``."""
@@ -430,12 +460,11 @@ class AdapterResidencyManager:
             return exc
         self._counters["unloads"] += 1
         self._slots.pop(slot.name, None)
-        for scenario, name in list(self._current.items()):
-            if name == slot.name:
-                self._current.pop(scenario, None)
+        if self._current.get(slot.scenario) == slot.name:
+            self._current.pop(slot.scenario)
         return None
 
-    # -- Reconciliation --------------------------------------------------
+    # -- Reconciliation
 
     def reconcile(self, engine_names: Iterable[str], engine: AdapterEngine | None) -> tuple[str, ...]:
         """Align bookkeeping with what the engine reports after a restart.
@@ -448,12 +477,14 @@ class AdapterResidencyManager:
         held = set(engine_names)
         with self._lock:
             for name in sorted(held - set(self._slots)):
-                stray = _Slot(name, scenario="", runtime_load_id="", order=-1)
+                stray = _Slot(name, scenario="", runtime_load_id="", order=STRAY_ORDER)
                 self._slots[name] = stray
                 if self._unload(stray, engine) is None:
                     self._counters["strays_unloaded"] += 1
                     self._note("stray_unloaded", name, "")
-            lost = tuple(sorted(name for name in self._slots if name not in held and self._slots[name].order >= 0))
+            lost = tuple(
+                sorted(name for name, slot in self._slots.items() if name not in held and slot.order != STRAY_ORDER)
+            )
             for name in lost:
                 slot = self._slots.pop(name)
                 self._current.pop(slot.scenario, None)
@@ -467,22 +498,21 @@ class AdapterResidencyManager:
             entry["detail"] = detail[:200]
         self._actions.append(entry)
 
-    # -- Observation -----------------------------------------------------
+    # -- Observation
 
     def resident(self) -> tuple[ResidentAdapter, ...]:
         with self._lock:
-            return tuple(self._describe(slot) for slot in sorted(self._slots.values(), key=lambda s: s.order))
+            return tuple(self._describe(slot) for slot in self._ordered_slots())
 
     def current(self, scenario: str) -> ResidentAdapter | None:
         with self._lock:
-            name = self._current.get(scenario)
-            slot = self._slots.get(name) if name is not None else None
+            slot = self._current_slot(scenario)
             return None if slot is None else self._describe(slot)
 
     def status(self) -> dict[str, Any]:
         """A bounded status block: global capacity plus per-scenario residency."""
         with self._lock:
-            resident = [self._describe(slot) for slot in sorted(self._slots.values(), key=lambda s: s.order)]
+            resident = [self._describe(slot) for slot in self._ordered_slots()]
             scenarios: dict[str, dict[str, Any]] = {}
             for entry in resident:
                 if not entry.scenario:
@@ -503,6 +533,9 @@ class AdapterResidencyManager:
                 "recent_actions": list(self._actions),
                 "scenarios": scenarios,
             }
+
+    def _ordered_slots(self) -> list[_Slot]:
+        return sorted(self._slots.values(), key=lambda slot: slot.order)
 
     def _protected(self, slot: _Slot, *, exempt_current: bool = False) -> bool:
         if slot.pinned or slot.in_flight > 0:
@@ -531,6 +564,9 @@ def _require_scenario(scenario: str) -> None:
 def _require_runtime_load_id(runtime_load_id: str) -> None:
     if not isinstance(runtime_load_id, str) or not runtime_load_id:
         raise ValueError("adapter residency requires a non-empty runtime_load_id")
+
+
+# -- Transport fencing --------------------------------------------------------
 
 
 class WeightUpdateLock:
@@ -580,6 +616,12 @@ class WeightUpdateLock:
         if self._poisoned or self._locked:
             raise RuntimeError("cannot clear phases while the rollout transport is active")
         self._completed_phases.clear()
+
+
+# -- Durable publication ------------------------------------------------------
+
+#: Marker states whose publication already happened; a repeat is a replay.
+PUBLISHED_STATES = frozenset({"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"})
 
 
 class WeightPublisher(ABC):
@@ -667,11 +709,20 @@ class TrainingPublication:
         with suppress(Exception):
             self._publisher.abort()
 
+    @contextmanager
+    def _aborting_on_failure(self) -> Iterator[None]:
+        """Mark the publication failed and fence inference if the body raises."""
+        try:
+            yield
+        except BaseException:
+            self._abort()
+            raise
+
     def publish(self, job_id: str) -> PublicationResult:
         """Publish one checkpoint, leaving every engine paused."""
         marker = self._job_marker(job_id)
         status = marker["status"]
-        if status in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
+        if status in PUBLISHED_STATES:
             return PublicationResult(marker, published=False)
         if status not in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
             raise RuntimeError(f"training job is {status}; operator recovery required")
@@ -715,11 +766,11 @@ class TrainingPublication:
             raise RuntimeError("training coordinator is stopped")
         marker = self._store.read() if self._store is not None else None
         if marker is not None:
-            if marker["status"] not in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
+            if marker["status"] not in PUBLISHED_STATES:
                 raise RuntimeError(f"cannot republish serving from {marker['status']}; use training job recovery")
             if marker["runtime_load_id"] != runtime_load_id:
                 raise RuntimeError("serving runtime load ID does not match the training marker")
-        try:
+        with self._aborting_on_failure():
             # Fence before recovery: replacement engines must inherit pause
             # intent, and monitoring must not restart before verified transfer.
             self._publisher.pause()
@@ -730,9 +781,6 @@ class TrainingPublication:
                 raise RuntimeError(
                     f"serving republication changed runtime load ID {runtime_load_id!r} to {published!r}"
                 )
-        except BaseException:
-            self._abort()
-            raise
         self.finish_recovery(marker, published)
         return published
 
@@ -773,25 +821,19 @@ class TrainingPublication:
         The backend restores checkpoint state and calls ``finish_recovery``
         inside this scope. A successful transfer alone cannot resume serving.
         """
-        try:
+        with self._aborting_on_failure():
             self.prepare_recovery(marker)
             yield
-        except BaseException:
-            self._abort()
-            raise
 
     def prepare_recovery(self, marker: dict[str, Any] | None) -> None:
         """Reassert startup pause, including committed and marker-free restarts."""
         if marker is not None and marker["status"] == "RUNNING":
             raise RuntimeError(f"ambiguous training job {marker['job_id']}")
-        try:
+        with self._aborting_on_failure():
             self._publisher.pause()
             self.phase = "recovering"
             if marker is not None and marker["status"] == "CHECKPOINT":
                 self._require_store().transition(marker, "UPDATING_WEIGHTS")
-        except BaseException:
-            self._abort()
-            raise
 
     def finish_recovery(self, marker: dict[str, Any] | None, runtime_load_id: str) -> None:
         """Record recovered publication while preserving the durable commit gate.
@@ -800,14 +842,10 @@ class TrainingPublication:
         engine. Previously published jobs must retain their serving identity.
         """
         status = None if marker is None else marker["status"]
-        try:
+        with self._aborting_on_failure():
             if not isinstance(runtime_load_id, str) or not runtime_load_id:
                 raise RuntimeError("weight publisher returned an empty runtime load ID")
-            if (
-                marker is not None
-                and status in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}
-                and runtime_load_id != marker["runtime_load_id"]
-            ):
+            if marker is not None and status in PUBLISHED_STATES and runtime_load_id != marker["runtime_load_id"]:
                 raise RuntimeError(
                     "checkpoint republication changed runtime load ID "
                     f"{marker['runtime_load_id']!r} to {runtime_load_id!r}"
@@ -824,39 +862,19 @@ class TrainingPublication:
                 self.phase = "serving"
             else:
                 raise RuntimeError(f"training marker is {status}; operator recovery required")
-        except BaseException:
-            self._abort()
-            raise
 
 
-@dataclass(frozen=True)
-class _AdapterTransfer:
-    scenario: str
-    name: str
+# -- Backend weight transfer --------------------------------------------------
 
 
-class _CoordinatedAdapterEngine(AdapterEngine):
-    """Reef residency operations across an explicit sender and receiver."""
-
-    def __init__(self, training: TrainingBackend, inference: InferenceBackend) -> None:
-        self._training = training
-        self._inference = inference
-
-    def load_adapter(self, name: str, payload: Any) -> None:
-        if not isinstance(payload, _AdapterTransfer) or payload.name != name:
-            raise TypeError(f"adapter {name!r} requires a matching adapter transfer")
-        self._training.send_adapter(payload.scenario, payload.name)
-
-    def unload_adapter(self, name: str) -> None:
-        self._inference.unload_adapter(name)
-
-
-class BackendWeightPublisher(WeightPublisher):
+class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     """Publish weights across independently owned training and inference backends.
 
     This object owns transfer identities, colocated memory handoff, adapter
     residency and receiver verification. TrainingPublication supplies the
     durable commit barrier; the scheduler serializes both with optimizer work.
+    As the :class:`AdapterEngine` behind its residency manager, it loads an
+    adapter by asking the sender for it and unloads one at the receiver.
     """
 
     def __init__(
@@ -874,7 +892,8 @@ class BackendWeightPublisher(WeightPublisher):
         self.state = state
         self.history = self.context.history
         self.residency = AdapterResidencyManager(self.config.adapter_capacity) if self.config.lora else None
-        self._adapter_engine = _CoordinatedAdapterEngine(training, inference)
+        # With the LoRA base kept resident, a colocated step releases only the
+        # KV cache and CUDA graphs; ``None`` releases everything.
         self.release_tags = (
             ("kv_cache", "cuda_graph")
             if (self.config.lora and self.config.colocate and self.config.keep_lora_base_resident)
@@ -890,17 +909,200 @@ class BackendWeightPublisher(WeightPublisher):
     def runtime_load_id(self, value: str) -> None:
         self.context.runtime_load_id = value
 
+    def require_history(self) -> ScenarioHistoryStore:
+        """The per-scenario history; only LoRA runs with a checkpoint save path keep one."""
+        if self.history is None:
+            raise RuntimeError("scenario bookkeeping requires LoRA training with a checkpoint save path")
+        return self.history
+
+    def require_residency(self) -> AdapterResidencyManager:
+        if self.residency is None:
+            raise RuntimeError("adapter residency requires a LoRA bridge")
+        return self.residency
+
+    def marker_scenario(self, marker: Mapping[str, Any] | None) -> str | None:
+        """The scenario a marker's publication belongs to, when the bridge trains per scenario."""
+        if self.history is None or marker is None:
+            return None
+        scenario = marker.get("scenario")
+        return str(scenario) if isinstance(scenario, str) and scenario else None
+
+    # -- Adapter engine
+
+    def load_adapter(self, name: str, payload: Any) -> None:
+        scenario, _ = parse_adapter_name(name)
+        self.training.send_adapter(scenario, name)
+
+    def unload_adapter(self, name: str) -> None:
+        self.inference.unload_adapter(name)
+
+    # -- Generation barrier
+
+    def pause_generation(self, *, reconcile: bool = False) -> None:
+        if self.generation_paused and not reconcile:
+            return
+        self.inference.pause()
+        self.generation_paused = True
+
+    def pause(self) -> None:
+        # Reassert the owner barrier even if the bridge cached a prior pause;
+        # replacement controllers/engines may not have observed that RPC.
+        self.pause_generation(reconcile=True)
+
+    def resume(self) -> None:
+        if not self.generation_paused:
+            return
+        self.inference.resume()
+        self.generation_paused = False
+
+    def abort(self) -> None:
+        self.inference.abort()
+
+    # -- Colocated memory handoff
+
     def prepare_training(self) -> None:
         if self.config.colocate:
             self.pause_generation()
             self.inference.offload(self.release_tags)
 
+    def restore_incumbent(self) -> None:
+        if not self.config.colocate:
+            return
+        # Pairs with the training step's offload: resuming a region that was
+        # never released fails, because the receiver resumes by removing the tag
+        # from the set release added it to.
+        if self.release_tags is None:
+            self.inference.onload_weights()
+        self.inference.onload_kv()
+        self.resume()
+
+    # -- Version identity
+
     def initialize_version(self) -> None:
         self.training.initialize_version(self.runtime_load_id)
         self.inference.initialize_version(self.runtime_load_id)
+        self._verify_engines_serve(self.runtime_load_id, "after version sync")
+
+    def next_runtime_load_id(self) -> str:
+        """Allocate the next serving identity independently of a sender attempt."""
+        current = RuntimeLoadId.parse(self.runtime_load_id)
+        return str(RuntimeLoadId(current.incarnation, current.sequence + 1))
+
+    def publication_target(self, marker: Mapping[str, Any] | None) -> str:
+        if marker is not None:
+            target = marker.get("target_runtime_load_id")
+            if isinstance(target, str) and target:
+                return target
+        target = self.next_runtime_load_id()
+        if marker is not None:
+            # Persist intent before any bytes leave the sender. An uncertain
+            # partial transfer and process restart must reuse the same target.
+            if self._store is None:
+                raise RuntimeError("training checkpoint path is not configured")
+            self._store.write({**marker, "target_runtime_load_id": target})
+        return target
+
+    def _verify_engines_serve(self, runtime_load_id: str, moment: str) -> None:
         observed = [str(value) for value in self.inference.runtime_load_ids()]
-        if not observed or set(observed) != {self.runtime_load_id}:
-            raise RuntimeError(f"serving engines disagree after version sync: {observed!r}")
+        if not observed or set(observed) != {runtime_load_id}:
+            raise RuntimeError(f"serving engines disagree {moment}: {observed!r}")
+
+    # -- Weight transfer
+
+    def update_serving(
+        self, *, force_full: bool = False, scenario: str | None = None, runtime_load_id: str | None = None
+    ) -> str:
+        """Publish the group's weights; ``scenario`` names the adapter a LoRA publication belongs to.
+
+        A per-scenario adapter publication loads a new versioned name into
+        every engine, so the residency manager frees a slot first (evicting
+        the publishing scenario's own current revision when nothing else
+        fits: generation is paused, so no request observes the gap) and
+        records the published revision afterwards.
+
+        Admission runs before any weight leaves the trainer. A capacity
+        rejection therefore means nothing was published and every engine still
+        serves what it served, so it must not terminate them — that took down
+        scenarios which were never part of the publication (#65). An eviction
+        the engine refused is the opposite: its state is uncertain, so the
+        terminate-and-recover path stays (#61).
+        """
+        residency = self.residency if scenario is not None else None
+        try:
+            self.state.phase = "publishing"
+            target = runtime_load_id or self.next_runtime_load_id()
+            if residency is not None and scenario is not None:
+                residency.make_room(scenario, self, supersede=True)
+            version = self._transfer(target, force_full=force_full)
+            if residency is not None and scenario is not None:
+                residency.register(scenario, version)
+        except AdapterEvictionFailed:
+            self._fail_transfer()
+            raise
+        except AdapterCapacityExhausted:
+            # Admission was refused before any weight left the trainer.
+            self.state.phase = "serving"
+            raise
+        except BaseException:
+            self._fail_transfer()
+            raise
+        self.runtime_load_id = version
+        return version
+
+    def _transfer(self, target: str, *, force_full: bool) -> str:
+        """Send the trainer's weights as ``target`` and verify every engine received them."""
+        if self.config.colocate:
+            # Repeatable release also covers retry after a partial receive:
+            # a released sender may need to reconstruct GPU workers.
+            self.inference.offload(self.release_tags)
+        self.training.prepare_weights(target, force_full=force_full)
+        if self.config.colocate and self.release_tags is None:
+            self.inference.onload_weights()
+        version = self.training.send_weights(target, force_full=force_full)
+        if version != target:
+            raise RuntimeError(f"weight sender returned runtime load ID {version!r}; expected {target!r}")
+        if self.config.colocate:
+            self.inference.onload_kv()
+        self._verify_engines_serve(version, "after update")
+        return version
+
+    def _fail_transfer(self) -> None:
+        """Weights may be half-applied: keep inference fenced until recovery."""
+        self.state.phase = "weight_sync_failed"
+        with suppress(Exception):
+            self.inference.abort()
+
+    def publish(self, marker: Mapping[str, Any], *, force_full: bool) -> str:
+        if self.history is not None:
+            self.training.activate_scenario(str(marker["scenario"]))
+        published = self.update_serving(
+            force_full=force_full,
+            scenario=self.marker_scenario(marker),
+            runtime_load_id=self.publication_target(marker),
+        )
+        if self.history is not None:
+            scenario = str(marker["scenario"])
+            self.history.record_publication(scenario, published, adapter_name(scenario, published))
+        return published
+
+    def republish(self, runtime_load_id: str, marker: Mapping[str, Any] | None) -> str:
+        try:
+            return self.update_serving(
+                force_full=True, scenario=self.marker_scenario(marker), runtime_load_id=runtime_load_id
+            )
+        finally:
+            # A failed/mismatched transfer must not replace the retry identity.
+            self.runtime_load_id = runtime_load_id
+
+    # -- Recovery
+
+    def recover(self, marker: Mapping[str, Any] | None) -> None:
+        self.inference.recover()
+        if self.history is not None:
+            # Replacement engines boot without adapters. Restore other scenarios
+            # before this job's complete transfer, and release dead residency slots.
+            self.require_residency().reconcile((), self)
+            self.restore_scenario_adapters(marker)
 
     def restore_scenario_adapters(self, marker: Mapping[str, Any] | None) -> None:
         """Re-register every scenario's committed adapter after a restart.
@@ -927,167 +1129,6 @@ class BackendWeightPublisher(WeightPublisher):
             self.inference.onload_weights()
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
-            residency.activate(
-                scenario,
-                version,
-                self._adapter_engine,
-                payload=_AdapterTransfer(scenario, adapter),
-            )
+            residency.activate(scenario, version, self)
         if active is not None:
             self.training.activate_scenario(active)
-
-    def require_history(self) -> ScenarioHistoryStore:
-        """The per-scenario history; only LoRA runs with a checkpoint save path keep one."""
-        if self.history is None:
-            raise RuntimeError("scenario bookkeeping requires LoRA training with a checkpoint save path")
-        return self.history
-
-    def require_residency(self) -> AdapterResidencyManager:
-        if self.residency is None:
-            raise RuntimeError("adapter residency requires a LoRA bridge")
-        return self.residency
-
-    def marker_scenario(self, marker: Mapping[str, Any] | None) -> str | None:
-        """The scenario a marker's publication belongs to, when the bridge trains per scenario."""
-        if self.history is None or marker is None:
-            return None
-        scenario = marker.get("scenario")
-        return str(scenario) if isinstance(scenario, str) and scenario else None
-
-    def restore_incumbent(self) -> None:
-        if not self.config.colocate:
-            return
-        # Pairs with the training step's offload: resuming a region that was
-        # never released fails, because the receiver resumes by removing the tag
-        # from the set release added it to.
-        if self.release_tags is None:
-            self.inference.onload_weights()
-        self.inference.onload_kv()
-        self.resume()
-
-    def next_runtime_load_id(self) -> str:
-        """Allocate the next serving identity independently of a sender attempt."""
-        current = RuntimeLoadId.parse(self.runtime_load_id)
-        return str(RuntimeLoadId(current.incarnation, current.sequence + 1))
-
-    def publication_target(self, marker: Mapping[str, Any] | None) -> str:
-        if marker is not None:
-            target = marker.get("target_runtime_load_id")
-            if isinstance(target, str) and target:
-                return target
-        target = self.next_runtime_load_id()
-        if marker is not None:
-            # Persist intent before any bytes leave the sender. An uncertain
-            # partial transfer and process restart must reuse the same target.
-            if self._store is None:
-                raise RuntimeError("training checkpoint path is not configured")
-            self._store.write({**marker, "target_runtime_load_id": target})
-        return target
-
-    def update_serving(
-        self, *, force_full: bool = False, scenario: str | None = None, runtime_load_id: str | None = None
-    ) -> str:
-        """Publish the group's weights; ``scenario`` names the adapter a LoRA publication belongs to.
-
-        A per-scenario adapter publication loads a new versioned name into
-        every engine, so the residency manager frees a slot first (evicting
-        the publishing scenario's own current revision when nothing else
-        fits: generation is paused, so no request observes the gap) and
-        records the published revision afterwards.
-
-        Admission runs before any weight leaves the trainer. A capacity
-        rejection therefore means nothing was published and every engine still
-        serves what it served, so it must not terminate them — that took down
-        scenarios which were never part of the publication (#65). An eviction
-        the engine refused is the opposite: its state is uncertain, so the
-        terminate-and-recover path stays (#61).
-        """
-        residency = self.residency if scenario is not None else None
-        try:
-            self.state.phase = "publishing"
-            target = runtime_load_id or self.next_runtime_load_id()
-            if residency is not None and scenario is not None:
-                residency.make_room(scenario, self._adapter_engine, supersede=True)
-            if self.config.colocate:
-                # Repeatable release also covers retry after a partial receive:
-                # a released sender may need to reconstruct GPU workers.
-                self.inference.offload(self.release_tags)
-            self.training.prepare_weights(target, force_full=force_full)
-            if self.config.colocate and self.release_tags is None:
-                self.inference.onload_weights()
-            raw_version = self.training.send_weights(target, force_full=force_full)
-            if raw_version != target:
-                raise RuntimeError(f"weight sender returned runtime load ID {raw_version!r}; expected {target!r}")
-            if self.config.colocate:
-                self.inference.onload_kv()
-            observed = [str(value) for value in self.inference.runtime_load_ids()]
-            if not observed or set(observed) != {raw_version}:
-                raise RuntimeError(f"serving engines disagree after update: {observed!r}")
-            if residency is not None and scenario is not None:
-                residency.register(scenario, raw_version)
-        except AdapterEvictionFailed:
-            self.state.phase = "weight_sync_failed"
-            with suppress(Exception):
-                self.inference.abort()
-            raise
-        except AdapterCapacityExhausted:
-            # Admission was refused before any weight left the trainer.
-            self.state.phase = "serving"
-            raise
-        except BaseException:
-            self.state.phase = "weight_sync_failed"
-            with suppress(Exception):
-                self.inference.abort()
-            raise
-        self.runtime_load_id = raw_version
-        return raw_version
-
-    def pause_generation(self, *, reconcile: bool = False) -> None:
-        if self.generation_paused and not reconcile:
-            return
-        self.inference.pause()
-        self.generation_paused = True
-
-    def resume(self) -> None:
-        if not self.generation_paused:
-            return
-        self.inference.resume()
-        self.generation_paused = False
-
-    def recover(self, marker: Mapping[str, Any] | None) -> None:
-        self.inference.recover()
-        if self.history is not None:
-            # Replacement engines boot without adapters. Restore other scenarios
-            # before this job's complete transfer, and release dead residency slots.
-            self.require_residency().reconcile((), self._adapter_engine)
-            self.restore_scenario_adapters(marker)
-
-    def pause(self) -> None:
-        # Reassert the owner barrier even if the bridge cached a prior pause;
-        # replacement controllers/engines may not have observed that RPC.
-        self.pause_generation(reconcile=True)
-
-    def republish(self, runtime_load_id: str, marker: Mapping[str, Any] | None) -> str:
-        try:
-            return self.update_serving(
-                force_full=True, scenario=self.marker_scenario(marker), runtime_load_id=runtime_load_id
-            )
-        finally:
-            # A failed/mismatched transfer must not replace the retry identity.
-            self.runtime_load_id = runtime_load_id
-
-    def publish(self, marker: Mapping[str, Any], *, force_full: bool) -> str:
-        if self.history is not None:
-            self.training.activate_scenario(str(marker["scenario"]))
-        published = self.update_serving(
-            force_full=force_full,
-            scenario=self.marker_scenario(marker),
-            runtime_load_id=self.publication_target(marker),
-        )
-        if self.history is not None:
-            scenario = str(marker["scenario"])
-            self.history.record_publication(scenario, published, adapter_name(scenario, published))
-        return published
-
-    def abort(self) -> None:
-        self.inference.abort()

@@ -7,8 +7,10 @@ import pytest
 from reef.runtime import recovery as markers
 from reef.runtime.interfaces import (
     PreparedTrainingJob,
+    TrainingBackend,
     TrainingCheckpoint,
-    TrainingJobBackend,
+    TrainingContext,
+    TrainingCoordinationConfig,
     TrainingJobResult,
     TrainingJobState,
     TrainingMetrics,
@@ -19,7 +21,9 @@ from reef.runtime.scheduler import TrainingExecution, training_job_id
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
 
-class MemoryTrainingBackend(TrainingJobBackend, PreparedTrainingJob):
+class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
+    """A backend that only prepares jobs; execution never touches weights or transport."""
+
     def __init__(self, root):
         self.path = root / ".reef-latest-job.json"
         self._checkpoint = TrainingCheckpoint(0, root / "checkpoint")
@@ -29,6 +33,43 @@ class MemoryTrainingBackend(TrainingJobBackend, PreparedTrainingJob):
         self.reserved = False
         self.state = TrainingJobState()
         self.prior = None
+        self._config = TrainingCoordinationConfig(save_hf_template=None)
+        self._context = TrainingContext()
+
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def context(self):
+        return self._context
+
+    def start(self):
+        return
+
+    def check_health(self):
+        return
+
+    def close(self):
+        return
+
+    def prepare_training_step(self, batch, step_preparer, algorithm_state):
+        raise NotImplementedError
+
+    def prepare_weights(self, runtime_load_id, *, force_full):
+        raise NotImplementedError
+
+    def send_weights(self, runtime_load_id, *, force_full):
+        raise NotImplementedError
+
+    def initialize_version(self, runtime_load_id):
+        raise NotImplementedError
+
+    def activate_scenario(self, scenario):
+        raise NotImplementedError
+
+    def send_adapter(self, scenario, name):
+        raise NotImplementedError
 
     @property
     def checkpoint(self):

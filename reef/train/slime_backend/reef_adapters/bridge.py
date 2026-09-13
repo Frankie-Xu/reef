@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,6 @@ from reef.runtime.interfaces import (
     TrainingCheckpoint,
     TrainingContext,
     TrainingCoordinationConfig,
-    TrainingJobBackend,
     TrainingJobResult,
     TrainingMetrics,
 )
@@ -171,10 +170,69 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     def _history(self) -> ScenarioHistoryStore | None:
         return self.context.history
 
+    @contextmanager
     def prepare(
-        self, payload: Mapping[str, Any], *, job_id: str, rollout_id: int, prior_marker: Mapping[str, Any] | None
-    ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]:
-        return _SlimeJobBackend(self).prepare(payload, job_id=job_id, rollout_id=rollout_id, prior_marker=prior_marker)
+        self,
+        payload: Mapping[str, Any],
+        *,
+        job_id: str,
+        rollout_id: int,
+        prior_marker: Mapping[str, Any] | None,
+    ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
+        scenario = self._job_scenario(payload)
+        scenario_step = rollout_id
+        if scenario is not None:
+            # Scenario steps are per scenario; the bridge's checkpoint index
+            # stays one monotonic sequence across all of them.
+            rollout_id = self._next_rollout_id
+        elif rollout_id != self._next_rollout_id:
+            raise RuntimeError(f"expected rollout {self._next_rollout_id}, got {rollout_id}")
+        max_staleness = _max_staleness(payload)
+        checkpoint = Path(self._checkpoint_path(rollout_id))
+        if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
+            raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
+        rollout_data = to_slime_rollout_data(dict(payload))
+        rollout_versions = rollout_data.get("producing_runtime_load_ids")
+        if (
+            max_staleness > 0
+            and rollout_versions is not None
+            and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
+        ):
+            raise ValueError("loss-family row producing versions do not match the shared training payload")
+        self._algo.validate_payload(rollout_data)
+        context: Any = nullcontext(None)
+        if self._storage is not None:
+            protected = marker_rollouts(prior_marker)
+            if self._history is not None:
+                # Every scenario's latest checkpoint is its restart source.
+                protected |= self._history.protected_rollouts()
+            context = self._storage.admit(
+                rollout_id=rollout_id,
+                active_rollouts=protected,
+            )
+        with context as storage_plan:
+            if storage_plan is not None and storage_plan["blocked"]:
+                yield TrainingJobResult(
+                    outcome="storage_blocked",
+                    storage=storage_plan,
+                    runtime_load_id=self._runtime_load_id,
+                )
+                return
+            # The teacher is scored before the RUNNING marker so a
+            # scoring failure leaves no partial state: the job
+            # stays retryable under the same identity.
+            algorithm_metrics = self._algo.prepare_rollout(rollout_data)
+            # Local batch processing preserves Slime's DP schedule and
+            # object-store transport: one Box per training DP rank.
+            packed = self._batch_processor.prepare_external_train_data(rollout_data)
+            yield _SlimePreparedTrainingJob(
+                self,
+                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
+                job_id=job_id,
+                rollout_data=rollout_data,
+                packed=packed,
+                algorithm_metrics=algorithm_metrics,
+            )
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
@@ -240,78 +298,6 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     @staticmethod
     def _get(value: Any) -> Any:
         return resolve(value, timeout=_TRAIN_RPC_TIMEOUT_S)
-
-
-class _SlimeJobBackend(TrainingJobBackend):
-    """Slime admission, scoring, tensorization and checkpoint reservations."""
-
-    def __init__(self, bridge: SlimeTrainingBackend) -> None:
-        self._bridge = bridge
-
-    @contextmanager
-    def prepare(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        job_id: str,
-        rollout_id: int,
-        prior_marker: Mapping[str, Any] | None,
-    ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
-        bridge = self._bridge
-        scenario = bridge._job_scenario(payload)
-        scenario_step = rollout_id
-        if scenario is not None:
-            # Scenario steps are per scenario; the bridge's checkpoint index
-            # stays one monotonic sequence across all of them.
-            rollout_id = bridge._next_rollout_id
-        elif rollout_id != bridge._next_rollout_id:
-            raise RuntimeError(f"expected rollout {bridge._next_rollout_id}, got {rollout_id}")
-        max_staleness = _max_staleness(payload)
-        checkpoint = Path(bridge._checkpoint_path(rollout_id))
-        if bridge._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
-            raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
-        rollout_data = to_slime_rollout_data(dict(payload))
-        rollout_versions = rollout_data.get("producing_runtime_load_ids")
-        if (
-            max_staleness > 0
-            and rollout_versions is not None
-            and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
-        ):
-            raise ValueError("loss-family row producing versions do not match the shared training payload")
-        bridge._algo.validate_payload(rollout_data)
-        context: Any = nullcontext(None)
-        if bridge._storage is not None:
-            protected = marker_rollouts(prior_marker)
-            if bridge._history is not None:
-                # Every scenario's latest checkpoint is its restart source.
-                protected |= bridge._history.protected_rollouts()
-            context = bridge._storage.admit(
-                rollout_id=rollout_id,
-                active_rollouts=protected,
-            )
-        with context as storage_plan:
-            if storage_plan is not None and storage_plan["blocked"]:
-                yield TrainingJobResult(
-                    outcome="storage_blocked",
-                    storage=storage_plan,
-                    runtime_load_id=bridge._runtime_load_id,
-                )
-                return
-            # The teacher is scored before the RUNNING marker so a
-            # scoring failure leaves no partial state: the job
-            # stays retryable under the same identity.
-            algorithm_metrics = bridge._algo.prepare_rollout(rollout_data)
-            # Local batch processing preserves Slime's DP schedule and
-            # object-store transport: one Box per training DP rank.
-            packed = bridge._batch_processor.prepare_external_train_data(rollout_data)
-            yield _SlimePreparedTrainingJob(
-                bridge,
-                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
-                job_id=job_id,
-                rollout_data=rollout_data,
-                packed=packed,
-                algorithm_metrics=algorithm_metrics,
-            )
 
 
 class _SlimePreparedTrainingJob(PreparedTrainingJob):

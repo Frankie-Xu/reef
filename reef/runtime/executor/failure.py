@@ -12,12 +12,16 @@ from threading import RLock
 
 @dataclass(frozen=True)
 class ExecutorFailure:
+    """One terminal failure of an executor, attributed to a rank when known."""
+
     backend: str
     reason: str
     rank: int | None = None
 
 
 class ExecutorFailedError(RuntimeError):
+    """Raised by every pending or later RPC once an executor has failed."""
+
     def __init__(self, failure: ExecutorFailure):
         self.failure = failure
         super().__init__(f"{failure.backend} executor failed (rank={failure.rank}): {failure.reason}")
@@ -33,6 +37,13 @@ class ExecutorFailureListener(ABC):
 
 
 class FailureState:
+    """Terminal failure and shutdown state shared by an executor and its futures.
+
+    ``track`` mirrors a transport future so that a failure recorded from any
+    thread fails every outstanding wait at once, instead of leaving callers
+    blocked on a worker that will never answer.
+    """
+
     def __init__(self) -> None:
         self._lock = RLock()
         self._failure: ExecutorFailure | None = None
@@ -56,6 +67,7 @@ class FailureState:
             return self._failure
 
     def check(self) -> None:
+        """Raise if the executor has failed or been shut down."""
         with self._lock:
             if self._failure is not None:
                 raise ExecutorFailedError(self._failure)
@@ -79,6 +91,7 @@ class FailureState:
             logging.getLogger(__name__).exception("executor failure listener raised")
 
     def fail(self, failure: ExecutorFailure) -> bool:
+        """Record the first failure and fail pending futures; later calls are ignored."""
         with self._lock:
             if self._failure is not None or self._closed:
                 return False
@@ -104,6 +117,7 @@ class FailureState:
             future.set_exception(error)
 
     def track(self, source: Future) -> Future:
+        """Return a future that completes with ``source`` or fails with the executor."""
         target: Future = Future()
         with self._lock:
             self.check()

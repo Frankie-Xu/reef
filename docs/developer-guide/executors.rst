@@ -151,8 +151,11 @@ are retired. Borrowed actors remain owned by their original launcher. There
 is no automatic recreation, request replay, or distributed-group recovery.
 
 Implement ``_init_executor``, ``rpc``, ``collective_rpc``, ``check_health`` and
-``shutdown`` in an ``Executor`` subclass. Backend-specific launch configuration
-belongs in ``ExecutorConfig.options``. GPU tensors, optimizer state, NCCL
+``shutdown`` in an ``Executor`` subclass. A transport that submits one call and
+gets a future back can subclass ``SubmittingExecutor`` instead and implement
+only ``_submit`` and ``_submit_all``; the bundled ``uni``, ``mp`` and ``ray``
+executors and ``DelegatingExecutor`` are built that way. Backend-specific launch
+configuration belongs in ``ExecutorConfig.options``. GPU tensors, optimizer state, NCCL
 collectives and KV transfers remain the model backend's responsibility.
 ``reinitialize_distributed`` is an optional capability and raises
 ``NotImplementedError`` by default; changing executors does not imply live
@@ -726,7 +729,7 @@ retry classification and the order of training and checkpoint recording. Reef's
 publication and shutdown. Execution and ``TrainingPublication`` share ``TrainingJobState`` for
 health reporting; recovery decisions always use the durable marker.
 
-``TrainingJobBackend.prepare`` performs admission, scoring and data packing
+``TrainingBackend.prepare`` performs admission, scoring and data packing
 before yielding a ``PreparedTrainingJob``. Its context holds the checkpoint
 reservation through the final marker write. It may return a stale or
 storage-blocked result without starting a job. Reef applies shared
