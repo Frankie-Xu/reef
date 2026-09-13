@@ -4,7 +4,6 @@ recipe:
   implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
   config:
     batch-size: 1
-    max-score: .inf
     evolution:
       adapter: terminus
       binary: reef-terminus

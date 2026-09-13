@@ -128,19 +128,20 @@ def test_multi_call_attempt_assembles_multi_turn():
     assert multi.is_multi_turn and multi.turn_count == 2
 
 
-def test_report_without_coral_metadata_is_named_never():
+def test_report_without_coral_metadata_fails_explicitly():
     processor = _processor()
     processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(
-        AgentRecord.create(
-            scenario=SCENARIO,
-            request_type=RequestType.REPORT,
-            agent_record_id="r-bare",
-            references=("i1",),
-            payload={"score": 1.0, "references": ["i1"]},
+    with pytest.raises(ValueError, match=r"metadata\.coral"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario=SCENARIO,
+                request_type=RequestType.REPORT,
+                agent_record_id="r-bare",
+                references=("i1",),
+                payload={"score": 1.0, "references": ["i1"]},
+            )
         )
-    )
-    assert any("metadata.coral" in reason for reason in processor.never_reasons)
+    assert {"i1", "r-bare"} <= processor.retention_decision().protected_agent_record_ids
 
 
 def test_group_size_floor():
@@ -153,4 +154,4 @@ def test_status_is_a_mapping_even_before_any_discard():
     status() call .items() on the base's discard set."""
     processor = _processor()
     status = processor.status()
-    assert status == {"discarded_groups": [], "never_reasons": {}}
+    assert status == {"discarded_groups": []}

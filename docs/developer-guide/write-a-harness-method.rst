@@ -102,8 +102,8 @@ Two batching modes
 ~~~~~~~~~~~~~~~~~~
 
 Evolution batches in one of two modes, selected by ``data.batch_policy``.
-The default, ``reports``, batches explicitly scored reports through the
-score window; use it whenever the deployment has an outcome signal (a
+The default, ``reports``, batches every valid explicitly scored report;
+use it whenever the deployment has an outcome signal (a
 grader, a test result, a user action), because a measured result beats
 model self judgment. ``records`` batches recorded inference traffic alone,
 every ``batch_size`` requests, so a deployment that only serves still

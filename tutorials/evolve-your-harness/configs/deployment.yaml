@@ -69,7 +69,6 @@ recipe:
 
               '
     batch-size: 1
-    max-score: 0.0
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
 

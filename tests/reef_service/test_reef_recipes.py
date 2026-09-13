@@ -197,26 +197,24 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
     ],
 )
 def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> None:
-    # Observable pin: a valid, assemblable two-turn episode is refused by the
-    # cookbook recipes' processors — the report is terminal and released, not
-    # accepted as a candidate. (openclawrl is absent: it consumes no reports
-    # at all — see test_openclawrl_recipe_ignores_reports.)
+    # Unsupported multi-turn training fails explicitly and preserves its inputs.
     trainer = recipe.build("math", SQLiteRecordStore())
     processor = trainer.processor
     processor.ingest(_turn_inference("i1", [10, 20], -0.1))
     processor.ingest(_turn_inference("i2", [10, 20, 11, 21], -0.2))
-    processor.ingest(
-        AgentRecord.create(
-            scenario="math",
-            request_type=RequestType.REPORT,
-            agent_record_id="r1",
-            payload={"score": 1.0, "references": ["i1", "i2"], "metadata": metadata},
-            references=("i1", "i2"),
+    with pytest.raises(ValueError, match="accept_multi_turn"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario="math",
+                request_type=RequestType.REPORT,
+                agent_record_id="r1",
+                payload={"score": 1.0, "references": ["i1", "i2"], "metadata": metadata},
+                references=("i1", "i2"),
+            )
         )
-    )
 
     assert not processor.ready()
-    assert "r1" in processor.retention_decision().releasable_agent_record_ids
+    assert "r1" in processor.retention_decision().protected_agent_record_ids
 
 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:

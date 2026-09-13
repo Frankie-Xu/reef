@@ -18,6 +18,7 @@ from recipes.sao.processor import SAOProcessor
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.reports import ReportValidationError
 from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
@@ -26,6 +27,7 @@ from reef.runtime.candidates import StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import PolicyBatch, PolicySample
 
@@ -225,7 +227,7 @@ def test_processor_preserves_explicit_observation_boundaries() -> None:
 
 
 @pytest.mark.unit
-def test_processor_drops_rollout_that_trains_a_non_action_token() -> None:
+def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     # loss_mask trains index 1, but the action mask marks it an observation.
     # Skip-observation GAE would give it zero advantage: reject the rollout
     # rather than silently waste gradient on it.
@@ -240,48 +242,53 @@ def test_processor_drops_rollout_that_trains_a_non_action_token() -> None:
     )
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
-    assert not processor.ready()
+    batch = processor.build_batch()
+    prepared = prepare_slime_step(batch, "sao", {})
+    with pytest.raises(ValueError):
+        to_slime_rollout_data(prepared.payload)
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
 
 
 @pytest.mark.unit
-def test_processor_drops_rollout_with_logprob_length_mismatch() -> None:
+def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
     processor.ingest(_sao_inference("i1", loss_mask=(1, 1, 1), rollout_log_probs=(-0.1, -0.2)))
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
-    assert not processor.ready()
+    batch = processor.build_batch()
+    prepared = prepare_slime_step(batch, "sao", {})
+    with pytest.raises(ValueError):
+        to_slime_rollout_data(prepared.payload)
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
 
 
 @pytest.mark.unit
-def test_processor_drops_rollout_with_non_finite_score() -> None:
+def test_processor_rejects_non_finite_report_scores() -> None:
     processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
     processor.ingest(_sao_inference("i1"))
-    processor.ingest(_sao_report("r1", "i1", float("nan")))
-
+    with pytest.raises(ReportValidationError, match="finite"):
+        processor.ingest(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready()
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"r1", "i1"})
+    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
 
 
 @pytest.mark.unit
-def test_processor_releases_inference_of_a_malformed_rollout() -> None:
-    # A rollout the bridge would reject is terminal: exactly one report exists
-    # per rollout, so its inference can never train and must be released rather
-    # than protected forever.
+def test_malformed_training_data_is_preserved_until_backend_validation() -> None:
     processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
     processor.ingest(_sao_inference("i1", loss_mask=(0, 0, 0)))
     processor.ingest(_sao_report("r1", "i1", 1.0))
-
-    decision = processor.retention_decision()
-
-    assert "i1" not in decision.protected_agent_record_ids
+    batch = processor.build_batch()
+    prepared = prepare_slime_step(batch, "sao", {})
+    with pytest.raises(ValueError):
+        to_slime_rollout_data(prepared.payload)
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("dead_report_first", [True, False])
-def test_processor_trains_a_corrected_retry_after_a_dead_report(dead_report_first: bool) -> None:
-    # A dead report marks its rollout releasable, but release is derived at
-    # read time: while the rollout is not compacted, a corrected retry
-    # re-claims it and trains — in either arrival order.
+def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_first: bool) -> None:
+    # Invalid eligibility flags never claim or consume the source record;
+    # a valid report is processed independently of arrival order.
     processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
     processor.ingest(_sao_inference("i1"))
     dead = AgentRecord.create(
@@ -293,13 +300,17 @@ def test_processor_trains_a_corrected_retry_after_a_dead_report(dead_report_firs
     )
     retry = _sao_report("retry", "i1", 0.5)
     for item in (dead, retry) if dead_report_first else (retry, dead):
-        processor.ingest(item)
+        if item is dead:
+            with pytest.raises(ReportValidationError, match="eligible"):
+                processor.ingest(item)
+        else:
+            processor.ingest(item)
         processor.retention_decision()  # a read between arrivals must not latch the release
 
     batch = processor.build_batch()
     assert [sample.source_agent_record_id for sample in batch.samples] == ["i1"]
     processor.acknowledge(batch.batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"dead", "retry", "i1"})
+    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"retry", "i1"})
 
 
 # --- backend preparation ---------------------------------------------------

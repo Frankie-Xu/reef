@@ -530,22 +530,10 @@ retention, deduplication, pending batches, and exactly-once consumption; the
 method implements only the hooks below. They run synchronously on the trainer
 thread, so they must not block on network or model latency.
 
-+-------------------+-------------------------------+-------------------------------+
-|                   | ``ReportedFeedbackProcessor`` | ``ComputedFeedbackProcessor`` |
-+===================+===============================+===============================+
-| signal arrives as | a report referencing          | information reconstructed     |
-|                   | inference records             | from recorded traffic         |
-+-------------------+-------------------------------+-------------------------------+
-| judgment          | synchronous, on available     | ``async`` model or service    |
-|                   | data                          | call                          |
-+-------------------+-------------------------------+-------------------------------+
-| method owns       | eligibility, optional         | correlation, slow judgment,   |
-|                   | grouping, batch shaping       | sample and batch shaping      |
-+-------------------+-------------------------------+-------------------------------+
-| Reef owns         | waiting index, retry dedup,   | worker lifecycle, queues,     |
-|                   | grouping state, retention,    | retention, replay             |
-|                   | replay                        |                               |
-+-------------------+-------------------------------+-------------------------------+
+Reported feedback supplies a ``make_sample`` hook that assembles valid reports;
+computed feedback supplies an asynchronous ``judge`` that derives new feedback.
+Both engines own their buffering, reservations, retention, and replay. Reports
+must reference existing inference records in the same scenario.
 
 ``DataProcessor.training_mode`` selects automatic, instruction-triggered or
 combined batching on the same processor. Declare ``supported_training_modes`` and
@@ -563,58 +551,33 @@ tracking is off.
 Reported feedback
 ~~~~~~~~~~~~~~~~~
 
-.. code:: mermaid
+``ReportedFeedbackProcessor`` exposes these recipe hooks:
 
-   sequenceDiagram
-       accTitle: How reported feedback becomes a typed batch
-       participant Reef as Reported-feedback processor
-       participant Method as Method processor
-       Reef->>Method: judge(ReportContext)
-       alt referenced inference is missing
-           Method-->>Reef: WAIT: park this report
-       else report can never train
-           Method-->>Reef: NEVER: release this report
-       else report is accepted
-           Method-->>Reef: ReportDecision.train(value, ...)
-           opt group_key supplied
-               Reef->>Method: decide_group(key, candidates)
-               Method-->>Reef: GroupDecision<br/>INCOMPLETE / READY / DISCARD
-           end
-           Reef->>Method: make_batch(ready units, batch_number)
-       end
+.. list-table::
+   :header-rows: 1
 
-+------------------------------------------------------+----------------------------------+
-| Hook                                                 | Contract                         |
-+======================================================+==================================+
-| ``judge(context) -> ReportDecision``                 | return ``TRAIN``, ``WAIT``, or   |
-|                                                      | ``NEVER``                        |
-+------------------------------------------------------+----------------------------------+
-| ``make_batch(units, batch_number) -> TrainingBatch`` | shape accepted candidates        |
-+------------------------------------------------------+----------------------------------+
-| ``decide_group(key, candidates) -> GroupDecision``   | required only when ``judge()``   |
-|                                                      | supplies a ``group_key``         |
-+------------------------------------------------------+----------------------------------+
-| ``output_schema``                                    | the exact batch class returned   |
-+------------------------------------------------------+----------------------------------+
-| ``exclusive_sources``                                | when true, a terminal report     |
-|                                                      | owns and releases its sources    |
-+------------------------------------------------------+----------------------------------+
-| ``ordered_groups``                                   | when true, ready groups batch by |
-|                                                      | sortable group key               |
-+------------------------------------------------------+----------------------------------+
+   * - Hook
+     - Contract
+   * - ``make_sample(context) -> ReportSample``
+     - Assemble one valid report and its resolved inferences; raise on data errors.
+   * - ``make_batch(units, batch_number) -> TrainingBatch``
+     - Shape selected samples into the declared batch type.
+   * - ``decide_group(key, candidates) -> GroupDecision``
+     - Required when samples supply a group key; return READY, INCOMPLETE, or DISCARD.
 
-Begin a score-based ``judge()`` with ``context.eligibility()``: it returns
-``WAIT`` while a referenced inference is missing, ``NEVER`` for permanently
-ineligible input, and ``None`` when the method should decide. Use
-``ReportDecision.never(reason)`` for a rejection an operator should be able to
-diagnose. The processor logs each new reason and counts repeats.
+``ReportContext`` carries ``report``, ordered ``inferences``, optional ``score``,
+and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or
+raises if the training method cannot use the supplied feedback.
 
-``ReportDecision.train(value)`` creates a singleton candidate. Supply
-``group_key`` and an idempotent ``slot`` when the training unit is a complete
-comparison group; ``decide_group()`` then returns ``READY``, ``INCOMPLETE``, or
-``DISCARD``. Report-level ``WAIT`` and ``GroupDecision.INCOMPLETE`` differ: the
-first waits for a report's missing references, the second holds accepted
-candidates until their group fills.
+``ReportSample(value, group_key=None, slot=None)`` creates a singleton sample by
+default. Group keys associate samples and slots deduplicate retries within a group.
+``output_schema`` declares the batch type, ``exclusive_sources`` controls source
+release for terminal group/duplicate reports, and ``ordered_groups`` orders ready
+groups by their keys.
+
+There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
+Reference validation runs at admission; incomplete groups wait for more valid
+samples. Training input violations raise instead of silently filtering reports.
 
 Computed feedback
 ~~~~~~~~~~~~~~~~~

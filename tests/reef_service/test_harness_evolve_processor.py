@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
+from reef.core.reports import ReportValidationError
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.types import ProcessorContext, TraceBatch
 
@@ -41,7 +42,7 @@ def _processor(config: dict | None = None) -> CordisProcessor:
 
 
 def test_trace_processor_batches_a_failed_trace() -> None:
-    processor = _processor({"max_score": 0.0})
+    processor = _processor()
     payload = {"messages": [{"role": "system", "content": "skill"}, {"role": "user", "content": "q"}]}
     processor.ingest(_inference("inf-1", payload))
     processor.ingest(_report("rep-1", 0.0, ["inf-1"]))
@@ -58,20 +59,18 @@ def test_trace_processor_batches_a_failed_trace() -> None:
     assert "rep-1" in retention.releasable_agent_record_ids
 
 
-def test_trace_processor_ignores_reports_outside_the_score_window() -> None:
-    processor = _processor({"max_score": 0.0})
+def test_trace_processor_batches_successful_reports() -> None:
+    processor = _processor()
     processor.ingest(_inference("inf-1", {"messages": []}))
     processor.ingest(_report("rep-1", 1.0, ["inf-1"]))
-    assert not processor.ready()
-    retention = processor.retention_decision()
-    assert "rep-1" in retention.releasable_agent_record_ids
+    assert processor.build_batch().samples[0].score == 1.0
 
 
 def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() -> None:
     """A report over a whole run becomes one sample: the trajectory holds
     every referenced payload in reference order, the payload is the last
     exchange, and the feedback rides along verbatim."""
-    processor = _processor({"max_score": 0.0})
+    processor = _processor()
     first = {"messages": [{"role": "user", "content": "first"}]}
     second = {"messages": [{"role": "user", "content": "second"}]}
     processor.ingest(_inference("inf-1", first))
@@ -89,7 +88,7 @@ def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() ->
 
 
 def test_trace_processor_keeps_single_reference_samples_flat_and_carries_feedback() -> None:
-    processor = _processor({"max_score": 0.0})
+    processor = _processor()
     payload = {"messages": [{"role": "user", "content": "q"}]}
     processor.ingest(_inference("inf-1", payload))
     processor.ingest(_report("rep-1", 0.0, ["inf-1"], feedback={"reason": "timeout"}))
@@ -101,17 +100,15 @@ def test_trace_processor_keeps_single_reference_samples_flat_and_carries_feedbac
     assert sample.feedback == {"reason": "timeout"}
 
 
-def test_trace_processor_never_trains_a_report_without_references() -> None:
-    processor = _processor({"max_score": 0.0})
-    processor.ingest(_report("rep-1", 0.0, []))
+def test_trace_processor_rejects_a_report_without_references() -> None:
+    processor = _processor()
+    with pytest.raises(ReportValidationError, match="references"):
+        processor.ingest(_report("rep-1", 0.0, []))
     assert not processor.ready()
-    retention = processor.retention_decision()
-    assert "rep-1" in retention.releasable_agent_record_ids
 
 
-def test_trace_processor_rejects_an_inverted_window() -> None:
-    with pytest.raises(ValueError):
-        _processor({"min_score": 1.0, "max_score": 0.0})
+def test_trace_processor_has_no_judge_hook() -> None:
+    assert not hasattr(CordisProcessor, "judge")
 
 
 def test_trace_processor_validates_assembly_config_fields_at_construction() -> None:
@@ -130,15 +127,12 @@ def test_trace_processor_has_no_training_preparation_hook() -> None:
 
 
 def test_trace_processor_refuses_a_non_finite_score() -> None:
-    # An open window still admits no score that cannot be compared: the
-    # layer's invariant is that NaN and inf never train, and the default
-    # window is [-inf, inf], where a chained comparison alone would pass inf.
     for bad in (float("inf"), float("-inf"), float("nan")):
         processor = _processor()
         processor.ingest(_inference("inf-1", {"messages": []}))
-        processor.ingest(_report("rep-1", bad, ["inf-1"]))
+        with pytest.raises(ReportValidationError, match="finite"):
+            processor.ingest(_report("rep-1", bad, ["inf-1"]))
         assert not processor.ready()
-        assert "rep-1" in processor.retention_decision().releasable_agent_record_ids
 
 
 def _record_processor(batch_size: int = 2) -> RecordDrivenTraceProcessor:

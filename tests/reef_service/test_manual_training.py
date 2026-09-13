@@ -1125,7 +1125,7 @@ def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
 
 
 def test_hybrid_batches_as_auto_does_without_an_instruction():
-    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1, "max_score": 0.0}, training_mode="hybrid"))
+    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1}, training_mode="hybrid"))
     processor.ingest(inference("a"))
     processor.ingest(report("a"))
     batch = processor.build_batch()
@@ -1293,7 +1293,7 @@ def test_the_proposal_route_refuses_in_manual_mode_and_admits_again_in_a_batchin
 
 def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold_them_all(caplog):
     def fill(mode):
-        processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1, "max_score": 0.0}, training_mode=mode))
+        processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1}, training_mode=mode))
         for i in range(20):
             processor.ingest(inference(f"inf-{i}"))
             processor.ingest(
@@ -1315,7 +1315,6 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     assert shed <= retention.releasable_agent_record_ids
     kept = {f"inf-{i}" for i in range(16, 20)} | {f"rep-{i}" for i in range(16, 20)}
     assert kept <= retention.protected_agent_record_ids
-    assert manual.never_reasons == {"more than 4 units held in manual mode": 16}
     assert sum("released report rep-0" in record.message for record in caplog.records) == 1
     assert len(caplog.records) == 1
     manual.ingest(instruction("do-it"))
@@ -1328,12 +1327,10 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     for mode in ("auto", "hybrid"):
         uncapped = fill(mode)
         assert uncapped._ready_count() == 20
-        assert uncapped.never_reasons == {}
         # The switch to manual trims the pile at once; the batch already handed out keeps its unit.
         reserved = uncapped.build_batch()
         uncapped.set_training_mode("manual")
         assert uncapped._ready_count() == 4
-        assert uncapped.never_reasons == {"more than 4 units held in manual mode": 16}
         assert "inf-0" in uncapped.retention_decision().protected_agent_record_ids
         assert uncapped.acknowledge(reserved.batch_id) == frozenset({"inf-0", "rep-0"})
         assert uncapped._ready_count() == 3
