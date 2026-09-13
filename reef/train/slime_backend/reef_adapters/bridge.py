@@ -61,7 +61,11 @@ from reef.train.slime_backend.reef_adapters.training_job.marker import (
     write_marker,
 )
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
-from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    CheckpointStorage,
+    RetentionConfig,
+    critic_checkpoint_due,
+)
 
 DEFAULT_BRIDGE_ACTOR_NAME = DEFAULT_ACTOR_NAME
 
@@ -475,6 +479,7 @@ class TrainBridgeActorImpl:
                 source_hf=source_hf,
                 source_megatron=source_megatron,
                 lora=lora,
+                critic_save_interval=critic_save_interval,
             )
             if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
             else None
@@ -1056,7 +1061,9 @@ class TrainBridgeActorImpl:
                 train_metrics.update(algorithm_metrics)
                 self._phase = "checkpointing"
                 self._group.save_model(rollout_id, force_sync=True)
-                if self._critic_save_root is not None and (rollout_id + 1) % self._critic_save_interval == 0:
+                if self._critic_save_root is not None and critic_checkpoint_due(
+                    rollout_id, self._critic_save_interval
+                ):
                     # Persist the critic's weights and optimizer alongside the
                     # actor pair — every commit by default, critic-only warmup
                     # included, otherwise the value head cold-starts on every

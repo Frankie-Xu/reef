@@ -210,6 +210,7 @@ def _load_reef_train_actor_adapter(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.actor", actor_module)
     memory_utils = types.ModuleType("slime.utils.memory_utils")
     memory_utils.print_memory = lambda *_args: None  # type: ignore[attr-defined]
+    memory_utils.clear_memory = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "slime.utils.memory_utils", memory_utils)
     reloadable = types.ModuleType("slime.utils.reloadable_process_group")
     reloadable.destroy_process_groups = lambda: None  # type: ignore[attr-defined]
@@ -328,6 +329,34 @@ def test_full_weight_save_delegates_without_reopening_slimes_timer(
 
     assert saved == [(7, True)]
     assert _StubTimer.started == ["save_model"]
+
+
+@pytest.mark.unit
+def test_resident_train_step_returns_cached_blocks_to_the_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Slime empties the caching allocator only when it offloads a model after
+    # its step. A resident model shares its GPUs with the colocated other one,
+    # so the adapter releases what the step reserved before returning; the
+    # offload path already does, so it is left to Slime.
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    events: list[str] = []
+    base = module.ReefMegatronTrainRayActor.__mro__[1]
+
+    def base_train(self, rollout_id, rollout_data_ref, external_data=None):
+        events.append(f"train:{rollout_id}")
+        return "values"
+
+    monkeypatch.setattr(base, "train", base_train, raising=False)
+    monkeypatch.setattr(module, "clear_memory", lambda: events.append("clear_memory"))
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+
+    actor.args = types.SimpleNamespace(offload_train=False)
+    assert actor.train(3, "ref") == "values"
+    assert events == ["train:3", "clear_memory"]
+
+    events.clear()
+    actor.args = types.SimpleNamespace(offload_train=True)
+    assert actor.train(4, "ref") == "values"
+    assert events == ["train:4"]
 
 
 @pytest.mark.unit

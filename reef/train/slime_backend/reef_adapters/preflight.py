@@ -182,6 +182,7 @@ def prepare_checkpoint_storage(args, retention: RetentionConfig) -> CheckpointSt
         source_hf=getattr(args, "hf_checkpoint", None),
         source_megatron=getattr(args, "load", None),
         lora=bool(getattr(args, "megatron_lora_rank", 0)),
+        critic_save_interval=int(getattr(args, "critic_save_interval", 1) or 1),
     )
     marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] == "RUNNING":
