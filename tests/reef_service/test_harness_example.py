@@ -342,7 +342,7 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 120 s and 16384 tokens and reviews with 60 s and 2048, the failure path asks
+    """The request path asks with 120 s and 16384 tokens and reviews with 60 s and 8192, the failure path asks
     with 60 s and 4096 (a thinking model spends part of each budget on its reasoning before the JSON), unless
     REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is ignored
     rather than turning the step into an error."""
@@ -350,7 +350,7 @@ def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evoluti
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 2048}]
+    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 8192}]
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
     assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 4096}]
@@ -362,7 +362,7 @@ def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evoluti
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}, {"timeout_s": 900.0, "max_tokens": 2048}]
+    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}, {"timeout_s": 900.0, "max_tokens": 8192}]
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
@@ -471,7 +471,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     assert REQUEST["text"] in review_prompt and "[BEGIN user request" in review_prompt
     assert DESIGN in review_prompt and '"id": "run-tests"' in review_prompt and "# improved" in review_prompt
     assert '"verdict": "complete" or "partial"' in review_prompt
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 2048}]
+    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 8192}]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
     model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
