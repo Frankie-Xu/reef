@@ -14,7 +14,9 @@ import json
 import math
 import time
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
@@ -217,6 +219,284 @@ def _build_sglang_tool_parser(tools: list[dict[str, Any]], parser_name: str) -> 
     return FunctionCallParser([Tool.model_validate(tool) for tool in tools], parser_name)
 
 
+def _sse_data(event: Mapping[str, Any]) -> bytes:
+    """One OpenAI-style SSE frame: a bare ``data:`` line."""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+
+
+def _sse_event(event: Mapping[str, Any]) -> bytes:
+    """One Anthropic-style SSE frame: the event type names the payload's ``type``."""
+    return f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+
+
+def _new_call_id() -> str:
+    return f"call_{uuid.uuid4().hex[:24]}"
+
+
+class _StreamedToolCalls:
+    """Tool calls seen so far in one stream: their ids, names and the argument text already sent."""
+
+    def __init__(self) -> None:
+        self.ids: dict[int, str] = {}
+        self.names: dict[int, str] = {}
+        self.arguments: dict[int, str] = {}
+
+    def announce(self, index: int, name: Any) -> bool:
+        """Record a call's name on first sight; returns whether this chunk carried the name."""
+        if name:
+            self.ids.setdefault(index, _new_call_id())
+            self.names[index] = str(name)
+        if index not in self.ids:
+            raise ValueError("SGLang tool stream emitted arguments before the tool name")
+        return bool(name)
+
+    def add_arguments(self, index: int, arguments: str) -> None:
+        self.arguments[index] = self.arguments.get(index, "") + arguments
+
+
+class _StreamWriter(ABC):
+    """Encode one protocol's streamed events; the relay decides what to send and when."""
+
+    @abstractmethod
+    def start(self) -> list[bytes]: ...
+
+    @abstractmethod
+    def thinking(self, value: str) -> list[bytes]: ...
+
+    @abstractmethod
+    def text(self, value: str) -> list[bytes]: ...
+
+    @abstractmethod
+    def tool_call(self, index: int, call_id: str, name: str, arguments: str, *, announced: bool) -> list[bytes]:
+        """Send tool-call progress; ``announced`` marks the chunk that first named the call."""
+
+    def logprobs(self, content: list[dict[str, Any]]) -> list[bytes]:
+        return []
+
+    @abstractmethod
+    def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
+        """Close the stream with the protocol's own view of the completed response."""
+
+
+class _OpenAIChunkWriter(_StreamWriter):
+    """``chat.completion.chunk`` events sharing one id, model and timestamp."""
+
+    def __init__(self, common: Mapping[str, Any]) -> None:
+        self._common = dict(common)
+
+    def _chunk(self, delta: Mapping[str, Any], **choice_fields: Any) -> bytes:
+        finish_reason = choice_fields.pop("finish_reason", None)
+        choice = {"index": 0, "delta": delta, "finish_reason": finish_reason, **choice_fields}
+        return _sse_data({**self._common, "choices": [choice]})
+
+    def start(self) -> list[bytes]:
+        return [self._chunk({"role": "assistant"})]
+
+    def thinking(self, value: str) -> list[bytes]:
+        return [self._chunk({"reasoning_content": value})]
+
+    def text(self, value: str) -> list[bytes]:
+        return [self._chunk({"content": value})]
+
+    def tool_call(self, index: int, call_id: str, name: str, arguments: str, *, announced: bool) -> list[bytes]:
+        tool_delta: dict[str, Any] = {"index": index, "function": {"arguments": arguments}}
+        if announced:
+            tool_delta.update(id=call_id, type="function")
+            tool_delta["function"]["name"] = name
+        return [self._chunk({"tool_calls": [tool_delta]})]
+
+    def logprobs(self, content: list[dict[str, Any]]) -> list[bytes]:
+        return [self._chunk({}, logprobs={"content": content})]
+
+    def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
+        choice = response["choices"][0]
+        return [
+            self._chunk({}, finish_reason=choice["finish_reason"], meta_info=choice["meta_info"]),
+            b"data: [DONE]\n\n",
+        ]
+
+
+class _AnthropicEventWriter(_StreamWriter):
+    """Anthropic Messages events; content blocks open and close as the sampled text changes kind."""
+
+    def __init__(self, message_id: str, *, model: str, input_tokens: int) -> None:
+        self._message_id = message_id
+        self._model = model
+        self._input_tokens = input_tokens
+        self._block_index = 0
+        self._open_block: tuple[str, int | None] | None = None
+
+    def start(self) -> list[bytes]:
+        return [
+            _sse_event(
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": self._message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": self._model,
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": self._input_tokens, "output_tokens": 0},
+                    },
+                }
+            )
+        ]
+
+    def _open(self, key: tuple[str, int | None], content_block: Mapping[str, Any]) -> list[bytes]:
+        if self._open_block == key:
+            return []
+        output = self._close()
+        output.append(
+            _sse_event({"type": "content_block_start", "index": self._block_index, "content_block": content_block})
+        )
+        self._open_block = key
+        return output
+
+    def _close(self) -> list[bytes]:
+        if self._open_block is None:
+            return []
+        output = [_sse_event({"type": "content_block_stop", "index": self._block_index})]
+        self._block_index += 1
+        self._open_block = None
+        return output
+
+    def _delta(self, delta: Mapping[str, Any]) -> bytes:
+        return _sse_event({"type": "content_block_delta", "index": self._block_index, "delta": delta})
+
+    def thinking(self, value: str) -> list[bytes]:
+        output = self._open(("thinking", None), {"type": "thinking", "thinking": "", "signature": ""})
+        output.append(self._delta({"type": "thinking_delta", "thinking": value}))
+        return output
+
+    def text(self, value: str) -> list[bytes]:
+        output = self._open(("text", None), {"type": "text", "text": ""})
+        output.append(self._delta({"type": "text_delta", "text": value}))
+        return output
+
+    def tool_call(self, index: int, call_id: str, name: str, arguments: str, *, announced: bool) -> list[bytes]:
+        output = self._open(("tool", index), {"type": "tool_use", "id": call_id, "name": name, "input": {}})
+        if arguments:
+            output.append(self._delta({"type": "input_json_delta", "partial_json": arguments}))
+        return output
+
+    def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
+        return [
+            *self._close(),
+            _sse_event(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": response["stop_reason"], "stop_sequence": response["stop_sequence"]},
+                    "usage": {"output_tokens": output_tokens},
+                }
+            ),
+            _sse_event({"type": "message_stop"}),
+        ]
+
+
+class _ChatStreamRelay:
+    """Turn one request's sampled deltas into client frames and remember what was sent.
+
+    Tool markers are parsed out of the visible text as it streams; at the end
+    :meth:`reconcile` compares the canonical parse of the full sample with
+    what already went out and sends only the difference.
+    """
+
+    def __init__(self, writer: _StreamWriter, stream_tool_parser: Any) -> None:
+        self.writer = writer
+        self._parser = stream_tool_parser
+        self._tools = _StreamedToolCalls()
+        self._reasoning = ""
+        self._text = ""
+
+    def piece(self, kind: str, value: str, *, parse_tools: bool = True) -> list[bytes]:
+        if not value:
+            return []
+        if kind == "thinking":
+            self._reasoning += value
+            return self.writer.thinking(value)
+        normal_text, calls = value, []
+        if self._parser is not None and parse_tools:
+            parse = getattr(self._parser, "parse_stream_chunk", None)
+            if parse is None:
+                # Third-party test/fallback parsers without an incremental
+                # API cannot safely distinguish a partial tool marker from
+                # visible text. Reconciliation emits the final parsed tool
+                # call at stream end.
+                normal_text = ""
+            else:
+                normal_text, calls = parse(value)
+        output: list[bytes] = []
+        if normal_text:
+            self._text += normal_text
+            output.extend(self.writer.text(normal_text))
+        for fallback_index, call in enumerate(calls):
+            index = getattr(call, "tool_index", fallback_index)
+            index = fallback_index if index is None else int(index)
+            announced = self._tools.announce(index, getattr(call, "name", None))
+            arguments = _argument_text(getattr(call, "parameters", ""))
+            self._tools.add_arguments(index, arguments)
+            output.extend(
+                self.writer.tool_call(
+                    index, self._tools.ids[index], self._tools.names[index], arguments, announced=announced
+                )
+            )
+        return output
+
+    def reconcile(self, message: dict[str, Any]) -> list[bytes]:
+        """Send what the canonical parse of the full sample holds beyond what streamed.
+
+        The message's tool calls are also given the ids the stream already
+        announced, so the recorded response and the streamed one agree.
+        """
+        tool_calls = message.get("tool_calls") or []
+        for index, call in enumerate(tool_calls):
+            if not isinstance(call, dict):
+                continue
+            call["id"] = self._tools.ids.setdefault(index, str(call.get("id") or _new_call_id()))
+            function = call.get("function")
+            if isinstance(function, Mapping):
+                self._tools.names.setdefault(index, str(function.get("name", "")))
+        output: list[bytes] = []
+        final_reasoning = message.get("reasoning_content")
+        if isinstance(final_reasoning, str) and final_reasoning.startswith(self._reasoning):
+            output.extend(self.piece("thinking", final_reasoning[len(self._reasoning) :], parse_tools=False))
+        final_text = message.get("content")
+        if isinstance(final_text, str) and final_text.startswith(self._text):
+            output.extend(self.piece("text", final_text[len(self._text) :], parse_tools=False))
+        for index, call in enumerate(tool_calls):
+            function = call.get("function") if isinstance(call, Mapping) else None
+            if not isinstance(function, Mapping):
+                continue
+            arguments = _argument_text(function.get("arguments", ""))
+            emitted = self._tools.arguments.get(index, "")
+            missing = arguments[len(emitted) :] if arguments.startswith(emitted) else arguments
+            if not missing and index in self._tools.arguments:
+                continue
+            output.extend(
+                self.writer.tool_call(index, self._tools.ids[index], self._tools.names[index], missing, announced=True)
+            )
+        return output
+
+
+def _argument_text(arguments: Any) -> str:
+    return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class _ChatCall:
+    """One validated chat request, rendered and ready for SGLang ``/generate``."""
+
+    anthropic: bool
+    payload: Mapping[str, Any]
+    request: dict[str, Any]
+    prompt_ids: list[int]
+    sampling_params: dict[str, Any]
+    tool_parser: Any
+
+
 class SGLangInferenceHandler(HttpInferenceHandler):
     """Serve OpenAI or Anthropic chat with engine-native policy tensors."""
 
@@ -260,12 +540,7 @@ class SGLangInferenceHandler(HttpInferenceHandler):
         # None = sniff the chat template on first render.
         self._force_reasoning = force_reasoning
 
-    async def inference(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
+    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == ANTHROPIC_COUNT_TOKENS_PATH:
             return self._anthropic_count_tokens(artifact, payload)
         if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
@@ -273,32 +548,43 @@ class SGLangInferenceHandler(HttpInferenceHandler):
                 "SGLang chat training inference supports only "
                 f"{CHAT_COMPLETIONS_PATH}, {ANTHROPIC_MESSAGES_PATH}, and {ANTHROPIC_COUNT_TOKENS_PATH}"
             )
+        call = self._chat_call(path, payload)
+        native = await self._native_inference(
+            artifact, self._native_payload(call.request, call.prompt_ids, call.sampling_params)
+        )
+        response = self._response_from_native(call, native, call.tool_parser)
+        if not call.anthropic:
+            return response
+        return self._anthropic_response(payload, call.request, response)
+
+    def _chat_call(self, path: str, payload: dict[str, Any]) -> _ChatCall:
+        """Normalize the provider request and render the prompt once for either endpoint."""
         anthropic = path == ANTHROPIC_MESSAGES_PATH
         request = self._anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
             raise ValueError("exact training capture currently requires n=1")
+        return _ChatCall(
+            anthropic=anthropic,
+            payload=payload,
+            request=request,
+            prompt_ids=self._render_prompt(request),
+            sampling_params=self._sampling_params(request),
+            tool_parser=self._configured_tool_parser(request),
+        )
 
-        tool_parser = self._configured_tool_parser(request)
-        prompt_ids = self._render_prompt(request)
-        sampling_params = self._sampling_params(request)
-        native_payload = self._native_payload(request, prompt_ids, sampling_params)
-        native = await self._native_inference(artifact, native_payload)
+    def _response_from_native(self, call: _ChatCall, native: dict[str, Any], tool_parser: Any) -> dict[str, Any]:
+        """The OpenAI-shaped response, with training tensors, for one normalized ``/generate`` result."""
         output_ids, rollout_log_probs = self._output_tensors(native)
-        version_spans = self._runtime_load_spans(native, len(output_ids))
-
-        response = self._chat_response(
-            request,
+        return self._chat_response(
+            call.request,
             native,
-            prompt_ids=prompt_ids,
+            prompt_ids=call.prompt_ids,
             output_ids=output_ids,
             rollout_log_probs=rollout_log_probs,
             loss_mask=[1] * len(output_ids),
-            runtime_load_spans=version_spans,
+            runtime_load_spans=self._runtime_load_spans(native, len(output_ids)),
             tool_parser=tool_parser,
         )
-        if not anthropic:
-            return response
-        return self._anthropic_response(payload, request, response)
 
     def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Count the exact templated input without creating policy tensors."""
@@ -622,12 +908,7 @@ class SGLangInferenceHandler(HttpInferenceHandler):
         response["_reef_token_runtime_load_ids"] = stamped
         return response
 
-    async def inference_stream(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> InferenceStream:
+    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         if path == ANTHROPIC_COUNT_TOKENS_PATH:
             raise ValueError("Anthropic count_tokens does not support streaming")
         if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
@@ -635,365 +916,41 @@ class SGLangInferenceHandler(HttpInferenceHandler):
                 "SGLang chat training inference supports streaming only for "
                 f"{CHAT_COMPLETIONS_PATH} and {ANTHROPIC_MESSAGES_PATH}"
             )
-
-        anthropic = path == ANTHROPIC_MESSAGES_PATH
-        request = self._anthropic_request(payload) if anthropic else dict(payload)
-        if request.get("n", 1) != 1:
-            raise ValueError("exact training capture currently requires n=1")
-        stream_tool_parser = self._configured_tool_parser(request)
-        prompt_ids = self._render_prompt(request)
-        sampling_params = self._sampling_params(request)
+        call = self._chat_call(path, payload)
         # Force the scheduler to flush every available decode step. This is a
         # request-local knob; deployments using SGLang's disjoint incremental
         # output mode are supported by _NativeStreamCapture as well.
-        sampling_params.setdefault("stream_interval", 1)
-        native_payload = self._native_payload(request, prompt_ids, sampling_params)
+        call.sampling_params.setdefault("stream_interval", 1)
+        native_payload = self._native_payload(call.request, call.prompt_ids, call.sampling_params)
         native_payload["stream"] = True
         upstream = await super().inference_stream(artifact, SGLANG_GENERATE_PATH, native_payload)
 
         chat_id = f"chatcmpl-{uuid.uuid4().hex}"
         message_id = f"msg_{uuid.uuid4().hex}"
         created = int(time.time())
-        common = {
-            "id": chat_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": str(request.get("model", self._model_path)),
-        }
-        stream_holder: dict[str, InferenceStream] = {}
+        writer: _StreamWriter
+        if call.anthropic:
+            writer = _AnthropicEventWriter(
+                message_id, model=str(payload.get("model", self._model_path)), input_tokens=len(call.prompt_ids)
+            )
+        else:
+            writer = _OpenAIChunkWriter(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": str(call.request.get("model", self._model_path)),
+                }
+            )
+        relay = _ChatStreamRelay(writer, call.tool_parser)
 
         async def chunks() -> AsyncIterator[bytes]:
-            capture = _NativeStreamCapture()
-            reasoning = _ReasoningStreamSplitter(
-                enabled=self._SPLIT_REASONING,
-                force_reasoning=self._reasoning_is_pre_opened(),
-            )
-            emitted_reasoning = ""
-            emitted_text = ""
-            tool_ids: dict[int, str] = {}
-            tool_names: dict[int, str] = {}
-            emitted_tool_arguments: dict[int, str] = {}
-            block_index = 0
-            open_block: tuple[str, int | None] | None = None
-
-            def frame(event: Mapping[str, Any]) -> bytes:
-                event_type = str(event["type"])
-                return f"event: {event_type}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
-
-            def open_anthropic_block(kind: str, tool_index: int | None = None) -> list[bytes]:
-                nonlocal block_index, open_block
-                output: list[bytes] = []
-                target = (kind, tool_index)
-                if open_block == target:
-                    return output
-                if open_block is not None:
-                    output.append(frame({"type": "content_block_stop", "index": block_index}))
-                    block_index += 1
-                    open_block = None
-                content_block: dict[str, Any]
-                if kind == "thinking":
-                    content_block = {"type": "thinking", "thinking": "", "signature": ""}
-                elif kind == "text":
-                    content_block = {"type": "text", "text": ""}
-                else:
-                    if tool_index is None:
-                        raise RuntimeError("tool block is missing its tool index")
-                    content_block = {
-                        "type": "tool_use",
-                        "id": tool_ids[tool_index],
-                        "name": tool_names[tool_index],
-                        "input": {},
-                    }
-                output.append(
-                    frame(
-                        {
-                            "type": "content_block_start",
-                            "index": block_index,
-                            "content_block": content_block,
-                        }
-                    )
-                )
-                open_block = target
-                return output
-
-            def close_anthropic_block() -> list[bytes]:
-                nonlocal block_index, open_block
-                if open_block is None:
-                    return []
-                output = [frame({"type": "content_block_stop", "index": block_index})]
-                block_index += 1
-                open_block = None
-                return output
-
-            def emit_piece(kind: str, value: str, *, parse_tools: bool = True) -> list[bytes]:
-                nonlocal emitted_reasoning, emitted_text
-                if not value:
-                    return []
-                if kind == "thinking":
-                    emitted_reasoning += value
-                    if anthropic:
-                        return [
-                            *open_anthropic_block("thinking"),
-                            frame(
-                                {
-                                    "type": "content_block_delta",
-                                    "index": block_index,
-                                    "delta": {"type": "thinking_delta", "thinking": value},
-                                }
-                            ),
-                        ]
-                    event = {
-                        **common,
-                        "choices": [{"index": 0, "delta": {"reasoning_content": value}, "finish_reason": None}],
-                    }
-                    return [f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()]
-
-                normal_text = value
-                calls: list[Any] = []
-                if stream_tool_parser is not None and parse_tools:
-                    parser = getattr(stream_tool_parser, "parse_stream_chunk", None)
-                    if parser is None:
-                        # Third-party test/fallback parsers without an
-                        # incremental API cannot safely distinguish a partial
-                        # tool marker from visible text. Reconciliation below
-                        # emits the final parsed tool call at stream end.
-                        normal_text = ""
-                    else:
-                        normal_text, calls = parser(value)
-                output: list[bytes] = []
-                if normal_text:
-                    emitted_text += normal_text
-                    if anthropic:
-                        output.extend(open_anthropic_block("text"))
-                        output.append(
-                            frame(
-                                {
-                                    "type": "content_block_delta",
-                                    "index": block_index,
-                                    "delta": {"type": "text_delta", "text": normal_text},
-                                }
-                            )
-                        )
-                    else:
-                        event = {
-                            **common,
-                            "choices": [{"index": 0, "delta": {"content": normal_text}, "finish_reason": None}],
-                        }
-                        output.append(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-                for fallback_index, call in enumerate(calls):
-                    tool_index = getattr(call, "tool_index", fallback_index)
-                    tool_index = fallback_index if tool_index is None else int(tool_index)
-                    name = getattr(call, "name", None)
-                    if name:
-                        tool_ids.setdefault(tool_index, f"call_{uuid.uuid4().hex[:24]}")
-                        tool_names[tool_index] = str(name)
-                    if tool_index not in tool_ids:
-                        raise ValueError("SGLang tool stream emitted arguments before the tool name")
-                    arguments = getattr(call, "parameters", "")
-                    if not isinstance(arguments, str):
-                        arguments = json.dumps(arguments, ensure_ascii=False)
-                    emitted_tool_arguments[tool_index] = emitted_tool_arguments.get(tool_index, "") + arguments
-                    if anthropic:
-                        output.extend(open_anthropic_block("tool", tool_index))
-                        if arguments:
-                            output.append(
-                                frame(
-                                    {
-                                        "type": "content_block_delta",
-                                        "index": block_index,
-                                        "delta": {"type": "input_json_delta", "partial_json": arguments},
-                                    }
-                                )
-                            )
-                    else:
-                        tool_delta: dict[str, Any] = {
-                            "index": tool_index,
-                            "function": {"arguments": arguments},
-                        }
-                        if name:
-                            tool_delta.update(
-                                {
-                                    "id": tool_ids[tool_index],
-                                    "type": "function",
-                                }
-                            )
-                            tool_delta["function"]["name"] = str(name)
-                        event = {
-                            **common,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"tool_calls": [tool_delta]},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        output.append(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-                return output
-
-            try:
-                if anthropic:
-                    yield frame(
-                        {
-                            "type": "message_start",
-                            "message": {
-                                "id": message_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "model": str(payload.get("model", self._model_path)),
-                                "content": [],
-                                "stop_reason": None,
-                                "stop_sequence": None,
-                                "usage": {"input_tokens": len(prompt_ids), "output_tokens": 0},
-                            },
-                        }
-                    )
-                else:
-                    event = {
-                        **common,
-                        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
-
-                async for native_event in _sse_json_events(upstream.chunks):
-                    raw_delta = capture.accept(native_event)
-                    for kind, value in reasoning.feed(raw_delta):
-                        for output in emit_piece(kind, value):
-                            yield output
-                    if not anthropic and request.get("logprobs") is True and capture.last_output_logprobs:
-                        token_ids, log_probs = self._output_tensors(
-                            {"meta_info": {"output_token_logprobs": capture.last_output_logprobs}}
-                        )
-                        event = {
-                            **common,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": None,
-                                    "logprobs": {"content": self._openai_logprobs(token_ids, log_probs)},
-                                }
-                            ],
-                        }
-                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
-                for kind, value in reasoning.finish():
-                    for output in emit_piece(kind, value):
-                        yield output
-
-                native = self._normalize_native_response(artifact, capture.response())
-                output_ids, rollout_log_probs = self._output_tensors(native)
-                version_spans = self._runtime_load_spans(native, len(output_ids))
-                # Streaming parsers are stateful. Parse the complete sample
-                # with a fresh instance for the canonical training response.
-                final_tool_parser = self._configured_tool_parser(request)
-                response = self._chat_response(
-                    request,
-                    native,
-                    prompt_ids=prompt_ids,
-                    output_ids=output_ids,
-                    rollout_log_probs=rollout_log_probs,
-                    loss_mask=[1] * len(output_ids),
-                    runtime_load_spans=version_spans,
-                    tool_parser=final_tool_parser,
-                )
-                response["id"] = chat_id
-                response["created"] = created
-                message = response["choices"][0]["message"]
-
-                for index, call in enumerate(message.get("tool_calls") or []):
-                    if not isinstance(call, dict):
-                        continue
-                    call_id = tool_ids.setdefault(index, str(call.get("id") or f"call_{uuid.uuid4().hex[:24]}"))
-                    call["id"] = call_id
-                    function = call.get("function")
-                    if isinstance(function, Mapping):
-                        tool_names.setdefault(index, str(function.get("name", "")))
-
-                final_reasoning = message.get("reasoning_content")
-                if isinstance(final_reasoning, str) and final_reasoning.startswith(emitted_reasoning):
-                    for output in emit_piece("thinking", final_reasoning[len(emitted_reasoning) :], parse_tools=False):
-                        yield output
-                final_text = message.get("content")
-                if isinstance(final_text, str) and final_text.startswith(emitted_text):
-                    for output in emit_piece("text", final_text[len(emitted_text) :], parse_tools=False):
-                        yield output
-
-                for index, call in enumerate(message.get("tool_calls") or []):
-                    function = call.get("function") if isinstance(call, Mapping) else None
-                    if not isinstance(function, Mapping):
-                        continue
-                    arguments = function.get("arguments", "")
-                    if not isinstance(arguments, str):
-                        arguments = json.dumps(arguments, ensure_ascii=False)
-                    emitted = emitted_tool_arguments.get(index, "")
-                    missing = arguments[len(emitted) :] if arguments.startswith(emitted) else arguments
-                    if not missing and index in emitted_tool_arguments:
-                        continue
-                    if anthropic:
-                        for output in open_anthropic_block("tool", index):
-                            yield output
-                        if missing:
-                            yield frame(
-                                {
-                                    "type": "content_block_delta",
-                                    "index": block_index,
-                                    "delta": {"type": "input_json_delta", "partial_json": missing},
-                                }
-                            )
-                    else:
-                        tool_delta = {
-                            "index": index,
-                            "id": tool_ids[index],
-                            "type": "function",
-                            "function": {"name": tool_names[index], "arguments": missing},
-                        }
-                        event = {
-                            **common,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"tool_calls": [tool_delta]},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
-
-                if anthropic:
-                    provider_response = self._anthropic_response(payload, request, response)
-                    provider_response["id"] = message_id
-                    stream_holder["stream"].record_response = provider_response
-                    for output in close_anthropic_block():
-                        yield output
-                    yield frame(
-                        {
-                            "type": "message_delta",
-                            "delta": {
-                                "stop_reason": provider_response["stop_reason"],
-                                "stop_sequence": provider_response["stop_sequence"],
-                            },
-                            "usage": {"output_tokens": len(output_ids)},
-                        }
-                    )
-                    yield frame({"type": "message_stop"})
-                else:
-                    stream_holder["stream"].record_response = response
-                    choice = response["choices"][0]
-                    event = {
-                        **common,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": choice["finish_reason"],
-                                "meta_info": choice["meta_info"],
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
-                    yield b"data: [DONE]\n\n"
-            finally:
-                await upstream.close()
+            # ``stream`` is bound below, before the first chunk is pulled; the
+            # relay records the completed response on it.
+            async for frame in self._relay_stream(
+                stream, upstream, relay, artifact, call, chat_id, message_id, created
+            ):
+                yield frame
 
         stream = InferenceStream(
             status=200,
@@ -1002,8 +959,63 @@ class SGLangInferenceHandler(HttpInferenceHandler):
             close=upstream.close,
             record_response_pending=True,
         )
-        stream_holder["stream"] = stream
         return stream
+
+    async def _relay_stream(
+        self,
+        stream: InferenceStream,
+        upstream: InferenceStream,
+        relay: _ChatStreamRelay,
+        artifact: Artifact,
+        call: _ChatCall,
+        chat_id: str,
+        message_id: str,
+        created: int,
+    ) -> AsyncIterator[bytes]:
+        """Forward SGLang's incremental events as client frames, then record the exact sample."""
+        capture = _NativeStreamCapture()
+        reasoning = _ReasoningStreamSplitter(
+            enabled=self._SPLIT_REASONING, force_reasoning=self._reasoning_is_pre_opened()
+        )
+        wants_logprobs = not call.anthropic and call.request.get("logprobs") is True
+        try:
+            for frame in relay.writer.start():
+                yield frame
+            async for native_event in _sse_json_events(upstream.chunks):
+                for kind, value in reasoning.feed(capture.accept(native_event)):
+                    for frame in relay.piece(kind, value):
+                        yield frame
+                if wants_logprobs and capture.last_output_logprobs:
+                    token_ids, log_probs = self._output_tensors(
+                        {"meta_info": {"output_token_logprobs": capture.last_output_logprobs}}
+                    )
+                    for frame in relay.writer.logprobs(self._openai_logprobs(token_ids, log_probs)):
+                        yield frame
+            for kind, value in reasoning.finish():
+                for frame in relay.piece(kind, value):
+                    yield frame
+
+            native = self._normalize_native_response(artifact, capture.response())
+            # Streaming parsers are stateful. Parse the complete sample with a
+            # fresh instance for the canonical training response.
+            response = self._response_from_native(call, native, self._configured_tool_parser(call.request))
+            response["id"] = chat_id
+            response["created"] = created
+            for frame in relay.reconcile(response["choices"][0]["message"]):
+                yield frame
+            output_tokens = response["usage"]["completion_tokens"]
+            if call.anthropic:
+                provider_response = self._anthropic_response(call.payload, call.request, response)
+                provider_response["id"] = message_id
+                stream.record_response = provider_response
+                for frame in relay.writer.finish(provider_response, output_tokens=output_tokens):
+                    yield frame
+            else:
+                stream.record_response = response
+                for frame in relay.writer.finish(response, output_tokens=output_tokens):
+                    yield frame
+        finally:
+            await upstream.close()
 
     @classmethod
     def _anthropic_response(
