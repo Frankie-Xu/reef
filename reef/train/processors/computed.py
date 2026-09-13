@@ -38,7 +38,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from threading import Lock, Thread
-from typing import Any, Protocol
+from typing import Any
 
 from reef.core.records_types import AgentRecord
 from reef.train.processors.base import DataProcessor, RetentionDecision
@@ -50,23 +50,21 @@ logger = logging.getLogger(__name__)
 CLOSE_GRACE_S = 5.0
 
 
-class SupportsReceipt(Protocol):
+@dataclass(frozen=True)
+class SupportsReceipt:
     """What the engine needs of a recipe's job and of its judgment alike:
     the receipt of the tracked record they concern.
 
     The recipe defines both types; the engine only ever reads ``receipt``, so
-    this is the whole seam between them. :class:`Failed` satisfies it too.
+    this shared value is the base of both types and of :class:`Failed`.
     """
 
-    @property
-    def receipt(self) -> str: ...
+    receipt: str
 
 
 @dataclass(frozen=True)
-class Failed:
+class Failed(SupportsReceipt):
     """The worker's answer for a job whose judgment never finished."""
-
-    receipt: str
 
 
 class JudgingWorker:

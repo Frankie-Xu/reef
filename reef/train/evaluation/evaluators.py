@@ -26,9 +26,23 @@ plugin is only concrete once both halves are supplied.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import Any
 
-from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import (
+    CandidateEvaluationPlugin,
+    CandidateEvaluator,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
+
+
+class CandidatePluginFactory(ABC):
+    """Bind one candidate evaluation plugin to a scenario's candidate backend."""
+
+    @abstractmethod
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin: ...
 
 
 class AlwaysSelectMixin(CandidateEvaluationPlugin):
@@ -142,9 +156,18 @@ class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
         self._candidate_backend = candidate_backend
 
 
+class AlwaysSelectPluginFactory(CandidatePluginFactory):
+    """Bind backend evaluation to unconditional candidate selection."""
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        return BackendAlwaysSelectPlugin(candidate_backend)
+
+
 __all__ = [
     "AlwaysSelectMixin",
+    "AlwaysSelectPluginFactory",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
+    "CandidatePluginFactory",
     "RegressionGateMixin",
 ]

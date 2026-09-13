@@ -69,6 +69,8 @@ class Trainer:
     ) -> Trainer:
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend")
+        if candidate_evaluator is not None and not isinstance(candidate_evaluator, CandidateEvaluationPlugin):
+            raise TypeError("candidate_evaluator must inherit CandidateEvaluationPlugin")
         processor = processor_factory(
             ProcessorContext(
                 scenario=scenario,

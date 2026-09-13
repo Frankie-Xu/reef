@@ -1,6 +1,6 @@
 # Existing Callable-based state and constructor injection. Each entry is an
 # exact AST fingerprint, so new locations or additional parameters fail the
-# design check. Delete an entry when its implementation moves to a Protocol or
+# design check. Delete an entry when its implementation moves to an ABC or
 # cohesive object interface.
 PYD002|reef/artifact/git_lfs.py|GitLFSRepositoryBackend.__init__|snapshot_download
 PYD002|reef/artifact/git_lfs.py|_GitLFSRepositoryBackendFactory.__init__|snapshot_download

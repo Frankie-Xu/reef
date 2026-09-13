@@ -88,12 +88,24 @@ Two other extension points have separate names and purposes:
 
 Native backend selectors remain ``training.backend`` and ``inference.backend``.
 Custom request adapters use ``inference.handler-factory`` and
-``inference.handler-config``. These replace the previous request-adapter
+``inference.handler-config``. The factory path names an ``InferenceHandler``
+subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
+**config)`` class method; arbitrary functions are not accepted. Handlers injected
+directly into ``create_app`` need only implement the inference methods.
+These configuration names replace the previous request-adapter
 ``backend-factory`` and ``backend-config`` names. Python extensions migrate the
 old recipe-facing ``TrainingBackend`` to ``CandidateBackend`` and the old
 request-facing ``InferenceBackend`` to ``InferenceHandler``; the names now
 reserved for native interfaces must not be used as replacement import aliases
 for those different contracts.
+
+Python extension contracts use abstract base classes and explicit inheritance.
+This also applies to repository factories, candidate evaluation plugins, harness
+plugins, and surface capabilities. Implement optional capabilities only when
+supported: adapter weight residency, artifact activation, and request leases
+remain separate interfaces. CI rejects ``typing.Protocol``,
+``typing_extensions.Protocol``, and ``runtime_checkable`` in Reef, recipes,
+examples, and tests; these findings cannot be baselined.
 
 Recipe
 ------
@@ -852,7 +864,10 @@ Candidate evaluation
 
    from reef import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision
 
-A plugin measures a produced candidate before it is published, and decides. Reef
+A plugin explicitly inherits ``CandidateEvaluationPlugin``, measures a produced
+candidate before it is published, and decides. ``CandidateEvaluator`` and
+``CandidateSelector`` remain separate abstract capabilities; implementing only
+one does not make an object a plugin. Reef
 enforces the fixed evaluate-then-decide order and verifies the decision kept the
 exact result it was given.
 
@@ -873,6 +888,19 @@ idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
 result was not durably committed. The deployment names the factory in its
 ``evaluation`` section (`Configuration
 <configuration.rst#the-evaluation-section>`__).
+
+``CandidateEvaluationPluginFactory`` is an abstract base class whose
+``build(config, *, runtime, training_runtime, scenario, environ)`` returns one
+scenario-local plugin. ``evaluation.module`` names its subclass or instance;
+factory subclasses must construct without arguments and without allocating
+model resources. Plain callable factories and objects that merely expose
+matching methods are rejected.
+
+Harness recipes instead use ``reef.train.evaluation.CandidatePluginFactory``:
+its ``build(candidate_backend)`` binds a plugin to an existing candidate
+backend. ``AlwaysSelectPluginFactory`` and ``ScoreComparisonPluginFactory``
+provide the built-in policies; custom factory classes explicitly inherit the
+same interface.
 
 Surface
 -------

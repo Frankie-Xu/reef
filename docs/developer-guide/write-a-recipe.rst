@@ -158,13 +158,33 @@ instead:
 .. code:: yaml
 
    evaluation:
-     module: my_pkg.evaluation:build_evaluator
+     module: my_pkg.evaluation:EvaluationFactory
      config:
        benchmark: gsm8k
        threshold: 0.8
 
-Reef calls the factory once per scenario with that opaque ``config`` and the
-scenario's training runtime. The trainer runs the plugin between the backend
+The reference names a ``CandidateEvaluationPluginFactory`` subclass with a
+no-argument constructor, or an instance of that class. Its constructor must
+not allocate model resources: Reef validates it when loading recipe config.
+Reef calls ``build`` once per scenario with the opaque ``config``,
+``runtime``, ``training_runtime``, ``scenario``, and ``environ``:
+
+.. code:: python
+
+   from reef import CandidateEvaluationPluginFactory
+   from my_pkg.benchmarks import BenchmarkGate
+
+
+   class EvaluationFactory(CandidateEvaluationPluginFactory):
+       def build(self, config, *, runtime, training_runtime, scenario, environ):
+           return BenchmarkGate(
+               benchmark=config["benchmark"], threshold=config["threshold"],
+               runtime=runtime, scenario=scenario,
+           )
+
+``BenchmarkGate`` must inherit ``CandidateEvaluationPlugin`` and implement
+both ``evaluate`` and ``decide``. Plain factory functions and objects that only
+have matching method names are rejected. The trainer runs the plugin between the backend
 step and publication, calling ``evaluate`` before ``decide``. A rejection
 leaves the previous version serving. `Python API
 <../reference/python-api.rst#candidate-evaluation>`__ documents the plugin

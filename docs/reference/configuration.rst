@@ -287,6 +287,8 @@ take precedence over the options object; avoid specifying a flag in both places.
 
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
+The factory path must name an ``InferenceHandler`` subclass with a
+``from_config`` class method; handler functions are not supported.
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
@@ -773,7 +775,7 @@ zero.
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
    evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
-   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
+   evolution.promote | | optional ``Promoter`` subclass, instance, or dotted ``module:attribute`` reference; its ``__call__(samples, *, manifest=None)`` chooses which trace prompts to promote; without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
    evolution.publish | auto | ``review`` holds every gate win as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
    evolution.review_kinds | [] | node kinds whose wins wait for a promote while the rest publish at once; a win that touches a ``native_loop`` waits whether or not the list names it
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
@@ -838,21 +840,26 @@ Only weight-training recipes read this section; a deployment that pairs it
 with any other recipe fails at startup, because a harness recipe builds its
 evaluator in code. Absent by default, in which case a successful
 weight-training step publishes without a gate. When present, Reef calls the
-named factory once per scenario and hands the plugin the exported but
+named factory's ``build`` method once per scenario and hands the plugin the exported but
 unpublished checkpoint.
 
 .. config::
 
-   evaluation.module | a ``package.module:factory`` reference to the plugin factory. Required.
-   evaluation.config | opaque mapping handed to the factory; Reef never reads it
+   evaluation.module | a ``package.module:Factory`` reference to a ``CandidateEvaluationPluginFactory`` subclass with a no-argument constructor, or a factory instance. Required.
+   evaluation.config | opaque mapping handed to ``factory.build``; Reef never reads it
 
 .. code:: yaml
 
    evaluation:
-     module: my_pkg.evaluation:build_evaluator
+     module: my_pkg.evaluation:EvaluationFactory
      config:
        benchmark: gsm8k
        threshold: 0.8
+
+``build(config, *, runtime, training_runtime, scenario, environ)`` must return
+a ``CandidateEvaluationPlugin`` subclass instance. The factory constructor is
+validated while loading recipe config and must not allocate model resources.
+Plain function factories and structural lookalikes are not accepted.
 
 The plugin interface is in `Write a recipe
 <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.

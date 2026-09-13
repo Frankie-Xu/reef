@@ -106,8 +106,8 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
     if evolution.get("evaluate") == "harness.aime:evaluate":
         evolution["evaluate"] = scorer.evaluate
-    if evolution.get("feedback") == "harness.aime:feedback":
-        evolution["feedback"] = scorer.feedback
+    if evolution.get("feedback") == "harness.aime:AIMEFeedback":
+        evolution["feedback"] = scorer
     # One --seed drives both random draws: the proposer's parent sampling
     # (evolution.gepa.seed) and the driver's minibatch order.
     evolution["gepa"] = {**evolution["gepa"], "seed": seed}

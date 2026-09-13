@@ -20,6 +20,13 @@ OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
 
 
+def test_configured_handler_rejects_a_function() -> None:
+    from reef.train.slime_backend.launch import _configured_inference_handler_factory
+
+    with pytest.raises(ValueError, match="must inherit InferenceHandler"):
+        _configured_inference_handler_factory("reef.runtime.adapters.http.provider_request_headers")
+
+
 class _Process:
     """Small Popen stand-in for orchestrator lifecycle tests."""
 
@@ -132,7 +139,7 @@ def test_service_config_preserves_inference_handler_config() -> None:
 @pytest.mark.unit
 def test_service_config_preserves_candidate_evaluation_section() -> None:
     evaluation = {
-        "module": "cookbook.evaluation:build_evaluator",
+        "module": "cookbook.evaluation:CheckpointFactory",
         "config": {"threshold": 0.8},
     }
 
@@ -380,7 +387,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         lambda *args, **kwargs: lambda scenario: object(),
     )
     evaluation = {
-        "module": "reef_service._candidate_evaluation_plugin:build_evaluator",
+        "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
         "config": {"score": 1.0, "threshold": 0.0},
     }
 
@@ -411,7 +418,7 @@ def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(mon
         deploy.build_dispatcher(
             _settings(
                 recipe="recipe",
-                evaluation_settings={"module": "cookbook.evaluation:build_evaluator"},
+                evaluation_settings={"module": "cookbook.evaluation:CheckpointFactory"},
                 agent_record_dir=str(tmp_path / "agent-record"),
             )
         )

@@ -11,7 +11,7 @@ from reef.core.batches import TrainingBatch, policy_samples
 from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.adapters.config import RuntimeConnectionConfig
-from reef.runtime.adapters.http import build_http_inference_handler
+from reef.runtime.adapters.http import HttpInferenceHandler
 from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, training_job_status
 from reef.runtime.base import (
     InferenceRuntime,
@@ -21,7 +21,7 @@ from reef.runtime.base import (
     TrainingRuntimeError,
 )
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.inference import InferenceHandlerFactory
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 from reef.runtime.weights.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
@@ -171,7 +171,7 @@ def connect_executor_runtimes(
     model_path: str = "",
     inference_timeout_s: float = 300.0,
     max_staleness: int = 0,
-    inference_handler_factory: InferenceHandlerFactory = build_http_inference_handler,
+    inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
     inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Assemble independent components over the existing deployment connection."""

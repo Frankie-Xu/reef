@@ -40,8 +40,8 @@ from reef.train.cordis_backend import (
     ScoreComparisonPlugin,
 )
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
-from reef.train.evaluation import BackendAlwaysSelectPlugin
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
 from reef.train.trainer import Trainer
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
 
@@ -1039,7 +1039,9 @@ def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\n"
         "def evaluate(task, result):\n    return 0.0\n\n"
-        "class DemoPlugin:\n"
+        "from reef.core.evaluation import CandidateEvaluationPlugin\n"
+        "from reef.train.evaluation.evaluators import CandidatePluginFactory\n\n"
+        "class DemoPlugin(CandidateEvaluationPlugin):\n"
         "    def __init__(self, backend):\n"
         "        self._backend = backend\n\n"
         "    def evaluate(self, candidate):\n"
@@ -1047,6 +1049,9 @@ def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
         "    def decide(self, candidate, evaluation):\n"
         "        from reef.train.evaluation import SelectionDecision\n"
         "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n"
+        "\nclass DemoFactory(CandidatePluginFactory):\n"
+        "    def build(self, candidate_backend):\n"
+        "        return DemoPlugin(candidate_backend)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1062,15 +1067,16 @@ def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
 
     compared = CordisRecipe.from_environment({}, config=config())
     assert compared.candidate_plugin is not None
-    assert type(compared.candidate_plugin(object())).__name__ == "ScoreComparisonPlugin"
+    assert type(compared.candidate_plugin.build(object())).__name__ == "ScoreComparisonPlugin"
 
     named = CordisRecipe.from_environment({}, config=config(selection="always"))
     assert named.candidate_plugin is not None
-    assert named.candidate_plugin is BackendAlwaysSelectPlugin
+    assert isinstance(named.candidate_plugin, AlwaysSelectPluginFactory)
 
-    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoPlugin"))
+    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoFactory"))
     assert dotted.candidate_plugin is not None
-    assert getattr(dotted.candidate_plugin, "__name__", "") == "DemoPlugin"
+    assert type(dotted.candidate_plugin).__name__ == "DemoFactory"
+    assert type(dotted.candidate_plugin.build(object())).__name__ == "DemoPlugin"
 
     with pytest.raises(RecipeConfigError, match="acceptance was removed"):
         CordisRecipe.from_environment(
@@ -1731,12 +1737,13 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
     a secret-shaped one, and applies the cap to what it returns."""
     key = "sk-476-POLICY-KEY-0123456789abcdef"
 
-    def keep_marked(samples):
-        return [
-            prompt
-            for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
-            if prompt and "keep" in prompt
-        ]
+    class KeepMarked(Promoter):
+        def __call__(self, samples, *, manifest=None):
+            return [
+                prompt
+                for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
+                if prompt and "keep" in prompt
+            ]
 
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -1748,7 +1755,7 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
         models=MODEL,
         binary=str(make_binary(tmp_path)),
         promote_failures=True,
-        promote=resolve_promoter(keep_marked),
+        promote=KeepMarked(),
         max_promoted_tasks=2,
     )
     first = run_backend_step(
@@ -1761,9 +1768,10 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
 def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path) -> None:
     seen: list[object] = []
 
-    def with_manifest(samples, *, manifest=None):
-        seen.append(manifest)
-        return []
+    class WithManifest(Promoter):
+        def __call__(self, samples, *, manifest=None):
+            seen.append(manifest)
+            return []
 
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -1775,7 +1783,7 @@ def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path)
         models=MODEL,
         binary=str(make_binary(tmp_path)),
         promote_failures=True,
-        promote=resolve_promoter(with_manifest),
+        promote=WithManifest(),
     )
     first = run_backend_step(b, _traced_batch("A"), b.initial_state())
     run_backend_step(b, _traced_batch("B"), first.state)
@@ -1787,7 +1795,8 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
     module = tmp_path / "demo_promote_policy.py"
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n\n"
-        "def promote(samples):\n    return []\n"
+        "from reef.train.cordis_backend.strategies import Promoter\n\n"
+        "class Promote(Promoter):\n    def __call__(self, samples, *, manifest=None):\n        return []\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1802,7 +1811,7 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
             }
         }
 
-    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:promote"))
+    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:Promote"))
     assert isinstance(on.promote, Promoter) and on.promote(()) == []
     assert CordisRecipe.from_environment({}, config=config()).promote is None
 

@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
+from reef.surface.base import InferenceLease
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ class _Slot:
         self.in_flight = 0
 
 
-class AdapterLease:
+class AdapterLease(InferenceLease):
     """Protects one resident adapter for the lifetime of one inference attempt."""
 
     def __init__(self, manager: AdapterResidencyManager, name: str) -> None:

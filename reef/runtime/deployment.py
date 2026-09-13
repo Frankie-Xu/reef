@@ -32,6 +32,15 @@ class DeploymentResources(ABC):
         """Release owned reservations and connections, idempotently."""
 
 
+class InferenceResources(DeploymentResources):
+    """Allocation that supplies a backend-native inference reservation."""
+
+    @property
+    @abstractmethod
+    def inference_placement(self) -> Any:
+        """Return the borrowed placement handle understood by the selected backend."""
+
+
 class DeploymentHealth(ABC):
     """Nonblocking observation of an already started deployment."""
 

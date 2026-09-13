@@ -6,10 +6,10 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.adapters.http import build_http_inference_handler
+from reef.runtime.adapters.http import HttpInferenceHandler
 from reef.runtime.adapters.training_group import TrainingGroupHandle, training_job_status
 from reef.runtime.base import InferenceAdmissionHandle, InferenceRuntime, TrainingJobResult, TrainingRuntimeError
-from reef.runtime.inference import InferenceHandler, InferenceHandlerFactory
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 
 
@@ -23,21 +23,27 @@ class ExecutorInferenceRuntime(InferenceRuntime):
         inference_url: str | None = None,
         model_path: str = "",
         inference_timeout_s: float = 300.0,
-        inference_handler_factory: InferenceHandlerFactory = build_http_inference_handler,
+        inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
         inference_handler_config: Mapping[str, Any] | None = None,
     ) -> None:
+        if not isinstance(inference_handler_factory, type) or not issubclass(
+            inference_handler_factory, InferenceHandler
+        ):
+            raise TypeError("inference_handler_factory must inherit InferenceHandler")
         self._control = control
         self._discover_inference_url = not inference_url
         if not inference_url:
             inference_url = training_job_status(control).get("inference_url")
             if not isinstance(inference_url, str) or not inference_url:
                 raise TrainingRuntimeError("inference_url is unset and the deployment does not report one")
-        handler = inference_handler_factory(
+        handler = inference_handler_factory.from_config(
             inference_url.rstrip("/"),
             model_path=model_path,
             timeout_s=inference_timeout_s,
             **dict(inference_handler_config or {}),
         )
+        if not isinstance(handler, InferenceHandler):
+            raise TypeError("InferenceHandler.from_config must return an InferenceHandler")
         super().__init__(base_url=inference_url, inference_timeout_s=inference_timeout_s)
         self._handler = handler
         self._model_path = model_path

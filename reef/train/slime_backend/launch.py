@@ -13,7 +13,7 @@ from reef.core.errors import DeployConfigError
 from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.inference import InferenceHandlerFactory
+from reef.runtime.inference import InferenceHandler
 from reef.train.deployment import TrainingDeployment, TrainingDeploymentPlan
 
 _NATIVE_INFERENCE = "reef.inference.sglang.chat.SGLangInferenceHandler"
@@ -32,22 +32,22 @@ def driver_environment(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _configured_inference_handler_factory(path: str | None) -> InferenceHandlerFactory | None:
+def _configured_inference_handler_factory(path: str | None) -> type[InferenceHandler] | None:
     """Load an optional request handler factory selected by deployment config."""
 
     if path is None:
         return None
     if not isinstance(path, str) or not path.strip():
-        raise ValueError("reef.inference_handler_factory must be a non-empty dotted path")
+        raise ValueError("inference.handler-factory must be a non-empty dotted path")
     module_path, separator, attribute = path.strip().rpartition(".")
     if not separator or not module_path or not attribute:
-        raise ValueError("reef.inference_handler_factory must be a dotted path")
+        raise ValueError("inference.handler-factory must be a dotted path")
     try:
         factory = getattr(importlib.import_module(module_path), attribute)
     except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot load reef.inference_handler_factory {path!r}") from exc
-    if not callable(factory):
-        raise ValueError(f"reef.inference_handler_factory {path!r} is not callable")
+        raise ValueError(f"cannot load inference.handler-factory {path!r}") from exc
+    if not isinstance(factory, type) or not issubclass(factory, InferenceHandler):
+        raise ValueError(f"inference.handler-factory {path!r} must inherit InferenceHandler")
     return factory
 
 
@@ -248,7 +248,7 @@ class SlimeDeployment(TrainingDeployment):
             raise ValueError("reef.inference_handler_config must be an object")
         if settings["inference_handler_config"]:
             if inference_handler_factory is None:
-                raise ValueError("reef.inference_handler_config requires reef.inference_handler_factory")
+                raise ValueError("reef.inference_handler_config requires inference.handler-factory")
             runtime_config["inference_handler_config"] = dict(settings["inference_handler_config"])
         if connector is not None:
             runtime_config["connect"] = connector

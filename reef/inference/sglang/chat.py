@@ -220,6 +220,13 @@ def _build_sglang_tool_parser(tools: list[dict[str, Any]], parser_name: str) -> 
 class SGLangInferenceHandler(HttpInferenceHandler):
     """Serve OpenAI or Anthropic chat with engine-native policy tensors."""
 
+    @classmethod
+    def from_config(
+        cls, upstream_url: str, *, model_path: str, timeout_s: float, **config: Any
+    ) -> SGLangInferenceHandler:
+        """Construct the tokenizer-aware handler selected by deployment configuration."""
+        return cls(upstream_url, model_path=model_path, timeout_s=timeout_s, **config)
+
     def __init__(
         self,
         upstream_url: str,

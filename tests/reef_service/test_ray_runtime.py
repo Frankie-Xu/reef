@@ -252,18 +252,25 @@ def test_ray_runtime_rejects_a_malformed_served_adapter_name() -> None:
 @pytest.mark.unit
 def test_ray_runtime_builds_a_tokenizer_aware_inference_backend() -> None:
     captured = {}
-    sentinel = object()
+    from reef.runtime.inference import InferenceHandler
 
-    def factory(upstream_url, *, model_path, timeout_s, **config):
-        captured.update(upstream_url=upstream_url, model_path=model_path, timeout_s=timeout_s, config=config)
-        return sentinel
+    class ConfiguredHandler(InferenceHandler):
+        @classmethod
+        def from_config(cls, upstream_url, *, model_path, timeout_s, **config):
+            captured.update(upstream_url=upstream_url, model_path=model_path, timeout_s=timeout_s, config=config)
+            return sentinel
+
+        async def inference(self, artifact, path, payload):
+            return {}
+
+    sentinel = ConfiguredHandler()
 
     runtime = ExecutorRuntimeFixture(
         train_group_handle=FakeTrainGroupHandle(),
         inference_url="http://router/",
         model_path="/models/qwen",
         inference_timeout_s=42,
-        inference_handler_factory=factory,
+        inference_handler_factory=ConfiguredHandler,
         inference_handler_config={"tool_call_parser": "qwen25"},
     )
 
@@ -274,6 +281,38 @@ def test_ray_runtime_builds_a_tokenizer_aware_inference_backend() -> None:
         "timeout_s": 42,
         "config": {"tool_call_parser": "qwen25"},
     }
+
+
+@pytest.mark.unit
+def test_runtime_rejects_a_structural_handler_factory() -> None:
+    class StructuralFactory:
+        @classmethod
+        def from_config(cls, *args, **kwargs):
+            raise AssertionError("must reject before constructing an unregistered handler")
+
+    with pytest.raises(TypeError, match="must inherit InferenceHandler"):
+        ExecutorRuntimeFixture(
+            train_group_handle=FakeTrainGroupHandle(),
+            inference_url="http://router",
+            inference_handler_factory=StructuralFactory,
+        )
+
+
+@pytest.mark.unit
+def test_runtime_rejects_invalid_handler_factory_result() -> None:
+    from reef.runtime.adapters.http import HttpInferenceHandler
+
+    class InvalidHandler(HttpInferenceHandler):
+        @classmethod
+        def from_config(cls, *args, **kwargs):
+            return object()
+
+    with pytest.raises(TypeError, match="must return an InferenceHandler"):
+        ExecutorRuntimeFixture(
+            train_group_handle=FakeTrainGroupHandle(),
+            inference_url="http://router",
+            inference_handler_factory=InvalidHandler,
+        )
 
 
 @pytest.mark.unit

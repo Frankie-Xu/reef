@@ -16,6 +16,7 @@ from reef.core.errors import ReefError
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.inference import InferenceHandler
 from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
+from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
 
 class RuntimeContractError(ReefError):
@@ -62,7 +63,7 @@ class TrainingJobResult:
             raise ValueError("training_job_id must be a non-empty string or None")
 
 
-class InferenceAdmissionHandle:
+class InferenceAdmissionHandle(InferenceLease):
     """A handle for one admitted inference, released after model execution."""
 
     def __init__(self, controller: InferenceAdmissionController) -> None:
@@ -175,7 +176,7 @@ class PreparedTrainingStep:
             raise ValueError("a skipped step cannot carry a backend payload")
 
 
-class InferenceRuntime(ABC):
+class InferenceRuntime(AdapterWeightRuntime):
     """Own inference requests, serving weights and admission.
 
     An InferenceHandler executes individual requests. This runtime owns that

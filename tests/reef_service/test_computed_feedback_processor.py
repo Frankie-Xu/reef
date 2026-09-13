@@ -13,19 +13,19 @@ from dataclasses import dataclass
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker
+from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker, SupportsReceipt
 from reef.train.types import PolicyBatch, PolicySample, ProcessorContext
 
 pytestmark = pytest.mark.unit
 
 
 @dataclass(frozen=True)
-class _Job:
+class _Job(SupportsReceipt):
     receipt: str
 
 
 @dataclass(frozen=True)
-class _Judgment:
+class _Judgment(SupportsReceipt):
     receipt: str
     good: bool = True
 

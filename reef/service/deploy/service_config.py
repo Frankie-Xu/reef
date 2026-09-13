@@ -109,7 +109,7 @@ class ServiceConfig:
         None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
     )
     inference_handler_factory: str | None = config_option(
-        None, public_path=("inference", "handler_factory"), help="Dotted inference request handler factory."
+        None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
     )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict,

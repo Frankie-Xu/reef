@@ -8,7 +8,14 @@ from reef.artifact.artifact import Artifact, ArtifactRef, LiveWeightArtifactRef
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
-from reef.surface.base import ServingRuntime, Surface, WeightRuntime
+from reef.surface.base import (
+    AdapterWeightRuntime,
+    ArtifactLoader,
+    InferenceHooks,
+    ServingRuntime,
+    Surface,
+    WeightRuntime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +41,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader:
+class WeightLoader(ArtifactLoader):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
@@ -69,7 +76,7 @@ class WeightLoader:
         # serving version remains exact.
         if isinstance(runtime, WeightRuntime):
             served = self._served_version(runtime)
-            if served is None and self._scenario is not None and self._per_scenario(runtime):
+            if served is None and self._scenario is not None and isinstance(runtime, AdapterWeightRuntime):
                 # An adapter runtime that holds nothing for this scenario
                 # cannot serve its live head; only the checkpoint is exact.
                 logger.warning(
@@ -92,13 +99,9 @@ class WeightLoader:
         return current
 
     def _served_version(self, runtime: WeightRuntime) -> str | None:
-        if self._scenario is not None and self._per_scenario(runtime):
-            return runtime.serving_adapter_runtime_load_id(self._scenario)  # type: ignore[attr-defined]
+        if self._scenario is not None and isinstance(runtime, AdapterWeightRuntime):
+            return runtime.serving_adapter_runtime_load_id(self._scenario)
         return runtime.serving_runtime_load_id()
-
-    @staticmethod
-    def _per_scenario(runtime: WeightRuntime) -> bool:
-        return callable(getattr(runtime, "serving_adapter_runtime_load_id", None))
 
     def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str:
         if not isinstance(runtime, WeightRuntime):
@@ -111,7 +114,7 @@ class WeightLoader:
         return runtime_load_id
 
 
-class WeightInferenceHooks:
+class WeightInferenceHooks(InferenceHooks):
     """Address weight-backed requests and verify the serving runtime load ID.
 
     ``adapter_name`` names the one adapter a shared-slot LoRA runtime serves.

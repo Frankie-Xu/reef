@@ -7,9 +7,10 @@ streamed responses retain the provider's format.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
@@ -19,10 +20,12 @@ from reef.runtime.inference import InferenceHandler, InferenceStream, UpstreamSt
 from reef.runtime.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string, register_runtime_kind
 
 
-class RequestHeadersFactory(Protocol):
+class RequestHeadersFactory(ABC):
     """Produce request headers for one artifact-bound upstream call."""
 
-    def __call__(self, artifact: Artifact, path: str) -> Mapping[str, str]: ...
+    @abstractmethod
+    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
+        """Return identity and authentication headers for the selected route."""
 
 
 def content_identity_headers(artifact: Artifact) -> dict[str, str]:
@@ -34,45 +37,52 @@ def content_identity_headers(artifact: Artifact) -> dict[str, str]:
 
 
 def default_artifact_request_headers(artifact: Artifact, path: str = "") -> Mapping[str, str]:
-    """The default :data:`RequestHeadersFactory`: identity headers for every path."""
+    """Identity headers for every provider route."""
     return content_identity_headers(artifact)
 
 
-def provider_request_headers(api_key: str) -> RequestHeadersFactory:
-    """Build a RequestHeadersFactory that adds provider-native auth.
+class ArtifactRequestHeaders(RequestHeadersFactory):
+    """Attach the selected Reef artifact identity."""
 
-    Reef artifact identity headers are always included. For Anthropic
-    (/v1/messages) the api key is sent as x-api-key + anthropic-version;
-    for OpenAI-compatible routes it is sent as a Bearer token.
-    """
-    if not api_key:
-        raise ValueError("api_key must be non-empty")
+    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
+        return content_identity_headers(artifact)
 
-    def headers_for(artifact: Artifact, path: str) -> Mapping[str, str]:
+
+class ProviderRequestHeaders(RequestHeadersFactory):
+    """Attach artifact identity and provider-specific authentication."""
+
+    def __init__(self, api_key: str) -> None:
+        if not api_key:
+            raise ValueError("api_key must be non-empty")
+        self._api_key = api_key
+
+    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
         headers = content_identity_headers(artifact)
         if path in ("/v1/messages", "/v1/messages/count_tokens"):
-            headers["x-api-key"] = api_key
+            headers["x-api-key"] = self._api_key
             headers["anthropic-version"] = "2023-06-01"
         else:
-            headers["Authorization"] = f"Bearer {api_key}"
+            headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    return headers_for
+
+def provider_request_headers(api_key: str) -> RequestHeadersFactory:
+    """Build provider-native authentication with Reef artifact identity."""
+    return ProviderRequestHeaders(api_key)
 
 
 class HttpInferenceHandler(InferenceHandler):
     """POST native inference requests to an HTTP provider.
 
-    The request headers are produced by a callable, so callers can inject
-    any combination of reef artifact identity headers, provider auth,
-    or custom headers without subclassing.
+    RequestHeadersFactory implementations provide artifact identity, provider
+    authentication, or deployment-specific headers.
     """
 
     def __init__(
         self,
         upstream_url: str,
         *,
-        request_headers: RequestHeadersFactory = default_artifact_request_headers,
+        request_headers: RequestHeadersFactory | None = None,
         timeout_s: float = 300.0,
         error_label: str = "inference upstream",
     ) -> None:
@@ -82,9 +92,18 @@ class HttpInferenceHandler(InferenceHandler):
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         self._upstream_url = upstream
-        self._request_headers = request_headers
+        self._request_headers = request_headers if request_headers is not None else ArtifactRequestHeaders()
         self._timeout_s = timeout_s
         self._error_label = error_label
+
+    @classmethod
+    def from_config(
+        cls, upstream_url: str, *, model_path: str, timeout_s: float, **config: Any
+    ) -> HttpInferenceHandler:
+        """Build a plain HTTP handler; model_path is for tokenizer-aware subclasses."""
+        if config:
+            raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
+        return cls(upstream_url, timeout_s=timeout_s)
 
     def reconnect(self, upstream_url: str) -> None:
         if not isinstance(upstream_url, str) or not upstream_url.startswith(("http://", "https://")):
@@ -104,7 +123,7 @@ class HttpInferenceHandler(InferenceHandler):
             session.post(
                 f"{self._upstream_url}{path}",
                 json=payload,
-                headers=dict(self._request_headers(artifact, path)),
+                headers=dict(self._request_headers.headers(artifact, path)),
             ) as response,
         ):
             body = await response.text()
@@ -134,7 +153,7 @@ class HttpInferenceHandler(InferenceHandler):
             response = await session.post(
                 f"{self._upstream_url}{path}",
                 json=payload,
-                headers=dict(self._request_headers(artifact, path)),
+                headers=dict(self._request_headers.headers(artifact, path)),
             )
         except Exception:
             await session.close()
@@ -178,20 +197,6 @@ class HttpInferenceHandler(InferenceHandler):
         )
 
 
-def build_http_inference_handler(
-    upstream_url: str,
-    *,
-    model_path: str,
-    timeout_s: float,
-    **config: Any,
-) -> InferenceHandler:
-    """Default factory; ``model_path`` is reserved for tokenizer-aware handlers."""
-
-    if config:
-        raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
-    return HttpInferenceHandler(upstream_url, timeout_s=timeout_s)
-
-
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
 
@@ -223,7 +228,7 @@ class InferenceProxyRuntime(InferenceRuntime):
         self._model_path = model_path
         self._api_key = api_key
         self._api = api
-        request_headers: RequestHeadersFactory = default_artifact_request_headers
+        request_headers: RequestHeadersFactory | None = None
         if api_key:
             request_headers = provider_request_headers(api_key)
         self._inference_handler = HttpInferenceHandler(
@@ -365,12 +370,13 @@ def _env_value(values: Mapping[str, str], name: str) -> str | None:
 
 __all__ = [
     "PROVIDER_APIS",
+    "ArtifactRequestHeaders",
     "HttpInferenceHandler",
     "InferenceProxyConfig",
     "InferenceProxyRuntime",
     "InferenceProxyRuntimeFactory",
+    "ProviderRequestHeaders",
     "RequestHeadersFactory",
-    "build_http_inference_handler",
     "content_identity_headers",
     "default_artifact_request_headers",
     "provider_request_headers",

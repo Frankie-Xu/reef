@@ -503,6 +503,22 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
 
 
 @pytest.mark.unit
+def test_trainer_rejects_structural_plugin_before_constructing_processor() -> None:
+    from ._candidate_evaluation_plugin import DuckPlugin
+
+    def processor_factory(context):
+        raise AssertionError("an invalid plugin must fail before processor construction")
+
+    with pytest.raises(TypeError, match="must inherit CandidateEvaluationPlugin"):
+        Trainer.build(
+            "math",
+            SQLiteRecordStore(),
+            processor_factory=processor_factory,
+            candidate_backend=_PreparingBackend(),
+            candidate_evaluator=DuckPlugin(),
+        )
+
+
 def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback() -> None:
     calls = []
 
@@ -524,7 +540,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
         def abort_step(self, prepared):
             raise AssertionError("the successful plugin evaluation must not abort")
 
-    class ExternalEvaluator:
+    class ExternalEvaluator(CandidateEvaluationPlugin):
         def evaluate(self, candidate):
             calls.append(("evaluate", candidate.candidate_id))
             return EvaluationResult("external", "1", {"score": 0.9})
@@ -622,7 +638,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
             assert prepared.candidate is not None
             calls.append(("abort", prepared.candidate.candidate_id))
 
-    class ReplacingEvaluator:
+    class ReplacingEvaluator(CandidateEvaluationPlugin):
         def evaluate(self, candidate):
             del candidate
             return EvaluationResult("external", "1", {"score": 1.0})

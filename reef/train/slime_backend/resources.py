@@ -11,11 +11,11 @@ from uuid import uuid4
 
 import ray
 
-from reef.runtime.deployment import DeploymentResources
+from reef.runtime.deployment import InferenceResources
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
 
 
-class SlimeDeploymentResources(DeploymentResources):
+class SlimeDeploymentResources(InferenceResources):
     """Own one Ray client session and the coordinated model reservations."""
 
     def __init__(

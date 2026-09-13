@@ -23,7 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import (
+    CandidateEvaluationPlugin,
+    CandidateEvaluator,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
@@ -53,13 +59,14 @@ from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, accepts_keyword, accepts_manifest
-from reef.train.evaluation.evaluators import BackendEvaluateMixin
+from reef.train.evaluation.evaluators import BackendEvaluateMixin, CandidatePluginFactory
 from reef.train.types import TraceBatch, TraceSample, TrainingBatch, TrainStepResult
 
 
@@ -474,6 +481,16 @@ class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
         self._candidate_backend = candidate_backend
 
 
+@dataclass(frozen=True)
+class ScoreComparisonPluginFactory(CandidatePluginFactory):
+    """Bind a scenario's score comparison policy with its configured margin."""
+
+    min_win_margin: int = 0
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        return ScoreComparisonPlugin(candidate_backend, min_win_margin=self.min_win_margin)
+
+
 def _score_vectors(
     evaluation: EvaluationResult,
 ) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
@@ -494,7 +511,7 @@ def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[
     return wins, losses
 
 
-class CordisBackend(CandidateBackend):
+class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
     """Settle one proposal per step through episode pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies
@@ -626,7 +643,7 @@ class CordisBackend(CandidateBackend):
         # remove its source without touching caller-owned Artifact.local paths.
         self._rendered_publications: dict[int, Artifact] = {}
         # Agent proposals wait here between the route that admitted them and the step that takes them.
-        self.proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
+        self._proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         self._current_step_record: Path | None = None
@@ -666,6 +683,10 @@ class CordisBackend(CandidateBackend):
 
     def close(self) -> None:
         self._pool_finalizer()
+
+    @property
+    def proposals(self) -> ProposalInbox | None:
+        return self._proposals
 
     @property
     def descriptor(self) -> AdapterDescriptor:

@@ -9,6 +9,8 @@ from graphlib import CycleError, TopologicalSorter
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -426,6 +428,7 @@ def test_inference_recovery_and_update_lock_require_no_model_framework() -> None
 
 
 def test_ray_update_lock_wrapper_does_not_import_slime() -> None:
+    pytest.importorskip("ray")
     _assert_isolated_import(
         "import sys; sys.modules['slime'] = None; from reef.inference.sglang.lock import ReefRolloutLock"
     )

@@ -3,25 +3,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 import ray
 
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.launch import engine_environment
-from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceService
+from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceResources, InferenceService
 from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 
 # Keep the existing wire identifier while removing its implementation dependency.
 INFERENCE_PROTOCOL = "slime-sglang-control-v2"
-
-
-@runtime_checkable
-class SGLangResources(Protocol):
-    @property
-    def inference_placement(self) -> Any: ...
 
 
 class RayHealthProbe:
@@ -57,7 +51,7 @@ class SGLangInferenceService(InferenceService):
     def start(self, resources: DeploymentResources) -> InferenceConnection:
         if self._started or self._closed:
             raise RuntimeError("inference service can only be started once")
-        if not isinstance(resources, SGLangResources) or resources.inference_placement is None:
+        if not isinstance(resources, InferenceResources) or resources.inference_placement is None:
             raise ValueError("SGLang inference requires its supplied model reservations")
         self._started = True
         self._inference = RayExecutor(

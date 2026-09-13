@@ -19,10 +19,30 @@ from reef.runtime.inference import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
+from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 CREATE_RULES = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
+
+
+def test_proposals_and_step_records_are_independent_opt_in_capabilities() -> None:
+    class Records(StepRecords):
+        def read_step_records(self, directory, relative):
+            return {"files": []}
+
+    class Gate(ProposalGate):
+        @property
+        def proposals(self):
+            return None
+
+        def admit(self, entries, mutations):
+            return [], None
+
+    assert isinstance(Records(), StepRecords)
+    assert not isinstance(Records(), ProposalGate)
+    assert isinstance(Gate(), ProposalGate)
+    assert not isinstance(Gate(), StepRecords)
 
 
 def _recipe(

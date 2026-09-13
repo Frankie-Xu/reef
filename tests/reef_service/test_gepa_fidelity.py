@@ -22,7 +22,7 @@ gepa = pytest.importorskip("gepa")
 from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import GEPAProposer, GEPASelectorMixin
+from recipes.gepa.method import EpisodeRunner, Feedback, GEPAProposer, GEPASelectorMixin
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -52,6 +52,11 @@ def score_of(output: str) -> float:
 
 def feedback(task: str, output: str, score: float) -> str:
     return "correct" if score >= 1.0 else f"wrong for {task}"
+
+
+class ReefFeedback(Feedback):
+    def feedback(self, task: str, output: str, score: float) -> str:
+        return feedback(task, output, score)
 
 
 def reflect(prompt: str) -> str:
@@ -103,8 +108,8 @@ def run_upstream(run_dir: Path, budget: int):
     return result, log, GEPAState.load(str(run_dir)).i + 1
 
 
-class ReefEpisodes:
-    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
+class ReefEpisodes(EpisodeRunner):
+    def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         text = files["pi-agent/AGENTS.md"].rstrip("\n")
         return EpisodeResult(0, "", "", ({"role": "assistant", "content": output_for(text, prompt)},), ())
 
@@ -125,7 +130,7 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
         descriptor=get_adapter("pi"),
         binary=None,
         score_episode=resolve_episode_scorer(evaluate),
-        feedback=feedback,
+        feedback=ReefFeedback(),
         minibatch_size=3,
         rng_seed=0,
         skip_perfect_score=True,

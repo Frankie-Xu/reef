@@ -195,14 +195,17 @@ def test_driver_keeps_custom_task_hooks(load, monkeypatch):
     def scorer(task, result):
         return 0.5
 
-    def feedback(task, output, score):
-        return "custom"
+    from recipes.gepa.method import Feedback
 
-    config["recipe"]["config"]["evolution"].update(evaluate=scorer, feedback=feedback)
+    class CustomFeedback(Feedback):
+        def feedback(self, task, output, score):
+            return "custom"
+
+    config["recipe"]["config"]["evolution"].update(evaluate=scorer, feedback=CustomFeedback())
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
     assert recipe.score_episode("problem", pi_episode("anything")) == 0.5
-    assert recipe.feedback("problem", "anything", 0.5) == "custom"
+    assert recipe.feedback.feedback("problem", "anything", 0.5) == "custom"
 
 
 @pytest.mark.parametrize("already_initialized", [False, True])

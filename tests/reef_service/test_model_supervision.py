@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
-from reef.inference.sglang.service import RayHealthProbe
 from reef.runtime.adapters.ray import NamedRayTrainGroupHandle
 from reef.runtime.deployment import DeploymentHealth, ModelPlanSource
 from reef.service.training_driver import ModelDeployment, supervise_deployment
@@ -85,6 +84,8 @@ def test_recovery_requires_cleanup_and_preflight_and_obeys_stop(tmp_path, failur
 
 
 def test_pending_health_probe_is_not_failure_and_does_not_queue_more_work(monkeypatch):
+    pytest.importorskip("ray")
+    from reef.inference.sglang.service import RayHealthProbe
     from reef.train.slime_backend import resources
 
     submitted = []

@@ -12,7 +12,7 @@ import inspect
 import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
@@ -283,36 +283,9 @@ class Promoter(ABC):
         """Return the prompts this step should promote into the gate."""
 
 
-class PromotePolicy(Protocol):
-    """A plain promote callable, ``(samples, *, manifest=None) -> Sequence[str]``, the keyword optional."""
-
-    def __call__(self, samples: tuple[TraceSample, ...], /, **kwargs: Any) -> Sequence[str]: ...
-
-
-class _CallablePromoter(Promoter):
-    """Adapter wrapping a plain callable as a :class:`Promoter` instance."""
-
-    def __init__(self, policy: PromotePolicy) -> None:
-        self._policy = policy
-        self._forward_manifest = accepts_manifest(policy)
-
-    def __call__(
-        self,
-        samples: tuple[TraceSample, ...],
-        *,
-        manifest: FailureManifest | None = None,
-    ) -> Sequence[str]:
-        if self._forward_manifest:
-            return self._policy(samples, manifest=manifest)
-        return self._policy(samples)
-
-
 def resolve_promoter(value: object) -> Promoter:
-    """Resolve a callable or dotted reference into a :class:`Promoter` instance."""
-    if isinstance(value, Promoter):
-        return value
-    if callable(value):
-        return _CallablePromoter(value)
+    """Resolve a Promoter instance, subclass, or dotted reference to either."""
+    resolved = value
     if isinstance(value, str) and ":" in value:
         import importlib
 
@@ -321,8 +294,8 @@ def resolve_promoter(value: object) -> Promoter:
             resolved = getattr(importlib.import_module(module_name), attribute)
         except (ImportError, AttributeError) as exc:
             raise ValueError(f"cannot import promoter {value!r}: {exc}") from exc
-        if isinstance(resolved, Promoter):
-            return resolved
-        if callable(resolved):
-            return _CallablePromoter(resolved)
-    raise ValueError("promote must be a Promoter instance, a callable, or a dotted 'module:attribute' reference")
+    if isinstance(resolved, type) and issubclass(resolved, Promoter):
+        resolved = resolved()
+    if isinstance(resolved, Promoter):
+        return resolved
+    raise ValueError("promote must be a Promoter instance, subclass, or dotted 'module:attribute' reference")

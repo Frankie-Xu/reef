@@ -22,6 +22,7 @@ from reef.train.evaluation import (
     BackendEvaluateMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
+    CandidateSelector,
     EvaluationResult,
     RegressionGateMixin,
     SelectionDecision,
@@ -29,7 +30,7 @@ from reef.train.evaluation import (
 )
 
 
-class DecideOnlyBackend:
+class DecideOnlyBackend(CandidateEvaluator):
     """Stands in for the training backend: these cases exercise ``decide`` only."""
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
@@ -42,6 +43,28 @@ def evaluation() -> EvaluationResult:
         evaluator_version="2026-08-21",
         metrics={"candidate_reward": 0.8, "current_reward": 0.7},
     )
+
+
+def test_evaluation_and_selection_remain_independent_nominal_capabilities() -> None:
+    class Selector(CandidateSelector):
+        def decide(self, candidate, result):
+            return SelectionDecision("select", "test", "1", "accepted", result)
+
+    evaluator = DecideOnlyBackend()
+    selector = Selector()
+    assert isinstance(evaluator, CandidateEvaluator)
+    assert not isinstance(evaluator, (CandidateSelector, CandidateEvaluationPlugin))
+    assert isinstance(selector, CandidateSelector)
+    assert not isinstance(selector, (CandidateEvaluator, CandidateEvaluationPlugin))
+
+    class DuckPlugin:
+        def evaluate(self, candidate):
+            return evaluation()
+
+        def decide(self, candidate, result):
+            return selector.decide(candidate, result)
+
+    assert not isinstance(DuckPlugin(), (CandidateEvaluator, CandidateSelector, CandidateEvaluationPlugin))
 
 
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:

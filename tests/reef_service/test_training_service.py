@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("ray", reason="requires the optional Ray runtime")
+
 from reef.runtime.deployment import WeightTransferSession
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor

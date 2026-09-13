@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import Any, Protocol
+from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import ReefError
@@ -35,6 +35,18 @@ class UpstreamStatusError(ReefError):
 
 class InferenceHandler(ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
+
+    @classmethod
+    def from_config(
+        cls,
+        upstream_url: str,
+        *,
+        model_path: str,
+        timeout_s: float,
+        **config: Any,
+    ) -> InferenceHandler:
+        """Construct a configured handler; direct injection needs only inference()."""
+        raise ValueError(f"{cls.__name__} does not support deployment configuration")
 
     def reconnect(self, upstream_url: str) -> None:
         """Retarget a managed endpoint, preserving handler-specific configuration."""
@@ -73,19 +85,6 @@ class InferenceHandler(ABC):
         )
 
 
-class InferenceHandlerFactory(Protocol):
-    """Construct a deployment-selected request handler for one serving endpoint."""
-
-    def __call__(
-        self,
-        upstream_url: str,
-        *,
-        model_path: str,
-        timeout_s: float,
-        **config: Any,
-    ) -> InferenceHandler: ...
-
-
 class InferenceStream:
     """One open provider response whose bytes can be forwarded incrementally."""
 
@@ -121,7 +120,6 @@ class InferenceStream:
 
 __all__ = [
     "InferenceHandler",
-    "InferenceHandlerFactory",
     "InferenceStream",
     "UpstreamStatusError",
 ]

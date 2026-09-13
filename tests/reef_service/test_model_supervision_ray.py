@@ -14,6 +14,8 @@ from uuid import uuid4
 
 import pytest
 
+pytest.importorskip("ray", reason="requires the optional Ray runtime")
+
 from reef.inference.sglang.service import RayHealthProbe
 from reef.runtime.adapters.ray import connect_ray_runtime
 from reef.runtime.backends import InferenceBackend, TrainingBackend

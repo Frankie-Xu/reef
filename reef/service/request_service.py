@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
@@ -35,28 +35,10 @@ from reef.service.release_page import before_release_id, build_release_page
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 
 logger = logging.getLogger(__name__)
-
-
-@runtime_checkable
-class StepRecords(Protocol):
-    """A backend that can read its scenario-scoped retained step files."""
-
-    def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class ProposalGate(Protocol):
-    """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
-
-    @property
-    def proposals(self) -> ProposalInbox | None: ...
-
-    def admit(
-        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
-    ) -> tuple[list[dict[str, Any]], str | None]: ...
 
 
 def _random_harness_scenario_name() -> str:

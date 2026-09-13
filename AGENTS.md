@@ -92,7 +92,13 @@ for the environment required by the selected backend.
   code and naming; mypy checks `reef`. Match nearby code and add types to new
   or changed interfaces.
 - Prefer focused functions, data classes for values, and cohesive objects for
-  state and lifecycle. Use composition and named protocols for behavior.
+  state and lifecycle. Use composition and explicit abstract base classes for behavior.
+- Do not use `typing.Protocol`, `typing_extensions.Protocol`, or `runtime_checkable`.
+  Define an `ABC` and inherit it explicitly. CI checks all first-party Python files,
+  including tutorials, Docker/docs/CI scripts, and root files, without baseline exceptions.
+  Third-party code, local dependency/build trees, vendored benchmarks, published result
+  programs, and golden fixtures are excluded; see the paths in
+  [.github/scripts/check_python_design.py](.github/scripts/check_python_design.py).
 - Do not use `TYPE_CHECKING`. Fix dependency direction or move shared contracts
   so annotation imports work at runtime.
 - Do not model long-lived behavior as `Callable` constructor arguments,

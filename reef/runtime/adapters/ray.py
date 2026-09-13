@@ -17,12 +17,12 @@ from typing import Any
 from reef.core.config import config_option
 from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE, RuntimeConnectionConfig
 from reef.runtime.adapters.executor_training import connect_executor_runtimes
-from reef.runtime.adapters.http import build_http_inference_handler
+from reef.runtime.adapters.http import HttpInferenceHandler
 from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle
 from reef.runtime.base import InferenceRuntime, TrainingRuntime, TrainingRuntimeError
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.inference import InferenceHandlerFactory
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 
 RayRuntimeError = TrainingRuntimeError
@@ -116,7 +116,7 @@ def connect_ray_runtime(
     inference_timeout_s: float = 300.0,
     train_timeout_s: float | None = None,
     max_staleness: int = 0,
-    inference_handler_factory: InferenceHandlerFactory = build_http_inference_handler,
+    inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
     inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Connect to a named training actor and return separate training and inference runtimes.

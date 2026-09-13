@@ -465,7 +465,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         {"EVALUATION_TOKEN": "secret"},
         config={
             "evaluation": {
-                "module": "reef_service._candidate_evaluation_plugin:build_evaluator",
+                "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
                 "config": {
                     "score": 0.25,
                     "threshold": 0.8,
