@@ -12,7 +12,7 @@ A method fills three slots:
 
 .. code:: python
 
-   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | None: ...
+   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
    def evaluate(task, result) -> float: ...
    class Selection:  # optional
        def decide(self, candidate, evaluation) -> SelectionDecision: ...
@@ -26,13 +26,20 @@ as ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The
 binding returns the assistant text. ``propose`` returns one ``Mutation``
 (``create``, ``update``, or
 ``remove`` on one root-level entry), a sequence applied as one composite
-proposal under one verdict, or ``None`` to skip. An optional keyword-only
+proposal under one verdict, or ``None`` to skip. It may also return a
+``StepProposal(mutations, notes)``: the same mutations plus ``notes``, a JSON
+mapping (a plan, a review verdict, what the method could not honor) that the
+step records under the commit metrics key ``proposal_notes`` and never reads;
+empty mutations skip the step as ``None`` does. An optional keyword-only
 ``manifest`` argument receives the previous step's ``FailureManifest``, and an
 optional keyword-only ``rejected`` argument receives the recent rejected
 proposals, oldest first, each a mapping of ``step``, ``mutations`` (each with
 its ``op``, ``id`` and the ``options`` it carried, ``None`` for a remove), and
 the verdict's ``reason``; a method uses it to stop re-proposing what the gate
 already refused, and can read the refused content rather than only its id.
+An optional keyword-only ``entries`` argument receives the tree as entry
+options, ``{"id", "name", "config"}`` mappings in tree order, so an ``update``
+or ``remove`` can name the entry it targets instead of creating a second one.
 Reef passes each keyword only to a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every
@@ -47,7 +54,11 @@ returns. Without it every failing trace's user prompt is promoted.
 
 ``selection`` defaults to ``score_comparison``: select when the candidate wins
 more task comparisons than it loses, by more than ``evolution.min_win_margin``
-when that is set. ``always`` selects every applied mutation.
+when that is set. ``floor`` runs the candidate alone and selects it when every
+gate task scores at least ``evolution.floor_score`` (default ``1.0``; an
+episode that could not run missed the floor): a floor is absolute, not a
+comparison, so the current release is not run and ``current_scores`` is empty.
+``always`` selects every applied mutation.
 
 .. warning::
 

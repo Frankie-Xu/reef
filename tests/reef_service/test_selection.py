@@ -15,7 +15,7 @@ import pytest
 
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.train.backend import TrainingBackend
-from reef.train.cordis_backend import ScoreComparisonMixin, ScoreComparisonPlugin
+from reef.train.cordis_backend import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
 from reef.train.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
@@ -47,13 +47,13 @@ def evaluation() -> EvaluationResult:
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:
     assert issubclass(TrainingBackend, CandidateEvaluator)
     # The shipped plugins are whole plugins: they evaluate and decide.
-    for plugin in (BackendAlwaysSelectPlugin, ScoreComparisonPlugin):
+    for plugin in (BackendAlwaysSelectPlugin, ScoreComparisonPlugin, FloorPlugin):
         assert issubclass(plugin, CandidateEvaluationPlugin)
         assert callable(plugin.evaluate)
         assert callable(plugin.decide)
     # The policies are mixins: they supply decide() and stay abstract on the half
     # they do not implement, so a mixin cannot stand up as a plugin on its own.
-    for mixin in (AlwaysSelectMixin, RegressionGateMixin, ScoreComparisonMixin):
+    for mixin in (AlwaysSelectMixin, RegressionGateMixin, ScoreComparisonMixin, FloorMixin):
         assert callable(mixin.decide)
         assert mixin.__abstractmethods__ == frozenset({"evaluate"})
     assert BackendEvaluateMixin.__abstractmethods__ == frozenset({"decide"})

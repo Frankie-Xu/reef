@@ -26,6 +26,7 @@ from reef_service.test_harness_wrapper import _ask_tree, _write_spool_entry
 from reef_service.test_reef_trainer_contracts import ExampleBackend
 
 from reef.core import AgentRecord, RequestType
+from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
 from reef.harness.client.wrapper import harness
 from reef.recipe.cordis import CordisRecipe
@@ -378,12 +379,19 @@ def test_the_merge_takes_the_proposers_items_by_name_wherever_it_put_them(caplog
     base = ({"name": "A", "kind": "env"},)
     item = {"name": "B", "kind": "env"}
     for handed in ([*base, item], [item, *base], [item]):
-        assert _merged_requires(base, handed) == [*base, item]
-    assert _merged_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == [*base]
+        assert _merged_requires(base, handed) == ([*base, item], [])
+    assert _merged_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == ([*base], [])
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        merged = _merged_requires(base, [item, {"name": "bad", "kind": "secret"}, {"name": "C", "kind": "service"}])
-        assert _merged_requires(base, "nope") == [*base] and _merged_requires(base, None) == [*base]
+        merged, refused = _merged_requires(
+            base, [item, {"name": "bad", "kind": "secret"}, {"name": "C", "kind": "service"}]
+        )
+        # What was dropped is returned with its reason, so the step records it beside the kept list.
+        assert _merged_requires(base, "nope") == ([*base], [{"item": "nope", "reason": "not a list"}])
+        assert _merged_requires(base, None) == ([*base], [])
     assert merged == [*base, item, {"name": "C", "kind": "service"}]
+    assert refused == [
+        {"item": {"name": "bad", "kind": "secret"}, "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"}
+    ]
     dropped = [record.getMessage() for record in caplog.records if "it added" in record.getMessage()]
     assert len(dropped) == 2 and "kind must be one of" in dropped[0] and "not a list" in dropped[1]
 

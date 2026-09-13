@@ -58,7 +58,14 @@ from reef.train.cordis_backend.manifest import FailureManifest, FailureObservati
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
-from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, accepts_keyword, accepts_manifest
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    StepProposal,
+    accepts_keyword,
+    accepts_manifest,
+)
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TraceBatch, TraceSample, TrainingBatch, TrainStepResult
 
@@ -197,6 +204,8 @@ RECORD_PROPOSER_FILE = "proposer.json"
 RECORD_MUTATIONS_FILE = "mutations.json"
 RECORD_EPISODES_DIR = "episodes"
 RECORD_EPISODE_FILE = "episode.json"
+#: The trees a gate step runs, in pairing order; a policy that gates the candidate alone names the first only.
+GATE_SIDES: tuple[str, ...] = ("candidate", "current")
 
 
 def _clip(text: str) -> str:
@@ -474,6 +483,55 @@ class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
         self._backend = backend
 
 
+class FloorMixin(CandidateEvaluationPlugin):
+    """Give a plugin a ``decide()`` that selects when every gate task scores at least ``floor_score``.
+
+    A floor is absolute, not a comparison: only the candidate's scores are
+    read, and an episode that could not run (score ``None``) missed it.
+    """
+
+    def __init__(self, *, floor_score: float = 1.0) -> None:
+        if (
+            isinstance(floor_score, bool)
+            or not isinstance(floor_score, (int, float))
+            or not math.isfinite(floor_score)
+            or floor_score <= 0
+        ):
+            raise ValueError("floor_score must be a positive number")
+        super().__init__()
+        self._floor_score = float(floor_score)
+
+    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
+        scores = tuple(evaluation.metrics.get("candidate_scores", ()))
+        passed = sum(1 for score in scores if score is not None and score >= self._floor_score)
+        failed = len(scores) - passed
+        if not scores:
+            reason = "no gate task was scored"
+        elif failed:
+            reason = f"candidate missed the floor on {failed} of {len(scores)} tasks"
+        else:
+            reason = f"candidate met the floor on all {len(scores)} tasks"
+        return SelectionDecision(
+            outcome="select" if scores and not failed else "reject",
+            policy="floor",
+            policy_version="1",
+            reason=reason,
+            evaluation=evaluation,
+            metrics={"passed": passed, "failed": failed, "floor_score": self._floor_score},
+        )
+
+
+class FloorPlugin(FloorMixin, BackendEvaluateMixin):
+    """Gate the candidate alone through the backend, decide by the floor; the current release is not run."""
+
+    def __init__(self, backend: Any, *, floor_score: float = 1.0) -> None:
+        super().__init__(floor_score=floor_score)
+        self._backend = backend
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        return self._backend.evaluate(candidate, sides=("candidate",))
+
+
 def _score_vectors(
     evaluation: EvaluationResult,
 ) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
@@ -572,6 +630,7 @@ class CordisBackend(TrainingBackend):
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
         self._propose_accepts_rejected = accepts_keyword(propose.__call__, "rejected")
         self._propose_accepts_sources = accepts_keyword(propose.__call__, "sources")
+        self._propose_accepts_entries = accepts_keyword(propose.__call__, "entries")
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -875,6 +934,9 @@ class CordisBackend(TrainingBackend):
                 extra["rejected"] = tuple(rejected)
             if self._propose_accepts_sources:
                 extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
+            if self._propose_accepts_entries:
+                # The tree as entry options, so a method can name the entry an update or remove targets.
+                extra["entries"] = tuple(dict(entry) for entry in snapshot)
             handed: dict[str, Any] | None = None
             if batch.request is not None:
                 if not self._propose.reads_requests:
@@ -892,11 +954,16 @@ class CordisBackend(TrainingBackend):
             # Recorded, not charged: the platform meters served traffic, the evolve step only counts its own.
             metrics["proposer_input_tokens"], metrics["proposer_output_tokens"] = _proposer_tokens(record)
             if batch.request is not None and handed is not None:
-                metrics["training_request"] = {
-                    "id": batch.request.id,
-                    **batch.request.to_dict(),
-                    "requires": _merged_requires(batch.request.requires, handed.get("requires")),
-                }
+                requires, refused = _merged_requires(batch.request.requires, handed.get("requires"))
+                metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
+                if refused:
+                    metrics["training_request"]["refused_requires"] = refused
+            if isinstance(proposal, StepProposal):
+                # The notes are the method's own record of the step; the backend writes them and never reads them.
+                notes = _bounded(proposal.notes)
+                if notes:
+                    metrics["proposal_notes"] = notes
+                proposal = proposal.mutations
             mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
         # like the proposer's traffic: the tree boundary has not seen it yet.
@@ -928,13 +995,23 @@ class CordisBackend(TrainingBackend):
             metrics=metrics,
         )
 
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+    def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = GATE_SIDES) -> EvaluationResult:
+        """Run the gate episodes of the named ``sides`` and return their scores.
+
+        The default runs the candidate and the current tree as pairs. A policy
+        that gates the candidate alone (a floor) passes ``("candidate",)``: no
+        current episode runs, ``current_scores`` is empty and the other
+        ``current_*`` keys are absent, and ``gate_sides`` records the choice.
+        """
         candidate = self._require_harness_candidate(candidate)
+        sides = tuple(sides)
+        if not sides or any(side not in GATE_SIDES for side in sides):
+            raise ValueError(f"sides must name one or both of {GATE_SIDES}, got {sides!r}")
         # Episodes run against the tree plus the model binding. The binding
         # is appended at render time and never enters the candidate's files,
         # so the published artifact carries no endpoint or credential.
-        candidate_files = self._render_for_episode(candidate.candidate_entries)
-        current_files = self._render_for_episode(candidate.current_entries)
+        entries = {"candidate": candidate.candidate_entries, "current": candidate.current_entries}
+        files = {side: self._render_for_episode(entries[side]) for side in sides}
         # Episodes interleave candidate and current inside each pairing, so
         # anything that drifts during the run (upstream load, rate limits)
         # lands on both sides of a pair instead of one whole side. A repeat
@@ -948,42 +1025,33 @@ class CordisBackend(TrainingBackend):
         gate_tasks = candidate.gate_tasks or self._tasks
         episodes_dir = None if candidate.record_dir is None else candidate.record_dir / RECORD_EPISODES_DIR
         pairings = [
-            (files, task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
+            (files[side], task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
             for index, task in enumerate(gate_tasks)
             for repeat in range(self._episode_repeats)
-            for side, files in (("candidate", candidate_files), ("current", current_files))
+            for side in sides
         ]
         scored = self._evaluate_pairings(pairings)
-        candidate_runs = scored[0::2]
-        current_runs = scored[1::2]
-        candidate_scores = tuple(run.score for run in candidate_runs)
-        current_scores = tuple(run.score for run in current_runs)
-        return EvaluationResult(
-            evaluator="harness_episode_pairs",
-            evaluator_version="1",
-            metrics={
-                "candidate_scores": candidate_scores,
-                "current_scores": current_scores,
-                # Failure observations ride the evaluation so settlement can
-                # build the committed side's manifest from the decision alone.
-                "candidate_failures": tuple(
-                    run.failure.to_dict() for run in candidate_runs if run.failure is not None
-                ),
-                "current_failures": tuple(run.failure.to_dict() for run in current_runs if run.failure is not None),
-                "episode_failures": sum(score is None for score in candidate_scores + current_scores),
-                "episode_repeats": self._episode_repeats,
-                "candidate_residue": sum(run.residue for run in candidate_runs),
-                "current_residue": sum(run.residue for run in current_runs),
-                "candidate_score": float(sum(score for score in candidate_scores if score is not None)),
-                "current_score": float(sum(score for score in current_scores if score is not None)),
-                # Per agent sums over the side's episodes, so a verdict says which agent did the work.
-                "candidate_agents": _sum_agents(run.agents for run in candidate_runs),
-                "current_agents": _sum_agents(run.agents for run in current_runs),
-                # Per episode, in pairing order: the root's stage path and how its turn ended.
-                "candidate_paths": tuple(run.path for run in candidate_runs),
-                "current_paths": tuple(run.path for run in current_runs),
-            },
-        )
+        runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
+        scores = {side: tuple(run.score for run in runs[side]) for side in sides}
+        metrics: dict[str, Any] = {
+            "candidate_scores": scores.get("candidate", ()),
+            "current_scores": scores.get("current", ()),
+            "episode_failures": sum(score is None for side in sides for score in scores[side]),
+            "episode_repeats": self._episode_repeats,
+        }
+        for side in sides:
+            # Failure observations ride the evaluation so settlement can
+            # build the committed side's manifest from the decision alone.
+            metrics[f"{side}_failures"] = tuple(run.failure.to_dict() for run in runs[side] if run.failure is not None)
+            metrics[f"{side}_residue"] = sum(run.residue for run in runs[side])
+            metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
+            # Per agent sums over the side's episodes, so a verdict says which agent did the work.
+            metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
+            # Per episode, in pairing order: the root's stage path and how its turn ended.
+            metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
+        if sides != GATE_SIDES:
+            metrics["gate_sides"] = list(sides)
+        return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
 
     def settle_step(
         self,
@@ -1005,19 +1073,23 @@ class CordisBackend(TrainingBackend):
 
         # The manifest describes the composition this step commits: the
         # candidate when selected, otherwise the retained current tree.
+        committed_side = "candidate" if decision.selected else "current"
         observed = candidate_failures if decision.selected else current_failures
         previous_state = prepared.state.get("failure_manifest")
         previous = None if previous_state is None else FailureManifest.from_state(previous_state)
-        manifest = advance(
-            previous,
-            int(prepared.state["steps"]),
-            tuple(FailureObservation.from_dict(value) for value in observed),
-        )
-        metrics["failures"] = {
-            "new": len(manifest.new),
-            "persisting": len(manifest.persisting),
-            "fixed": len(manifest.fixed),
-        }
+        # A side the gate did not run showed nothing, so its manifest carries over untouched, as through a skip.
+        manifest = None
+        if committed_side in evaluation_metrics.get("gate_sides", GATE_SIDES):
+            manifest = advance(
+                previous,
+                int(prepared.state["steps"]),
+                tuple(FailureObservation.from_dict(value) for value in observed),
+            )
+            metrics["failures"] = {
+                "new": len(manifest.new),
+                "persisting": len(manifest.persisting),
+                "fixed": len(manifest.fixed),
+            }
         # A recheck is not a proposal, so it leaves the failure streak alone.
         if candidate.recheck:
             streak = int(prepared.state.get("failure_streak", 0))
@@ -1036,7 +1108,9 @@ class CordisBackend(TrainingBackend):
         elif decision.selected and self._recheck_every:
             rollback_entries = list(candidate.current_entries)
             rollback_gated_against = metrics["gated_against"]
-        state = {**prepared.state, "failure_manifest": manifest.to_state(), "failure_streak": streak}
+        state = {**prepared.state, "failure_streak": streak}
+        if manifest is not None:
+            state["failure_manifest"] = manifest.to_state()
         state.pop("rollback_entries", None)
         state.pop("rollback_gated_against", None)
         if rollback_entries is not None:
@@ -1221,21 +1295,27 @@ class CordisBackend(TrainingBackend):
         return _load_error(self._loader, id_, self._descriptor)
 
 
-def _proposer_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[dict[str, Any]]:
+def _proposer_requires(
+    base: Sequence[Mapping[str, Any]], handed: object
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The items a proposer added to its request mapping, each under the shape and text screens admission runs.
 
     An item is the proposer's when its name is not among the person's
     ``base`` items, wherever the proposer put it; one that is malformed, or
     whose name or check is credential or directive shaped, is dropped alone
-    and named once in the log, the rest stand and the mutations stand."""
+    and named once in the log, the rest stand and the mutations stand.
+    Returns the kept items and the refused ones, each refused as the bounded
+    ``item`` with the ``reason`` it was dropped, so the step can record them."""
     log = logging.getLogger(__name__)
+    added: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
     if handed is None:
-        return []
+        return added, refused
     if not isinstance(handed, Sequence) or isinstance(handed, (str, bytes)):
         log.warning("propose: the requires it added are dropped: not a list")
-        return []
+        refused.append({"item": _bounded(handed), "reason": "not a list"})
+        return added, refused
     names = {str(item.get("name")) for item in base}
-    added: list[dict[str, Any]] = []
     for item in handed:
         # The person's items passed admission and the person's copy wins: an edit of one is not the proposer's.
         if isinstance(item, Mapping) and str(item.get("name")) in names:
@@ -1244,21 +1324,30 @@ def _proposer_requires(base: Sequence[Mapping[str, Any]], handed: object) -> lis
             (parsed,) = parse_requires([item])
         except ValueError as error:
             log.warning("propose: a requires item it added is dropped: %s", error)
+            refused.append({"item": _bounded(item), "reason": str(error)})
             continue
         texts = (parsed["name"], str(parsed.get("check") or ""))
         if any(secret_shaped(text) for text in texts):
             log.warning("propose: a requires item it added carries a credential shaped literal; dropped")
+            refused.append({"item": _bounded(item), "reason": "carries a credential shaped literal"})
             continue
         if any(directive_shaped(text) for text in texts):
             log.warning("propose: a requires item it added carries an instruction override phrasing; dropped")
+            refused.append({"item": _bounded(item), "reason": "carries an instruction override phrasing"})
             continue
         added.append(parsed)
-    return added
+    return added, refused
 
 
-def _merged_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[dict[str, Any]]:
-    """The person's items, then what the proposer added by name, capped at ``MAX_REQUIRES`` naming the dropped."""
-    merged = merge_requires(base, _proposer_requires(base, handed))
+def _merged_requires(
+    base: Sequence[Mapping[str, Any]], handed: object
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The person's items, then what the proposer added by name, capped at ``MAX_REQUIRES`` naming the dropped.
+
+    Returned with what :func:`_proposer_requires` refused, so the commit
+    records the items the person will not see in the list."""
+    added, refused = _proposer_requires(base, handed)
+    merged = merge_requires(base, added)
     if len(merged) > MAX_REQUIRES:
         logging.getLogger(__name__).warning(
             "propose: requires capped at %d items; dropped: %s",
@@ -1266,7 +1355,7 @@ def _merged_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[
             ", ".join(str(item["name"]) for item in merged[MAX_REQUIRES:]),
         )
         merged = merged[:MAX_REQUIRES]
-    return merged
+    return merged, refused
 
 
 def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
