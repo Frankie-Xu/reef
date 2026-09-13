@@ -399,8 +399,8 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
             self.rank = rank
             self.version = None
 
-        def pull_weights(self, sequence):
-            events.append(("pull", self.rank, sequence))
+        def pull_weights(self, sequence, *, source_dir, local_checkpoint_dir):
+            events.append(("pull", self.rank, (sequence, source_dir, local_checkpoint_dir)))
 
         def pause_generation(self, mode):
             events.append(("pause", self.rank, mode))
@@ -461,7 +461,10 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
         if manage_generation and not mismatch:
             phases += ["continue", "continue"]
         assert [event[0] for event in events] == phases
-        assert sorted(event for event in events if event[0] == "pull") == [("pull", 0, 6), ("pull", 1, 6)]
+        assert sorted(event for event in events if event[0] == "pull") == [
+            ("pull", 0, (6, str(tmp_path), local_checkpoint)),
+            ("pull", 1, (6, str(tmp_path), local_checkpoint)),
+        ]
         assert sorted(event for event in events if event[0] == "update") == [
             ("update", 0, (local_checkpoint, "deployment:6")),
             ("update", 1, (local_checkpoint, "deployment:6")),

@@ -320,7 +320,15 @@ class SlimeTrainGroup:
         serving = RayExecutor.from_workers(engines)
 
         if self.args.update_weight_local_checkpoint_dir:
-            serving.collective_rpc("pull_weights", args=(disk_sequence,), timeout=TRAIN_RPC_TIMEOUT_S)
+            serving.collective_rpc(
+                "pull_weights",
+                args=(disk_sequence,),
+                kwargs={
+                    "source_dir": self.args.update_weight_disk_dir,
+                    "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
+                },
+                timeout=TRAIN_RPC_TIMEOUT_S,
+            )
             model_path = self.args.update_weight_local_checkpoint_dir
         else:
             model_path = str(disk_weight_dir)

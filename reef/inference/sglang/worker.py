@@ -179,6 +179,13 @@ class SGLangWorker:
         return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def check_health(self):
+        """Raise if a monitor failed or a live engine actor is unreachable.
+
+        Only live engines are probed. A ``None`` slot is an engine the owner
+        already retired (a failed health probe or an aborted weight update) and
+        will replace through recovery; reporting it here again would turn an
+        in-progress, recoverable publication into a deployment failure.
+        """
         for monitor in self._health_monitors:
             monitor.check_health()
         engines = [engine for server in self.servers.values() for engine in server.all_engines if engine is not None]
