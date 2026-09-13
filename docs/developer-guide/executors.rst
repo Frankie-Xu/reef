@@ -505,8 +505,8 @@ Inference recovery and reconnect
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``reef.runtime.recovery.InferenceControl`` owns pause intent and
-recovery/reconnect ordering through three backend contracts: ``InferenceEngines``
-for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
+recovery/reconnect ordering through three backend contracts defined beside it
+in ``reef.runtime.recovery``: ``InferenceEngines`` for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
 and replacement, and ``InferenceMonitor`` for background recovery. The SGLang
 inference worker supplies these adapters; engine handles, GPU topology and Ray
 fan-out remain private to it. The existing training-side RPC vocabulary and

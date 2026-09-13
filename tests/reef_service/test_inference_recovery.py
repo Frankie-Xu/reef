@@ -2,9 +2,14 @@
 
 import pytest
 
-from reef.runtime.interfaces import InferenceEngines, InferenceMonitor, WeightUpdateConnection
 from reef.runtime.publication import WeightUpdateLock
-from reef.runtime.recovery import FileTrainingJobStore, InferenceControl
+from reef.runtime.recovery import (
+    FileTrainingJobStore,
+    InferenceControl,
+    InferenceEngines,
+    InferenceMonitor,
+    WeightUpdateConnection,
+)
 
 
 class MemoryEngines(InferenceEngines):

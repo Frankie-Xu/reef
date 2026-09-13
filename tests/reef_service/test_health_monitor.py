@@ -5,8 +5,7 @@ from time import monotonic
 
 import pytest
 
-from reef.runtime.interfaces import EngineHealthChecks, EngineHealthTarget
-from reef.runtime.recovery import EngineHealthMonitor, HealthMonitorConfig
+from reef.runtime.recovery import EngineHealthChecks, EngineHealthMonitor, EngineHealthTarget, HealthMonitorConfig
 
 
 class Target(EngineHealthTarget):

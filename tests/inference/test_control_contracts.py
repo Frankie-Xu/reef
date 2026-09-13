@@ -3,12 +3,11 @@
 import pytest
 
 from reef.runtime.executor.failure import ExecutorFailureListener
-from reef.runtime.interfaces import (
-    AdapterEngine,
+from reef.runtime.interfaces import AdapterEngine, InferenceMemoryOperations
+from reef.runtime.recovery import (
     EngineHealthChecks,
     EngineHealthTarget,
     InferenceEngines,
-    InferenceMemoryOperations,
     InferenceMonitor,
     WeightUpdateConnection,
 )

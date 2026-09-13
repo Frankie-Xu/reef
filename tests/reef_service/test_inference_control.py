@@ -208,8 +208,7 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
 
 def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
     from reef.inference.sglang.lock import ReefRolloutLock
-    from reef.runtime.interfaces import InferenceEngines, InferenceMonitor, WeightUpdateConnection
-    from reef.runtime.recovery import InferenceControl
+    from reef.runtime.recovery import InferenceControl, InferenceEngines, InferenceMonitor, WeightUpdateConnection
 
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)

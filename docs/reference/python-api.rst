@@ -68,6 +68,10 @@ interface used by recipes and serving. The two sides are independent:
    from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
 
 The native contracts are abstract base classes in ``reef/runtime/interfaces.py``.
+The engine supervision hooks an inference integration also implements
+(``InferenceEngines``, ``InferenceMonitor``, ``WeightUpdateConnection``,
+``EngineHealthChecks``, ``EngineHealthTarget``) live in
+``reef/runtime/recovery.py``, next to the objects that drive them.
 Implementations inherit the corresponding interface and provide every abstract
 operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
 SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's

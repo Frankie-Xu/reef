@@ -2,9 +2,12 @@
 
 - Durable files: atomic JSON writes, the training-job marker and its state
   machine, and the per-scenario publication history.
-- Inference supervision: :class:`InferenceControl` pauses and recovers engines
-  around weight updates; :class:`EngineHealthMonitor` probes them in the
-  background without racing those barriers.
+- Inference supervision: the hooks an integration implements
+  (:class:`InferenceEngines`, :class:`InferenceMonitor`,
+  :class:`WeightUpdateConnection`, :class:`EngineHealthChecks`), and the
+  objects that drive them: :class:`InferenceControl` pauses and recovers
+  engines around weight updates; :class:`EngineHealthMonitor` probes them in
+  the background without racing those barriers.
 - :class:`TrainingRecovery` rebuilds serving state at coordinator startup from
   the marker, behind the publication commit gate.
 """
@@ -16,7 +19,8 @@ import logging
 import math
 import os
 import tempfile
-from collections.abc import Mapping
+from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Thread
@@ -24,15 +28,11 @@ from time import monotonic
 from typing import Any, Literal
 
 from reef.runtime.interfaces import (
-    EngineHealthChecks,
-    InferenceEngines,
-    InferenceMonitor,
     MarkerStatus,
     RuntimeLoadId,
     ScenarioHistoryStore,
     TrainingJobResult,
     TrainingJobStore,
-    WeightUpdateConnection,
 )
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
 
@@ -397,6 +397,75 @@ def _parse_history(value: Mapping[str, Any], path: Path) -> dict[str, dict[str, 
 
 
 # -- Inference supervision ----------------------------------------------------
+
+
+# The hooks an inference integration implements so the objects below can pause,
+# probe, recover and replace its engines without importing the integration.
+
+
+class InferenceEngines(ABC):
+    """Concrete operations on the inference engines attached to a trainer."""
+
+    @property
+    @abstractmethod
+    def owned(self) -> bool:
+        """Whether engine replacement is controlled by this deployment."""
+
+    @abstractmethod
+    def pause(self) -> object: ...
+
+    @abstractmethod
+    def resume(self) -> object: ...
+
+    @abstractmethod
+    def recover(self) -> None:
+        """Replace dead engines; preserve healthy engines and initial attachment."""
+
+    @abstractmethod
+    def terminate(self) -> int:
+        """Retire owned engines after an uncertain update; never kill borrowed engines."""
+
+
+class InferenceMonitor(ABC):
+    """Background engine monitoring must respect publication/recovery barriers."""
+
+    @abstractmethod
+    def pause(self) -> None:
+        """Drain active checks and retirement before engine mutation; raise on timeout."""
+
+    @abstractmethod
+    def resume(self) -> None: ...
+
+
+class WeightUpdateConnection(ABC):
+    """Connection fencing for direct worker-to-engine weight transport."""
+
+    @abstractmethod
+    def is_usable(self) -> bool:
+        """True only when the update lock is known to be idle and unpoisoned."""
+
+    @abstractmethod
+    def replace(self) -> None:
+        """Replace the uncertain update lock; existing worker connections become stale."""
+
+
+class EngineHealthTarget(ABC):
+    """One captured engine identity, including any nodes that retire together."""
+
+    @abstractmethod
+    def check(self, timeout: float) -> None:
+        """Raise on failure and bound the probe by the supplied timeout."""
+
+    @abstractmethod
+    def retire(self, timeout: float) -> None:
+        """Retire captured handles only; never substitute newer occupants of their slots."""
+
+
+class EngineHealthChecks(ABC):
+    """Snapshot current targets without changing engine ownership."""
+
+    @abstractmethod
+    def targets(self) -> Sequence[EngineHealthTarget]: ...
 
 
 class InferenceControl:

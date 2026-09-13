@@ -8,17 +8,17 @@ Who implements what:
 - A training integration *implements* ``TrainingBackend`` (with
   ``PreparedTrainingJob``) so Reef's coordinator can drive it.
 - An inference integration *implements* ``InferenceHandler`` for requests,
-  ``InferenceBackend`` for weight receipt, and the engine supervision hooks
-  (``InferenceEngines``, ``InferenceMonitor``, ``WeightUpdateConnection``,
-  ``EngineHealthTarget``/``EngineHealthChecks``, ``InferenceMemoryOperations``,
-  ``AdapterEngine``) that ``recovery`` and ``publication`` call back into.
+  ``InferenceBackend`` for weight receipt, and ``InferenceMemoryOperations``
+  and ``AdapterEngine`` for the memory and adapter operations ``scheduler``
+  and ``publication`` call back into. The engine supervision hooks live in
+  ``recovery`` next to the objects that drive them.
 - Reef itself implements the durable stores (``TrainingJobStore``,
   ``ScenarioHistoryStore``); they are abstract here only so ``publication``
   and ``recovery`` can share them without importing each other.
 
 The module reads top-down in that order: identities and errors, training
 values, request admission, request handling, runtime contracts, native
-backend contracts, engine supervision, durable stores.
+backend contracts, durable stores.
 """
 
 from __future__ import annotations
@@ -816,74 +816,6 @@ class InferenceMemoryOperations(ABC):
 
     @abstractmethod
     def resume(self, regions: Sequence[str]) -> None: ...
-
-
-# -- Engine supervision -------------------------------------------------------
-
-
-class InferenceEngines(ABC):
-    """Concrete operations on the inference engines attached to a trainer."""
-
-    @property
-    @abstractmethod
-    def owned(self) -> bool:
-        """Whether engine replacement is controlled by this deployment."""
-
-    @abstractmethod
-    def pause(self) -> object: ...
-
-    @abstractmethod
-    def resume(self) -> object: ...
-
-    @abstractmethod
-    def recover(self) -> None:
-        """Replace dead engines; preserve healthy engines and initial attachment."""
-
-    @abstractmethod
-    def terminate(self) -> int:
-        """Retire owned engines after an uncertain update; never kill borrowed engines."""
-
-
-class InferenceMonitor(ABC):
-    """Background engine monitoring must respect publication/recovery barriers."""
-
-    @abstractmethod
-    def pause(self) -> None:
-        """Drain active checks and retirement before engine mutation; raise on timeout."""
-
-    @abstractmethod
-    def resume(self) -> None: ...
-
-
-class WeightUpdateConnection(ABC):
-    """Connection fencing for direct worker-to-engine weight transport."""
-
-    @abstractmethod
-    def is_usable(self) -> bool:
-        """True only when the update lock is known to be idle and unpoisoned."""
-
-    @abstractmethod
-    def replace(self) -> None:
-        """Replace the uncertain update lock; existing worker connections become stale."""
-
-
-class EngineHealthTarget(ABC):
-    """One captured engine identity, including any nodes that retire together."""
-
-    @abstractmethod
-    def check(self, timeout: float) -> None:
-        """Raise on failure and bound the probe by the supplied timeout."""
-
-    @abstractmethod
-    def retire(self, timeout: float) -> None:
-        """Retire captured handles only; never substitute newer occupants of their slots."""
-
-
-class EngineHealthChecks(ABC):
-    """Snapshot current targets without changing engine ownership."""
-
-    @abstractmethod
-    def targets(self) -> Sequence[EngineHealthTarget]: ...
 
 
 # -- Durable stores -----------------------------------------------------------
