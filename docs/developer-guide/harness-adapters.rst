@@ -574,9 +574,12 @@ two commands, two tools and two event handlers:
   clarifications, a ``Clarifications:`` block of ``- Q:`` / ``A:`` pairs,
   capped at 4000 characters, filed the way the command files it. It returns
   ``filed request <id>; reef is running the step, which usually takes one to
-  three minutes, and will report here when it settles`` and throws the
-  command's error messages; the command's own filing notifies the same
-  expected time.
+  three minutes, and will report here when it settles. Watch it here:
+  <link>`` and throws the command's error messages; the command's own filing
+  notifies the same expected time and the same link. The link is the
+  request's page, ``GET /reef/harness/requests/<id>/page`` with ``scenario``
+  and, when ``REEF_TOKEN`` is set, ``token`` as query parameters, so a
+  browser opens it without the headers.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
   <id> queued`` and, once the request's record (``GET
   /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
@@ -585,29 +588,48 @@ two commands, two tools and two event handlers:
   keeps the footer as it was. Meanwhile the extension polls ``GET
   /reef/harness/releases`` every ``REEF_HARNESS_WATCH_MS`` milliseconds
   (5000 by default) for the row whose ``metrics.training_request.id`` is the
-  filed record, for at most 30 minutes; one watch runs at a time, a second
-  filing replaces the first, and ``session_shutdown`` clears it. When the row
-  appears, one notice quotes the request's first 60 characters and names the
-  next action by verdict: a selected release says to restart ``reef-pi``
-  (the update notice offers it); a pending one to review it with
-  ``/reef-versions <step>`` and promote; a rejected step quotes
+  filed record, for at most 30 minutes, checked on every tick; one watch
+  runs at a time, a second filing replaces the first, and
+  ``session_shutdown`` clears it. Every fetch the extension makes carries an
+  abort signal with a 10 s deadline (``REEF_HARNESS_FETCH_MS`` shortens it),
+  so a hung read costs one poll, not every later tick. When the row appears,
+  the report quotes the request's first 60 characters and names the next
+  action by verdict: a selected release says to restart ``reef-pi`` (the
+  update notice offers it); a pending one says ``This release changes an
+  extension, so it is not installed until you promote it: /reef-versions
+  <step> promote. Page: <link>``; a rejected step quotes
   ``selection.reason`` and says to rephrase or split the request; a skipped
   step quotes ``metrics.skipped`` and, when the step recorded one,
   ``proposal_notes.failure``, why the proposer produced nothing. The
   selected, rejected and skipped lines end with ``Details: /reef-versions
   <step>.``; ``Not covered: ...`` follows when the step's
-  ``proposal_notes.review.uncovered`` lists items. Past the cap the watch
-  says ``/reef-versions`` shows the verdict when it settles.
+  ``proposal_notes.review.uncovered`` lists items. The report is delivered
+  twice on purpose: as a custom message (``pi.sendMessage`` with
+  ``customType: "reef-harness"`` and ``triggerTurn: false``), which the chat
+  renders and the session file keeps, and as a notice, which the next
+  status line may overwrite. Past the cap the watch says ``/reef-versions``
+  shows the verdict when it settles.
+- The filed requests not yet reported are kept in
+  ``.reef-harness-requests.json`` beside the release file, as ``{id, text,
+  filed_at}`` entries (the newest ten, none older than a day), and dropped
+  once reported. At ``session_start`` each stored id whose row the catalog
+  holds gets its report as the custom message and the notice; one the
+  catalog does not hold yet gets the watch again. So a restarted pi, or a
+  report the person missed, still gets the verdict in the chat.
 - ``session_start``: with a UI, one info line says the two commands exist,
-  and a second line counts the pending releases no promote has named yet:
-  ``N release(s) await your review: /reef-versions <step>[, <step>]``.
+  and a second line counts the pending releases no promote has named yet
+  and says how to see and promote them: ``N release(s) await your review:
+  /reef-versions <step>[, <step>] (promote with /reef-versions <step>
+  promote)``.
 - ``/reef-versions [step] [promote]``: lists the release chain with each
-  step's verdict and request. With a step it prints the step's page URL
-  (``GET /reef/harness/releases/{step}/page``), then ``design:`` (the
+  step's verdict and request. With a step it prints ``design:`` (the
   proposer's plan, first 200 characters) and ``not covered:`` when the row
-  carries ``proposal_notes``, and, for a pending release, the promote action
-  and a trial install command; ``/reef-versions <step> promote`` runs the
-  promote after a confirmation.
+  carries ``proposal_notes``, then the step's page link (``GET
+  /reef/harness/releases/{step}/page`` with the scenario and the token as
+  query parameters) and a curl that fetches the page with the headers into
+  a file, and, for a pending release, the promote action and a trial
+  install command; ``/reef-versions <step> promote`` runs the promote after
+  a confirmation.
 
 The writing happens on the service, where the evolve step hands the request
 to the recipe's ``propose`` and the commit records it under

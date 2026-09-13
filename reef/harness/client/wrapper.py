@@ -26,13 +26,16 @@ When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are bloc
   when nothing is spooled). The scenario must use ``training_mode: manual``
   or ``hybrid``. Acceptance queues a step without inference receipts or a
   feedback report; the merged ``requires`` list rides ``training_request``
-  in the commit's metrics. With ``--wait`` the wrapper polls the release
-  catalog every 5 s for the step that consumed the request (``--timeout``
-  seconds, 1800 by default), says once when the request's record shows a
-  step took it, and prints the verdict with the next action (a skipped
-  step's line quotes why the proposer produced nothing): exit 0 for a
-  selected or pending release, 1 for a rejected or skipped step, 2 when
-  the timeout passes first.
+  in the commit's metrics. The accepted line is followed by a link to the
+  request's page (``GET /reef/harness/requests/<id>/page`` with the scenario
+  and the token as query parameters, so a browser opens it as is). With
+  ``--wait`` the wrapper polls the release catalog every 5 s for the step
+  that consumed the request (``--timeout`` seconds, 1800 by default), says
+  once when the request's record shows a step took it, and prints the
+  verdict with the next action (a pending release says it is not installed
+  until promoted and names its page link; a skipped step's line quotes why
+  the proposer produced nothing): exit 0 for a selected or pending release,
+  1 for a rejected or skipped step, 2 when the timeout passes first.
 
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
@@ -785,6 +788,26 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
+def _page_link(upstream: str, path: str, scenario: str, token: str | None) -> str:
+    """A page a browser opens: the query carries what the wrapper sends as headers, the scenario and the token."""
+    query = f"scenario={urllib.parse.quote(scenario, safe='')}"
+    if token:
+        query += f"&token={urllib.parse.quote(token, safe='')}"
+    return f"{upstream}{path}?{query}"
+
+
+def _request_page_link(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
+    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``."""
+    return _page_link(
+        upstream, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario, token
+    )
+
+
+def _step_page_link(upstream: str, scenario: str, token: str | None, step: int) -> str:
+    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``."""
+    return _page_link(upstream, f"/reef/harness/releases/{step}/page", scenario, token)
+
+
 def _metrics_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
     metrics = row.get("metrics")
     return metrics if isinstance(metrics, Mapping) else {}
@@ -835,11 +858,12 @@ def _failure_of(row: Mapping[str, Any]) -> str:
     return failure.strip() if isinstance(failure, str) else ""
 
 
-def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]]) -> str:
+def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
     """One line for a settled step: its verdict and the next action, quoting the request's first 60 characters.
 
     The extension's watch says the same in the session; ``harness --wait``
-    and ``doctor`` say it here, with ``page`` as the review step."""
+    and ``doctor`` say it here. ``page`` is the step's page link, which the
+    pending line names as the review."""
     row = rows[step]
     metrics = _metrics_of(row)
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
@@ -849,8 +873,8 @@ def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]]) ->
         return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
     if verdict == "pending":
         return (
-            f"'{ask}' is ready as release {release} but changes an extension, so it waits for your review: "
-            f"reef-{adapter} page {step}, then /reef-versions {step} promote."
+            f"'{ask}' is ready as release {release}. This release changes an extension, so it is not installed "
+            f"until you promote it: /reef-versions {step} promote. Page: {page}"
         )
     if verdict == "rejected":
         selection = metrics.get("selection")
@@ -907,7 +931,8 @@ def _await_verdict(
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
         if step is not None:
-            print(f"reef-{adapter}: {_verdict_line(adapter, step, rows)}")
+            page = _step_page_link(upstream, scenario, token, step)
+            print(f"reef-{adapter}: {_verdict_line(adapter, step, rows, page)}")
             uncovered = _uncovered(rows[step])
             if uncovered:
                 print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
@@ -973,6 +998,7 @@ def harness(
         # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
         sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
     print(f"reef-{adapter}: training request {record_id} accepted")
+    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, token, record_id)}")
     if not wait:
         print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /reef-versions later")
         return 0
@@ -1166,6 +1192,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     usually asking what happened to their request."""
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
+    token: str | None = None
     try:
         from reef.core.version import __version__
 
@@ -1234,10 +1261,11 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     else:
         rows.append((True, "release", f"{installed[:8]} installed"))
     # A release held for review is not something the install needs, but it is what the person is waiting on.
-    listed = catalog or []
-    for step, row in enumerate(listed):
-        if _verdict_of(row, listed) == "pending":
-            rows.append((True, "review", _verdict_line(adapter, step, listed)))
+    if catalog and upstream is not None:
+        for step, row in enumerate(catalog):
+            if _verdict_of(row, catalog) == "pending":
+                page = _step_page_link(upstream, scenario, token, step)
+                rows.append((True, "review", _verdict_line(adapter, step, catalog, page)))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
     return 0 if all(ok for ok, _, _ in rows) else 1
