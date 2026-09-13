@@ -21,6 +21,38 @@ state under ``.reef/reefine/``. For custom deployments, copy
 `Reefine tutorial <https://github.com/Human-Agent-Society/reef/tree/main/tutorials/reefine>`__
 includes installation, bug-fix and research demos, and recorded measurements.
 
+From the ask to the install
+---------------------------
+
+1. Ask. In a ``reef-pi`` session, ``/reef-harness <what it should do>`` has
+   the model think the change through before anything is filed: when it
+   triggers, what state the harness must know and how it learns it, what you
+   must set up. When an open point would change what gets built, it asks you
+   up to three questions, each with concrete options, then files your
+   original words with the answers as clarifications; ``--direct`` as the
+   first word files at once. From the shell, ``reef-pi harness "<text>"``
+   posts the same training instruction to ``POST /reef/train``; add
+   ``--wait`` to stay until the step settles.
+2. Step. In ``training-mode: manual`` the deployment runs one evolve step
+   for each accepted instruction. The served model designs the change first
+   (it restates the request, names what triggers the behavior and what state
+   the harness must know and where each comes from, and lists what only you
+   can provide), writes the entries, and reviews them against the request in
+   a second call. The gate then runs the candidate on the health task.
+3. Verdict. The session that asked reports the verdict when the step
+   settles, and ``reef-pi harness ... --wait`` prints the same line: published
+   as a release, ready but waiting for your review because it changes an
+   extension, rejected by the gate, or skipped with the reason. Each names
+   the next action, and the points the review left uncovered follow it.
+   ``/reef-versions <step>`` and ``reef-pi page <step>`` show the step's page.
+4. Promote and set up. A release that touches a ``code_extension`` waits as
+   pending until ``/reef-versions <step> promote`` (or
+   ``POST /reef/scenarios/{scenario}/promote``). When the release needs
+   something from your machine, ``reef-pi setup`` lists the ``requires``
+   items and runs a check only after you confirm it.
+5. Install. Restart ``reef-pi``: the update notice offers the new head, and
+   the install refuses a release whose requirements are not checked off.
+
 Behavior and configuration
 --------------------------
 
@@ -30,22 +62,64 @@ Behavior and configuration
   Requests and update notices are enabled in the seed by default.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
-* ``evolution.selection: always`` records evaluation scores and publishes
-  admitted candidates whose evaluation ran, even without score improvement.
-  Code-extension review still applies.
+* ``evolution.selection: floor`` is the default: the gate runs the candidate
+  alone and publishes it when every task scores at least
+  ``evolution.floor_score`` (``1.0``). The current release is not run, and an
+  episode that could not run misses the floor.
 
-The bundled evaluator recognizes only the profile's sieve, Fibonacci, and CSV
-tasks. These measure arithmetic regressions, not whether a requested workflow
-works. Set both ``evolution.tasks`` and ``evolution.evaluate`` for a different
-workload, and use ``evolution.selection: score_comparison`` to require
-improvement.
+The health floor
+----------------
+
+The profile's one gate task is a health check:
+
+.. code:: yaml
+
+   tasks:
+     - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+       as a plain word alone on the last line.'
+
+The bundled evaluator grades the reply's last line, ``reef-ok`` exactly. The
+floor answers one question: does the tree still work after the change? The
+model binding answers, the shell tool runs, every extension loads. It says
+nothing about whether the change does what was asked; the step's design and
+review notes and the person judge that. Set both ``evolution.tasks`` and
+``evolution.evaluate`` for a workload of your own, and
+``evolution.selection: score_comparison`` to require the candidate to beat
+the current release on them instead.
+
+What the step records
+---------------------
+
+Every step's catalog row carries the request under
+``metrics.training_request`` and the proposer's notes under
+``metrics.proposal_notes``; the step page
+(``GET /reef/harness/releases/<step>/page``, ``reef-pi page <step>``) renders
+them:
+
+* ``design``: the proposer's plan for the request, a few sentences, as the
+  page's Design section.
+* ``review``: the second call's verdict, ``complete`` or ``partial``, with
+  the points of the request the entries cover and the ones they leave
+  uncovered, as the Review section; the verdict line in the session and
+  from ``--wait`` names the uncovered points. Absent when the review call
+  failed, which never blocks the step.
+* ``refused_requires``: the ``requires`` items the proposer wrote that could
+  not be honored, each with the reason, under "refused by the step" in the
+  Setup section. An ``env`` item whose check is a shell test is brought to
+  the one variable it names first, so ``test -n "$TOKEN"`` becomes the
+  variable ``TOKEN`` rather than a refusal.
+* ``undeclared_env``: the variables a written extension reads through
+  ``process.env`` that no ``requires`` item names. Nothing adds them; the
+  page shows them so you can set them or ask for the item.
+
 All ``CordisRecipe`` evolution settings remain available, including custom
 proposers, seeds, execution settings, and publication policies.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
-call budgets. Defaults are 120 seconds and 4096 reply tokens for instructions,
-60 seconds and 2048 tokens for failure-driven proposals. The tutorial's
-``run.sh`` raises these to 900 seconds and 16384 tokens for its local model.
+call budgets. Defaults are 120 seconds and 4096 reply tokens for an
+instruction, 60 seconds and 1024 tokens for its review, and 60 seconds and
+2048 tokens for failure-driven proposals. The tutorial's ``run.sh`` raises
+these to 900 seconds and 16384 tokens for its local model.
 
 Migration
 ---------
