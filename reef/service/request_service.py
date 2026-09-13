@@ -32,9 +32,11 @@ from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page
+from reef.service.request_page import build_request_page
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.train.cordis_backend.backend import StepProgress
 from reef.train.cordis_backend.proposals import ProposalInbox
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,14 @@ class StepRecords(Protocol):
 
 
 @runtime_checkable
+class StepProgressReader(Protocol):
+    """A backend that reports where its running step stands; the harness backend does, another need not."""
+
+    @property
+    def step_progress(self) -> StepProgress | None: ...
+
+
+@runtime_checkable
 class ProposalGate(Protocol):
     """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
 
@@ -57,6 +67,20 @@ class ProposalGate(Protocol):
     def admit(
         self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
     ) -> tuple[list[dict[str, Any]], str | None]: ...
+
+
+def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
+    """The headers a page route reads, ``?scenario=`` standing in for ``x-reef-scenario`` when that header is absent.
+
+    A page is a link a person opens in a browser, which sends no ``x-reef-*``
+    header; the header wins when both are present. The token has the same
+    fallback in :mod:`reef.service.auth`, for the page routes alone.
+    """
+    merged = dict(headers.items())
+    scenario = query.get("scenario", "").strip()
+    if scenario and not any(key.lower() == SCENARIO_HEADER for key in merged):
+        merged[SCENARIO_HEADER] = scenario
+    return merged
 
 
 def _random_harness_scenario_name() -> str:
@@ -616,6 +640,32 @@ class RequestService:
             node_paths=None if descriptor is None else descriptor.node_paths,
         )
 
+    def harness_request_page(
+        self, headers: Mapping[str, str], record_id: str, link_query: Mapping[str, str] | None = None
+    ) -> str:
+        """One HTML page for the harness request stored as agent record ``record_id``, live until its step settles.
+
+        The record is the ``POST /reef/train`` instruction as stored; the
+        catalog row whose ``training_request.id`` names it settles the page.
+        Until then the page reads the running step's progress from the
+        scenario's training backend, when the backend reports one, and
+        whether the trainer holds the request in its reserved batch.
+        ``link_query`` is carried to the version page link, so a page opened
+        through query parameters links one that opens the same way. An
+        unknown id, or one that is not a training instruction, raises
+        ArtifactNotFound naming it.
+        """
+        scenario = self._file_scenario(headers)
+        record = self._dispatcher.read_record(scenario.name, record_id)
+        if record is None or record.get("request_type") != RequestType.TRAIN.value:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
+        rows = list(reversed(scenario.releases()))
+        backend = scenario.trainer.training_backend
+        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        reserved = scenario.trainer.pending_batch
+        consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
+        return build_request_page(record, rows, progress=progress, consumed=consumed, link_query=link_query)
+
     def harness_install_script(
         self,
         headers: Mapping[str, str],
@@ -813,6 +863,8 @@ __all__ = [
     "PendingInference",
     "PreparedInference",
     "RequestService",
+    "StepProgressReader",
     "client_inference_response",
     "normalize_request_payload",
+    "page_headers",
 ]

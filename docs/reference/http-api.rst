@@ -64,6 +64,9 @@ Routes
 | ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, design, what |
 |                                                        | changed, review, verdict, setup, chain            |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/page``        | one HTML page per filed harness request: its      |
+|                                                        | step's state, then the verdict; reloads itself    |
++--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/harness/proposals``                       | an agent's proposed tree change, admitted or not  |
@@ -695,6 +698,45 @@ On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
 install (which replaces the installed tree) and the head's reinstall beside
 it when the release is pending; a promoted release gets none of them.
 
+Request page
+~~~~~~~~~~~~
+
+``GET /reef/harness/requests/{record_id}/page`` answers one self contained
+HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
+harness request, ``record_id`` being the ``agent_record_id`` that
+``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/reef-harness``
+print the link. Until the step settles the page reloads itself every five
+seconds and has two sections: Request (the text, the session and release it
+came from, and what it says it needs from your machine) and Progress, with
+the request's state and what it means: ``queued`` while no step has taken
+the request, ``proposing`` while the served model writes the change,
+``gating`` while the candidate's episodes run (with their count and the
+step record directory when the backend reports them, and the time into the
+step), ``running`` while the trainer holds the request and the backend
+reports no phase, and ``settling`` while the row that consumed the record
+lands. The catalog row whose ``metrics.training_request.id`` is the record
+id settles the page: the reload stops and Progress gives way to Verdict
+(the verdict as the version page words it, what it means and the next
+action, a failed instruction's ``error``, ``proposal_notes.failure`` as
+``proposer failure``, the release id and a link to the version page), What
+changed (each mutation's op, id and kind) and, when the step recorded a
+review, Review (its verdict and the points it left uncovered). An unknown
+id, or one that is not a training instruction, is HTTP 404 naming it.
+
+Both pages are links a person opens in a browser, which sends no header, so
+they also take the scenario and the token as query parameters,
+``?scenario=<name>&token=<token>``, in place of ``x-reef-scenario`` and
+``Authorization: Bearer``; a header wins when present, and the request
+page's link to the version page carries the parameters it was opened with.
+The token then sits in the URL, in the browser's history and in whatever
+logs request lines, so a deployment that hands out such links is a local
+one. Every other route reads the headers alone; a ``?token=`` elsewhere is
+HTTP 401.
+
+.. code:: text
+
+   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&token=<token>
+
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
 
@@ -777,7 +819,8 @@ Status codes
 |        | scenario-scoped route, or a report violating the recipe's   |
 |        | declared schema                                             |
 +--------+-------------------------------------------------------------+
-| 401    | missing or wrong bearer token                               |
+| 401    | missing or wrong bearer token; the two harness pages also   |
+|        | read ``?token=`` (see Request page)                         |
 +--------+-------------------------------------------------------------+
 | 403    | relayed from the upstream provider. Reef issues none of its |
 |        | own: an unaccepted token is 401, and per-scenario           |
