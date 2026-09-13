@@ -12,7 +12,13 @@ from typing import Any
 
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.runtime import ExecutorInferenceRuntime
-from reef.runtime.deployment import ExecutorRuntimeConfig, RayRuntimeConfig, RuntimeConfigError, RuntimeFactory
+from reef.runtime.deployment import (
+    ExecutorRuntimeConfig,
+    RayRuntimeConfig,
+    RuntimeConfigError,
+    RuntimeFactory,
+    runtime_pair,
+)
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.connection import (
     DEFAULT_ACTOR_NAME,
@@ -23,6 +29,18 @@ from reef.runtime.executor.connection import (
 )
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.train.runtime import ExecutorTrainingRuntime
+
+#: Connection keys the config path forwards verbatim to :func:`connect_executor_runtimes`.
+CONNECTION_CONFIG_KEYS = (
+    "inference",
+    "inference_url",
+    "inference_timeout_s",
+    "max_staleness",
+    "inference_handler_factory",
+    "inference_handler_config",
+)
+#: Keys the config path forwards verbatim to :func:`connect_ray_runtime`.
+RAY_CONFIG_KEYS = ("actor_name", "namespace", "ray_address", "train_timeout_s", *CONNECTION_CONFIG_KEYS[1:])
 
 
 def connect_executor_runtimes(
@@ -113,6 +131,17 @@ def _executor_config(value: Mapping[str, Any]) -> ExecutorConfig:
         raise RuntimeConfigError(f"invalid runtime.executor configuration: {exc}") from exc
 
 
+def _executor_from_config(value: Any) -> tuple[Executor, bool]:
+    """Resolve the ``executor`` entry; the flag says whether this call created it."""
+    if isinstance(value, Mapping):
+        value = _executor_config(value)
+    if isinstance(value, ExecutorConfig):
+        return Executor.create(value), True
+    if isinstance(value, Executor):
+        return value, False
+    raise RuntimeConfigError("runtime.executor must be an Executor, ExecutorConfig, or configuration mapping")
+
+
 class ExecutorTrainingRuntimeFactory(RuntimeFactory):
     """Create a training coordinator using a configured executor.
 
@@ -128,6 +157,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
         return ExecutorRuntimeConfig
 
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        # Python assembly may inject these objects; they are not YAML fields.
         injected = {
             key: config[key] for key in ("executor", "inference", "inference_handler_factory") if key in config
         }
@@ -141,39 +171,20 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
     ) -> tuple[TrainingRuntime, InferenceRuntime]:
-        value = config.get("executor")
-        if isinstance(value, Mapping):
-            value = _executor_config(value)
-        created = False
-        if isinstance(value, ExecutorConfig):
-            executor = Executor.create(value)
-            created = True
-        elif isinstance(value, Executor):
-            executor = value
-        else:
-            raise RuntimeConfigError("runtime.executor must be an Executor, ExecutorConfig, or configuration mapping")
+        executor, created = _executor_from_config(config.get("executor"))
+        train_timeout_s = config.get("train_timeout_s")
+        if train_timeout_s is None:
+            # A training step legitimately outlasts an inference request.
+            train_timeout_s = config.get("inference_timeout_s", 300.0)
         try:
             handle = ExecutorCoordinatorClient(
-                executor,
-                rank=config.get("coordinator_rank", 0),
-                timeout_s=(
-                    config["train_timeout_s"]
-                    if config.get("train_timeout_s") is not None
-                    else config.get("inference_timeout_s", 300.0)
-                ),
+                executor, rank=config.get("coordinator_rank", 0), timeout_s=train_timeout_s
             )
-            kwargs: dict[str, Any] = {"train_group_handle": handle, "model_path": model_path}
-            for key in (
-                "inference",
-                "inference_url",
-                "inference_timeout_s",
-                "max_staleness",
-                "inference_handler_factory",
-                "inference_handler_config",
-            ):
-                if key in config:
-                    kwargs[key] = config[key]
-            return connect_executor_runtimes(**kwargs)
+            return connect_executor_runtimes(
+                train_group_handle=handle,
+                model_path=model_path,
+                **{key: config[key] for key in CONNECTION_CONFIG_KEYS if key in config},
+            )
         except BaseException:
             if created:
                 with suppress(Exception):
@@ -199,6 +210,8 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
         # fields and must never be serialized through the argument parser.
         injected = {key: config[key] for key in ("connect", "inference_handler_factory") if key in config}
         values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
+        # Only keys the caller set are forwarded, so the connector's own
+        # defaults apply to everything else.
         return {**{key: value for key, value in values.items() if key in config}, **injected}
 
     def __call__(
@@ -211,31 +224,10 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
         connect = config.get("connect", connect_ray_runtime)
         if not callable(connect):
             raise RuntimeConfigError("runtime.connect must be callable")
-        kwargs: dict[str, Any] = {"model_path": model_path}
-        for key in (
-            "inference_url",
-            "actor_name",
-            "namespace",
-            "ray_address",
-            "inference_timeout_s",
-            "train_timeout_s",
-            "max_staleness",
-            "inference_handler_factory",
-            "inference_handler_config",
-        ):
-            if key in config:
-                kwargs[key] = config[key]
-        runtime = connect(**kwargs)
-        if not (
-            isinstance(runtime, tuple)
-            and len(runtime) == 2
-            and isinstance(runtime[0], TrainingRuntime)
-            and isinstance(runtime[1], InferenceRuntime)
-        ):
-            for component in runtime if isinstance(runtime, tuple) else (runtime,):
-                with suppress(Exception):
-                    component.shutdown()
+        built = connect(model_path=model_path, **{key: config[key] for key in RAY_CONFIG_KEYS if key in config})
+        pair = runtime_pair(built)
+        if pair is None:
             raise RuntimeConfigError(
-                f"runtime connector returned {type(runtime).__name__}, not a (TrainingRuntime, InferenceRuntime) pair"
+                f"runtime connector returned {type(built).__name__}, not a (TrainingRuntime, InferenceRuntime) pair"
             )
-        return runtime
+        return pair

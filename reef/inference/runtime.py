@@ -90,13 +90,7 @@ class ExecutorInferenceRuntime(InferenceRuntime):
             if remaining <= 0:
                 raise TrainingRuntimeError("inference is unavailable during model recovery")
             status = await asyncio.wait_for(asyncio.to_thread(self._publication_status), timeout=remaining)
-            state = status["status"]
-            available = status["serving_healthy"] and (
-                state in {"IDLE", "REJECTED"}
-                or (state == "COMPLETE" and status.get("commit_acknowledged") is True)
-                or (state in {"RUNNING", "CHECKPOINT"} and not status.get("colocate", False))
-            )
-            if available:
+            if _serving_available(status):
                 try:
                     return await asyncio.wait_for(super().acquire_inference(), timeout=min(0.25, remaining))
                 except asyncio.TimeoutError:
@@ -143,3 +137,17 @@ class ExecutorInferenceRuntime(InferenceRuntime):
 
     def shutdown(self) -> None:
         self.pause_admission()
+
+
+def _serving_available(status: Mapping[str, Any]) -> bool:
+    """Whether the coordinator's durable state lets requests run against the engines.
+
+    Idle, rejected and acknowledged jobs serve normally. A running or
+    checkpointing job serves too unless training shares the engines' devices.
+    """
+    state = status["status"]
+    return bool(status["serving_healthy"]) and (
+        state in {"IDLE", "REJECTED"}
+        or (state == "COMPLETE" and status.get("commit_acknowledged") is True)
+        or (state in {"RUNNING", "CHECKPOINT"} and not status.get("colocate", False))
+    )

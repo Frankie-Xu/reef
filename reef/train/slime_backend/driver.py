@@ -236,17 +236,14 @@ def create_training_plan(
         ),
         inference_config=inference_config(args),
         training=training,
-        coordinator=CoordinatorConfig(
-            options={
-                "name": actor_name,
-                "namespace": namespace,
-                "max_concurrency": 64,
-                **(
-                    {"enable_tensor_transport": True}
-                    if getattr(args, "rollout_data_transport", "object-store") == "nixl"
-                    else {}
-                ),
-            }
-        ),
+        coordinator=_coordinator_config(args, actor_name=actor_name, namespace=namespace),
         monitor_components=not getattr(args, "rollout_external", False),
     )
+
+
+def _coordinator_config(args: Any, *, actor_name: str, namespace: str) -> CoordinatorConfig:
+    """Ray actor options for Reef's coordinator, discoverable by name in the cluster."""
+    options: dict[str, Any] = {"name": actor_name, "namespace": namespace, "max_concurrency": 64}
+    if getattr(args, "rollout_data_transport", "object-store") == "nixl":
+        options["enable_tensor_transport"] = True
+    return CoordinatorConfig(options=options)

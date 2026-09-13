@@ -8,10 +8,10 @@ from typing import Any
 import ray
 
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import CONTROL_TIMEOUT_S, SGLangConfig
 from reef.inference.sglang.launch import engine_environment
 from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceResources, InferenceService
-from reef.runtime.executor import ExecutorConfig, WorkerSpec
+from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 
 # Keep the existing wire identifier while removing its implementation dependency.
@@ -68,32 +68,34 @@ class SGLangInferenceService(InferenceService):
                     "num_gpus": 0,
                     "runtime_env": {"env_vars": engine_environment(self.config)},
                 },
-                launch_timeout_s=14_400,
+                launch_timeout_s=CONTROL_TIMEOUT_S,
             )
         )
         return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._inference.workers))
 
-    def backend(self, connection: InferenceConnection) -> SGLangInferenceBackend:
-        """Adapt a compatible borrowed connection for Reef's coordinator."""
+    def _control(self, connection: InferenceConnection) -> Executor:
         if connection.protocol != self.connection_protocol:
             raise ValueError(f"incompatible SGLang inference connection: {connection.protocol!r}")
-        return SGLangInferenceBackend(connection.control)
+        return connection.control
+
+    def backend(self, connection: InferenceConnection) -> SGLangInferenceBackend:
+        """Adapt a compatible borrowed connection for Reef's coordinator."""
+        return SGLangInferenceBackend(self._control(connection))
 
     def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
         """Fence engines and release shared memory before trainer allocation."""
-        if connection.protocol != self.connection_protocol:
-            raise ValueError(f"incompatible SGLang inference connection: {connection.protocol!r}")
-        connection.control.rpc(0, "prepare_training_connection", timeout=14_400)
+        self._control(connection).rpc(0, "prepare_training_connection", timeout=CONTROL_TIMEOUT_S)
+
+    def _running(self) -> RayExecutor:
+        if self._inference is None or self._closed:
+            raise RuntimeError("inference service is not running")
+        return self._inference
 
     def check_health(self) -> None:
-        if self._inference is None or self._closed:
-            raise RuntimeError("inference service is not running")
-        self._inference.rpc(0, "check_health", timeout=30)
+        self._running().rpc(0, "check_health", timeout=30)
 
     def poll(self) -> None:
-        if self._inference is None or self._closed:
-            raise RuntimeError("inference service is not running")
-        self._probe.poll(self._inference.workers[0], "check_health")
+        self._probe.poll(self._running().workers[0], "check_health")
 
     def close(self) -> None:
         if self._closed:

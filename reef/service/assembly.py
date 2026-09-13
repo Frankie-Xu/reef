@@ -22,7 +22,7 @@ from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry
+from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry, runtime_pair
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
@@ -81,18 +81,11 @@ def _connect_training_runtime(
     )
     backend = training_deployment_for(settings.training_backend)
     runtime_config = backend.runtime_config(asdict(settings), max_staleness=max_staleness, connector=connector)
-    runtime = RuntimeRegistry().build(runtime_config, model_path=model_path)
-    if not (
-        isinstance(runtime, tuple)
-        and len(runtime) == 2
-        and isinstance(runtime[0], TrainingRuntime)
-        and isinstance(runtime[1], InferenceRuntime)
-    ):
-        for component in runtime if isinstance(runtime, tuple) else (runtime,):
-            with suppress(Exception):
-                component.shutdown()
+    built = RuntimeRegistry().build(runtime_config, model_path=model_path)
+    pair = runtime_pair(built)
+    if pair is None:
         raise TypeError("training backend runtime factory must build a (TrainingRuntime, InferenceRuntime) pair")
-    return runtime
+    return pair
 
 
 def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:

@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.inference.sglang.config import CONTROL_TIMEOUT_S
 from reef.runtime.executor import Executor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.interfaces import InferenceBackend
-
-_CONTROL_TIMEOUT_S = 14_400
 
 
 class SGLangInferenceBackend(InferenceBackend):
@@ -43,7 +42,7 @@ class SGLangInferenceBackend(InferenceBackend):
         """Stamp Reef's initial version while the coordinator keeps serving paused."""
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
             raise ValueError("initial runtime load ID must be a nonempty string")
-        self._engines().collective_rpc("set_runtime_load_id", args=(runtime_load_id,), timeout=_CONTROL_TIMEOUT_S)
+        self._engines().collective_rpc("set_runtime_load_id", args=(runtime_load_id,), timeout=CONTROL_TIMEOUT_S)
 
     def pause(self) -> None:
         self._call("pause_generation_for_update")
@@ -68,7 +67,7 @@ class SGLangInferenceBackend(InferenceBackend):
 
     def unload_adapter(self, name: str) -> None:
         results = self._engines().collective_rpc(
-            "unload_lora_adapter", kwargs={"lora_name": name}, timeout=_CONTROL_TIMEOUT_S
+            "unload_lora_adapter", kwargs={"lora_name": name}, timeout=CONTROL_TIMEOUT_S
         )
         for result in results:
             if result is not None and (not isinstance(result, Mapping) or result.get("success") is not True):
@@ -79,4 +78,4 @@ class SGLangInferenceBackend(InferenceBackend):
         return RayExecutor.from_workers(engines)
 
     def _call(self, method: str, *args: Any) -> Any:
-        return self._executor.rpc(0, method, args=args, timeout=_CONTROL_TIMEOUT_S)
+        return self._executor.rpc(0, method, args=args, timeout=CONTROL_TIMEOUT_S)

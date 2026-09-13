@@ -8,10 +8,27 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_option
-from reef.runtime.deployment import RayRuntimeConfig, RuntimeConfigError, RuntimeFactory, RuntimeRegistry
+from reef.runtime.deployment import RayRuntimeConfig, RuntimeConfigError, RuntimeFactory, RuntimeRegistry, runtime_pair
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE, connect_ray_coordinator
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.train.runtime import ExecutorTrainingRuntime
+
+#: Coordinator connection keys forwarded verbatim to :class:`SlimeTrainingRuntime`.
+TRAINING_CONFIG_KEYS = (
+    "actor_name",
+    "namespace",
+    "ray_address",
+    "inference_timeout_s",
+    "train_timeout_s",
+    "max_staleness",
+)
+#: Keys forwarded verbatim to the independently selected inference factory.
+INFERENCE_CONFIG_KEYS = (
+    "inference_url",
+    "inference_timeout_s",
+    "inference_handler_factory",
+    "inference_handler_config",
+)
 
 
 class SlimeTrainingRuntime(ExecutorTrainingRuntime):
@@ -75,47 +92,28 @@ class SlimeRuntimeFactory(RuntimeFactory):
         if "connect" in config:
             # Preserve explicit Python connectors used by externally managed deployments.
             injected = {key: value for key, value in config.items() if key != "inference_runtime"}
-            pair = registry.build({**injected, "type": "ray_training"}, model_path=model_path, environ=environ)
-            if not isinstance(pair, tuple):
+            built = registry.build({**injected, "type": "ray_training"}, model_path=model_path, environ=environ)
+            pair = runtime_pair(built)
+            if pair is None:
                 raise RuntimeConfigError("the configured training connector must return a runtime pair")
             return pair
-        training = SlimeTrainingRuntime(
-            **{
-                key: config[key]
-                for key in (
-                    "actor_name",
-                    "namespace",
-                    "ray_address",
-                    "inference_timeout_s",
-                    "train_timeout_s",
-                    "max_staleness",
-                )
-                if key in config
-            }
-        )
+        training = SlimeTrainingRuntime(**{key: config[key] for key in TRAINING_CONFIG_KEYS if key in config})
         try:
-            inference_config = {
-                key: config[key]
-                for key in (
-                    "inference_url",
-                    "inference_timeout_s",
-                    "inference_handler_factory",
-                    "inference_handler_config",
-                )
-                if key in config
-            }
             inference = registry.build(
-                {**inference_config, "type": config["inference_runtime"], "control": training.train_group_handle},
+                {
+                    **{key: config[key] for key in INFERENCE_CONFIG_KEYS if key in config},
+                    "type": config["inference_runtime"],
+                    "control": training.train_group_handle,
+                },
                 model_path=model_path,
                 recipe_config=recipe_config,
                 environ=environ,
             )
             if not isinstance(inference, InferenceRuntime):
-                if isinstance(inference, tuple):
-                    for component in inference:
-                        if isinstance(component, (TrainingRuntime, InferenceRuntime)):
-                            with suppress(Exception):
-                                component.shutdown()
+                # A misconfigured selection may have built a whole pair; release it.
+                for component in inference if isinstance(inference, tuple) else ():
+                    with suppress(Exception):
+                        component.shutdown()
                 raise RuntimeConfigError("the selected inference factory must return an InferenceRuntime")
             return training, inference
         except BaseException:

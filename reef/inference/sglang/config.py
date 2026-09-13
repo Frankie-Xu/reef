@@ -7,6 +7,9 @@ from typing import Any
 
 from reef.runtime.executor import Executor
 
+#: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
+CONTROL_TIMEOUT_S = 14_400
+
 
 @dataclass(frozen=True)
 class SGLangGroupConfig:

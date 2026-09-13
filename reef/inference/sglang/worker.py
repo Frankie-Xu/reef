@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
 
@@ -26,6 +27,20 @@ def recover_server(server) -> None:
     if not any(engine is None for group in server.server_groups for engine in group.all_engines):
         return
     server.recover()
+
+
+def retire_engines(engines: Sequence[Any], *, timeout: float = 30) -> None:
+    """Ask each engine actor to shut down, then kill it; failures never block retirement."""
+    pending = []
+    for engine in engines:
+        with suppress(Exception):
+            pending.append(engine.shutdown.remote())
+    if pending:
+        with suppress(Exception):
+            ray.get(pending, timeout=timeout)
+    for engine in engines:
+        with suppress(Exception):
+            ray.kill(engine, no_restart=True)
 
 
 class SGLangWorker:
@@ -206,23 +221,9 @@ class SGLangWorker:
         self._closed = True
         # External engines and shared placement groups are borrowed resources.
         if self.servers:
-            engines = [
-                engine
-                for server in self.servers.values()
-                for group in server.server_groups
-                for engine in group.all_engines
-                if engine is not None
-            ]
-            pending = []
-            for engine in engines:
-                with suppress(Exception):
-                    pending.append(engine.shutdown.remote())
-            if pending:
-                with suppress(Exception):
-                    ray.get(pending, timeout=30)
-            for engine in engines:
-                with suppress(Exception):
-                    ray.kill(engine, no_restart=True)
+            retire_engines(
+                [engine for server in self.servers.values() for engine in server.all_engines if engine is not None]
+            )
             self.servers = {}
         lock = getattr(self, "rollout_engine_lock", None)
         if lock is not None:
@@ -272,26 +273,13 @@ class _SGLangInferenceEngines(InferenceEngines):
     def terminate(self) -> int:
         server = self._worker._get_updatable_server()
         groups = [] if server is None else server.server_groups
-        if not groups:
-            return 0
-        indexed_engines = [
-            (group, index, engine)
-            for group in groups
-            for index, engine in enumerate(group.all_engines)
-            if engine is not None
+        slots = [
+            (group, index) for group in groups for index, engine in enumerate(group.all_engines) if engine is not None
         ]
-        shutdowns = []
-        for _, _, engine in indexed_engines:
-            with suppress(Exception):
-                shutdowns.append(engine.shutdown.remote())
-        if shutdowns:
-            with suppress(Exception):
-                ray.get(shutdowns, timeout=30)
-        for group, index, engine in indexed_engines:
-            with suppress(Exception):
-                ray.kill(engine, no_restart=True)
+        retire_engines([group.all_engines[index] for group, index in slots])
+        for group, index in slots:
             group.all_engines[index] = None
-        return len(indexed_engines)
+        return len(slots)
 
 
 class _SGLangWeightUpdateConnection(WeightUpdateConnection):

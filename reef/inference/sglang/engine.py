@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import fields
 from functools import cached_property
 from typing import Any
 
@@ -22,6 +23,17 @@ from reef.runtime.interfaces import InferenceMemoryOperations
 from reef.runtime.scheduler import InferenceMemory
 
 logger = logging.getLogger(__name__)
+
+#: Options Reef sets for LoRA serving; a group override may not disagree with them.
+LORA_SERVING_OPTIONS = (
+    "enable_lora",
+    "max_lora_rank",
+    "max_loaded_loras",
+    "max_loras_per_batch",
+    "lora_target_modules",
+    "enable_weights_cpu_backup",
+    "tokenizer_worker_num",
+)
 
 
 class ReefSGLangEngine:
@@ -44,26 +56,10 @@ class ReefSGLangEngine:
         self.worker_type = worker_type
         self.base_gpu_id = base_gpu_id
         self.sglang_overrides = {key.replace("-", "_"): value for key, value in (sglang_overrides or {}).items()}
-        options = config.options
-        if options.get("enable_lora"):
+        if config.options.get("enable_lora"):
             require_lora_tensor_request_schema()
             require_lora_distributed_request_schema()
-            protected = (
-                "enable_lora",
-                "max_lora_rank",
-                "max_loaded_loras",
-                "max_loras_per_batch",
-                "lora_target_modules",
-                "enable_weights_cpu_backup",
-                "tokenizer_worker_num",
-            )
-            conflicts = [
-                key
-                for key in protected
-                if key in self.sglang_overrides and self.sglang_overrides[key] != options.get(key)
-            ]
-            if conflicts:
-                raise ValueError(f"SGLang overrides conflict with Reef LoRA serving requirements: {conflicts}")
+            self._check_lora_overrides()
         self.num_gpus_per_engine = num_gpus_per_engine or config.gpus_per_engine
         self.external_url = external_url
         self.process = None
@@ -72,6 +68,16 @@ class ReefSGLangEngine:
         self.router_port: int | None = None
         self.server_host = ""
         self.server_port = 0
+
+    def _check_lora_overrides(self) -> None:
+        """Reject per-group overrides that would break Reef's LoRA serving setup."""
+        conflicts = [
+            key
+            for key in LORA_SERVING_OPTIONS
+            if key in self.sglang_overrides and self.sglang_overrides[key] != self.config.options.get(key)
+        ]
+        if conflicts:
+            raise ValueError(f"SGLang overrides conflict with Reef LoRA serving requirements: {conflicts}")
 
     def init(
         self,
@@ -83,12 +89,29 @@ class ReefSGLangEngine:
         router_ip: str | None = None,
         router_port: int | None = None,
     ) -> None:
-        from dataclasses import fields
+        options = self._server_options(dist_init_addr, port, nccl_port, host, disaggregation_bootstrap_port)
+        self.server_host, self.server_port = host, port
+        self.router_ip, self.router_port = router_ip, router_port
+        if self.external_url:
+            self._verify_external_engine(options)
+        else:
+            self.process = launch_engine(options)
+            if self.node_rank == 0:
+                wait_ready(self.get_url(), self.process, self.config.startup_timeout)
+        self._register_to_router(options)
 
+    def _server_options(
+        self,
+        dist_init_addr: str,
+        port: int,
+        nccl_port: int | None,
+        host: str,
+        disaggregation_bootstrap_port: int | None,
+    ) -> dict[str, Any]:
+        """The ``ServerArgs`` fields for this engine: config, group overrides, then placement."""
         from sglang.srt.server_args import ServerArgs
 
-        options = dict(self.config.options)
-        options.update(self.sglang_overrides)
+        options = {**self.config.options, **self.sglang_overrides}
         pp = int(options.get("pp_size") or 1)
         tp = int(options.get("tp_size") or self.num_gpus_per_engine // pp)
         if tp * pp != self.num_gpus_per_engine:
@@ -125,22 +148,17 @@ class ReefSGLangEngine:
             options.setdefault("cuda_graph_backend_prefill", "disabled")
             if options["cuda_graph_backend_prefill"] is None:
                 options["cuda_graph_backend_prefill"] = "disabled"
-        options = {key: value for key, value in options.items() if key in names}
-        self.server_host, self.server_port = host, port
-        self.router_ip, self.router_port = router_ip, router_port
-        if self.external_url:
-            actual = requests.get(f"{self.external_url}/get_server_info", timeout=30)
-            actual.raise_for_status()
-            info = actual.json()
-            info = info.get("server_args", info)
-            for key in ("enable_memory_saver", "disable_radix_cache", "incremental_streaming_output"):
-                if key in options and info.get(key) != options[key]:
-                    raise ValueError(f"external SGLang engine has incompatible {key}")
-        else:
-            self.process = launch_engine(options)
-            if self.node_rank == 0:
-                wait_ready(self.get_url(), self.process, self.config.startup_timeout)
-        self._register_to_router(options)
+        return {key: value for key, value in options.items() if key in names}
+
+    def _verify_external_engine(self, options: dict[str, Any]) -> None:
+        """An engine Reef did not launch must still run with the settings Reef relies on."""
+        actual = requests.get(f"{self.external_url}/get_server_info", timeout=30)
+        actual.raise_for_status()
+        info = actual.json()
+        info = info.get("server_args", info)
+        for key in ("enable_memory_saver", "disable_radix_cache", "incremental_streaming_output"):
+            if key in options and info.get(key) != options[key]:
+                raise ValueError(f"external SGLang engine has incompatible {key}")
 
     def _register_to_router(self, server_args_dict: dict[str, Any]) -> None:
         if self.node_rank != 0 or self.worker_type == "encoder":

@@ -18,6 +18,33 @@ from reef.core.config import config_option
 from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
 
+#: Hop-by-hop headers that describe one connection and must not be forwarded.
+HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "content-length",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+#: Routes that speak the Anthropic Messages API and take its native auth headers.
+ANTHROPIC_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
+ANTHROPIC_VERSION = "2023-06-01"
+
+#: Provider API dialects the proxy can describe to the training side.
+PROVIDER_APIS = ("openai", "responses", "anthropic")
+
+#: Keys a per-scenario model override may carry.
+MODEL_CONFIG_KEYS = frozenset({"url", "model", "api", "api_key"})
+
+# -- Request headers ----------------------------------------------------------
+
 
 class RequestHeadersFactory(ABC):
     """Produce request headers for one artifact-bound upstream call."""
@@ -35,11 +62,6 @@ def content_identity_headers(artifact: Artifact) -> dict[str, str]:
     return headers
 
 
-def default_artifact_request_headers(artifact: Artifact, path: str = "") -> Mapping[str, str]:
-    """Identity headers for every provider route."""
-    return content_identity_headers(artifact)
-
-
 class ArtifactRequestHeaders(RequestHeadersFactory):
     """Attach the selected Reef artifact identity."""
 
@@ -48,7 +70,11 @@ class ArtifactRequestHeaders(RequestHeadersFactory):
 
 
 class ProviderRequestHeaders(RequestHeadersFactory):
-    """Attach artifact identity and provider-specific authentication."""
+    """Attach artifact identity and provider-specific authentication.
+
+    Anthropic routes take the key as ``x-api-key`` plus a version header;
+    OpenAI-compatible routes take it as a bearer token.
+    """
 
     def __init__(self, api_key: str) -> None:
         if not api_key:
@@ -57,9 +83,9 @@ class ProviderRequestHeaders(RequestHeadersFactory):
 
     def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
         headers = content_identity_headers(artifact)
-        if path in ("/v1/messages", "/v1/messages/count_tokens"):
+        if path in ANTHROPIC_PATHS:
             headers["x-api-key"] = self._api_key
-            headers["anthropic-version"] = "2023-06-01"
+            headers["anthropic-version"] = ANTHROPIC_VERSION
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
@@ -68,6 +94,9 @@ class ProviderRequestHeaders(RequestHeadersFactory):
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
     """Build provider-native authentication with Reef artifact identity."""
     return ProviderRequestHeaders(api_key)
+
+
+# -- HTTP handler -------------------------------------------------------------
 
 
 class HttpInferenceHandler(InferenceHandler):
@@ -109,95 +138,63 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError("inference endpoint must be an HTTP URL")
         self._upstream_url = upstream_url.rstrip("/")
 
-    async def inference(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
+    def _post_arguments(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Keyword arguments of one ``session.post`` call."""
+        return {
+            "url": f"{self._upstream_url}{path}",
+            "json": payload,
+            "headers": dict(self._request_headers.headers(artifact, path)),
+        }
+
+    def _status_error(self, status: int, body: str) -> UpstreamStatusError:
+        return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
+
+    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         from aiohttp import ClientSession, ClientTimeout
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
-            session.post(
-                f"{self._upstream_url}{path}",
-                json=payload,
-                headers=dict(self._request_headers.headers(artifact, path)),
-            ) as response,
+            session.post(**self._post_arguments(artifact, path, payload)) as response,
         ):
-            body = await response.text()
             if response.status >= 400:
-                raise UpstreamStatusError(
-                    f"{self._error_label} returned {response.status}: {body[:400]}",
-                    status=response.status,
-                )
+                raise self._status_error(response.status, await response.text())
             value = await response.json()
         if not isinstance(value, dict):
             raise TypeError(f"{self._error_label} response must be a JSON object")
         return value
 
-    async def inference_stream(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> InferenceStream:
+    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         from aiohttp import ClientSession, ClientTimeout
 
-        session = ClientSession(
-            timeout=ClientTimeout(total=self._timeout_s),
-            auto_decompress=False,
-        )
+        # The session outlives this call: the stream owns it until closed.
+        session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
         try:
-            response = await session.post(
-                f"{self._upstream_url}{path}",
-                json=payload,
-                headers=dict(self._request_headers.headers(artifact, path)),
-            )
+            response = await session.post(**self._post_arguments(artifact, path, payload))
         except Exception:
             await session.close()
             raise
-
-        if response.status >= 400:
-            try:
-                body = (await response.read()).decode(errors="replace")
-            finally:
-                response.close()
-                await session.close()
-            raise UpstreamStatusError(
-                f"{self._error_label} returned {response.status}: {body[:400]}",
-                status=response.status,
-            )
-
-        excluded_headers = {
-            "connection",
-            "content-length",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailer",
-            "transfer-encoding",
-            "upgrade",
-        }
-        response_headers = {
-            name: value for name, value in response.headers.items() if name.lower() not in excluded_headers
-        }
 
         async def close() -> None:
             response.close()
             await session.close()
 
+        if response.status >= 400:
+            try:
+                body = (await response.read()).decode(errors="replace")
+            finally:
+                await close()
+            raise self._status_error(response.status, body)
         return InferenceStream(
             status=response.status,
-            headers=response_headers,
+            headers={
+                name: value for name, value in response.headers.items() if name.lower() not in HOP_BY_HOP_HEADERS
+            },
             chunks=response.content.iter_any(),
             close=close,
         )
 
 
-#: Provider API dialects the proxy can describe to the training side.
-PROVIDER_APIS = ("openai", "responses", "anthropic")
+# -- Proxy runtime ------------------------------------------------------------
 
 
 class InferenceProxyRuntime(InferenceRuntime):
@@ -218,21 +215,15 @@ class InferenceProxyRuntime(InferenceRuntime):
         api: str = "openai",
         inference_timeout_s: float = 300.0,
     ) -> None:
-        super().__init__(
-            base_url=base_url,
-            inference_timeout_s=inference_timeout_s,
-        )
+        super().__init__(base_url=base_url, inference_timeout_s=inference_timeout_s)
         if api not in PROVIDER_APIS:
             raise ValueError(f"inference proxy api must be one of {PROVIDER_APIS}, got {api!r}")
         self._model_path = model_path
         self._api_key = api_key
         self._api = api
-        request_headers: RequestHeadersFactory | None = None
-        if api_key:
-            request_headers = provider_request_headers(api_key)
         self._inference_handler = HttpInferenceHandler(
             self.base_url,
-            request_headers=request_headers,
+            request_headers=ProviderRequestHeaders(api_key) if api_key else None,
             timeout_s=self.inference_timeout_s,
             error_label="inference provider",
         )
@@ -242,29 +233,21 @@ class InferenceProxyRuntime(InferenceRuntime):
         """Validate a per-scenario model override and build its proxy runtime."""
         if value is None:
             return None
-        if not isinstance(value, Mapping) or set(value) - {"url", "model", "api", "api_key"}:
+        if not isinstance(value, Mapping) or set(value) - MODEL_CONFIG_KEYS:
             raise ValueError("model must be null or an object with url, model, api and api_key")
         for name in ("url", "model"):
-            item = value.get(name)
-            if not isinstance(item, str) or not item.strip() or any(ord(c) < 32 for c in item):
+            if not _clean_text(value.get(name)) or not value[name].strip():
                 raise ValueError(f"model.{name} must be a non-empty string without control characters")
-        parsed = urlparse(value["url"])
-        if (
-            parsed.scheme not in ("http", "https")
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-        ):
+        url = value["url"].strip()
+        if not _plain_http_url(url):
             raise ValueError("model.url must be an HTTP(S) URL without credentials, query or fragment")
         api = value.get("api", "openai")
         if api not in PROVIDER_APIS:
             raise ValueError("model.api must be openai, responses or anthropic")
         key = value.get("api_key")
-        if key is not None and (not isinstance(key, str) or any(ord(c) < 32 for c in key)):
+        if key is not None and not _clean_text(key):
             raise ValueError("model.api_key must be a string without control characters")
-        return cls(base_url=value["url"].strip(), model_path=value["model"].strip(), api=api, api_key=key)
+        return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=key)
 
     @property
     def model_path(self) -> str:
@@ -285,6 +268,23 @@ class InferenceProxyRuntime(InferenceRuntime):
     @property
     def inference_handler(self) -> InferenceHandler:
         return self._inference_handler
+
+
+def _clean_text(value: object) -> bool:
+    """A string with no control characters (which would corrupt headers or logs)."""
+    return isinstance(value, str) and not any(ord(character) < 32 for character in value)
+
+
+def _plain_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.netloc)
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 @dataclass(frozen=True)
@@ -319,11 +319,10 @@ class InferenceProxyRuntimeFactory(RuntimeFactory):
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
     ) -> InferenceRuntime:
-        api_key = config_secret(config, environ, "api_key", "api_key_env")
         return InferenceProxyRuntime(
             model_path=model_path,
             base_url=config_string(config, "base_url"),
-            api_key=api_key,
+            api_key=config_secret(config, environ, "api_key", "api_key_env"),
             api=config["api"],
             inference_timeout_s=config["timeout_s"],
         )
@@ -351,12 +350,7 @@ def resolve_proxy_runtime(
     timeout_raw = _env_value(values, "REEF_INFERENCE_TIMEOUT_S")
     if timeout_raw is not None:
         config["timeout_s"] = float(timeout_raw)
-    built = RuntimeRegistry().build(
-        config,
-        model_path=_env_value(values, "REEF_MODEL_PATH") or "",
-        environ=values,
-    )
-
+    built = RuntimeRegistry().build(config, model_path=_env_value(values, "REEF_MODEL_PATH") or "", environ=values)
     if not isinstance(built, InferenceRuntime):
         raise TypeError("inference proxy factory must return an InferenceRuntime")
     return built
@@ -376,7 +370,6 @@ __all__ = [
     "ProviderRequestHeaders",
     "RequestHeadersFactory",
     "content_identity_headers",
-    "default_artifact_request_headers",
     "provider_request_headers",
     "resolve_proxy_runtime",
 ]

@@ -21,6 +21,29 @@ from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, Tra
 DEFAULT_ACTOR_NAME = "reef-train-bridge"
 DEFAULT_NAMESPACE = "reef"
 
+#: Every durable training-job state a coordinator may report.
+TRAINING_JOB_STATES = frozenset(
+    {
+        "IDLE",
+        "RUNNING",
+        "CHECKPOINT",
+        "UPDATING_WEIGHTS",
+        "READY_TO_COMMIT",
+        "HEAD_COMMITTED",
+        "COMPLETE",
+        "REJECTED",
+        "REJECTING",
+    }
+)
+LORA_MODES = frozenset({"shared", "scenario"})
+
+#: RPCs that only read state; a named client retries them across actor replacement.
+_READ_ONLY_RPCS = frozenset({"health", "serving_runtime_load_id"})
+
+_OUTDATED_BACKEND = (
+    "training backend predates deferred serving-weight updates; restart the Reef service and training actor together"
+)
+
 
 class CoordinatorClient(ABC):
     """Client contract for Reef coordinator RPCs, shared by both runtimes.
@@ -39,22 +62,6 @@ class CoordinatorClient(ABC):
     @abstractmethod
     def health(self) -> Mapping[str, Any]:
         """Return backend health and durable training-job state."""
-        ...
-
-    @abstractmethod
-    def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
-        """Activate one checkpointed candidate in the serving engine."""
-        ...
-
-    @abstractmethod
-    def reject_training_candidate(self, training_job_id: str) -> None:
-        """Finish a rejected candidate without changing serving weights."""
-        ...
-
-    @abstractmethod
-    def acknowledge_training_commit(self, training_job_id: str) -> None:
-        """Acknowledge Reef's durable commit for an activated candidate."""
-        ...
 
     @abstractmethod
     def prepare_training_step(
@@ -63,6 +70,18 @@ class CoordinatorClient(ABC):
 
     @abstractmethod
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult: ...
+
+    @abstractmethod
+    def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
+        """Activate one checkpointed candidate in the serving engine."""
+
+    @abstractmethod
+    def reject_training_candidate(self, training_job_id: str) -> None:
+        """Finish a rejected candidate without changing serving weights."""
+
+    @abstractmethod
+    def acknowledge_training_commit(self, training_job_id: str) -> None:
+        """Acknowledge Reef's durable commit for an activated candidate."""
 
     def shutdown(self) -> None:
         return
@@ -77,9 +96,7 @@ class ExecutorCoordinatorClient(CoordinatorClient):
     """
 
     def __init__(self, executor: Executor, *, rank: int = 0, timeout_s: float = 300.0) -> None:
-        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
-            raise TrainingRuntimeError("training timeout must be a positive finite number")
-        if not math.isfinite(timeout_s) or timeout_s <= 0:
+        if not _positive_finite(timeout_s):
             raise TrainingRuntimeError("training timeout must be a positive finite number")
         if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
             raise TrainingRuntimeError("training coordinator rank must be a non-negative integer")
@@ -94,6 +111,21 @@ class ExecutorCoordinatorClient(CoordinatorClient):
     def _rpc(self, method: str, *args: Any) -> Any:
         return self._executor.rpc(self._rank, method, args=args, timeout=self._timeout_s)
 
+    def health(self) -> Mapping[str, Any]:
+        try:
+            value = self._rpc("health")
+        except AttributeError as exc:
+            raise TrainingRuntimeError(_OUTDATED_BACKEND) from exc
+        if not isinstance(value, Mapping):
+            raise TrainingRuntimeError("train group returned invalid health")
+        if not isinstance(value.get("training_job"), Mapping):
+            raise TrainingRuntimeError(_OUTDATED_BACKEND)
+        return dict(value)
+
+    def serving_runtime_load_id(self) -> str | None:
+        version = self._rpc("serving_runtime_load_id")
+        return None if version is None else str(version)
+
     def prepare_training_step(
         self,
         batch: TrainingBatch,
@@ -102,26 +134,8 @@ class ExecutorCoordinatorClient(CoordinatorClient):
     ) -> PreparedTrainingStep:
         return self._rpc("prepare_training_step", batch, step_preparer, dict(algorithm_state))
 
-    def serving_runtime_load_id(self) -> str | None:
-        version = self._rpc("serving_runtime_load_id")
-        return None if version is None else str(version)
-
-    def health(self) -> Mapping[str, Any]:
-        try:
-            value = self._rpc("health")
-        except AttributeError as exc:
-            raise TrainingRuntimeError(
-                "training backend predates deferred serving-weight updates; "
-                "restart the Reef service and training actor together"
-            ) from exc
-        if not isinstance(value, Mapping):
-            raise TrainingRuntimeError("train group returned invalid health")
-        if not isinstance(value.get("training_job"), Mapping):
-            raise TrainingRuntimeError(
-                "training backend predates deferred serving-weight updates; "
-                "restart the Reef service and training actor together"
-            )
-        return dict(value)
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        return self._rpc("execute_training_job", dict(payload))
 
     def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
         return self._rpc("update_serving_weights", training_job_id)
@@ -132,18 +146,45 @@ class ExecutorCoordinatorClient(CoordinatorClient):
     def acknowledge_training_commit(self, training_job_id: str) -> None:
         self._rpc("acknowledge_training_commit", training_job_id)
 
-    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
-        return self._rpc("execute_training_job", dict(payload))
-
     def shutdown(self) -> None:
         """Release the executor; its ownership policy protects attached workers."""
         self._executor.shutdown()
 
 
+def _positive_finite(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+
+
 def training_job_status(handle: CoordinatorClient) -> Mapping[str, Any]:
+    """The coordinator's durable training-job status plus the engine facts Reef reads.
+
+    Every field is validated here once, so callers index the result directly.
+    """
     health = handle.health()
     if not isinstance(health, Mapping):
         raise TrainingRuntimeError(f"train group handle returned invalid health: {type(health).__name__}")
+    healthy = _require_healthy(health)
+    status = health.get("training_job")
+    if not isinstance(status, Mapping):
+        raise TrainingRuntimeError("train group health is missing training_job status")
+    if status.get("deferred_weight_update") is not True:
+        raise TrainingRuntimeError("Reef requires deferred serving-weight updates")
+    state = status.get("status", "COMPLETE")
+    if not isinstance(state, str):
+        raise TrainingRuntimeError("train group returned malformed training-job status")
+    if state not in TRAINING_JOB_STATES:
+        raise TrainingRuntimeError(f"train group returned unknown training-job status: {state!r}")
+    if "commit_acknowledged" in status and not isinstance(status["commit_acknowledged"], bool):
+        raise TrainingRuntimeError("train group returned malformed commit acknowledgement")
+    return {
+        "inference_url": health.get("inference_url"),
+        **status,
+        "serving_healthy": healthy is not False and health.get("phase") != "recovering",
+        **_engine_facts(health),
+    }
+
+
+def _require_healthy(health: Mapping[str, Any]) -> bool | None:
     healthy = health.get("ok")
     if healthy is not None and not isinstance(healthy, bool):
         raise TrainingRuntimeError("train group returned malformed health status")
@@ -153,21 +194,19 @@ def training_job_status(handle: CoordinatorClient) -> Mapping[str, Any]:
         phase = health.get("phase")
         detail = f" in phase {phase!r}" if isinstance(phase, str) and phase else ""
         raise TrainingRuntimeError(f"train group is unhealthy{detail}")
-    status = health.get("training_job")
-    if not isinstance(status, Mapping):
-        raise TrainingRuntimeError("train group health is missing training_job status")
-    deferred = status.get("deferred_weight_update")
+    return healthy
+
+
+def _engine_facts(health: Mapping[str, Any]) -> dict[str, Any]:
+    """Validated engine-level fields of a health report, with absent ones normalized."""
     colocate = health.get("colocate", False)
-    lora_adapter = health.get("lora_adapter")
-    state = status.get("status", "COMPLETE")
-    if deferred is not True:
-        raise TrainingRuntimeError("Reef requires deferred serving-weight updates")
-    if not isinstance(colocate, bool) or not isinstance(state, str):
+    if not isinstance(colocate, bool):
         raise TrainingRuntimeError("train group returned malformed training-job status")
+    lora_adapter = health.get("lora_adapter")
     if lora_adapter is not None and (not isinstance(lora_adapter, str) or not lora_adapter):
         raise TrainingRuntimeError("train group returned a malformed serving adapter name")
     lora_mode = health.get("lora_mode")
-    if lora_mode is not None and lora_mode not in {"shared", "scenario"}:
+    if lora_mode is not None and lora_mode not in LORA_MODES:
         raise TrainingRuntimeError(f"train group returned unknown LoRA mode: {lora_mode!r}")
     lora_adapters = health.get("lora_adapters")
     if lora_adapters is not None and not isinstance(lora_adapters, Mapping):
@@ -175,24 +214,7 @@ def training_job_status(handle: CoordinatorClient) -> Mapping[str, Any]:
     adapter_residency = health.get("adapter_residency")
     if adapter_residency is not None and not isinstance(adapter_residency, Mapping):
         raise TrainingRuntimeError("train group returned malformed adapter residency")
-    if "commit_acknowledged" in status and not isinstance(status["commit_acknowledged"], bool):
-        raise TrainingRuntimeError("train group returned malformed commit acknowledgement")
-    if state not in {
-        "IDLE",
-        "RUNNING",
-        "CHECKPOINT",
-        "UPDATING_WEIGHTS",
-        "READY_TO_COMMIT",
-        "HEAD_COMMITTED",
-        "COMPLETE",
-        "REJECTED",
-        "REJECTING",
-    }:
-        raise TrainingRuntimeError(f"train group returned unknown training-job status: {state!r}")
     return {
-        "inference_url": health.get("inference_url"),
-        **dict(status),
-        "serving_healthy": healthy is not False and health.get("phase") != "recovering",
         "colocate": colocate,
         "lora_adapter": lora_adapter,
         "lora_mode": lora_mode,
@@ -200,6 +222,8 @@ def training_job_status(handle: CoordinatorClient) -> Mapping[str, Any]:
         "adapter_residency": dict(adapter_residency) if adapter_residency is not None else None,
     }
 
+
+# -- Ray -----------------------------------------------------------------------
 
 RayRuntimeError = TrainingRuntimeError
 RayCoordinatorClient = CoordinatorClient
@@ -220,10 +244,7 @@ class RemoteRayCoordinatorClient(ExecutorCoordinatorClient):
     """Attach a non-owning executor to an existing Ray training coordinator."""
 
     def __init__(self, train_group_actor: Any, *, timeout_s: float = 300.0) -> None:
-        super().__init__(
-            RayExecutor.from_workers((train_group_actor,), owned=False),
-            timeout_s=timeout_s,
-        )
+        super().__init__(RayExecutor.from_workers((train_group_actor,), owned=False), timeout_s=timeout_s)
 
 
 class NamedRayCoordinatorClient(RemoteRayCoordinatorClient):
@@ -240,12 +261,7 @@ class NamedRayCoordinatorClient(RemoteRayCoordinatorClient):
     def __init__(
         self, actor_name: str, namespace: str, *, timeout_s: float = 300, health_timeout_s: float = 300
     ) -> None:
-        if (
-            isinstance(health_timeout_s, bool)
-            or not isinstance(health_timeout_s, (int, float))
-            or not math.isfinite(health_timeout_s)
-            or health_timeout_s <= 0
-        ):
+        if not _positive_finite(health_timeout_s):
             raise TrainingRuntimeError("health timeout must be a positive finite number")
         super().__init__(_require_ray().get_actor(actor_name, namespace=namespace), timeout_s=timeout_s)
         self._actor_name = actor_name
@@ -255,22 +271,22 @@ class NamedRayCoordinatorClient(RemoteRayCoordinatorClient):
 
     def _rpc(self, method: str, *args: Any) -> Any:
         ray = _require_ray()
-        timeout = self._health_timeout_s if method in {"health", "serving_runtime_load_id"} else self._timeout_s
-        deadline = time.monotonic() + timeout
+        read_only = method in _READ_ONLY_RPCS
+        deadline = time.monotonic() + (self._health_timeout_s if read_only else self._timeout_s)
         while not self._closed:
+            remaining = deadline - time.monotonic()
             try:
                 actor = ray.get_actor(self._actor_name, namespace=self._namespace)
             except ValueError as exc:
-                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TrainingRuntimeError("training coordinator is unavailable during recovery") from exc
                 time.sleep(min(0.1, remaining))
                 continue
             executor = RayExecutor.from_workers((actor,), owned=False)
             try:
-                return executor.rpc(0, method, args=args, timeout=max(0.001, deadline - time.monotonic()))
+                return executor.rpc(0, method, args=args, timeout=max(0.001, remaining))
             except (ray.exceptions.RayActorError, ExecutorFailedError):
-                if method not in {"health", "serving_runtime_load_id"} or time.monotonic() >= deadline:
+                if not read_only or time.monotonic() >= deadline:
                     raise
                 time.sleep(min(0.1, max(0, deadline - time.monotonic())))
             finally:
@@ -294,9 +310,9 @@ def connect_ray_coordinator(
     ray = _require_ray()
     if not ray.is_initialized():
         ray.init(address=ray_address or "auto", namespace=namespace)
+    if train_timeout_s is None:
+        # A training step legitimately outlasts an inference request.
+        train_timeout_s = inference_timeout_s
     return NamedRayCoordinatorClient(
-        actor_name,
-        namespace,
-        timeout_s=train_timeout_s if train_timeout_s is not None else inference_timeout_s,
-        health_timeout_s=inference_timeout_s,
+        actor_name, namespace, timeout_s=train_timeout_s, health_timeout_s=inference_timeout_s
     )

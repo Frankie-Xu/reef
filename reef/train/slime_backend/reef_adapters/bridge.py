@@ -234,6 +234,47 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 algorithm_metrics=algorithm_metrics,
             )
 
+    def train_job(self, job: _SlimePreparedTrainingJob) -> TrainingMetrics:
+        """Run one optimizer step for an admitted job and collect its metrics."""
+        checkpoint = job.checkpoint
+        if checkpoint.scenario is not None:
+            self._group.activate_scenario(checkpoint.scenario)
+        training = self._algo.train(
+            checkpoint.rollout_id,
+            job.packed,
+            actor_group=self._group,
+            critic_group=self._critic_group,
+            resolve=self._get,
+        )
+        durable_metrics = {
+            **training.durable_metrics,
+            **self._algo.rollout_metrics(job.rollout_data, self.context.runtime_load_id),
+        }
+        train_metrics = next(
+            (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
+            {},
+        )
+        train_metrics.update(self._get(self._group.async_pop_rank0_metrics()))
+        train_metrics.update(job.algorithm_metrics)
+        return TrainingMetrics(training=train_metrics, durable=durable_metrics)
+
+    def save_job_checkpoint(self, job: _SlimePreparedTrainingJob) -> None:
+        """Persist the paired model/optimizer checkpoints and record the step."""
+        checkpoint = job.checkpoint
+        rollout_id = checkpoint.rollout_id
+        self._group.save_model(rollout_id, force_sync=True)
+        if self._critic_save_root is not None:
+            # Critic-only warmup also needs paired optimizer recovery; the
+            # critic checkpoint never becomes a serving model/HF export.
+            self._critic_group.save_model(rollout_id, force_sync=True)
+        if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
+            raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
+        if self._storage is not None:
+            rewards = job.rollout_data["rewards"]
+            self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
+        if checkpoint.scenario is not None:
+            self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
+
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
 
@@ -301,11 +342,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
 
 
 class _SlimePreparedTrainingJob(PreparedTrainingJob):
-    """One prepared Slime step; Reef controls when training and saving run."""
+    """One admitted Slime step; the backend runs it when Reef says so."""
 
     def __init__(
         self,
-        bridge: SlimeTrainingBackend,
+        backend: SlimeTrainingBackend,
         *,
         checkpoint: TrainingCheckpoint,
         job_id: str,
@@ -313,56 +354,22 @@ class _SlimePreparedTrainingJob(PreparedTrainingJob):
         packed: Any,
         algorithm_metrics: Mapping[str, Any],
     ) -> None:
-        self._bridge = bridge
+        self._backend = backend
         self._checkpoint = checkpoint
-        self._job_id = job_id
-        self._rollout_data = rollout_data
-        self._packed = packed
-        self._algorithm_metrics = algorithm_metrics
+        self.job_id = job_id
+        self.rollout_data = rollout_data
+        self.packed = packed
+        self.algorithm_metrics = algorithm_metrics
 
     @property
     def checkpoint(self) -> TrainingCheckpoint:
         return self._checkpoint
 
     def train(self) -> TrainingMetrics:
-        bridge = self._bridge
-        if self.checkpoint.scenario is not None:
-            bridge._group.activate_scenario(self.checkpoint.scenario)
-        training = bridge._algo.train(
-            self.checkpoint.rollout_id,
-            self._packed,
-            actor_group=bridge._group,
-            critic_group=bridge._critic_group,
-            resolve=bridge._get,
-        )
-        durable_metrics: dict[str, Any] = {}
-        durable_metrics.update(training.durable_metrics)
-        durable_metrics.update(bridge._algo.rollout_metrics(self._rollout_data, bridge.context.runtime_load_id))
-        worker_metrics = dict(bridge._get(bridge._group.async_pop_rank0_metrics()))
-        train_metrics = next(
-            (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
-            {},
-        )
-        train_metrics.update(worker_metrics)
-        train_metrics.update(self._algorithm_metrics)
-        return TrainingMetrics(training=train_metrics, durable=durable_metrics)
+        return self._backend.train_job(self)
 
     def save_checkpoint(self) -> None:
-        bridge = self._bridge
-        rollout_id = self.checkpoint.rollout_id
-        bridge._group.save_model(rollout_id, force_sync=True)
-        if bridge._critic_save_root is not None:
-            # Critic-only warmup also needs paired optimizer recovery; the
-            # critic checkpoint never becomes a serving model/HF export.
-            bridge._critic_group.save_model(rollout_id, force_sync=True)
-        checkpoint = self.checkpoint.path
-        if checkpoint.is_symlink() or not checkpoint.is_dir():
-            raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint}")
-        if bridge._storage is not None:
-            rewards = self._rollout_data["rewards"]
-            bridge._storage.complete(self._job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
-        if self.checkpoint.scenario is not None:
-            bridge._require_history().record_checkpoint(self.checkpoint.scenario, rollout_id)
+        self._backend.save_job_checkpoint(self)
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -546,6 +547,25 @@ class RuntimeRegistry:
             # Injected entries may be plain callables that parse nothing.
             config = factory.parse_config(config, values)
         return factory(config, model_path, recipe_config or {}, values)
+
+
+def runtime_pair(value: Any) -> tuple[TrainingRuntime, InferenceRuntime] | None:
+    """Return ``value`` as a ``(training, inference)`` pair, or ``None`` after shutting down what it held.
+
+    Factories and connectors are user-supplied; anything other than the pair
+    is a configuration error, and any runtime they did build must not leak.
+    """
+    if (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[0], TrainingRuntime)
+        and isinstance(value[1], InferenceRuntime)
+    ):
+        return value
+    for component in value if isinstance(value, tuple) else (value,):
+        with suppress(Exception):
+            component.shutdown()
+    return None
 
 
 # -- Config section helpers ---------------------------------------------------

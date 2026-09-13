@@ -18,7 +18,7 @@ from reef.artifact import (
 )
 from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.inference.http import HttpInferenceHandler, default_artifact_request_headers
+from reef.inference.http import HttpInferenceHandler, content_identity_headers
 from reef.recipe import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import InferenceHandler
@@ -99,7 +99,7 @@ def test_live_artifact_headers_use_version_without_a_checkpoint_path() -> None:
     ref = LiveWeightArtifactRef("artifact-1", "live:weight-v1", "checkpoint", "weight-v1")
     artifact = Artifact(ref, None)
 
-    assert default_artifact_request_headers(artifact) == {
+    assert content_identity_headers(artifact) == {
         "x-reef-release-id": "live:weight-v1",
     }
 

@@ -76,67 +76,87 @@ class SGLangEngineGroup:
         }
 
     def start_engines(self, cursors: dict[str, int]) -> list[Any]:
-        self.num_new_engines = 0
-        local_width = min(self.num_gpus_per_engine, self.config.gpus_per_node)
-        created = []
-        for index, engine in enumerate(self.all_engines):
-            if engine is not None:
-                continue
-            options: dict[str, Any] = {
-                "num_cpus": 0.2,
-                "num_gpus": 0 if self.external else 0.2,
-                "runtime_env": {"env_vars": engine_environment(self.config)},
-            }
-            base_gpu = 0
-            if not self.external:
-                pg, bundles, devices = self.placement
-                offset = self.gpu_offset + index * local_width
-                if offset + local_width > len(devices):
-                    raise ValueError("inference placement is smaller than its SGLang engine groups")
-                base_gpu = int(devices[offset])
-                if [int(device) for device in devices[offset : offset + local_width]] != list(
-                    range(base_gpu, base_gpu + local_width)
-                ):
-                    raise ValueError("SGLang engines require contiguous GPUs within each node")
-                options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=bundles[offset],
-                    placement_group_capture_child_tasks=True,
-                )
-            overrides = dict(self.group.options)
-            if self.config.offload and not self.needs_offload:
-                overrides.setdefault("enable_memory_saver", False)
-            actor = (
-                ray.remote(ReefSGLangEngine)
-                .options(**options)
-                .remote(
-                    self.config,
-                    rank=index,
-                    worker_type=self.worker_type,
-                    base_gpu_id=base_gpu,
-                    sglang_overrides=overrides,
-                    num_gpus_per_engine=self.num_gpus_per_engine,
-                    external_url=self.external["url"] if self.external else None,
-                )
-            )
-            self.all_engines[index] = actor
-            created.append(index)
-        self.num_new_engines = len(created)
-        addresses: dict[int, dict[str, Any]] = {}
+        """Launch an actor for every empty slot; return the pending ``init`` calls.
+
+        ``cursors`` tracks the next free port range per host across groups so
+        engines on one node never race for the same ports.
+        """
+        created = [index for index, engine in enumerate(self.all_engines) if engine is None]
         for index in created:
-            actor = self.all_engines[index]
-            if self.external:
-                host, port = self.external["host"], self.external["port"]
-                addresses[index] = {
+            self.all_engines[index] = self._launch_actor(index)
+        self.num_new_engines = len(created)
+        addresses = self._addresses(created, cursors)
+        return [
+            self.all_engines[index].init.remote(
+                **addresses[index], router_ip=self.router[0], router_port=self.router[1]
+            )
+            for index in created
+        ]
+
+    def _launch_actor(self, index: int) -> Any:
+        options: dict[str, Any] = {
+            "num_cpus": 0.2,
+            "num_gpus": 0 if self.external else 0.2,
+            "runtime_env": {"env_vars": engine_environment(self.config)},
+        }
+        base_gpu = 0
+        if not self.external:
+            base_gpu, options["scheduling_strategy"] = self._placement(index)
+        overrides = dict(self.group.options)
+        if self.config.offload and not self.needs_offload:
+            overrides.setdefault("enable_memory_saver", False)
+        return (
+            ray.remote(ReefSGLangEngine)
+            .options(**options)
+            .remote(
+                self.config,
+                rank=index,
+                worker_type=self.worker_type,
+                base_gpu_id=base_gpu,
+                sglang_overrides=overrides,
+                num_gpus_per_engine=self.num_gpus_per_engine,
+                external_url=self.external["url"] if self.external else None,
+            )
+        )
+
+    def _placement(self, index: int) -> tuple[int, PlacementGroupSchedulingStrategy]:
+        """The first GPU and the bundle that pin engine ``index`` to its reserved devices."""
+        pg, bundles, devices = self.placement
+        local_width = min(self.num_gpus_per_engine, self.config.gpus_per_node)
+        offset = self.gpu_offset + index * local_width
+        if offset + local_width > len(devices):
+            raise ValueError("inference placement is smaller than its SGLang engine groups")
+        base_gpu = int(devices[offset])
+        if [int(device) for device in devices[offset : offset + local_width]] != list(
+            range(base_gpu, base_gpu + local_width)
+        ):
+            raise ValueError("SGLang engines require contiguous GPUs within each node")
+        strategy = PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=bundles[offset],
+            placement_group_capture_child_tasks=True,
+        )
+        return base_gpu, strategy
+
+    def _addresses(self, created: list[int], cursors: dict[str, int]) -> dict[int, dict[str, Any]]:
+        """Per-actor ``init`` addresses; every node of a multi-node engine meets at node zero's."""
+        if self.external:
+            host, port = self.external["host"], self.external["port"]
+            return {
+                index: {
                     "host": host,
                     "port": port,
                     "nccl_port": None,
                     "dist_init_addr": f"{host}:{port}",
                     "disaggregation_bootstrap_port": self.external.get("disaggregation_bootstrap_port"),
                 }
-                continue
+                for index in created
+            }
+        addresses: dict[int, dict[str, Any]] = {}
+        width = 34 + int(self.group.options.get("dp_size", self.config.options.get("dp_size")) or 1)
+        for index in created:
+            actor = self.all_engines[index]
             host, _ = ray.get(actor._get_current_node_ip_and_free_port.remote())
-            width = 34 + int(self.group.options.get("dp_size", self.config.options.get("dp_size")) or 1)
             _, port = ray.get(
                 actor._get_current_node_ip_and_free_port.remote(start_port=cursors.get(host, 15000), consecutive=width)
             )
@@ -147,21 +167,10 @@ class SGLangEngineGroup:
                 "nccl_port": port + 1,
                 "disaggregation_bootstrap_port": port + 2,
             }
-            if index % self.nodes_per_engine == 0:
-                for node in range(index, index + self.nodes_per_engine):
-                    addresses.setdefault(node, {})["dist_init_addr"] = f"{host}:{port + 3}"
-        # Preserve node-zero's rendezvous when subsequent per-node ports are filled.
         for index in created:
-            if not self.external:
-                head = index - index % self.nodes_per_engine
-                root = addresses[head]
-                addresses[index]["dist_init_addr"] = f"{root['host']}:{root['port'] + 3}"
-        return [
-            self.all_engines[index].init.remote(
-                **addresses[index], router_ip=self.router[0], router_port=self.router[1]
-            )
-            for index in created
-        ]
+            root = addresses[index - index % self.nodes_per_engine]
+            addresses[index]["dist_init_addr"] = f"{root['host']}:{root['port'] + 3}"
+        return addresses
 
 
 @dataclass
