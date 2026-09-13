@@ -276,6 +276,9 @@ Deployment modules
 * ``execution.py`` validates process definitions and dependency order and selects
   executors. ``process.py`` owns worker processes; ``guard.py`` cleans up a remote
   process group when its Ray owner disappears.
+* ``diagnostics.py`` lists the resolved settings with their sources (file,
+  command line, environment, automatic, default) for the startup log, masking
+  credentials.
 * ``orchestrator.py`` coordinates configuration resolution, launch, readiness,
   supervision and shutdown, including the internal HTTP child entrypoint.
 

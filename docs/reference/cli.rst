@@ -21,6 +21,7 @@ unexpectedly.
    -c, --config | optional config file. No file is loaded unless explicitly selected.
    --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``harness-evolve``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
+   --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
    --help | the command list
    -V, --version | the installed reef version. Takes no command: ``reef --version``.
 
