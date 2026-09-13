@@ -31,6 +31,7 @@ from statistics import fmean
 from typing import Any, Protocol
 
 from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.trajectories import recorded_payload
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -40,7 +41,7 @@ from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend.strategies import EpisodeScorer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 from . import components, reflection
 from .archive import Archive
@@ -152,7 +153,7 @@ class GEPAProposer:
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
     ) -> tuple[Mutation, ...] | None:
         archive = self._archive
@@ -245,7 +246,7 @@ class GEPAProposer:
         nodes: tuple[tuple[str, object], ...],
         parent: int,
         parent_texts: Mapping[str, str],
-        samples: Sequence[TraceSample],
+        samples: Sequence[TrajectoryItem],
         models: ModelBindings,
     ) -> list[_Example]:
         """The parent's minibatch: free from traffic, or re-run on the parent."""
@@ -255,7 +256,7 @@ class GEPAProposer:
             # parent on the minibatch and counts it, so the traffic that
             # stands in for that evaluation counts the same.
             self._archive.charge(len(batch))
-            return [_Example(task, output, float(sample.score)) for sample, (task, output) in batch]
+            return [_Example(task, output, float(sample.metadata.get("reward"))) for sample, (task, output) in batch]
         examples = []
         for _, (task, _) in batch:
             score, output, error = self._score(nodes, parent_texts, task, models)
@@ -395,13 +396,15 @@ def _scores(values: Any) -> list[float]:
     return [0.0 if value is None else float(value) for value in values]
 
 
-def _traffic(samples: Sequence[TraceSample]) -> list[tuple[TraceSample, tuple[str, str]]]:
+def _traffic(samples: Sequence[TrajectoryItem]) -> list[tuple[TrajectoryItem, tuple[str, str]]]:
     """Each sample as its prompt and the answer the served composition gave.
 
     A recorded request with no user message carries no task to re-run, so it
     is not a minibatch example at all and is dropped here.
     """
-    pairs = [(sample, (_prompt_of(sample.payload), _response_of(sample.payload))) for sample in samples]
+    pairs = [
+        (sample, (_prompt_of(recorded_payload(sample)), _response_of(recorded_payload(sample)))) for sample in samples
+    ]
     return [(sample, texts) for sample, texts in pairs if texts[0]]
 
 

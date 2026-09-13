@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, ReportSample, SampleAssembly
-from reef.train.types import PolicyBatch, ProcessorContext
+from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, SampleAssembly
+from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
 
 
 class ThresholdProcessor(ReportedFeedbackProcessor):
     """One report becomes one sample, with no score filtering."""
 
-    output_schema = PolicyBatch
+    output_schema = TrainingBatch
 
     def __init__(self, context: ProcessorContext) -> None:
         self._assembly = SampleAssembly.from_config(context)
         super().__init__(context)
 
-    def make_sample(self, context: ReportContext) -> ReportSample:
-        return ReportSample(self._assembly.build(context, context.require_score()))
+    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+        return self._assembly.build(context, context.require_score())
 
-    def make_batch(self, units, batch_number: int) -> PolicyBatch:
-        return PolicyBatch(
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(
             f"{self.scenario}:threshold:{batch_number}",
-            tuple(unit.candidates[0].value for unit in units),
+            items,
         )

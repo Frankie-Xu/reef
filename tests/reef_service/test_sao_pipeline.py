@@ -12,6 +12,7 @@ from threading import Event
 from typing import Any
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOProcessor
@@ -19,6 +20,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
+from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
@@ -29,7 +31,7 @@ from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import PolicyBatch, PolicySample
+from reef.train.types import TrainingBatch
 
 
 class _StateOnlySaoBackend(TrainingBackend):
@@ -163,16 +165,16 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
 
     batch = processor.build_batch()
 
-    assert isinstance(batch, PolicyBatch)
-    assert len(batch.samples) == 1
-    sample = batch.samples[0]
-    assert sample.source_agent_record_id == "i1"
-    assert sample.reward == pytest.approx(0.75)
+    assert isinstance(batch, TrainingBatch)
+    assert len(batch.items) == 1
+    sample = batch.items[0]
+    assert source_record_id(sample) == "i1"
+    assert trajectory_reward(sample) == pytest.approx(0.75)
     # No explicit action mask -> the whole response is one action.
-    assert sample.action_mask == sample.loss_mask
+    assert tuple(sample.training.get("action_mask", [])) == tuple(sample.training.get("loss_mask", []))
     # The producing version and timestamp support policy-lag / queue-age reporting.
-    assert sample.runtime_load_id == "slime-v3"
-    assert sample.rollout_created_at is not None
+    assert sample.training.get("runtime_load_id", None) == "slime-v3"
+    assert sample.training.get("rollout_created_at", None) is not None
 
 
 @pytest.mark.unit
@@ -201,7 +203,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live()
 
     batch = processor.build_batch()
 
-    assert batch.samples[0].runtime_load_id == "slime-v7"
+    assert batch.items[0].training.get("runtime_load_id", None) == "slime-v7"
 
 
 @pytest.mark.unit
@@ -222,8 +224,8 @@ def test_processor_preserves_explicit_observation_boundaries() -> None:
 
     batch = processor.build_batch()
 
-    assert batch.samples[0].action_mask == (1, 0, 1)
-    assert batch.samples[0].loss_mask == (1, 0, 1)
+    assert tuple(batch.items[0].training.get("action_mask", [])) == (1, 0, 1)
+    assert tuple(batch.items[0].training.get("loss_mask", [])) == (1, 0, 1)
 
 
 @pytest.mark.unit
@@ -308,7 +310,7 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
         processor.retention_decision()  # a read between arrivals must not latch the release
 
     batch = processor.build_batch()
-    assert [sample.source_agent_record_id for sample in batch.samples] == ["i1"]
+    assert [source_record_id(sample) for sample in batch.items] == ["i1"]
     processor.acknowledge(batch.batch_id)
     assert processor.retention_decision().releasable_agent_record_ids == frozenset({"retry", "i1"})
 
@@ -318,9 +320,9 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
 
 @pytest.mark.unit
 def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "math:sao:1",
-        (PolicySample("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
+        (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
     result = prepare_slime_step(batch, "sao", {})
@@ -332,7 +334,10 @@ def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
 
 @pytest.mark.unit
 def test_backend_preparation_advances_step_state() -> None:
-    batch = PolicyBatch("math:sao:1", (PolicySample("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),))
+    batch = TrainingBatch(
+        "math:sao:1",
+        (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
+    )
 
     first = prepare_slime_step(batch, "sao", {})
     second = prepare_slime_step(batch, "sao", first.next_algorithm_state)
@@ -374,15 +379,15 @@ class _StubTrainingRuntime(TrainingRuntime):
         return self._served_version
 
     def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
-        assert isinstance(batch, PolicyBatch)
-        sample = batch.samples[0]
+        assert isinstance(batch, TrainingBatch)
+        sample = batch.items[0]
         prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
         assert prepared.payload is not None
         payload = {
             **prepared.payload,
             "rollout_id": scenario_step,
-            "reward": sample.reward,
-            "expected_runtime_load_id": sample.runtime_load_id,
+            "reward": trajectory_reward(sample),
+            "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
         return PreparedTrainingStep(
             action="train",
@@ -641,7 +646,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         )
         assert second.state == {"steps": 1}
         assert second.reserve_training_batch() is not None
-        assert second.pending_batch.samples[0].source_agent_record_id == "i2"
+        assert source_record_id(second.pending_batch.items[0]) == "i2"
 
 
 if __name__ == "__main__":

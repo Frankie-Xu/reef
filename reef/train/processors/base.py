@@ -14,7 +14,7 @@ from typing import Any
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
-from reef.train.types import PolicyBatch, ProcessorContext, TrainingBatch
+from reef.train.types import ProcessorContext, TrainingBatch
 
 
 @dataclass(frozen=True)
@@ -173,7 +173,7 @@ class DataProcessor:
         return self._context.experiment_logger
 
     #: The batch type ``build_batch`` returns; the trainer validates it.
-    output_schema: type[TrainingBatch] = PolicyBatch
+    output_schema: type[TrainingBatch] = TrainingBatch
 
     def ingest(self, item: AgentRecord) -> None:
         if item.request_type is RequestType.TRAIN:

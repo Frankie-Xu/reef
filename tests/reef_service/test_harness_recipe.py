@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from reef_service._trajectories import recorded_trajectory
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
@@ -43,7 +44,7 @@ from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
 from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.trainer import Trainer
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
+from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch, TrainStepResult
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the episode scorer can prefer compositions containing the marker.
@@ -96,8 +97,8 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
-def batch() -> TraceBatch:
-    return TraceBatch("demo:trace:1", (TraceSample("a1", {"messages": []}, 0.0),))
+def batch() -> TrainingBatch:
+    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 # The deployment's model binding: where episodes and proposals reach a model.
@@ -158,7 +159,7 @@ def backend(tmp_path: Path, propose, seed: tuple = ()) -> CordisBackend:
 
 def run_backend_step(
     backend: CordisBackend,
-    trace_batch: TraceBatch,
+    trace_batch: TrainingBatch,
     state,
 ) -> TrainStepResult:
     """Exercise the backend phases directly; production runs them in Trainer."""
@@ -1470,11 +1471,12 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
     assert all(received is executor for received in seen)
 
 
-def _traced_batch(*prompts: str) -> TraceBatch:
+def _traced_batch(*prompts: str) -> TrainingBatch:
     samples = tuple(
-        TraceSample(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0) for i, p in enumerate(prompts)
+        recorded_trajectory(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0)
+        for i, p in enumerate(prompts)
     )
-    return TraceBatch("demo:trace:promote", samples)
+    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
@@ -1548,16 +1550,16 @@ def test_secret_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
     assert key not in json.dumps(result.state)
 
 
-def _tagged_batch(*pairs: tuple[str, str | None]) -> TraceBatch:
+def _tagged_batch(*pairs: tuple[str, str | None]) -> TrainingBatch:
     samples = tuple(
-        TraceSample(
+        recorded_trajectory(
             f"a{i}",
             {"messages": [{"role": "user", "content": p}], "metadata": {"tags": {"client": s}} if s else {}},
             0.0,
         )
         for i, (p, s) in enumerate(pairs)
     )
-    return TraceBatch("demo:trace:promote", samples)
+    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def _promoting_backend(tmp_path: Path, **kwargs):

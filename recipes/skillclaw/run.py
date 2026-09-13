@@ -414,9 +414,8 @@ def run_day(
             "error": str(result["error"]),
             "breakdown": result["breakdown"],
         }
-        # The day reports the night's digests read (TraceSample carries no
-        # metadata channel); written before the report so the trigger report
-        # never races its own night.
+        # Persist task metadata for the night's digests before posting the
+        # trigger report, so the night can read the complete day.
         report_path = round_dir / "reports" / f"{slug}.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")

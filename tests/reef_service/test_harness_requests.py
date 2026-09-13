@@ -37,7 +37,7 @@ from reef.train.cordis_backend.backend import _merged_requires
 from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
-from reef.train.types import TraceBatch
+from reef.train.types import TrainingBatch
 
 
 @pytest.mark.parametrize("has_receipts", [False, True])
@@ -404,9 +404,9 @@ def test_the_backend_caps_the_merged_list_and_writes_the_row_of_a_step_that_prop
     person = [{"name": f"P{index}", "kind": "env"} for index in range(6)]
     added = [{"name": "A0", "kind": "env"}, {"name": "A1", "kind": "service"}, {"name": "A2", "kind": "permission"}]
 
-    def batch_for(request_id: str) -> TraceBatch:
+    def batch_for(request_id: str) -> TrainingBatch:
         request = TrainingRequest("ask", "s", "rel-0", request_id, requires=person)
-        return TraceBatch(f"demo:instruction:{request_id}", (), request=request)
+        return TrainingBatch(f"demo:instruction:{request_id}", (), request=request)
 
     def extending(nodes, samples, models, *, requests=()):
         requests[0]["requires"].extend(added)

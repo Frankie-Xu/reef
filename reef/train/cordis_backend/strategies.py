@@ -19,7 +19,7 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 
 class Proposer(ABC):
@@ -86,7 +86,7 @@ class Proposer(ABC):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -178,7 +178,7 @@ class _CallableProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -276,7 +276,7 @@ class Promoter(ABC):
     @abstractmethod
     def __call__(
         self,
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:
@@ -286,7 +286,7 @@ class Promoter(ABC):
 class PromotePolicy(Protocol):
     """A plain promote callable, ``(samples, *, manifest=None) -> Sequence[str]``, the keyword optional."""
 
-    def __call__(self, samples: tuple[TraceSample, ...], /, **kwargs: Any) -> Sequence[str]: ...
+    def __call__(self, samples: tuple[TrajectoryItem, ...], /, **kwargs: Any) -> Sequence[str]: ...
 
 
 class _CallablePromoter(Promoter):
@@ -298,7 +298,7 @@ class _CallablePromoter(Promoter):
 
     def __call__(
         self,
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:

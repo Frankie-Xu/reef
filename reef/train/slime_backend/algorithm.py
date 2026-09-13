@@ -83,6 +83,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from reef.core.batches import TrajectoryItem
+from reef.core.trajectories import source_record_id, trajectory_reward
+
 
 @dataclass(frozen=True)
 class TrainResult:
@@ -275,17 +278,17 @@ class SlimeAlgorithm(ABC):
 
     # --- stage 2: shape row ---
 
-    def shape_sample_row(self, sample: Any) -> list[Any]:
+    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
         """Shape one Reef sample into this family's wire row.
 
         Default: ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``.
         """
         return [
-            sample.source_agent_record_id,
-            list(sample.tokens),
-            list(sample.loss_mask),
-            list(sample.rollout_log_probs),
-            sample.reward,
+            source_record_id(sample),
+            list(sample.training.get("tokens", [])),
+            list(sample.training.get("loss_mask", [])),
+            list(sample.training.get("rollout_log_probs", [])),
+            trajectory_reward(sample),
         ]
 
     # --- stage 3: build batch ---

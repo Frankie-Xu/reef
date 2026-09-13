@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
@@ -21,6 +22,7 @@ from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor
@@ -34,7 +36,6 @@ from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend.strategies import resolve_episode_scorer
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the scorer can prefer any composition whose instructions carry the marker.
@@ -67,7 +68,7 @@ NODES = (
 SEED = ({"id": "rules", "name": "rules", "config": {"text": SEED_TEXT}},)
 
 TASK = "what is 2+2?"
-SAMPLE = TraceSample(
+SAMPLE = recorded_trajectory(
     "a1",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -77,7 +78,7 @@ SAMPLE = TraceSample(
 )
 #: The same exchange as the proxy records a streamed reply: the message it
 #: assembled from the chunks sits beside the raw stream body, no ``choices``.
-STREAMED_SAMPLE = TraceSample(
+STREAMED_SAMPLE = recorded_trajectory(
     "a2",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -511,7 +512,7 @@ def test_a_perfect_minibatch_short_circuits_before_any_model_call(tmp_path: Path
     archive = Archive(tmp_path / "archive.json")
     episodes = FakeEpisodes()
     models, reflector = bindings()
-    solved = TraceSample("a1", dict(SAMPLE.payload), 1.0)
+    solved = recorded_trajectory("a1", dict(recorded_payload(SAMPLE)), 1.0)
 
     assert proposer(archive, episodes)(NODES, (solved,), models) is None
     assert (episodes.prompts, reflector.prompts) == ([], [])

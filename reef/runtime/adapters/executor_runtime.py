@@ -7,7 +7,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.batches import TrainingBatch, policy_samples
+from reef.core.artifact_ref import parse_runtime_load_spans
+from reef.core.batches import TrainingBatch, trajectories
 from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntime
@@ -134,7 +135,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         if prepared.payload is None:
             raise TrainingRuntimeError("non-skip training preparation must carry a payload")
         payload = dict(prepared.payload)
-        samples = policy_samples(batch)
+        samples = trajectories(batch)
         source_rows = payload.pop("source_rows", None)
         if source_rows is not None:
             # Wire rows follow the step schedule (epochs repeat rows, shuffle
@@ -144,7 +145,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
                 samples = tuple(samples[row] for row in source_rows)
             except (IndexError, TypeError) as exc:
                 raise TrainingRuntimeError(f"prepared payload names invalid source rows: {exc}") from exc
-        versions = tuple(sample.runtime_load_id for sample in samples)
+        versions = tuple(sample.training.get("runtime_load_id", None) for sample in samples)
         if not samples:
             raise TrainingRuntimeError("a training job requires at least one policy sample")
         version_spans = [
@@ -154,7 +155,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
                     "end": span.end,
                     "runtime_load_id": span.runtime_load_id,
                 }
-                for span in sample.runtime_load_spans
+                for span in parse_runtime_load_spans(sample.training.get("runtime_load_spans", []))
             ]
             for sample in samples
         ]

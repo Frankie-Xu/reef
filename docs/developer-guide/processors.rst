@@ -24,6 +24,16 @@ none may block:
   the consumed record ids, which the commit record persists so recovery never
   re-ingests them.
 
+Every concrete processor produces ``TrainingBatch.items``, an ordered tuple of
+``TrainDataItem`` values: ``TrajectoryItem`` for existing trajectories or
+``TaskItem`` for Harbor tasks that an algorithm will roll out. A batch may mix
+both. ``make_sample`` constructs ATIF trajectory items, including captured
+training tensors and feedback in ``extra.reef``. ``make_batch`` collects the
+items; grouped recipes set ``group_id`` on each member. Assembly, scheduling
+and group completeness remain recipe decisions. There is no separate dataset
+container. See `batch values <../reference/python-api.rst#batch>`__ for formats
+and algorithm support.
+
 The processor also controls retention. The trainer reads
 ``retention_decision()`` (protected vs releasable ids) and reports deletions
 back through ``compaction_applied()``.
@@ -58,8 +68,8 @@ implements one assembly hook:
    def make_training_batch(self, batch_number, request):
        if request is not None and self.training_mode == "manual":
            # Manual runs the instruction alone; harness needs no samples.
-           self._pending_units = ()
-           return TraceBatch(request.id, ())
+           self._pending_reports = ()
+           return TrainingBatch(request.id, ())
        # Hybrid hands the instruction the units an automatic batch would take.
        return self._make_pending(batch_number)
 
@@ -126,14 +136,18 @@ not a reason to discard the report.
 
 A reported-feedback recipe implements:
 
-- ``make_sample(context) -> ReportSample``: assemble one report and its resolved
-  inference records. ``ReportSample`` carries a value and optional ``group_key``
-  and ``slot``. Use ``context.require_score()`` when the method needs a reward.
-- ``make_batch(units, batch_number)``: assemble the selected samples into a typed
-  training batch.
-- ``decide_group(key, candidates)`` for grouped methods: return ``INCOMPLETE``,
-  ``READY``, or ``DISCARD``. Waiting for enough valid samples in a group is
-  independent of reference validation.
+- ``make_sample(context) -> TrainDataItem``: assemble an ATIF trajectory or
+  Harbor task directly. Use ``context.require_score()`` when the method needs
+  a reward. The engine attaches the source and report ids to the returned item.
+- ``make_batch(items, batch_number)``: assemble the flat tuple of selected
+  training items into a batch. Consumption remains the engine's responsibility,
+  including selected items that the recipe removes from training.
+- ``grouping(context)`` for grouped methods: return ``(group_key, slot)``.
+  The default ``(None, None)`` makes an independent sample. A None slot uses
+  the report id; repeated slots preserve the first accepted report.
+- ``decide_group(key, items)`` for grouped methods: return ``INCOMPLETE``,
+  ``READY``, or ``DISCARD``. The items are training data, without cache wrappers.
+  The collection group can span multiple training comparison groups, as in TTTD.
 
 The engine handles report-id deduplication, group-slot retries, reservations,
 consumption, and retention. A batch is ready in automatic mode after
@@ -161,7 +175,7 @@ A record's path to a batch
 .. code:: text
 
    report -> validate existing references -> ingest -> make_sample
-       -> candidate -> optional group barrier -> make_batch -> batch -> acknowledge
+       -> TrainDataItem -> optional group barrier -> make_batch -> batch -> acknowledge
 
    computed record -> ingest/track -> dispatch -> async judge
        -> make_sample -> candidate -> make_batch -> batch -> acknowledge
@@ -178,7 +192,7 @@ Compatibility
 -------------
 
 Reported-feedback subclasses must replace ``judge`` and ``ReportDecision`` with
-``make_sample`` and ``ReportSample``. Remove ``WAIT``/``NEVER`` branches: invalid
+``make_sample`` returning ``TrainDataItem``. Remove ``WAIT``/``NEVER`` branches: invalid
 references fail admission, and training contract failures must raise. Existing
 stored records replay through the new contract; legacy reports with invalid
 references or eligibility flags fail explicitly and need correction before replay.
