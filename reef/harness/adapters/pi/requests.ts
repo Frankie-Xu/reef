@@ -270,6 +270,8 @@ export default function requests(pi) {
       }
     };
     mine.timer = setInterval(poll, watchIntervalMs());
+    // A headless session exits when its turn ends; the timer must not hold the process open for the verdict.
+    if (typeof mine.timer.unref === "function") mine.timer.unref();
     watch = mine;
     ctx.ui.setStatus("reef", `reef: step for request ${recordId.slice(0, 8)} running`);
   };
