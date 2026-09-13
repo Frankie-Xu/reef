@@ -139,7 +139,9 @@ training:
     ckpt-fully-parallel-save: true
     sequence-parallel: true
     use-dynamic-batch-size: true
-    max-tokens-per-gpu: "49152"
+    # Micro-batches of one or two turns: with both bases resident, a 48k-token
+    # micro-batch's checkpointed activations and fp32 logits do not fit.
+    max-tokens-per-gpu: "16384"
     attention-dropout: "0.0"
     hidden-dropout: "0.0"
     attention-softmax-in-fp32: true

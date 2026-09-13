@@ -20,6 +20,9 @@ export REEF_SCENARIO="${REEF_SCENARIO:-ceobench-sao}"
 export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-49152}"
 # The agent's shell runs as this unprivileged user inside the task container.
 export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
+# Pace the game to the trainer: the recipe's batch size (serve.yaml), so each
+# new week starts only after the reported weeks' batches have committed.
+export CEOBENCH_PACE_BATCH="${CEOBENCH_PACE_BATCH:-16}"
 
 # Prerequisites
 command -v uv >/dev/null || { echo "run.sh: uv not found (pip install uv)" >&2; exit 1; }

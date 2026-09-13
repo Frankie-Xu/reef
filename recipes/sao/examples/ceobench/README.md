@@ -164,6 +164,16 @@ verifier's final cash, posted by a watcher thread once Harbor writes
 `result.json`. The Harbor reward itself stays the benchmark's terminal metric
 (final cash over the starting balance); it is evaluation only.
 
+The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
+the recipe's batch size). The sidecar peeks at each request's dashboard;
+the first request of a new week closes the week before it, reports it, and
+waits until every batch the reported weeks filled has committed a training
+release. Week N is therefore always played by a policy trained on weeks 0
+to N-1, whatever the ratio of step time to play time; a wait longer than
+`CEOBENCH_PACE_TIMEOUT_S` (30 minutes) is forgiven so a batch the recipe
+declined cannot hold the game forever. The untrained baseline runs with the
+pacer off.
+
 Turns of one week share the week's score; the critic's skip-observation GAE
 does the credit assignment inside each turn. A weekly delta is dense enough
 for SAO's one-rollout-per-step cadence and lines up with the benchmark's own

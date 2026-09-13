@@ -293,6 +293,91 @@ def test_last_week_closes_with_the_verifier_final_cash(monkeypatch, tmp_path) ->
 
 
 @pytest.mark.unit
+def test_training_pacer_waits_for_the_batches_the_reported_turns_filled(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    monkeypatch.setattr(agent_module, "PACE_POLL_S", 0.0)
+    releases = iter([3, 3, 4, 5])  # 3 at episode start, then the trainer catches up
+    logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    pacer = agent_module.TrainingPacer(16, timeout_s=60, count_releases=lambda: next(releases), logger=logger)
+
+    # 35 reported turns fill two batches of 16; the third release beyond the
+    # baseline is not required until a third batch fills.
+    assert pacer.expected_releases(35) == 2
+    pacer.wait(2, 35)
+    assert pacer._base == 3
+
+
+@pytest.mark.unit
+def test_training_pacer_forgives_a_batch_the_trainer_never_commits(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    monkeypatch.setattr(agent_module, "PACE_POLL_S", 0.0)
+    warnings = []
+    logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: warnings.append(a))
+    pacer = agent_module.TrainingPacer(16, timeout_s=0.0, count_releases=lambda: 0, logger=logger)
+
+    pacer.wait(3, 32)  # two batches expected, none committed: times out at once
+
+    assert len(warnings) == 1
+    # The shortfall is forgiven: the next week only waits for new batches.
+    assert pacer.expected_releases(32) == 0
+    assert pacer.expected_releases(48) == 1
+
+
+@pytest.mark.unit
+def test_gate_closes_the_previous_week_before_serving_the_next(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    turns = [
+        _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
+        _turn("r-2", _dashboard(0, 0, 1_000_000), 20, 5),
+    ]
+    agent, _sidecar = _agent(agent_module, monkeypatch, turns)
+    agent._capture = _Capture(turns)  # the sidecar is already serving
+    waits = []
+
+    class Pacer:
+        def wait(self, week, posted_turns):
+            waits.append((week, posted_turns))
+            return 0.0
+
+    agent._pacer = Pacer()
+    agent._gated_week = None
+
+    # The first request of week 1 arrives: week 0 closes with week 1's opening cash and is reported.
+    agent._gate_week(1, 7, 982_311.0)
+
+    assert [payload["references"] for _, payload in agent._client.calls] == [["r-1"], ["r-2"]]
+    assert agent._client.calls[0][1]["metadata"]["ceobench"]["cash_end"] == 982_311.0
+    assert waits == [(1, 2)]
+    # Later requests of the same week pass without another wait.
+    agent._gate_week(1, 7, 982_311.0)
+    assert waits == [(1, 2)]
+
+
+@pytest.mark.unit
+def test_paced_handler_peeks_at_the_week_and_replays_the_body(monkeypatch) -> None:
+    import io
+
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    seen = []
+    forwarded = []
+
+    class Base:
+        def _forward(self, forward_path, routed_session):
+            forwarded.append((forward_path, routed_session, self.rfile.read()))
+
+    handler_cls = agent_module.paced_handler(Base, lambda week, day, cash: seen.append((week, day, cash)))
+    body = json.dumps({"messages": [{"role": "user", "content": _dashboard(4, 28, 940_968)}]}).encode()
+    handler = object.__new__(handler_cls)
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+
+    handler._forward("/v1/chat/completions", None)
+
+    assert seen == [(4, 28, 940_968.0)]
+    assert forwarded == [("/v1/chat/completions", None, body)]
+
+
+@pytest.mark.unit
 def test_harness_fails_the_trial_when_the_runner_exits_nonzero(monkeypatch) -> None:
     agent_module, _ = _load_harness(monkeypatch, "ceobench")
     agent, sidecar = _agent(agent_module, monkeypatch, [{"status": 200, "receipt": "r-1", "response": {}}])

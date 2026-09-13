@@ -34,15 +34,26 @@ and any provider override stay outside the repository.
 the engine serves the model's full context, but a turn whose prompt and
 completion together exceed this many tokens is recorded and never reported,
 because the trainer could not hold it.
+
+``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
+to the recipe's batch size, the sidecar holds the first request of each new
+week until every batch the reported weeks filled has committed a training
+release, so week N is played by a policy trained on weeks 0 to N-1 rather
+than by whatever the trainer had reached. ``CEOBENCH_PACE_TIMEOUT_S``
+(default 1800) bounds one such wait; a batch the recipe declined would
+otherwise hold the game forever.
 """
 
 import atexit
+import io
 import json
 import os
 import re
 import shlex
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -64,6 +75,8 @@ DEFAULT_DAYS = 500
 FORWARDED_ENV_PREFIXES = ("SAAS_BENCH_", "OPENAI_", "ANTHROPIC_", "AWS_")
 #: How often the reporter looks for a finished week while the episode runs.
 WEEK_POLL_S = 5.0
+#: How often the pacer re-reads the scenario's releases while it holds a week.
+PACE_POLL_S = 10.0
 #: The weekly dashboard header the benchmark's engine returns, with the
 #: week's opening cash on the line after it.
 DASHBOARD_RE = re.compile(r"=== Week (\d+) Dashboard \(Day (\d+)\) ===\s*\n\s*\nCash: (-?)\$(-?[\d,]+)")
@@ -145,10 +158,19 @@ class WeekLedger:
         self.weeks: dict[int, dict] = {}
         self.turns: list[dict] = []  # {"receipt", "tokens", "week"} per served turn
         self.posted: set[int] = set()
+        #: Weeks whose dashboard was seen on a request not yet served (the
+        #: pacer's peek), so the week before can close before that request
+        #: is forwarded: week -> (day, opening cash).
+        self.announced: dict[int, tuple[int, float]] = {}
+
+    def announce(self, week: int, day: int, cash: float) -> None:
+        self.announced.setdefault(week, (day, cash))
 
     def observe(self, captured: list[dict]) -> None:
         current: int | None = None
-        self.weeks = {}
+        self.weeks = {
+            week: {"day": day, "cash_start": cash, "turns": []} for week, (day, cash) in self.announced.items()
+        }
         self.turns = []
         for turn in captured:
             if turn.get("status") != 200 or not turn.get("receipt"):
@@ -202,6 +224,74 @@ class WeekLedger:
         return rows
 
 
+class TrainingPacer:
+    """Hold a new week until the trainer has consumed the weeks before it.
+
+    ``expected_releases`` is what the reported turns must have produced: one
+    training release per full batch. ``wait`` blocks until the scenario has
+    that many releases beyond the count at episode start, or the timeout
+    passes, in which case the shortfall is forgiven so later weeks do not
+    wait for a batch the recipe declined.
+    """
+
+    def __init__(self, batch_size: int, timeout_s: float, count_releases, logger) -> None:
+        self.batch_size = int(batch_size)
+        self.timeout_s = float(timeout_s)
+        self._count_releases = count_releases
+        self._logger = logger
+        self._base: int | None = None
+        self._forgiven = 0
+        self._lock = threading.Lock()
+
+    def expected_releases(self, posted_turns: int) -> int:
+        return posted_turns // self.batch_size - self._forgiven
+
+    def wait(self, week: int, posted_turns: int) -> float:
+        """Block until the trainer caught up; return the seconds spent waiting."""
+        started = time.time()
+        with self._lock:
+            if self._base is None:
+                self._base = self._count_releases() or 0
+            expected = self.expected_releases(posted_turns)
+            while True:
+                observed = (self._count_releases() or 0) - self._base
+                if observed >= expected:
+                    break
+                if time.time() - started >= self.timeout_s:
+                    self._forgiven += expected - observed
+                    self._logger.warning(
+                        "week %d: trainer committed %d of %d expected releases after %.0fs; going on",
+                        week,
+                        observed,
+                        expected,
+                        self.timeout_s,
+                    )
+                    break
+                time.sleep(PACE_POLL_S)
+        return time.time() - started
+
+
+def paced_handler(base_handler, gate):
+    """Wrap the sidecar's handler so a new week's first request waits for training."""
+
+    class PacedHandler(base_handler):
+        def _forward(self, forward_path: str, routed_session):
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length else b""
+            if forward_path.endswith("/chat/completions") and raw:
+                try:
+                    body = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    body = None
+                seen = turn_week({"request": body}) if isinstance(body, dict) else None
+                if seen is not None:
+                    gate(*seen)
+            self.rfile = io.BytesIO(raw)
+            return super()._forward(forward_path, routed_session)
+
+    return PacedHandler
+
+
 class HarborAgent(BaseAgent):
     """One Harbor trial, one CEO-Bench episode through Reef."""
 
@@ -231,6 +321,18 @@ class HarborAgent(BaseAgent):
         self._ledger = WeekLedger()
         self._ledger_lock = threading.Lock()
         self._max_tokens = int(os.environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
+        batch = int(os.environ.get("CEOBENCH_PACE_BATCH", "0") or 0)
+        self._pacer = (
+            TrainingPacer(
+                batch,
+                float(os.environ.get("CEOBENCH_PACE_TIMEOUT_S", "1800") or 1800),
+                self._count_training_releases,
+                self.logger,
+            )
+            if batch > 0
+            else None
+        )
+        self._gated_week: int | None = None
 
     @staticmethod
     def name() -> str:
@@ -295,9 +397,45 @@ class HarborAgent(BaseAgent):
             override_headers={"x-reef-scenario": self._scenario, "authorization": f"Bearer {self._token}"},
         )
         self._capture = CaptureStore()
-        server = ThreadingHTTPServer((config.listen_host, config.listen_port), build_handler(config, self._capture))
+        handler = build_handler(config, self._capture)
+        if self._pacer is not None:
+            handler = paced_handler(handler, self._gate_week)
+        server = ThreadingHTTPServer((config.listen_host, config.listen_port), handler)
         threading.Thread(target=server.serve_forever, name="ceobench-sidecar", daemon=True).start()
         return server
+
+    def _gate_week(self, week: int, day: int, cash: float) -> None:
+        """Before a week's first request is served, close the week before it and wait for training."""
+        if self._pacer is None or (self._gated_week is not None and week <= self._gated_week):
+            return
+        self._gated_week = week
+        with self._ledger_lock:
+            self._ledger.announce(week, day, cash)
+        self._post_finished_weeks()
+        with self._ledger_lock:
+            posted = sum(
+                self._reportable(entry["turns"])
+                for posted_week, entry in self._ledger.weeks.items()
+                if posted_week in self._ledger.posted
+            )
+        waited = self._pacer.wait(week, posted)
+        if waited > 1.0:
+            self.logger.info("week %d held %.0fs for training", week, waited)
+
+    def _reportable(self, turns) -> int:
+        return sum(1 for _receipt, tokens in turns if not self._max_tokens or tokens <= self._max_tokens)
+
+    def _count_training_releases(self) -> int | None:
+        request = urllib.request.Request(
+            f"{self._service_url}/reef/scenarios/{self._scenario}/releases",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read())
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            return None
+        return sum(1 for row in payload.get("releases", []) if row.get("operation") == "training")
 
     def _report_weeks_online(self, episode_over: threading.Event) -> None:
         """Report every week as soon as the next week's dashboard shows up."""
