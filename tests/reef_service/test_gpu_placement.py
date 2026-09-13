@@ -1,7 +1,7 @@
 """Reef reserves one model deployment's GPUs and slices them per component."""
 
-import importlib
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -41,9 +41,10 @@ def test_layout_rejects_impossible_shapes():
 @pytest.mark.unit
 def test_release_returns_the_group_once(monkeypatch):
     released = []
-    # ``ray.util.placement_group`` the attribute is a function; fetch the module itself.
-    placement_module = importlib.import_module("ray.util.placement_group")
-    monkeypatch.setattr(placement_module, "remove_placement_group", released.append)
+    # Release imports the module lazily; a stand-in keeps this test free of Ray.
+    placement_module = ModuleType("ray.util.placement_group")
+    placement_module.remove_placement_group = released.append  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ray.util.placement_group", placement_module)
     group = SimpleNamespace(id="pg")
     reservation = ModelGpuReservation(GpuBundles(group, [0, 1], [0, 1]), ModelGpuLayout(1, 1))
     reservation.release()
