@@ -23,7 +23,7 @@ from reef.train.algos.registry import register_preparer
 from reef.train.algos.signals import StepSignal
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
-from reef.train.types import PolicyBatch, TrainingBatch
+from reef.train.types import TrainingBatch, trajectories
 
 # The source suite exercises the repository cookbook as well as Reef core.
 # Load those packages explicitly: production ``import reef`` deliberately does
@@ -72,10 +72,9 @@ class SftPreparer(StepPreparer):
     name = "sft"
 
     def __call__(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        if not isinstance(batch, PolicyBatch):
-            raise TypeError(f"{self.name} requires PolicyBatch, got {type(batch).__name__}")
+        samples = trajectories(batch)
         steps = next_steps(state)
-        return StepSignal("train", self.name, {"steps": steps}, {"samples": len(batch.samples), "steps": steps})
+        return StepSignal("train", self.name, {"steps": steps}, {"samples": len(samples), "steps": steps})
 
 
 register_loss_family(SftAlgorithm())

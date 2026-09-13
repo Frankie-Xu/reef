@@ -112,11 +112,10 @@ hooks, and an optional client-pulled file tree, composed as fields on one
 Processor
 ---------
 
-The method's data-side component. It judges each resolved unit, consisting of
-one record plus the reports referencing it, as ``TRAIN``, ``WAIT``, or
-``NEVER``, and assembles
-the accepted units into one typed batch. Reported and computed feedback pick
-different engines.
+The method's data-side component. It assembles records and feedback into a
+typed training batch. Reported feedback uses valid reports with existing
+inference references; computed feedback derives its signal from traffic.
+The engines share batching, consumption, and retention contracts.
 
 Preparer
 --------

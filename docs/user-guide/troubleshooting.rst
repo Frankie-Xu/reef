@@ -39,7 +39,7 @@ Requests
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** In order of likelihood: the recipe's step trigger is not reached yet (``batch_size`` reports, or a full ``groups_per_step × rollouts_per_group`` grid for ``tttd``); the report carries no finite ``score`` and the recipe requires one; ``metadata.training.eligible`` is ``false``; or the referenced receipts were already consumed by an earlier step, in which case the report is accepted and ignored. ``GET /reef/scenarios/{scenario}/contract`` shows what the recipe consumes; ``/reef/status`` shows whether a batch is ready.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``batch_size`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
@@ -52,7 +52,7 @@ Reports and training
 Harness evolution
 -----------------
 
-**every task passed: nothing batched, no evolve step runs.** The recipe learns from failures: only reports scoring at or below ``data.max_score`` (``0.0`` in the example) batch. Use a model that fails a task, raise ``max_score``, or add tasks the model gets wrong.
+**reports are accepted but no evolve step runs.** Check the configured training mode and batch size. Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 

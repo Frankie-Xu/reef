@@ -96,10 +96,9 @@ recipe:
                 });
               }
 
-    # The third report closes the minibatch. The score window includes both
-    # correct and incorrect transcripts for reflection.
+    # The third report closes the minibatch. Both correct and incorrect
+    # transcripts contribute to reflection.
     batch-size: 3
-    max-score: .inf
 inference:
   upstream-model: ${REEF_MODEL}
 

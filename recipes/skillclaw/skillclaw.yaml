@@ -60,7 +60,6 @@ recipe:
       # episode and passes to propose. The served pool never names an endpoint.
       seed: []
     batch-size: 60
-    max-score: .inf
 inference:
   upstream-model: ${REEF_MODEL}
 

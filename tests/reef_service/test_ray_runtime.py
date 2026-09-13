@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import pickle
 from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.artifact import LiveWeightArtifactRef
@@ -26,7 +29,7 @@ from reef.surface import RuntimeLoadMismatch, create_weight_surface
 from reef.train.algos import StepScheduling, StepSignal
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step as slime_prepare_step
-from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
+from reef.train.types import TaskItem, TrainingBatch, trajectories
 
 from ._grouped_pg import GROUPED_PG_PREPARER as _TEST_GROUPED_PREPARER
 
@@ -35,8 +38,7 @@ _TEST_SFT_PREPARER = "reef_service.test_ray_runtime:_prepare_test_sft"
 
 def _prepare_test_sft(batch, state) -> StepSignal:
     """Package-test custom preparer; cookbook examples are not in the wheel."""
-    if not isinstance(batch, PolicyBatch):
-        raise TypeError(f"sft requires PolicyBatch, got {type(batch).__name__}")
+    trajectories(batch)
     return StepSignal(
         action="train",
         loss_family="sft",
@@ -160,11 +162,11 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
         self.status = "REJECTED"
 
 
-def policy_batch() -> PolicyBatch:
-    return PolicyBatch(
+def policy_batch() -> TrainingBatch:
+    return TrainingBatch(
         "batch-1",
         (
-            PolicySample(
+            policy_trajectory(
                 "i1",
                 (1, 2),
                 (0, 1),
@@ -174,7 +176,7 @@ def policy_batch() -> PolicyBatch:
                 topk_indices=((1, 2), (3, 4)),
                 topk_log_probs=((-0.2, -0.9), (-0.15, -0.8)),
             ),
-            PolicySample(
+            policy_trajectory(
                 "i2",
                 (3, 4),
                 (1, 1),
@@ -188,14 +190,20 @@ def policy_batch() -> PolicyBatch:
     )
 
 
-def grouped_policy_batch(*, versions: tuple[str | None, str | None] = ("v0", "v0")) -> GroupedPolicyBatch:
-    return GroupedPolicyBatch(
+def grouped_policy_batch(*, versions: tuple[str | None, str | None] = ("v0", "v0")) -> TrainingBatch:
+    return TrainingBatch(
         "batch-2",
-        (
-            (
-                PolicySample("g1", (1, 2), (1,), (-0.1,), 0.2, versions[0]),
-                PolicySample("g2", (3, 4), (1,), (-0.2,), 0.8, versions[1]),
-            ),
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                (
+                    (
+                        policy_trajectory("g1", (1, 2), (1,), (-0.1,), 0.2, versions[0]),
+                        policy_trajectory("g2", (3, 4), (1,), (-0.2,), 0.8, versions[1]),
+                    ),
+                )
+            )
+            for sample in group
         ),
     )
 
@@ -414,12 +422,12 @@ def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, step_prepa
 @pytest.mark.parametrize(
     ("batch", "step_preparer", "error", "message"),
     [
-        (grouped_policy_batch(), "sft", TypeError, "requires PolicyBatch"),
+        (TrainingBatch("task", (TaskItem(Path("tasks/example")),)), "sft", TypeError, "unsupported item"),
         (
-            grouped_policy_batch(),
+            TrainingBatch("task", (TaskItem(Path("tasks/example")),)),
             _TEST_SFT_PREPARER,
             TypeError,
-            "requires PolicyBatch",
+            "unsupported item",
         ),
         (policy_batch(), "unknown", ValueError, "unknown step preparer"),
     ],
@@ -482,10 +490,10 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_source_fi
     # and rollout source fields (producing runtime load ID, creation time) have no
     # slot in the policy 5-tuple. Each sample is its own rollout (no grouping)
     # and advantages are never shipped — the critic computes them in-backend.
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "math:sao:1",
         (
-            PolicySample(
+            policy_trajectory(
                 source_agent_record_id="i1",
                 tokens=(5, 1, 2, 3),
                 loss_mask=(1, 0, 1),
@@ -521,10 +529,10 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_source_fi
 
 @pytest.mark.unit
 def test_slime_backend_preparation_sao_rows_tolerate_missing_source_fields() -> None:
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "math:sao:1",
         (
-            PolicySample(
+            policy_trajectory(
                 source_agent_record_id="i1",
                 tokens=(5, 1),
                 loss_mask=(1,),
@@ -544,11 +552,11 @@ def test_slime_backend_preparation_sao_rows_tolerate_missing_source_fields() -> 
     assert payload["samples"][0][-2:] == [None, None]
 
 
-def sao_batch(runtime_load_id: str | None = "slime-v3") -> PolicyBatch:
-    return PolicyBatch(
+def sao_batch(runtime_load_id: str | None = "slime-v3") -> TrainingBatch:
+    return TrainingBatch(
         "math:sao:1",
         (
-            PolicySample(
+            policy_trajectory(
                 source_agent_record_id="i1",
                 tokens=(5, 1, 2),
                 loss_mask=(1, 1),
@@ -618,8 +626,8 @@ def test_ray_runtime_preserves_enabled_sao_mixed_producing_versions() -> None:
         def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
 
-    first = sao_batch("engine:1").samples[0]
-    second = PolicySample(
+    first = sao_batch("engine:1").items[0]
+    second = policy_trajectory(
         source_agent_record_id="i2",
         tokens=(6, 1, 2),
         loss_mask=(1, 1),
@@ -628,7 +636,7 @@ def test_ray_runtime_preserves_enabled_sao_mixed_producing_versions() -> None:
         reward=0.7,
         runtime_load_id="engine:2",
     )
-    batch = PolicyBatch("math:sao:2", (first, second))
+    batch = TrainingBatch("math:sao:2", (first, second))
     runtime = ExecutorRuntimeFixture(
         train_group_handle=VersionedHandle(),
         inference_url="http://router",
@@ -704,7 +712,7 @@ def test_ray_runtime_carries_mixed_token_runtime_load_ids_to_bounded_admission()
         def serving_runtime_load_id(self) -> str | None:
             return "engine:7"
 
-    sample = PolicySample(
+    sample = policy_trajectory(
         source_agent_record_id="i1",
         tokens=(10, 20, 21, 22),
         loss_mask=(1, 1, 1),
@@ -722,7 +730,7 @@ def test_ray_runtime_carries_mixed_token_runtime_load_ids_to_bounded_admission()
         max_staleness=2,
     )
 
-    prepared = runtime.prepare_training_step(PolicyBatch("batch", (sample,)), "sft", {}, 0)
+    prepared = runtime.prepare_training_step(TrainingBatch("batch", (sample,)), "sft", {}, 0)
 
     assert prepared.payload is not None
     assert prepared.payload["producing_runtime_load_ids"] == [None]
@@ -740,7 +748,7 @@ def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_t
         def serving_runtime_load_id(self) -> str | None:
             return "engine:7"
 
-    sample = PolicySample(
+    sample = policy_trajectory(
         source_agent_record_id="i1",
         tokens=(10, 20, 21),
         loss_mask=(1, 1),
@@ -753,7 +761,7 @@ def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_t
     )
     runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
 
-    prepared = runtime.prepare_training_step(PolicyBatch("batch", (sample,)), "sft", {}, 0)
+    prepared = runtime.prepare_training_step(TrainingBatch("batch", (sample,)), "sft", {}, 0)
 
     assert prepared.payload is not None
     assert prepared.payload["expected_runtime_load_id"] == "engine:7"
@@ -764,10 +772,10 @@ def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_t
 @pytest.mark.unit
 def test_ray_runtime_rejects_a_sao_batch_missing_source_fields() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "math:sao:1",
         (
-            PolicySample(
+            policy_trajectory(
                 source_agent_record_id="i1",
                 tokens=(5, 1),
                 loss_mask=(1,),

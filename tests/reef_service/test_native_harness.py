@@ -16,6 +16,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 from reef_service.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
 
 from reef.harness.adapters import available_adapters, get_adapter
@@ -48,7 +49,7 @@ from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonPl
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import BackendAlwaysSelectPlugin
-from reef.train.types import TraceBatch, TraceSample
+from reef.train.types import TrainingBatch
 
 TOOL = (
     "native_tool",
@@ -659,7 +660,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
         binary=_launcher(tmp_path),
         seed=SEED_NODES,
     )
-    batch = TraceBatch("demo:trace:native", (TraceSample("a1", {"messages": []}, 0.0),))
+    batch = TrainingBatch("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_files
@@ -1009,7 +1010,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
             binary=_launcher(tmp_path),
             seed=SEED_NODES,
         )
-        batch = TraceBatch("demo:trace:graph", (TraceSample("a1", {"messages": []}, 0.0),))
+        batch = TrainingBatch("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         prepared = backend.prepare_step(batch, backend.initial_state(), 0)
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_files["native/graphs/main.json"]) == SEED_GRAPH
@@ -2121,7 +2122,7 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
     episode = backend._render_for_episode(SEED_NODES)
     assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
     assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
-    batch = TraceBatch("demo:trace:tree", (TraceSample("a1", {"messages": []}, 0.0),))
+    batch = TrainingBatch("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
     evaluator = BackendAlwaysSelectPlugin(backend)

@@ -22,6 +22,7 @@ from statistics import fmean
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
@@ -29,7 +30,7 @@ from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend.strategies import Proposer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 from .population import Population, PopulationStore, normalize_entries
 
@@ -165,7 +166,7 @@ class MetaHarnessProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: Any = None,
@@ -271,7 +272,7 @@ class MetaHarnessProposer(Proposer):
         render_composition(_entry_nodes(entries), self._descriptor)
         return entries
 
-    def _prompt(self, population: Population, samples: Sequence[TraceSample]) -> str:
+    def _prompt(self, population: Population, samples: Sequence[TrajectoryItem]) -> str:
         records = population.candidates if self._mode == "full_history" else [population.served]
         history = [
             {
@@ -287,11 +288,11 @@ class MetaHarnessProposer(Proposer):
         ]
         traffic = [
             {
-                "source_agent_record_id": sample.source_agent_record_id,
-                "score": sample.score,
-                "feedback": sample.feedback,
-                "payload": dict(sample.payload),
-                "trajectory": [dict(event) for event in sample.trajectory],
+                "source_agent_record_id": source_record_id(sample),
+                "score": sample.metadata.get("reward"),
+                "feedback": sample.metadata.get("feedback"),
+                "payload": dict(recorded_payload(sample)),
+                "trajectory": [dict(event) for event in recorded_payloads(sample)],
             }
             for sample in samples
         ]

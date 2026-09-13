@@ -639,7 +639,7 @@ user instruction, and harness evolution runs it alone. In ``hybrid``, the
 processor batches as in ``auto`` and runs instructions too, a queued
 instruction first; harness evolution hands the proposer, beside the
 instruction, the units an automatic batch would take next, up to
-``batch_size`` and possibly none: failing traces in the score window, or
+``batch_size`` and possibly none: scored traces, or
 records under ``data.batch_policy: records``. The processor defines
 what an instruction batch carries, independently of its automatic batching
 policy.
@@ -718,7 +718,6 @@ Harness-evolution presets also carry an ``evolution`` section:
      path: qwen3-8b
    data:
      batch_size: 1
-     max_score: 0.0
    evolution:
      adapter: pi
      propose: methods.mine:propose
@@ -792,18 +791,16 @@ before moving services across nodes.
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
-``batch_size`` and ``max_score`` go under ``data:``; the rest goes under
+``batch_size`` goes under ``data:``; the rest goes under
 ``evolution:``. `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
 
 .. config::
 
    data.batch_size | 1 | traces per mutation attempt
-   data.max_score | 0.0 | upper bound of the score window that batches
    data.batch_policy | reports | ``records`` batches recorded traffic alone, every ``batch_size`` requests, with unscored samples
 
-The window has no lower bound, so the default keeps only traces at or below
-zero.
+Every valid scored report contributes a trace, including successful outcomes.
 
 .. config::
 

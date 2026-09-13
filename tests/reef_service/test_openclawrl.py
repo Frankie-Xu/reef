@@ -6,18 +6,20 @@ import json
 import time
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.core import AgentRecord, RequestType
+from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.processors.computed import JudgingWorker
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import PolicyBatch, PolicySample, ProcessorContext
+from reef.train.types import ProcessorContext, TrainingBatch
 
 
 class FakeWorker:
@@ -115,9 +117,9 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
     assert processor.ready()
     batch = processor.build_batch()
-    assert isinstance(batch, PolicyBatch)
-    assert [sample.reward for sample in batch.samples] == [1.0]
-    assert batch.samples[0].source_agent_record_id == "t1"
+    assert isinstance(batch, TrainingBatch)
+    assert [trajectory_reward(sample) for sample in batch.items] == [1.0]
+    assert source_record_id(batch.items[0]) == "t1"
     processor.acknowledge(batch.batch_id)
     assert not processor.ready()
     decision = processor.retention_decision()
@@ -281,19 +283,19 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
         time.sleep(0.01)
     assert processor.ready(), "worker judgment never landed"
     batch = processor.build_batch()
-    sample = batch.samples[0]
-    assert sample.reward == 1.0
+    sample = batch.items[0]
+    assert trajectory_reward(sample) == 1.0
     # The RL-only anchor is the native ids verbatim, built without the
     # teacher (its construction cannot fail), for the Megatron teacher pass.
     assert teacher.calls == []
-    assert sample.extras["teacher_cands"] == ({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)
+    assert sample.training.get("extras", {})["teacher_cands"] == [{"hint": "", "teacher_tokens": [1, 2, 3, 4]}]
     processor.close()
 
 
 @pytest.mark.unit
 def test_backend_passes_raw_rewards_through_without_normalization() -> None:
     samples = tuple(
-        PolicySample(
+        policy_trajectory(
             str(index),
             (1, 2),
             (1,),
@@ -304,7 +306,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         )
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
-    batch = PolicyBatch("s:openclawrl:1", samples)
+    batch = TrainingBatch("s:openclawrl:1", tuple(sample for sample in samples))
     result = prepare_slime_step(batch, "openclawrl", {})
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]

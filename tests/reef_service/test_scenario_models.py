@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -23,7 +24,7 @@ from reef.storage.model_config import read_model_config, write_model_config
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.types import TraceBatch, TraceSample
+from reef.train.types import TrainingBatch
 
 
 @pytest.fixture
@@ -152,7 +153,9 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
             )
         backend = scenario.trainer.candidate_backend
         prepared = backend.prepare_step(
-            TraceBatch("batch", (TraceSample("record", {"messages": []}, 0.0),)), backend.initial_state(), 0
+            TrainingBatch("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
+            backend.initial_state(),
+            0,
         )
         assert prepared.candidate is not None
         # Updates between proposal and evaluation must not mix providers within the step.

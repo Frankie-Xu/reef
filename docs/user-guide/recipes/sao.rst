@@ -41,7 +41,7 @@ How Reef implements it
 ----------------------
 
 The processor turns every eligible ``ScoredRolloutReport`` into one
-``PolicySample``. With the default ``batch_size`` of 1, each sample is its
+``TrajectoryItem``. With the default ``batch_size`` of 1, each sample is its
 own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
 SAO's per-token primitive and a critic colocated on the actor GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages

@@ -1,7 +1,7 @@
 Write a recipe
 ==============
 
-A recipe is the method a deployment runs: which recorded traffic is eligible,
+A recipe is the method a deployment runs: how recorded traffic is processed,
 how it becomes a batch, what signal that batch carries, and whether the
 candidate it produces replaces the served version.
 
@@ -30,11 +30,10 @@ This page covers a **weight** recipe. For a harness-evolution method with
        subgraph RESOLVE["2. Resolve and select"]
            direction LR
            ENG["Resolve reported<br/>or computed feedback"]
-           JUDGE["Judge"]
+           SAMPLE["Make sample"]
            BATCH["Make batch"]
-           ENG -->|"resolved unit"| JUDGE
-           JUDGE -->|TRAIN| BATCH
-           JUDGE -.->|"WAIT or NEVER"| ENG
+           ENG -->|"resolved feedback"| SAMPLE
+           SAMPLE --> BATCH
        end
        subgraph EVOLVE["3. Update and publish"]
            direction LR
@@ -50,14 +49,13 @@ This page covers a **weight** recipe. For a harness-evolution method with
        end
        COLLECT -->|"stored records"| RESOLVE
        RESOLVE -->|"typed batch"| EVOLVE
-       class JUDGE,BATCH,PREP,EVAL,SELECT user-owned
+       class SAMPLE,BATCH,PREP,EVAL,SELECT user-owned
 
-The shaded steps are the method's. A processor *judges* each resolved unit. A
-unit consists of one record plus the reports that reference it. ``TRAIN``
-batches it, ``WAIT`` holds
-it until its remaining references land, ``NEVER`` drops it. After the backend
-runs, the method's evaluator measures the candidate and its selector decides
-whether it is published.
+The shaded steps are the method's. A reported-feedback processor assembles
+valid reports and their already stored inference records into samples, then
+batches complete units. Required training fields are validated by the backend;
+contract failures raise instead of silently dropping reports. After training,
+the evaluator measures the candidate and the selector decides whether to publish.
 
 Before you write one
 --------------------
@@ -74,7 +72,7 @@ A weight recipe is four pieces plus the class that binds them.
 .. config::
 
    step preparer | a plain function turning a typed batch into a ``StepSignal``: the loss family, the per-sample advantages, and the next algorithm state. No torch, Ray, or Slime import.
-   processor | decides which reports are eligible and shapes the accepted ones into one typed batch
+   processor | assembles valid reports and referenced records into samples and typed batches
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``BackendAlwaysSelectPlugin``, selects whatever the backend produced
    recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the preparer (by dotted path), and the loss family

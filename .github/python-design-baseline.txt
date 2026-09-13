@@ -26,4 +26,3 @@ PYD003|reef/harness/compose/registry.py|Runtime|callback
 PYD003|reef/train/processors/reported.py|SampleAssembly|make_sample
 PYD003|reef/train/slime_backend/reef_adapters/weight_updaters/base.py|SynchronizedWeightUpdateMixin|_on_chunk
 PYD004|reef/harness/compose/fiber.py|_drive|collect,live
-PYD004|tests/reef_service/test_reported_feedback_processor.py|engine|judge_fn,decide_group_fn

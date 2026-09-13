@@ -162,7 +162,7 @@ in ``manual`` or ``hybrid``. It receives one request mapping containing
 ``id``, ``text``, ``session``, ``release_id`` and ``untrusted=True``,
 together with the current harness and model bindings. In ``hybrid``,
 ``samples`` carries what an automatic batch would take next, up to
-``batch_size`` and possibly none (failing traces in the score window, or
+``batch_size`` and possibly none (scored traces, or
 records under ``data.batch_policy: records``), so the method answers the
 request with the failures beside it; in ``manual`` it is empty. Its mutations pass
 through the same gate and ``evolution.publish`` policy. Pending agent
@@ -173,19 +173,19 @@ failure-only proposer must be extended with a ``requests`` branch first.
 .. flow::
    :loop: publish the winner, or restore the snapshot
 
-   Batch :: scored reports retained by the score window
+   Batch :: scored reports with existing inference references
    ``propose`` :: one proposal, a mutation or a sequence applied as one, or ``None``
    Episodes* :: run the candidate and current tree on the same tasks
    Verdict :: publish the candidate or restore the snapshot
 
-No evolution runs while traffic flows. A report enters the *window* when it
-references at least one receipt and its score is at or below ``max_score``;
-the default for harness evolution keeps only failures. A report over one
+With the reports policy, inference traffic alone does not trigger evolution.
+Every valid scored report with at least one existing inference reference
+contributes a trace, including successful outcomes. A report over one
 receipt batches as that exchange; a report over several batches as one
 trajectory sample carrying every referenced exchange in order, which is what
 ``reef-pi report`` sends for a whole run (``--per-receipt`` fans the score
 across the receipts as separate reports instead). When ``batch_size``
-window entries have accumulated, one step runs the loop once. With
+trace samples have accumulated, one step runs the loop once. With
 ``evolution.promote_failures: true`` a failing trace's prompt is added to the
 gate as a permanent task, so the seed tasks are the floor of a suite that
 grows from real failures and no later candidate can win while bringing one
@@ -203,8 +203,8 @@ promoted is the method's call: an optional ``evolution.promote`` names a
 ``Promoter`` subclass or instance. Its ``__call__(samples, *, manifest=None)``
 receives the step's trace samples and failure manifest and returns the prompts to promote; without it
 every failing trace's user prompt is promoted. Reef still dedupes, screens,
-and caps whatever it returns. ``batch_size``
-and ``max_score`` live under ``data:`` in the recipe config, and
+and caps whatever it returns. ``batch_size`` lives under ``data:`` in the
+recipe config, and
 ``data.batch_policy: records`` drops the report requirement entirely:
 recorded traffic alone batches, unscored, for methods that judge for
 themselves.

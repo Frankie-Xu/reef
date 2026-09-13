@@ -6,6 +6,7 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
@@ -203,26 +204,24 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
     ],
 )
 def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> None:
-    # Observable pin: a valid, assemblable two-turn episode is refused by the
-    # cookbook recipes' processors — the report is terminal and released, not
-    # accepted as a candidate. (openclawrl is absent: it consumes no reports
-    # at all — see test_openclawrl_recipe_ignores_reports.)
+    # Unsupported multi-turn training fails explicitly and preserves its inputs.
     trainer = recipe.build("math", SQLiteRecordStore())
     processor = trainer.processor
     processor.ingest(_turn_inference("i1", [10, 20], -0.1))
     processor.ingest(_turn_inference("i2", [10, 20, 11, 21], -0.2))
-    processor.ingest(
-        AgentRecord.create(
-            scenario="math",
-            request_type=RequestType.REPORT,
-            agent_record_id="r1",
-            payload={"score": 1.0, "references": ["i1", "i2"], "metadata": metadata},
-            references=("i1", "i2"),
+    with pytest.raises(ValueError, match="accept_multi_turn"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario="math",
+                request_type=RequestType.REPORT,
+                agent_record_id="r1",
+                payload={"score": 1.0, "references": ["i1", "i2"], "metadata": metadata},
+                references=("i1", "i2"),
+            )
         )
-    )
 
     assert not processor.ready()
-    assert "r1" in processor.retention_decision().releasable_agent_record_ids
+    assert "r1" in processor.retention_decision().protected_agent_record_ids
 
 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
@@ -396,18 +395,31 @@ def test_cookbook_preparers_signal_their_recipes_loss_family() -> None:
 
     from reef.train.algos.registry import resolve_preparer
     from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
+    from reef.train.types import TrainingBatch
 
-    first = PolicySample("i1", (5, 1), (1,), (-0.1,), 0.5)
-    second = replace(first, source_agent_record_id="i2", reward=1.5)
+    first = policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5)
+    second = first.with_metadata(source_agent_record_id="i2", reward=1.5)
     checked = set()
     for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
         spec = recipe_type.training_spec()
         assert spec.processor is not None
-        if spec.processor.output_schema is GroupedPolicyBatch:
-            batch = GroupedPolicyBatch("b", ((first, second),))
+        if recipe_type is TTTDRecipe:
+            batch = TrainingBatch(
+                "b",
+                tuple(
+                    replace(sample, group_id=str(index))
+                    for index, group in enumerate(((first, second),))
+                    for sample in group
+                ),
+            )
         else:
-            batch = PolicyBatch("b", (first, second))
+            batch = TrainingBatch(
+                "b",
+                (
+                    first,
+                    second,
+                ),
+            )
         signal = resolve_preparer(spec.step_preparer)(batch, {})
         assert signal.loss_family == spec.loss_family, recipe_type.__name__
         assert resolve_loss_family(signal.loss_family).loss_family == spec.loss_family

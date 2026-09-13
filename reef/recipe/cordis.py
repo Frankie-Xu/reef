@@ -228,7 +228,6 @@ class CordisRecipe(Recipe):
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     batch_size: int = config_field(1)
-    max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
     scenario_model: ModelConfig | None = field(default=None, repr=False, kw_only=True)
@@ -608,7 +607,6 @@ class CordisRecipe(Recipe):
                 context.with_config(
                     {
                         "batch_size": self.batch_size,
-                        "max_score": self.max_score,
                         "manual_enabled": self.propose.reads_requests,
                     }
                 )

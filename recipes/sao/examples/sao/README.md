@@ -91,7 +91,7 @@ reef-eval starts one Harbor trial for the next problem
   -> Reef stores the sampled tokens, the loss mask, and the rollout log-probabilities
   -> the agent extracts \boxed{} and scores it against the gold answer
   -> the agent reports the score against that rollout's receipt
-  -> SAOProcessor accepts the report and emits one PolicySample
+  -> SAOProcessor accepts the report and emits one ATIF TrajectoryItem
   -> the sao step preparer hands Slime a batch of one
   -> the colocated critic computes values; skip-observation GAE builds the advantages
   -> Slime runs policy_loss with SAO's per-token DIS primitive, after two critic steps

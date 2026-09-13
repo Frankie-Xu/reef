@@ -15,7 +15,7 @@ from typing import Any
 from recipes.openclawrl.sessions import Binding
 from reef.core.records_types import AgentRecord
 from reef.train.processors.computed import SupportsReceipt
-from reef.train.types import PolicySample
+from reef.train.types import TrajectoryItem
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class TurnJudgment(SupportsReceipt):
     teacher_cands: tuple[Mapping[str, Any], ...] = ()
 
 
-def validate_teacher_cands(cands: tuple[Any, ...], sample: PolicySample) -> tuple[dict[str, Any], ...] | None:
+def validate_teacher_cands(cands: tuple[Any, ...], sample: TrajectoryItem) -> tuple[dict[str, Any], ...] | None:
     """Normalize candidate token sequences for the Megatron teacher pass.
 
     Alignment is exact by construction — every candidate ends with the
@@ -54,8 +54,8 @@ def validate_teacher_cands(cands: tuple[Any, ...], sample: PolicySample) -> tupl
     would silently gather the wrong positions, and the sample must not
     train on it.
     """
-    response_length = len(sample.loss_mask)
-    native_tail = [int(v) for v in sample.tokens[-response_length:]]
+    response_length = len(sample.training.get("loss_mask", []))
+    native_tail = [int(v) for v in sample.training.get("tokens", [])[-response_length:]]
     validated: list[dict[str, Any]] = []
     for cand in cands:
         tokens = cand.get("teacher_tokens")

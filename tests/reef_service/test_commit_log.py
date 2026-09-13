@@ -22,6 +22,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime, candidate_backend, r
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
+from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
@@ -353,7 +354,7 @@ class RecordingRuntime(StubTrainingRuntime):
         del step_preparer
         payload = {
             "rollout_id": scenario_step,
-            "sources": [sample.source_agent_record_id for sample in batch.samples],
+            "sources": [source_record_id(sample) for sample in batch.items],
         }
         return PreparedTrainingStep(
             action="train",
@@ -975,7 +976,6 @@ class _HarnessEvolveTestRecipe(Recipe):
     evaluate: object
     tasks: tuple[str, ...]
     batch_size: int = 1
-    max_score: float = 0.0
     _: KW_ONLY
     name: str = "harness_evolve"
 
@@ -996,9 +996,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: CordisProcessor(
-                context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
-            ),
+            processor_factory=lambda context: CordisProcessor(context.with_config({"batch_size": self.batch_size})),
             candidate_backend=candidate_backend,
             candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
             algorithm_state=algorithm_state,
@@ -1057,7 +1055,7 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     def blocking_proposer(nodes, samples, model):
         del nodes
-        if samples[0].source_agent_record_id != "a-i1":
+        if source_record_id(samples[0]) != "a-i1":
             return
         started.set()
         assert release.wait(1)

@@ -192,7 +192,7 @@ async def _gate_step(client: TestClient) -> dict:
     """Drive one gated evolution step through the wire; return the new manifest.
 
     One traced inference plus its failing report fills the batch (batch_size
-    1, max_score 0.0). The report POST only records and schedules the step;
+    1). The report POST only records and schedules the step;
     the harness read channel exposes the winner after the background commit.
     """
     response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})

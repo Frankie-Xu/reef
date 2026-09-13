@@ -9,11 +9,12 @@ the shared score-only vocabulary; method-specific contracts live with their
 method packages.
 """
 
-from reef.core.reports.base import ReportBase, ReportValidationError
+from reef.core.reports.base import ReportBase, ReportValidationError, validate_report_payload
 from reef.core.reports.scored_rollout import ScoredRolloutReport
 
 __all__ = [
     "ReportBase",
     "ReportValidationError",
     "ScoredRolloutReport",
+    "validate_report_payload",
 ]

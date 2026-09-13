@@ -602,22 +602,10 @@ retention, deduplication, pending batches, and exactly-once consumption; the
 method implements only the hooks below. They run synchronously on the trainer
 thread, so they must not block on network or model latency.
 
-+-------------------+-------------------------------+-------------------------------+
-|                   | ``ReportedFeedbackProcessor`` | ``ComputedFeedbackProcessor`` |
-+===================+===============================+===============================+
-| signal arrives as | a report referencing          | information reconstructed     |
-|                   | inference records             | from recorded traffic         |
-+-------------------+-------------------------------+-------------------------------+
-| judgment          | synchronous, on available     | ``async`` model or service    |
-|                   | data                          | call                          |
-+-------------------+-------------------------------+-------------------------------+
-| method owns       | eligibility, optional         | correlation, slow judgment,   |
-|                   | grouping, batch shaping       | sample and batch shaping      |
-+-------------------+-------------------------------+-------------------------------+
-| Reef owns         | waiting index, retry dedup,   | worker lifecycle, queues,     |
-|                   | grouping state, retention,    | retention, replay             |
-|                   | replay                        |                               |
-+-------------------+-------------------------------+-------------------------------+
+Reported feedback supplies a ``make_sample`` hook that assembles valid reports;
+computed feedback supplies an asynchronous ``judge`` that derives new feedback.
+Both engines own their buffering, reservations, retention, and replay. Reports
+must reference existing inference records in the same scenario.
 
 ``DataProcessor.training_mode`` selects automatic, instruction-triggered or
 combined batching on the same processor. Declare ``supported_training_modes`` and
@@ -635,58 +623,43 @@ tracking is off.
 Reported feedback
 ~~~~~~~~~~~~~~~~~
 
-.. code:: mermaid
+``ReportedFeedbackProcessor`` exposes these recipe hooks:
 
-   sequenceDiagram
-       accTitle: How reported feedback becomes a typed batch
-       participant Reef as Reported-feedback processor
-       participant Method as Method processor
-       Reef->>Method: judge(ReportContext)
-       alt referenced inference is missing
-           Method-->>Reef: WAIT: park this report
-       else report can never train
-           Method-->>Reef: NEVER: release this report
-       else report is accepted
-           Method-->>Reef: ReportDecision.train(value, ...)
-           opt group_key supplied
-               Reef->>Method: decide_group(key, candidates)
-               Method-->>Reef: GroupDecision<br/>INCOMPLETE / READY / DISCARD
-           end
-           Reef->>Method: make_batch(ready units, batch_number)
-       end
+.. list-table::
+   :header-rows: 1
 
-+------------------------------------------------------+----------------------------------+
-| Hook                                                 | Contract                         |
-+======================================================+==================================+
-| ``judge(context) -> ReportDecision``                 | return ``TRAIN``, ``WAIT``, or   |
-|                                                      | ``NEVER``                        |
-+------------------------------------------------------+----------------------------------+
-| ``make_batch(units, batch_number) -> TrainingBatch`` | shape accepted candidates        |
-+------------------------------------------------------+----------------------------------+
-| ``decide_group(key, candidates) -> GroupDecision``   | required only when ``judge()``   |
-|                                                      | supplies a ``group_key``         |
-+------------------------------------------------------+----------------------------------+
-| ``output_schema``                                    | the exact batch class returned   |
-+------------------------------------------------------+----------------------------------+
-| ``exclusive_sources``                                | when true, a terminal report     |
-|                                                      | owns and releases its sources    |
-+------------------------------------------------------+----------------------------------+
-| ``ordered_groups``                                   | when true, ready groups batch by |
-|                                                      | sortable group key               |
-+------------------------------------------------------+----------------------------------+
+   * - Hook
+     - Contract
+   * - ``make_sample(context) -> TrainDataItem``
+     - Assemble one valid report and its resolved inferences; raise on data errors.
+   * - ``make_batch(items, batch_number) -> TrainingBatch``
+     - Shape the flat tuple of selected training items into a batch.
+   * - ``grouping(context) -> (group_key, slot)``
+     - Optional collection group and retry slot; defaults to an independent report.
+   * - ``decide_group(key, items) -> GroupDecision``
+     - Required when grouping supplies a group key; return READY, INCOMPLETE, or DISCARD.
 
-Begin a score-based ``judge()`` with ``context.eligibility()``: it returns
-``WAIT`` while a referenced inference is missing, ``NEVER`` for permanently
-ineligible input, and ``None`` when the method should decide. Use
-``ReportDecision.never(reason)`` for a rejection an operator should be able to
-diagnose. The processor logs each new reason and counts repeats.
+``ReportContext`` carries ``report``, ordered ``inferences``, optional ``score``,
+and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or
+raises if the training method cannot use the supplied feedback.
 
-``ReportDecision.train(value)`` creates a singleton candidate. Supply
-``group_key`` and an idempotent ``slot`` when the training unit is a complete
-comparison group; ``decide_group()`` then returns ``READY``, ``INCOMPLETE``, or
-``DISCARD``. Report-level ``WAIT`` and ``GroupDecision.INCOMPLETE`` differ: the
-first waits for a report's missing references, the second holds accepted
-candidates until their group fills.
+``make_sample`` returns a trajectory or task directly. The processor adds the
+report id and ordered references to ``source_agent_record_ids``. Grouping and
+consumption state stay private; recipes never receive buffered report objects.
+``grouping`` returns ``(None, None)`` by default. A group key collects reports,
+and a slot deduplicates retries within that group (None uses the report id).
+This collection group differs from ``TrajectoryItem.group_id``: TTTD waits for
+a complete step, then trains several comparison groups within it.
+``make_batch`` receives items in group/arrival order. Acknowledgement consumes
+all selected reports, even when the recipe omits constant-reward groups from
+its output. Reports arriving after reservation remain for a later batch.
+``output_schema`` declares the batch type, ``exclusive_sources`` controls source
+release for terminal group/duplicate reports, and ``ordered_groups`` orders ready
+groups by their keys.
+
+There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
+Reference validation runs at admission; incomplete groups wait for more valid
+samples. Training input violations raise instead of silently filtering reports.
 
 Computed feedback
 ~~~~~~~~~~~~~~~~~
@@ -702,7 +675,7 @@ calls a model or another slow service.
 | ``async judge(job)``                  | slow judgment, on the processor's |
 |                                       | own worker                        |
 +---------------------------------------+-----------------------------------+
-| ``make_sample(record, judgment)``     | a ``PolicySample``, or ``None``   |
+| ``make_sample(record, judgment)``     | a ``TrajectoryItem``, or ``None`` |
 |                                       | to retire the record              |
 +---------------------------------------+-----------------------------------+
 | ``make_batch(samples, batch_number)`` | the declared batch type           |
@@ -725,47 +698,89 @@ Batch
 
 .. code:: python
 
+   from pathlib import Path
    from reef.train.types import (
-       GroupedPolicyBatch, PolicyBatch, PolicySample,
-       TraceBatch, TraceSample, TrainingBatch,
+       TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem,
+       trajectories, trajectory_groups,
    )
 
-A batch is a frozen dataclass with a stable ``batch_id``. A processor returns
-the same pending batch until that id is acknowledged, so batch content must not
-depend on mutable external state.
+``TrainDataItem = TrajectoryItem | TaskItem``. Every processor returns a frozen
+``TrainingBatch(batch_id, items, request=None)`` with an ordered tuple of items.
+The same batch may contain both kinds. ``request`` is keyword-only and carries
+an optional explicit training instruction; a request-only batch may be empty.
+A processor returns the same pending batch until its id is acknowledged.
 
-.. code:: text
+.. code:: python
 
-   TrainingBatch
-   ├── PolicyBatch          samples: tuple[PolicySample, ...]
-   ├── GroupedPolicyBatch   comparison_sets: tuple[tuple[PolicySample, ...], ...]
-   └── TraceBatch           samples: tuple[TraceSample, ...]
+   batch = TrainingBatch(
+       "scenario:batch:1",
+       (
+           TrajectoryItem(atif_document, source_agent_record_ids=("inference-1", "report-1")),
+           TaskItem(Path("tasks/example"), source_agent_record_ids=("record-2",)),
+       ),
+   )
 
-+------------------------+-------------------------------------------------+
-| Type                   | Typical use                                     |
-+========================+=================================================+
-| ``PolicyBatch``        | singleton rollout and session-derived weight    |
-|                        | updates                                         |
-+------------------------+-------------------------------------------------+
-| ``GroupedPolicyBatch`` | group-relative objectives                       |
-+------------------------+-------------------------------------------------+
-| ``TraceBatch``         | local harness-artifact evolution                |
-+------------------------+-------------------------------------------------+
+A ``TrajectoryItem.trajectory`` is an
+`ATIF document <https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__
+as a JSON-compatible mapping. All shipped processors and recipes use this
+representation. The item checks the envelope; consumers validate the fields
+their algorithms require. Standard steps describe messages, tool calls and
+observations. Captured records use ATIF-v1.7, matching the pinned Harbor version.
 
-A ``PolicySample`` carries ``source_agent_record_id``, ``tokens``,
-``loss_mask``, ``rollout_log_probs``, and ``reward``. When available, it also carries
-``runtime_load_id``, ``action_mask``, ``rollout_created_at``, ``turn_count``,
-``topk_indices`` / ``topk_log_probs``, ``runtime_load_spans``, and ``extras``,
-the field a processor uses for its own loss family. Use the shared assembly
-helpers in ``reef.train.processors.reported`` and
-``reef.train.processors.common`` rather than re-parsing provider responses.
+Reef-specific fields live inside ``trajectory.extra.reef``:
 
-A ``TraceSample`` is not tokenized: it carries ``source_agent_record_id``, the
-recorded ``payload`` unchanged, and the resolved ``score``.
+- ``reward`` and ``feedback`` hold the supplied or computed training signal;
+- ``source_agent_record_id`` identifies the primary source;
+- ``records`` preserves ordered source ids, timestamps and original provider
+  payloads, including provider-specific fields;
+- ``training`` holds exact captured ``tokens``, ``loss_mask``,
+  ``rollout_log_probs``, ``runtime_load_id`` and ``runtime_load_spans``.
+  Recipes may also supply ``action_mask``, ``rollout_created_at``, ``turn_count``,
+  ``topk_indices``, ``topk_log_probs`` and method-specific ``extras``.
 
-Subclass ``TrainingBatch`` only when the processor and backend genuinely share a
-different data contract; set ``output_schema`` to the new class and keep the
-batch serializable, with no handles to services, files, threads, or models.
+``item.metadata`` and ``item.training`` read these extension objects.
+``with_metadata`` and ``with_training`` return updated documents while preserving
+other extensions. Training arrays are JSON lists, and runtime load spans are
+objects with ``start``, ``end`` and ``runtime_load_id``.
+
+``TrajectoryItem.group_id`` is an optional string, scoped to the batch.
+None means an independent trajectory. Group-relative policy algorithms require
+an explicit id on every trajectory and contiguous items for each group, so
+advantages and rows stay aligned. TTTD and CORAL preserve their existing group
+barriers and ordering. SAO and OpenClaw-RL explicitly schedule each trajectory
+independently, even when group metadata is present. ``trajectory_groups(batch)`` reads these comparison groups;
+``trajectories(batch)`` reads ATIF items in flat item order.
+
+A ``TaskItem`` names a `Harbor task directory <https://www.harborframework.com/docs/tasks>`__
+with ``task_path: Path``: the directory contains the instruction, environment
+and verifier configuration/files. The path is interpreted in the consuming
+algorithm's execution environment. The value also accepts optional ``metadata``.
+It performs no file I/O or rollout. Algorithms supporting tasks own validation,
+environment execution and conversion to trajectories. Current built-in policy
+and harness backends explicitly reject task items; accepting the container
+contract does not imply that every algorithm supports every item kind.
+
+Both item kinds may carry ``source_agent_record_ids``. These record derivation
+inputs; processor acknowledgement remains authoritative for consumption,
+including inputs removed by a recipe's existing group rules.
+
+The ``reef.core.trajectories`` helpers construct and consume ATIF:
+``make_trajectory(records, reward, feedback)`` retains original exchanges;
+``recorded_payload`` / ``recorded_payloads`` project exchanges for harness
+methods, including external ATIF without captured records; and
+``trajectory_reward`` reads a finite policy reward. Policy assembly uses
+``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from
+``reef.train.processors.common`` to add exact captured tensors. Missing required
+tensors fail at the training boundary; these helpers do not invent tokens or
+log probabilities from text. Both batch readers reject unsupported item kinds
+instead of silently filtering mixed batches.
+
+Migration: the former policy/trace sample types and their batch subclasses are
+removed. Construct ATIF items directly and return ``TrainingBatch(id, items)``.
+Use ``group_id`` on each member for grouped batches. Read captured tensors from
+``item.training`` and rewards through ``trajectory_reward(item)``.
+``output_schema`` defaults to ``TrainingBatch``. Keep batches serializable, with
+no handles to services, files, threads or models.
 
 Step preparer
 -------------
@@ -773,6 +788,7 @@ Step preparer
 .. code:: python
 
    from reef.train.algos import StepSignal
+   from reef.core.trajectories import trajectory_reward
 
 A preparer turns a reserved batch into a pure, backend-neutral signal. Normally
 it is a plain function named by the recipe as ``package.module:callable``, and
@@ -781,13 +797,12 @@ its module must be importable in both the service and the training process.
 .. code:: python
 
    def prepare_step(batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-       if not isinstance(batch, PolicyBatch):
-           raise TypeError(f"my_method requires PolicyBatch, got {type(batch).__name__}")
+       samples = trajectories(batch)
        steps = next_steps(state)
        return StepSignal(
            action="train",
            loss_family="my_method",
-           advantages=tuple(sample.reward for sample in batch.samples),
+           advantages=tuple(trajectory_reward(sample) for sample in samples),
            next_algorithm_state={"steps": steps},
            metrics={"steps": steps},
        )
@@ -840,7 +855,7 @@ snapshot, apply, run the paired episodes, record, publish or revert.
 +========================+==========================================================+
 | ``nodes``              | the tree as ``(kind, config)`` pairs                     |
 +------------------------+----------------------------------------------------------+
-| ``samples``            | the batch of ``TraceSample`` records                     |
+| ``samples``            | the batch of ATIF ``TrajectoryItem`` values              |
 +------------------------+----------------------------------------------------------+
 | ``models``             | the method's only path to a model: ``models.served`` is  |
 |                        | the model under test, ``models["teacher"]`` comes from   |

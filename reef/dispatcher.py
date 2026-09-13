@@ -23,6 +23,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
@@ -386,8 +387,21 @@ class Dispatcher:
         # appended, so the producer's POST fails with the violation naming
         # the broken field instead of the record dying silently at training
         # time. An undeclared schema keeps open ingress.
-        if item.request_type is RequestType.REPORT and (report_type := current.report_type) is not None:
-            report_type.from_dict(item.payload)
+        if item.request_type is RequestType.REPORT:
+            # An identical retry remains valid after its sources were compacted.
+            if (existing := current.records.existing_receipt(item)) is not None:
+                return existing
+            validate_report_payload(item.payload)
+            if (report_type := current.report_type) is not None:
+                report_type.from_dict(item.payload)
+            if len(set(item.references)) != len(item.references):
+                raise ReportValidationError("report references must be unique")
+            for reference in item.references:
+                stored_reference = current.records.get_for_audit(item.scenario, reference)
+                if stored_reference is None or stored_reference.item.request_type is not RequestType.INFERENCE:
+                    raise ReportValidationError(
+                        f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
+                    )
         appended = current.records.append_result(item)
         stored = appended.item
         if not appended.inserted:

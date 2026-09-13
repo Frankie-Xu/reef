@@ -22,17 +22,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Hashable, Mapping
+from dataclasses import replace
 from typing import Any
 
-from reef.train.processors.reported import (
-    BatchUnit,
-    GroupDecision,
-    ReportContext,
-    ReportDecision,
-    ReportedFeedbackProcessor,
-    SampleAssembly,
-)
-from reef.train.types import GroupedPolicyBatch, ProcessorContext, policy_row_violation
+from reef.core.trajectories import trajectory_reward
+from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
+from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +47,7 @@ class CoralProcessor(ReportedFeedbackProcessor):
       enough scored children simply never train.
     """
 
-    output_schema = GroupedPolicyBatch
+    output_schema = TrainingBatch
     exclusive_sources = True
     ordered_groups = False  # sibling groups close in whatever order grading lands
 
@@ -79,40 +74,34 @@ class CoralProcessor(ReportedFeedbackProcessor):
             return None
         return coral
 
-    def judge(self, context: ReportContext) -> ReportDecision:
+    def make_sample(self, context: ReportContext) -> TrajectoryItem:
         coral = self._coral_metadata(context)
         if coral is None:
-            return ReportDecision.never("CoralProcessor requires metadata.coral with a commit_hash")
-        if (gate := context.eligibility()) is not None:
-            return gate
-        score = context.score
-        if score is None or context.inferences is None:
-            raise RuntimeError("eligible CORAL report is not fully resolved")
-        try:
-            sample = self._assembly.build(context, score)
-        except (TypeError, ValueError) as error:
-            return ReportDecision.never(f"sample assembly failed: {error}")
-        if sample is None or policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs):
-            return ReportDecision.never("policy tensor contract violation")
+            raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
+        sample = self._assembly.build(context, context.require_score())
         release_ids = {
             inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
         }
         if len(release_ids) > 1:
-            # One attempt spanning a weight update cannot carry one coherent
-            # set of rollout log probs.
-            return ReportDecision.never(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
-        parent = coral.get("parent_hash")
-        group_key = parent if isinstance(parent, str) and parent else ROOT_GROUP
-        return ReportDecision.train(
-            _CoralRow(sample, next(iter(release_ids), None)),
-            group_key=group_key,
-            slot=coral["commit_hash"],  # one attempt = one commit; regrade retries collapse
+            raise ValueError(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
+        return sample.with_metadata(
+            coral={**coral, "group": self.grouping(context)[0], "release_id": next(iter(release_ids), None)}
         )
 
-    def decide_group(self, key: Hashable, candidates: tuple[Any, ...]) -> GroupDecision:
-        if len(candidates) < self.group_size:
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        coral = self._coral_metadata(context)
+        if coral is None:
+            raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
+        parent = coral.get("parent_hash")
+        group = parent if isinstance(parent, str) and parent else ROOT_GROUP
+        return group, coral["commit_hash"]
+
+    def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
+        if len(items) < self.group_size:
             return GroupDecision.INCOMPLETE
-        versions = {candidate.value.release_id for candidate in candidates if candidate.value.release_id is not None}
+        versions = {
+            item.metadata["coral"]["release_id"] for item in items if item.metadata["coral"]["release_id"] is not None
+        }
         if len(versions) <= 1:
             return GroupDecision.READY
         ordered = tuple(sorted(versions))
@@ -120,7 +109,7 @@ class CoralProcessor(ReportedFeedbackProcessor):
         logger.error(
             "CORAL sibling group %s discarded: %d attempts span releases %s",
             key,
-            len(candidates),
+            len(items),
             list(ordered),
         )
         return GroupDecision.DISCARD
@@ -131,38 +120,27 @@ class CoralProcessor(ReportedFeedbackProcessor):
                 {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
                 for parent, versions in sorted(self._mixed_release_groups.items())
             ],
-            # Why reports did not train — the first thing to look at when a
-            # group never releases on a live deployment.
-            "never_reasons": dict(self.never_reasons),
         }
 
-    def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> GroupedPolicyBatch:
-        if len(units) != 1:
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        parents = {item.metadata["coral"]["group"] for item in items}
+        if len(parents) != 1:
             raise RuntimeError("CoralProcessor batches exactly one sibling group per step")
-        unit = units[0]
-        group = tuple(candidate.value.sample for candidate in unit.candidates)
-        rewards = tuple(sample.reward for sample in group)
+        parent = next(iter(parents))
+        batch = TrainingBatch(f"{self.scenario}:coral:{parent}:{batch_number}", items)
+        group = trajectories(batch)
+        rewards = tuple(trajectory_reward(sample) for sample in group)
         if all(reward == rewards[0] for reward in rewards[1:]):
             # Constant-reward group: keep it for a well-defined zero-gradient
             # step rather than starving the barrier (mirrors TTTD's fallback).
-            logger.info("CORAL group %s has constant reward %s", unit.group_key, rewards[0])
+            logger.info("CORAL group %s has constant reward %s", parent, rewards[0])
         self.experiment_logger.log(
             {
-                "parent": unit.group_key,
+                "parent": parent,
                 "siblings": len(group),
                 "reward_min": min(rewards),
                 "reward_max": max(rewards),
             },
             namespace="coral",
         )
-        return GroupedPolicyBatch(f"{self.scenario}:coral:{unit.group_key}:{batch_number}", (group,))
-
-
-class _CoralRow:
-    """One accepted attempt: its assembled sample plus producing release."""
-
-    __slots__ = ("release_id", "sample")
-
-    def __init__(self, sample: Any, release_id: str | None) -> None:
-        self.sample = sample
-        self.release_id = release_id
+        return replace(batch, items=tuple(replace(item, group_id=str(parent)) for item in group))

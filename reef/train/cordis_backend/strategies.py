@@ -19,7 +19,7 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 
 class Proposer(ABC):
@@ -59,7 +59,7 @@ class Proposer(ABC):
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
     in ``hybrid`` it is what an automatic batch would take next, up to
-    ``batch_size`` and possibly none (failing traces in the score window, or
+    ``batch_size`` and possibly none (scored traces, or
     records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
     instructions. It generates mutations against the current tree, then the
     same gate and publication policy used by automatic evolution apply.
@@ -86,7 +86,7 @@ class Proposer(ABC):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -178,7 +178,7 @@ class _CallableProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -276,7 +276,7 @@ class Promoter(ABC):
     @abstractmethod
     def __call__(
         self,
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:

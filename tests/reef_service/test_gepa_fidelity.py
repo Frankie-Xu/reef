@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 gepa = pytest.importorskip("gepa")
 
@@ -28,7 +29,6 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.train.cordis_backend.strategies import resolve_episode_scorer
-from reef.train.types import TraceSample
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]
 VAL = [{"input": f"validation problem {i}", "answer": "### 1"} for i in range(45)]
@@ -147,7 +147,7 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
     for iteration in range(iterations):
         plan = archive.plan(len(TRAIN), len(VAL), 3)
         samples = tuple(
-            TraceSample(
+            recorded_trajectory(
                 f"r{iteration}-{index}",
                 {
                     "messages": [{"role": "user", "content": TRAIN[index]["input"]}],

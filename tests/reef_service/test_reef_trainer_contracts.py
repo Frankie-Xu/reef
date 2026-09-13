@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -23,7 +23,7 @@ from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCan
 
 @dataclass(frozen=True)
 class ExampleBatch(TrainingBatch):
-    values: tuple[str, ...]
+    values: tuple[str, ...] = field(kw_only=True)
 
 
 class ExampleProcessor(DataProcessor):

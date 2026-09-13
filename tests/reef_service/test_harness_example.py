@@ -14,6 +14,7 @@ from types import ModuleType
 
 import pytest
 import yaml
+from reef_service._trajectories import recorded_trajectory
 from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.harness.episodes.model_binding import ModelBindingError
@@ -25,7 +26,6 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import Mutation
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
 
@@ -34,7 +34,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-h
 #: reef hands the proposer is the only endpoint in play.
 NODES = (("skill", {"name": "answer-style", "text": "# answer-style\n\nStarter skill."}),)
 
-SAMPLES = (TraceSample("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
+SAMPLES = (recorded_trajectory("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
 
 #: One queued instruction, as the backend forwards it to a proposer that names ``requests``.
 REQUEST = {
@@ -158,7 +158,7 @@ def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
 
 #: A report's feedback beside its request: what the reporter said was wrong, which the payload alone cannot show.
 REPORTED = (
-    TraceSample(
+    recorded_trajectory(
         "a2",
         {"messages": [{"role": "user", "content": "fix the failing test in auth.py"}]},
         0.0,
@@ -168,7 +168,7 @@ REPORTED = (
 
 
 def test_propose_shows_each_failure_with_its_report_score_and_feedback(evolution) -> None:
-    """The step hands the proposer TraceSamples whose ``feedback`` is the report's text verbatim; a proposer that
+    """The step hands the proposer ATIF trajectory items whose ``feedback`` is the report's text verbatim; a proposer that
     serialized the payload alone would learn what the model answered but never why it was scored down."""
     model = canned(proposal("answer-style"))
     evolution.propose(NODES, REPORTED + SAMPLES, model)
@@ -478,7 +478,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.max_score, built.training_mode) == (1, 0.0, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]
