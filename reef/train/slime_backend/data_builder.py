@@ -4,8 +4,8 @@ Each loss family's spec names its payload builder (``build_rollout_data``);
 the shared policy builder below covers every 5-tuple family, and the common
 row and rollout-id checks live here so families cannot drift on the shared
 wire contract. Structural row validity is the same
-:func:`reef.train.types.policy_row_violation` predicate the pairing
-processors apply at ingest time.
+:func:`reef.train.types.policy_row_violation` predicate. Violations raise
+training data errors rather than changing report eligibility.
 """
 
 from __future__ import annotations

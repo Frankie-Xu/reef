@@ -10,6 +10,7 @@ from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from recipes.tttd.preparer import TttdPreparer
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.reports import ReportValidationError
 from reef.train import ProcessorContext
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -250,20 +251,18 @@ def test_tttd_caches_policy_samples_at_ingest(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_tttd_resolves_reports_replayed_before_their_inferences() -> None:
+def test_tttd_refuses_reports_before_their_inferences() -> None:
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_report(0, group, rollout, float(group + rollout)))
-
+            with pytest.raises(ReportValidationError, match="unavailable"):
+                processor.ingest(_report(0, group, rollout, float(group + rollout)))
+            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
     assert not processor.ready()
-
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
-
-    batch = processor.build_batch()
-    assert [[sample.reward for sample in group] for group in batch.comparison_sets] == [
+            processor.ingest(_report(0, group, rollout, float(group + rollout)))
+    assert [[sample.reward for sample in group] for group in processor.build_batch().comparison_sets] == [
         [0.0, 1.0, 2.0],
         [1.0, 2.0, 3.0],
     ]
@@ -272,15 +271,10 @@ def test_tttd_resolves_reports_replayed_before_their_inferences() -> None:
 @pytest.mark.unit
 def test_tttd_invalid_single_report_does_not_wait_for_missing_inference() -> None:
     processor = _processor()
-    invalid_report = _report(0, processor.groups_per_step, 0, 1.0)
-
-    processor.ingest(invalid_report)
-
-    retention = processor.retention_decision()
-    assert retention.protected_agent_record_ids == frozenset()
-    assert retention.releasable_agent_record_ids == frozenset(
-        {invalid_report.agent_record_id, *invalid_report.references}
-    )
+    with pytest.raises(ReportValidationError):
+        processor.ingest(_report(0, processor.groups_per_step, 0, 1.0))
+    assert not processor.ready()
+    assert not processor.retention_decision().protected_agent_record_ids
 
 
 @pytest.mark.unit

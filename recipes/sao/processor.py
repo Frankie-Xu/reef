@@ -6,14 +6,8 @@ from dataclasses import replace
 
 from reef.core.records_types import AgentRecord
 from reef.train.processors.common import make_policy_sample
-from reef.train.processors.reported import (
-    NEVER,
-    ReportContext,
-    ReportDecision,
-    ReportedFeedbackProcessor,
-    SampleAssembly,
-)
-from reef.train.types import PolicyBatch, PolicySample, ProcessorContext, policy_row_violation
+from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, ReportSample, SampleAssembly
+from reef.train.types import PolicyBatch, PolicySample, ProcessorContext
 
 
 def make_sao_sample(item: AgentRecord, reward: float) -> PolicySample:
@@ -43,13 +37,9 @@ class SAOProcessor(ReportedFeedbackProcessor):
     default ``batch_size=1`` the dispatcher trains once per accepted rollout, so
     a rollout enters training the moment its score arrives.
 
-    SAO reuses ``PolicySample`` / ``PolicyBatch`` but fills the ``action_mask``
-    (for skip-observation GAE) and ``rollout_created_at`` (for queue age) that
-    the group-relative processors leave at their defaults. Nothing upstream
-    validates a single-inference sample, so ``judge`` is where a malformed
-    rollout is dropped as terminal rather than failing a training step: the
-    Slime bridge's tensor contract, plus SAO's own rule that the action mask
-    lines up with the loss mask.
+    SAO reuses ``PolicySample`` / ``PolicyBatch`` and fills ``action_mask``
+    and ``rollout_created_at``. The training backend validates required
+    tensors; malformed training input fails explicitly.
     """
 
     output_schema = PolicyBatch
@@ -59,29 +49,11 @@ class SAOProcessor(ReportedFeedbackProcessor):
         self._assembly = SampleAssembly.from_config(context, make_sample=make_sao_sample)
         super().__init__(context)
 
-    def judge(self, context: ReportContext) -> ReportDecision:
-        # 1. Shared gate: NEVER for reports that can never train, WAIT until
-        #    every referenced inference has arrived.
-        if (gate := context.eligibility()) is not None:
-            return gate
-        score = context.score
-        if score is None:
-            raise RuntimeError("eligible SAO report has no score")
-        # 2. Assemble the policy sample, then apply SAO's documented default:
-        #    with no observation spans marked, the action mask equals the loss
-        #    mask. A harness that marks none and a multi-turn episode (which
-        #    the shared assembly builds, filling no SAO field) both land here.
-        sample = self._assembly.build(context, score)
-        if sample is not None and not sample.action_mask:
+    def make_sample(self, context: ReportContext) -> ReportSample:
+        sample = self._assembly.build(context, context.require_score())
+        if not sample.action_mask:
             sample = replace(sample, action_mask=sample.loss_mask)
-        # 3. Tensors the slime bridge would reject are terminal here, not at
-        #    the training step.
-        if sample is None or policy_row_violation(
-            sample.tokens, sample.loss_mask, sample.rollout_log_probs, action_mask=sample.action_mask
-        ):
-            return NEVER
-        # 4. The rollout trains on its own: one report, one candidate.
-        return ReportDecision.train(sample)
+        return ReportSample(sample)
 
     def make_batch(self, units, batch_number: int) -> PolicyBatch:
         return PolicyBatch(

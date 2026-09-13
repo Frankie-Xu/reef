@@ -5,10 +5,10 @@ One pass on pi (``./run.sh``):
     record - each task goes once through reef inference, so reef serves the
              reply and records the exchange against a receipt
     report - the reply is graded with the same grader the evolve gate uses
-             and the score is reported against the receipt; every failure
-             (score 0.0, inside the max_score window) batches and triggers
+             and the score is reported against the receipt; every valid report
+             batches and triggers
              one gated evolve step - the model proposes a mutation over its
-             own failures, real episodes score it, a win publishes
+             recorded attempts, real episodes score it, a win publishes
     pull   - GET /reef/harness returns the winning composition; the evolved
              skill, tool, hook, and graph files are printed
 

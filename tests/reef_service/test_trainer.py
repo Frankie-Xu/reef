@@ -9,6 +9,7 @@ from recipes.sao import SAOProcessor
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.reports import ReportValidationError
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
@@ -192,17 +193,13 @@ def test_recipe_processor_never_becomes_ready() -> None:
 
 
 @pytest.mark.unit
-def test_pairing_processor_correlates_report_and_applies_improved_only_policy() -> None:
-    processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1, "min_score": 0.5}))
-    processor.ingest(report("late", "good", 1.0))
-    assert not processor.ready()
+def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
+    processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 2}))
     processor.ingest(inference("bad"))
-    processor.ingest(report("bad-r", "bad", 0.1))
     processor.ingest(inference("good"))
-
-    batch = processor.build_batch()
-    assert isinstance(batch, PolicyBatch)
-    assert [sample.source_agent_record_id for sample in batch.samples] == ["good"]
+    processor.ingest(report("bad-r", "bad", 0.1))
+    processor.ingest(report("good-r", "good", 1.0))
+    assert [sample.reward for sample in processor.build_batch().samples] == [0.1, 1.0]
 
 
 @pytest.mark.unit
@@ -219,15 +216,12 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), float("-inf")])
-def test_pairing_processor_never_trains_a_non_finite_score(bad_score: float) -> None:
-    # NaN slips past any `score < min_score` comparison; the shared
-    # eligibility gate rejects every non-finite score as terminal.
+def test_pairing_processor_rejects_a_non_finite_score(bad_score: float) -> None:
     processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1}))
     processor.ingest(inference("i1"))
-    processor.ingest(report("r1", "i1", bad_score))
-
+    with pytest.raises(ReportValidationError, match="finite"):
+        processor.ingest(report("r1", "i1", bad_score))
     assert not processor.ready()
-    assert "r1" in processor.retention_decision().releasable_agent_record_ids
 
 
 @pytest.mark.unit
@@ -240,9 +234,9 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     final_report = report("r1", ("i1", "i2"), 0.75)
 
     processor.ingest(first)
-    processor.ingest(final_report)
-    assert not processor.ready()
     processor.ingest(second)
+    assert not processor.ready()
+    processor.ingest(final_report)
 
     batch = processor.build_batch()
     assert batch.samples == (
@@ -304,67 +298,49 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
     processor = processor_type(ProcessorContext("math", config, report_type=report_type))
     processor.ingest(training_inference("i1", [10, 20], [1], [-0.1]))
     multi_turn_report = report("r1", ("i1", "i2"), 1.0, **metadata)
-    processor.ingest(multi_turn_report)
-
-    assert not processor.ready()
+    with pytest.raises(ReportValidationError, match="unavailable"):
+        processor.ingest(multi_turn_report)
     assert assembled_samples == []
-    assert processor.retention_decision().protected_agent_record_ids == frozenset({"i1", "i2", "r1"})
-
     processor.ingest(training_inference("i2", [10, 20, 11, 21], [1], [-0.2]))
-
-    assert not processor.ready()
+    with pytest.raises(ValueError, match="accept_multi_turn"):
+        processor.ingest(multi_turn_report)
     assert assembled_samples
     assert all(sample.turn_count == 2 and sample.is_multi_turn for sample in assembled_samples)
-    decision = processor.retention_decision()
-    assert decision.protected_agent_record_ids == frozenset()
-    assert decision.releasable_agent_record_ids == frozenset({"i1", "i2", "r1"})
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "r1"}
 
 
 @pytest.mark.unit
-def test_rejected_multi_turn_report_keeps_source_owned_by_live_report() -> None:
+def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() -> None:
     processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1}))
     processor.ingest(training_inference("i1", [10, 20], [1], [-0.1]))
     processor.ingest(training_inference("i2", [10, 20, 11, 21], [1], [-0.2]))
     processor.ingest(report("single", "i1", 1.0))
-    processor.ingest(report("multi", ("i1", "i2"), 1.0))
-
-    decision = processor.retention_decision()
-    assert decision.protected_agent_record_ids == frozenset({"i1", "single"})
-    assert decision.releasable_agent_record_ids == frozenset({"i2", "multi"})
-
-    batch = processor.build_batch()
-    processor.acknowledge(batch.batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"i1", "i2", "single", "multi"})
+    with pytest.raises(ValueError, match="accept_multi_turn"):
+        processor.ingest(report("multi", ("i1", "i2"), 1.0))
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "single", "multi"}
+    processor.acknowledge(processor.build_batch().batch_id)
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "multi"}
 
 
 @pytest.mark.unit
-def test_pairing_processor_releases_forked_multi_turn_episode() -> None:
-    processor = ThresholdProcessor(
-        ProcessorContext("math", {"batch_size": 1, "accept_multi_turn_policy_samples": True})
-    )
+def test_pairing_processor_raises_for_forked_multi_turn_episode() -> None:
+    processor = ThresholdProcessor(ProcessorContext("math", {"accept_multi_turn_policy_samples": True}))
     processor.ingest(training_inference("i1", [1, 2, 3], [1], [-0.1]))
     processor.ingest(training_inference("i2", [1, 9, 3, 4], [1], [-0.2]))
-    processor.ingest(report("r1", ("i1", "i2"), 1.0))
-
+    with pytest.raises(ValueError, match="cannot assemble"):
+        processor.ingest(report("r1", ("i1", "i2"), 1.0))
     assert not processor.ready()
-    decision = processor.retention_decision()
-    assert decision.protected_agent_record_ids == frozenset()
-    assert decision.releasable_agent_record_ids == frozenset({"i1", "i2", "r1"})
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "r1"}
 
 
 @pytest.mark.unit
-def test_pairing_processor_releases_report_marked_ineligible_for_training() -> None:
-    processor = ThresholdProcessor(
-        ProcessorContext("math", {"batch_size": 1, "accept_multi_turn_policy_samples": True})
-    )
+def test_pairing_processor_rejects_report_eligibility_flags() -> None:
+    processor = ThresholdProcessor(ProcessorContext("math"))
     processor.ingest(inference("i1"))
-    processor.ingest(inference("i2"))
-    processor.ingest(report("r1", ("i1", "i2"), 0.0, training={"eligible": False}))
-
+    with pytest.raises(ReportValidationError, match="eligible"):
+        processor.ingest(report("r1", "i1", 0.0, training={"eligible": False}))
     assert not processor.ready()
-    decision = processor.retention_decision()
-    assert decision.protected_agent_record_ids == frozenset()
-    assert decision.releasable_agent_record_ids == frozenset({"i1", "i2", "r1"})
+    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
 
 
 @pytest.mark.unit
@@ -393,15 +369,13 @@ def test_pairing_retention_consumes_reports_exactly_and_releases_trained_inferen
 
 
 @pytest.mark.unit
-def test_pairing_retention_releases_terminal_filtered_reports() -> None:
-    processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1, "min_score": 0.5}))
+def test_pairing_retention_protects_low_score_feedback_until_consumed() -> None:
+    processor = ThresholdProcessor(ProcessorContext("math"))
     processor.ingest(inference("i1"))
     processor.ingest(report("low", "i1", 0.1))
-
-    decision = processor.retention_decision()
-
-    assert decision.protected_agent_record_ids == frozenset({"i1"})
-    assert decision.releasable_agent_record_ids == frozenset({"low"})
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "low"}
+    processor.acknowledge(processor.build_batch().batch_id)
+    assert processor.retention_decision().releasable_agent_record_ids == {"i1", "low"}
 
 
 @pytest.mark.unit
@@ -880,7 +854,7 @@ def test_sao_processor_defaults_action_mask_for_assembled_episodes() -> None:
     which fills no SAO-only fields; the processor must apply its documented
     single-turn default (action mask = loss mask) instead of rejecting the
     assembled sample on an empty action mask."""
-    processor = SAOProcessor(ProcessorContext("swe", {"batch_size": 1, "accept_multi_turn_policy_samples": True}))
+    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1, "accept_multi_turn_policy_samples": True}))
     processor.ingest(training_inference("i1", [10, 20], [1], [-0.1]))
     processor.ingest(training_inference("i2", [10, 20, 11, 21], [1], [-0.2]))
     processor.ingest(report("r1", ("i1", "i2"), 1.0))
@@ -891,3 +865,29 @@ def test_sao_processor_defaults_action_mask_for_assembled_episodes() -> None:
     assert sample.is_multi_turn
     assert sample.action_mask == sample.loss_mask
     assert any(sample.action_mask)
+
+
+@pytest.mark.parametrize("missing", ["tokens", "rollout_log_probs"])
+def test_reported_samples_leave_required_tensor_validation_to_training_backend(missing: str) -> None:
+    from reef.train.slime_backend.data_builder import to_slime_rollout_data
+
+    processor = SAOProcessor(ProcessorContext("math"))
+    payload = {"tokens": [10, 20], "loss_mask": [1], "rollout_log_probs": [-0.1]}
+    payload.pop(missing)
+    processor.ingest(
+        AgentRecord.create(
+            scenario="math",
+            request_type=RequestType.INFERENCE,
+            agent_record_id="i1",
+            payload=payload,
+        )
+    )
+    processor.ingest(report("r1", "i1", 1.0))
+    batch = processor.build_batch()
+    assert len(batch.samples) == 1
+    prepared = prepare_slime_step(batch, "sao", {})
+    assert prepared.payload is not None
+    with pytest.raises(ValueError):
+        to_slime_rollout_data(prepared.payload)
+    assert processor.build_batch() is batch
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}

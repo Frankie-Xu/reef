@@ -59,7 +59,7 @@ class Proposer(ABC):
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
     in ``hybrid`` it is what an automatic batch would take next, up to
-    ``batch_size`` and possibly none (failing traces in the score window, or
+    ``batch_size`` and possibly none (scored traces, or
     records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
     instructions. It generates mutations against the current tree, then the
     same gate and publication policy used by automatic evolution apply.

@@ -1,7 +1,6 @@
 """Shared readers and sample builders both engines use.
 
-The report readers (``report_score``, ``report_is_trainable``) answer what a
-report carries; the sample builders turn one inference record — or an ordered
+The report reader ``report_score`` reads the reported reward; the sample builders turn one inference record — or an ordered
 multi-call episode — into a ``PolicySample`` with the tensors the training
 bridge requires.
 """
@@ -15,13 +14,6 @@ from typing import Any
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.records_types import AgentRecord
 from reef.train.types import PolicySample
-
-
-def report_is_trainable(report: AgentRecord) -> bool:
-    """Honor an optional framework-neutral report eligibility marker."""
-    metadata = report.payload.get("metadata", {})
-    training = metadata.get("training") if isinstance(metadata, Mapping) else None
-    return not isinstance(training, Mapping) or training.get("eligible", True) is not False
 
 
 def sample_assembly_config_fields(config: Mapping[str, Any]) -> tuple[bool, int, int]:

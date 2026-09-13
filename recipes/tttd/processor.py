@@ -13,11 +13,11 @@ from reef.train.processors.reported import (
     Candidate,
     GroupDecision,
     ReportContext,
-    ReportDecision,
     ReportedFeedbackProcessor,
+    ReportSample,
     SampleAssembly,
 )
-from reef.train.types import GroupedPolicyBatch, PolicySample, ProcessorContext, policy_row_violation
+from reef.train.types import GroupedPolicyBatch, PolicySample, ProcessorContext
 
 logger = logging.getLogger(__name__)
 
@@ -66,47 +66,19 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         self._failed_step_versions: dict[int, tuple[str, ...]] = {}
         super().__init__(context.with_config({**config, "batch_size": 1}))
 
-    def judge(self, context: ReportContext) -> ReportDecision:
-        # The recipe-owned contract is parsed by the reported-feedback engine.
-        # Keep the processor independent from the concrete recipe module:
-        # TTTDRecipe.build already guarantees the parsed report's shape.
+    def make_sample(self, context: ReportContext) -> ReportSample:
         parsed: Any = context.parsed_report
         if parsed is None:
-            return ReportDecision.never("TTTDProcessor requires the recipe's report schema")
-        # 2. The one rule the schema cannot check is config-relative:
-        #    whether the announced grid *is* this scenario's configured grid
-        #    (a mismatch is a valid report for some other configuration, not
-        #    a malformed one — but it can never train here).
+            raise ValueError("TTTDProcessor requires the recipe's report schema")
         if parsed.groups_per_step != self.groups_per_step or parsed.rollouts_per_group != self.rollouts_per_group:
-            return ReportDecision.never(
+            raise ValueError(
                 f"report announces a {parsed.groups_per_step}x{parsed.rollouts_per_group} grid; "
                 f"this scenario trains on {self.groups_per_step}x{self.rollouts_per_group}"
             )
-        # 3. Shared gate: NEVER for reports that can never train, WAIT
-        #    until every referenced inference has arrived.
-        if (gate := context.eligibility()) is not None:
-            return gate
-        score = context.score
-        if score is None or context.inferences is None:
-            raise RuntimeError("eligible TTTD report is not fully resolved")
-        # 4. Assemble the sample; assembly and tensor failures are named
-        #    rejections, never a failed training step.
-        try:
-            sample = self._assembly.build(context, score)
-        except (TypeError, ValueError) as error:
-            return ReportDecision.never(f"sample assembly failed: {error}")
-        if sample is None or policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs):
-            return ReportDecision.never("policy tensor contract violation")
-        # 5. Address the rollout into its step's grid: the step is the
-        #    group, (group, rollout) is the slot — a retry at an occupied
-        #    slot is terminal, the first durable report wins.
+        sample = self._assembly.build(context, context.require_score())
         inference = context.inferences[0]
         release_id = inference.artifact_ref.release_id if inference.artifact_ref is not None else None
-        return ReportDecision.train(
-            _TTTDRow(sample, release_id),
-            group_key=parsed.step,
-            slot=(parsed.group, parsed.rollout),
-        )
+        return ReportSample(_TTTDRow(sample, release_id), group_key=parsed.step, slot=(parsed.group, parsed.rollout))
 
     def decide_group(self, key: Hashable, candidates: tuple[Candidate, ...]) -> GroupDecision:
         # 1. The barrier: a step batches only when every one of its

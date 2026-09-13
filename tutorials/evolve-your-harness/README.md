@@ -150,7 +150,7 @@ Pick a model that fails at least one task and still writes the strict JSON mutat
 
 1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed composition: one starter `answer-style` skill node. The endpoint lives only on serve.yaml's `reef` section (`upstream_url`, `upstream_api_key`, `upstream_model`) and the recipe names its model as `model.path`; Reef hands the endpoint and that name to `propose` as a model binding and renders them into each evaluation episode, so neither the method nor the published tree ever names them.
 2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evolve gate grades episodes, and the score is reported against the receipt.
-3. Only failures batch (`max_score: 0.0`, the SkillClaw window), and `batch_size: 1` makes every failing report one evolve step: `propose` sends the failing requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win.
+3. Every valid scored report batches, and `batch_size: 1` makes each report one evolve step: `propose` sends the failing requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win.
 4. `run.py` pulls `GET /reef/harness` and prints the gate metrics and the evolved `SKILL.md` files. Point any pi at the pulled tree, with its model set to Reef, and it carries the learned skill.
 
 ## Native variant
@@ -172,7 +172,7 @@ The recorded pass is identical, so the two variants are comparable on the same t
 
 Last updated: 2026-09-05. Every row was measured on the code of the pull request in its Code column, with the tutorial files as they stood there.
 
-The loop under measurement is one fresh scenario through `./run.sh` (pi adapter) or `./run.sh native` (native adapter): the three tasks `[sieve]`, `[fib]` and `[csv]` go through Reef once, each reply is graded 1.0 for the exact answer alone on the last line and 0.0 otherwise, only a 0.0 report batches (`max_score: 0.0`, `batch_size: 1`), and each batched report runs one evolve step whose gate runs the current and the candidate tree once per task. Scores are listed in task order; W / L / T counts the three task pairings of one gate; the model under test is also the proposer.
+The historical measurements below used the previous failure-only `max_score` filter, which has since been removed. The loop under measurement is one fresh scenario through `./run.sh` (pi adapter) or `./run.sh native` (native adapter): the three tasks `[sieve]`, `[fib]` and `[csv]` go through Reef once, each reply is graded 1.0 for the exact answer alone on the last line and 0.0 otherwise, only a 0.0 report batches (`max_score: 0.0`, `batch_size: 1`), and each batched report runs one evolve step whose gate runs the current and the candidate tree once per task. Scores are listed in task order; W / L / T counts the three task pairings of one gate; the model under test is also the proposer.
 
 ### Environment
 

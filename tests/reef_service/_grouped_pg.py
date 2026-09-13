@@ -22,14 +22,12 @@ from reef.core.records_types import AgentRecord
 from reef.train.algos import StepSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.processors.reported import (
-    NEVER,
     BatchUnit,
     Candidate,
     GroupDecision,
-    Outcome,
     ReportContext,
-    ReportDecision,
     ReportedFeedbackProcessor,
+    ReportSample,
     SampleAssembly,
 )
 from reef.train.types import GroupedPolicyBatch, ProcessorContext, TrainingBatch
@@ -64,26 +62,11 @@ class GroupedPolicyProcessor(ReportedFeedbackProcessor):
         self._assembly = SampleAssembly.from_config(context)
         super().__init__(context)
 
-    def judge(self, context: ReportContext) -> ReportDecision:
-        # 1. Reports that can never train are terminal on sight.
-        gate = context.eligibility()
-        if gate is not None and gate.outcome is Outcome.NEVER:
-            return gate
-        # 2. A single-call report with no comparison set can never group —
-        #    terminal before its reference even resolves.
+    def make_sample(self, context: ReportContext) -> ReportSample:
         set_id = _comparison_set_id(context.report)
-        if len(context.references) == 1 and set_id is None:
-            return NEVER
-        # 3. Park until every referenced inference has arrived.
-        if gate is not None:
-            return gate
-        score = context.score
-        assert score is not None
-        # 4. Assemble the sample and address it into its comparison group.
-        sample = self._assembly.build(context, score)
-        if sample is None or set_id is None:
-            return NEVER
-        return ReportDecision.train(sample, group_key=set_id)
+        if set_id is None:
+            raise ValueError("grouped training requires metadata.comparison_set")
+        return ReportSample(self._assembly.build(context, context.require_score()), group_key=set_id)
 
     def decide_group(self, key: Hashable, candidates: tuple[Candidate, ...]) -> GroupDecision:
         del key

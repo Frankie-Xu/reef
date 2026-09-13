@@ -156,7 +156,7 @@ runs an instruction alone, without samples. ``hybrid`` batches on traffic and
 runs instructions: a queued instruction goes first, oldest first, one per
 step, and the units an automatic batch would take next, up to
 ``batch_size`` and possibly none, ride beside it as the batch's samples
-(failing traces in the score window, or records under
+(scored traces, or records under
 ``data.batch_policy: records``), so the proposer reads the request next
 to them; with none queued the step batches as ``auto`` does.
 
@@ -375,21 +375,30 @@ Report
 Reef stores four fields and drops other top-level keys. Put harness-specific
 data inside ``metadata`` or ``feedback``.
 
-+----------------+------------------+----------+-------------------------------------------+
-| Field          | Type             | Required | Notes                                     |
-+================+==================+==========+===========================================+
-| ``score``      | number           | no       | a bool is not a number and is rejected    |
-+----------------+------------------+----------+-------------------------------------------+
-| ``feedback``   | string or object | no       | opaque to Reef's core: a rubric, judge    |
-|                |                  |          | output, plain text                        |
-+----------------+------------------+----------+-------------------------------------------+
-| ``references`` | list of strings  | no       | the receipts this report grades; several  |
-|                |                  |          | batch as one trajectory sample, none is   |
-|                |                  |          | accepted but never trains                 |
-+----------------+------------------+----------+-------------------------------------------+
-| ``metadata``   | object           | no       | opaque, except                            |
-|                |                  |          | ``training.eligible`` (default ``true``)  |
-+----------------+------------------+----------+-------------------------------------------+
+.. list-table::
+   :header-rows: 1
+
+   * - Field
+     - Type
+     - Required
+     - Notes
+   * - ``score``
+     - number
+     - no
+     - Must be finite; booleans are rejected.
+   * - ``feedback``
+     - string or object
+     - no
+     - Opaque feedback interpreted by the recipe.
+   * - ``references``
+     - list of strings
+     - no
+     - Unique existing inference receipts in this scenario. Reported-feedback
+       processors require at least one reference; several form one trajectory.
+   * - ``metadata``
+     - object
+     - no
+     - Recipe metadata; ``training.eligible`` is not supported.
 
 It answers ``{agent_record_id, scenario, request_type}``.
 
@@ -411,8 +420,15 @@ A recipe may declare a report schema. `tttd
 <../user-guide/recipes/tttd.rst#the-report-contract>`__ declares one. In that case, Reef
 validates the declared ``score`` and ``metadata`` fields at ingress and answers
 HTTP 400 on a violation; ``feedback`` and undeclared ``metadata`` keys pass
-through unvalidated. To record a report but keep it out of training, send
-``"metadata": {"training": {"eligible": false}}``.
+through, except the removed ``metadata.training.eligible`` field, which is
+rejected with HTTP 400 regardless of its value. Reports cannot opt out of training.
+
+Every supplied reference must identify an already stored inference record in the
+same scenario. Missing, foreign, non-inference, or duplicate references produce
+HTTP 400 without persisting the report. Reef does not wait for future records;
+the producer may resubmit after the referenced inference has been stored.
+Identical retries of previously accepted reports retain their original behavior
+after reference cleanup; they do not restart training.
 
 Record
 ------

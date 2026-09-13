@@ -973,7 +973,6 @@ class _HarnessEvolveTestRecipe(Recipe):
     evaluate: object
     tasks: tuple[str, ...]
     batch_size: int = 1
-    max_score: float = 0.0
     _: KW_ONLY
     name: str = "harness_evolve"
 
@@ -994,9 +993,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: CordisProcessor(
-                context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
-            ),
+            processor_factory=lambda context: CordisProcessor(context.with_config({"batch_size": self.batch_size})),
             training_backend=training_backend,
             candidate_evaluator=ScoreComparisonPlugin(training_backend),
             algorithm_state=algorithm_state,

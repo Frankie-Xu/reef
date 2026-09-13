@@ -363,7 +363,6 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert built.name == "skillclaw"
     assert built.candidate_plugin is BackendAlwaysSelectPlugin
     assert built.batch_size == 60
-    assert built.max_score == float("inf")  # the whole day batches, passes included
     assert [entry["id"] for entry in built.seed] == ["alpha"]
     assert built.seed[0]["config"]["name"] == "alpha"
     assert len(built.tasks) == 3
@@ -462,7 +461,6 @@ def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int)
         seed=SEED,
         candidate_plugin=BackendAlwaysSelectPlugin,
         batch_size=batch_size,
-        max_score=float("inf"),
         runtime=runtime(),
     )
 

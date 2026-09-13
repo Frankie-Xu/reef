@@ -478,7 +478,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.max_score, built.training_mode) == (1, 0.0, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]

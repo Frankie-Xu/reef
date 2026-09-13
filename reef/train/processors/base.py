@@ -51,10 +51,10 @@ class DataProcessor:
 
     * As **reports** referencing inference records → subclass
       :class:`~reef.train.processors.reported.ReportedFeedbackProcessor` and write
-      ``judge`` (what counts) and ``make_batch`` (what a batch looks like).
+      ``make_sample`` (assemble feedback) and ``make_batch`` (what a batch looks like).
       The engine owns everything between them — including ``ingest``, which
-      is where it calls your ``judge``, on the trainer's thread: a plain
-      method, so keep it a pure decision on data already in hand.
+      is where it calls your ``make_sample``, on the trainer's thread: a plain
+      method operating on data already in hand.
     * **Computed from the traffic itself** — correlated across records,
       judged by a model, landing asynchronously → subclass
       :class:`~reef.train.processors.computed.ComputedFeedbackProcessor` and write
@@ -67,7 +67,7 @@ class DataProcessor:
 
     That is the whole difference between the two processors: feedback is
     either reported explicitly or computed from correlated traffic. The
-    reported path calls synchronous ``judge`` inside ``ingest``; the computed
+    reported path calls synchronous ``make_sample`` inside ``ingest``; the computed
     path awaits ``async def judge`` on its worker after recipe code dispatches
     a job.
 

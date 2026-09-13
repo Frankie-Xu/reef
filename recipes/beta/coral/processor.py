@@ -28,11 +28,11 @@ from reef.train.processors.reported import (
     BatchUnit,
     GroupDecision,
     ReportContext,
-    ReportDecision,
     ReportedFeedbackProcessor,
+    ReportSample,
     SampleAssembly,
 )
-from reef.train.types import GroupedPolicyBatch, ProcessorContext, policy_row_violation
+from reef.train.types import GroupedPolicyBatch, ProcessorContext
 
 logger = logging.getLogger(__name__)
 
@@ -79,34 +79,20 @@ class CoralProcessor(ReportedFeedbackProcessor):
             return None
         return coral
 
-    def judge(self, context: ReportContext) -> ReportDecision:
+    def make_sample(self, context: ReportContext) -> ReportSample:
         coral = self._coral_metadata(context)
         if coral is None:
-            return ReportDecision.never("CoralProcessor requires metadata.coral with a commit_hash")
-        if (gate := context.eligibility()) is not None:
-            return gate
-        score = context.score
-        if score is None or context.inferences is None:
-            raise RuntimeError("eligible CORAL report is not fully resolved")
-        try:
-            sample = self._assembly.build(context, score)
-        except (TypeError, ValueError) as error:
-            return ReportDecision.never(f"sample assembly failed: {error}")
-        if sample is None or policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs):
-            return ReportDecision.never("policy tensor contract violation")
+            raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
+        sample = self._assembly.build(context, context.require_score())
         release_ids = {
             inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
         }
         if len(release_ids) > 1:
-            # One attempt spanning a weight update cannot carry one coherent
-            # set of rollout log probs.
-            return ReportDecision.never(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
+            raise ValueError(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
         parent = coral.get("parent_hash")
         group_key = parent if isinstance(parent, str) and parent else ROOT_GROUP
-        return ReportDecision.train(
-            _CoralRow(sample, next(iter(release_ids), None)),
-            group_key=group_key,
-            slot=coral["commit_hash"],  # one attempt = one commit; regrade retries collapse
+        return ReportSample(
+            _CoralRow(sample, next(iter(release_ids), None)), group_key=group_key, slot=coral["commit_hash"]
         )
 
     def decide_group(self, key: Hashable, candidates: tuple[Any, ...]) -> GroupDecision:
@@ -131,9 +117,6 @@ class CoralProcessor(ReportedFeedbackProcessor):
                 {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
                 for parent, versions in sorted(self._mixed_release_groups.items())
             ],
-            # Why reports did not train — the first thing to look at when a
-            # group never releases on a live deployment.
-            "never_reasons": dict(self.never_reasons),
         }
 
     def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> GroupedPolicyBatch:
