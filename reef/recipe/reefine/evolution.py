@@ -128,7 +128,8 @@ REVIEW_PROMPT = (
     "Entries written:\n{entries}\n\n"
     "List what the request asks for or implies that the entries cover, and what they leave uncovered: "
     "a trigger with no source, a state the user has no way to turn on and off, a step the request names "
-    "that no entry performs, a variable an extension reads that no requires item names. "
+    "that no entry performs, a variable an extension reads that no requires item names (PI_OFFLINE, "
+    "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none). "
     "Respond with one JSON object and nothing else:\n"
     '{{"verdict": "complete" or "partial", "covered": ["<one point per item>"], '
     '"uncovered": ["<one point per item>"]}}\n'
