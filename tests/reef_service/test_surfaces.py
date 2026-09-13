@@ -375,14 +375,14 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.dispatcher import Dispatcher
-    from reef.runtime.inference import InferenceBackend
+    from reef.runtime.inference import InferenceHandler
     from reef.service.app import RequestService
 
     class SkillRecipe(Recipe):
         def build_surface(self, scenario):
             return create_skill_surface([_InjectingModule()])
 
-    class RecordingBackend(InferenceBackend):
+    class RecordingBackend(InferenceHandler):
         def __init__(self) -> None:
             self.seen = None
 

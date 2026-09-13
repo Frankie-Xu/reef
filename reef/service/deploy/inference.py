@@ -19,7 +19,7 @@ from reef.service.profiles import profile_names
 
 
 @dataclass(frozen=True)
-class InferenceBackend:
+class InferenceCommand:
     """Native command bindings and readiness for an OpenAI-compatible engine."""
 
     command: tuple[str, ...]
@@ -27,8 +27,8 @@ class InferenceBackend:
     reserved_options: tuple[str, ...] = ()
 
 
-INFERENCE_BACKENDS = {
-    "sglang": InferenceBackend(
+INFERENCE_COMMANDS = {
+    "sglang": InferenceCommand(
         command=(
             "{python}",
             "-m",
@@ -78,9 +78,9 @@ def http_readiness_command(python: str, endpoint: str) -> list[str]:
 def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
     """Resolve launch choices once, before model downloads or service creation."""
     backend = settings.inference_backend or "sglang"
-    definition = INFERENCE_BACKENDS.get(backend)
+    definition = INFERENCE_COMMANDS.get(backend)
     if definition is None:
-        raise DeployConfigError(f"managed local inference supports: {', '.join(sorted(INFERENCE_BACKENDS))}")
+        raise DeployConfigError(f"managed local inference supports: {', '.join(sorted(INFERENCE_COMMANDS))}")
     parallel_size = settings.tensor_parallel_size if settings.tensor_parallel_size is not None else 1
     if parallel_size < 1:
         raise DeployConfigError("--inference.tensor-parallel-size must be positive")
@@ -140,8 +140,8 @@ _ENVIRONMENT_FIELDS = {
 }
 _CONFIGURED_FIELDS = {
     "inference_url",
-    "inference_backend_factory",
-    "inference_backend_config",
+    "inference_handler_factory",
+    "inference_handler_config",
     "ray_address",
     "ray_namespace",
     "ray_actor_name",

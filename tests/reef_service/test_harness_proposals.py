@@ -15,7 +15,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
@@ -60,7 +60,7 @@ async def _post(client: TestClient, body: dict, scenario: str = "agents"):
     return await client.post("/reef/harness/proposals", headers={"x-reef-scenario": scenario}, json=body)
 
 
-class _EchoBackend(InferenceBackend):
+class _EchoBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del artifact, path, payload
         return {"choices": [{"message": {"content": "ok"}}]}
@@ -180,7 +180,7 @@ def test_a_malformed_body_is_400_and_a_scenario_that_takes_no_proposals_is_404(t
             await client.close()
         for other, message in ((plain, "carries no harness surface"), (files_only, "takes no proposals")):
             other.get_or_create_scenario("agents")
-            client = TestClient(TestServer(create_app(other, inference_backend=_EchoBackend())))
+            client = TestClient(TestServer(create_app(other, inference_handler=_EchoBackend())))
             await client.start_server()
             try:
                 response = await _post(client, _proposal(CREATE_RULES))
@@ -200,7 +200,7 @@ def test_inference_responses_carry_no_release_header_on_a_scenario_that_serves_n
     plain = _dispatcher(tmp_path, Recipe())
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(plain, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(plain, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             for stream in (False, True):
@@ -384,7 +384,7 @@ def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, m
 
     try:
         proposal_id = asyncio.run(post(_proposal(CREATE_RULES)))["proposal_id"]
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         monkeypatch.setattr(type(backend), "settle_step", die)
         _report_once(scenario, "agents", "1")
         with pytest.raises(RuntimeError, match="evaluator died"):

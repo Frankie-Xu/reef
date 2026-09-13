@@ -1,17 +1,18 @@
-"""Native SGLang receiver operations used by Reef's training coordinator."""
+"""Native SGLang inference backend used by Reef's training coordinator."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.runtime.backends import InferenceBackend
 from reef.runtime.executor import Executor
 from reef.runtime.executor.ray import RayExecutor
 
 _CONTROL_TIMEOUT_S = 14_400
 
 
-class SGLangInferenceOperations:
+class SGLangInferenceBackend(InferenceBackend):
     """Borrow a control connection without owning publication or engine lifetime.
 
     The coordinator decides operation order and whether a loaded revision may

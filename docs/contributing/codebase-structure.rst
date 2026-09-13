@@ -159,8 +159,10 @@ with surface contracts, while checkpoint cadence is recipe policy.
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
 ``runtime/scheduler.py`` coordinates recipe-facing candidate and commit operations.
 ``runtime/training_job/`` owns job identity/replay, staleness admission,
-train/checkpoint ordering and commit-gated publication. Its ``operations.py``
-defines the separate training and inference contracts consumed by the coordinator.
+train/checkpoint ordering and commit-gated publication. ``runtime/backends.py``
+defines ``TrainingBackend`` and ``InferenceBackend``, the native contracts consumed
+by the coordinator. ``runtime/base.py`` defines the separate ``TrainingRuntime``
+and ``InferenceRuntime`` scheduling interfaces.
 Concrete training integrations retain model operations, checkpoint and tensor I/O.
 ``runtime/control/`` groups inference pause/recovery, health probes and memory
 handoffs. ``runtime/weights/`` groups version identity, candidates, LoRA residency

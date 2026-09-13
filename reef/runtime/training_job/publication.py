@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from reef.runtime.training_job.marker import TrainingJobState, read_marker, transition_marker, write_marker
 from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed
 
 
-class WeightPublisher(Protocol):
+class WeightPublisher(ABC):
     """Model operations needed by Reef's durable publication transaction.
 
     Transport stays in the backend: ``publish`` must verify that all engines
@@ -23,19 +24,26 @@ class WeightPublisher(Protocol):
     ``abort`` prevents inference after an uncertain or partial update.
     """
 
+    @abstractmethod
     def recover(self, marker: Mapping[str, Any] | None) -> None: ...
 
+    @abstractmethod
     def pause(self) -> None: ...
 
+    @abstractmethod
     def publish(self, marker: Mapping[str, Any], *, force_full: bool) -> str: ...
 
+    @abstractmethod
     def republish(self, runtime_load_id: str, marker: Mapping[str, Any] | None) -> str:
         """Resend unchanged trainer weights with a full transfer and the same identity."""
 
+    @abstractmethod
     def resume(self) -> None: ...
 
+    @abstractmethod
     def restore_incumbent(self) -> None: ...
 
+    @abstractmethod
     def abort(self) -> None: ...
 
 

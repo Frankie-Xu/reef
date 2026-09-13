@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import SGLangConfig
-from reef.inference.sglang.operations import SGLangInferenceOperations
 from reef.inference.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
 from reef.runtime.deployment import InferenceConnection
 from reef.runtime.executor.ray import RayExecutor
@@ -43,7 +43,7 @@ def test_service_adapts_only_compatible_connections_without_owning_workers():
     receiver = Receiver()
     executor = UniProcExecutor.from_workers([receiver])
     service = SGLangInferenceService(SGLangConfig("model", 1, 1, 1))
-    operations = service.operations(InferenceConnection(INFERENCE_PROTOCOL, executor))
+    operations = service.backend(InferenceConnection(INFERENCE_PROTOCOL, executor))
 
     assert operations.inference_url() == "http://inference:8000"
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
@@ -56,7 +56,7 @@ def test_service_adapts_only_compatible_connections_without_owning_workers():
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
 
     with pytest.raises(ValueError, match="incompatible SGLang"):
-        service.operations(InferenceConnection("other-protocol", executor))
+        service.backend(InferenceConnection("other-protocol", executor))
 
 
 def test_preparing_weight_transfer_fences_only_a_compatible_receiver():
@@ -75,13 +75,13 @@ def test_preparing_weight_transfer_fences_only_a_compatible_receiver():
 
 @pytest.mark.parametrize("versions", ["weights:1", [None], [1], [""], {"engine": "weights:1"}])
 def test_receiver_rejects_malformed_versions_before_publication(versions):
-    operations = SGLangInferenceOperations(UniProcExecutor.from_workers([Receiver(versions)]))
+    operations = SGLangInferenceBackend(UniProcExecutor.from_workers([Receiver(versions)]))
     with pytest.raises(RuntimeError, match="invalid runtime load IDs"):
         operations.runtime_load_ids()
 
 
 def test_receiver_preserves_mixed_versions_for_coordinator_consistency_check():
-    operations = SGLangInferenceOperations(UniProcExecutor.from_workers([Receiver(["weights:1", "weights:2"])]))
+    operations = SGLangInferenceBackend(UniProcExecutor.from_workers([Receiver(["weights:1", "weights:2"])]))
     assert operations.runtime_load_ids() == ("weights:1", "weights:2")
 
 
@@ -92,7 +92,7 @@ def test_receiver_preserves_pause_failure_without_attempting_resume():
             raise TimeoutError("pause acknowledgement lost")
 
     receiver = UncertainReceiver()
-    operations = SGLangInferenceOperations(UniProcExecutor.from_workers([receiver]))
+    operations = SGLangInferenceBackend(UniProcExecutor.from_workers([receiver]))
     with pytest.raises(TimeoutError, match="acknowledgement lost"):
         operations.pause()
     assert receiver.paused
@@ -113,7 +113,7 @@ def test_initial_version_stamping_keeps_receiver_paused_on_partial_failure(monke
     receiver = Receiver(versions)
     receiver.get_updatable_engines_and_lock = lambda: ([object(), object()], None, 0, [], [], [])
     monkeypatch.setattr(RayExecutor, "from_workers", lambda workers: EngineGroup())
-    operations = SGLangInferenceOperations(UniProcExecutor.from_workers([receiver]))
+    operations = SGLangInferenceBackend(UniProcExecutor.from_workers([receiver]))
     operations.pause()
     if fail_second:
         with pytest.raises(TimeoutError, match="acknowledgement lost"):
@@ -146,7 +146,7 @@ def test_adapter_eviction_requires_every_engine_acknowledgement(monkeypatch, las
             return [engine.unload_lora_adapter(**kwargs) for engine in engines]
 
     monkeypatch.setattr(RayExecutor, "from_workers", lambda workers: EngineGroup())
-    operations = SGLangInferenceOperations(UniProcExecutor.from_workers([receiver]))
+    operations = SGLangInferenceBackend(UniProcExecutor.from_workers([receiver]))
     if last_result == {"success": False}:
         with pytest.raises(RuntimeError, match="engine kept adapter"):
             operations.unload_adapter("scenario/weights:2")

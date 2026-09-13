@@ -13,10 +13,10 @@ from reef.core.errors import DeployConfigError
 from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.inference import InferenceBackendFactory
+from reef.runtime.inference import InferenceHandlerFactory
 from reef.train.deployment import TrainingDeployment, TrainingDeploymentPlan
 
-_NATIVE_INFERENCE = "reef.inference.sglang.chat.SGLangChatTrainingInferenceBackend"
+_NATIVE_INFERENCE = "reef.inference.sglang.chat.SGLangInferenceHandler"
 _READY_PROBE = (
     "import os, pathlib, sys; "
     "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "
@@ -32,22 +32,22 @@ def driver_environment(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _configured_inference_backend_factory(path: str | None) -> InferenceBackendFactory | None:
-    """Load an optional backend factory selected by deployment config."""
+def _configured_inference_handler_factory(path: str | None) -> InferenceHandlerFactory | None:
+    """Load an optional request handler factory selected by deployment config."""
 
     if path is None:
         return None
     if not isinstance(path, str) or not path.strip():
-        raise ValueError("reef.inference_backend_factory must be a non-empty dotted path")
+        raise ValueError("reef.inference_handler_factory must be a non-empty dotted path")
     module_path, separator, attribute = path.strip().rpartition(".")
     if not separator or not module_path or not attribute:
-        raise ValueError("reef.inference_backend_factory must be a dotted path")
+        raise ValueError("reef.inference_handler_factory must be a dotted path")
     try:
         factory = getattr(importlib.import_module(module_path), attribute)
     except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot load reef.inference_backend_factory {path!r}") from exc
+        raise ValueError(f"cannot load reef.inference_handler_factory {path!r}") from exc
     if not callable(factory):
-        raise ValueError(f"reef.inference_backend_factory {path!r} is not callable")
+        raise ValueError(f"reef.inference_handler_factory {path!r} is not callable")
     return factory
 
 
@@ -195,7 +195,7 @@ class SlimeDeployment(TrainingDeployment):
             training_backend_options=options,
             ray_namespace=settings["ray_namespace"] or DEFAULT_NAMESPACE,
             ray_actor_name=settings["ray_actor_name"] or DEFAULT_ACTOR_NAME,
-            inference_backend_factory=settings["inference_backend_factory"] or _NATIVE_INFERENCE,
+            inference_handler_factory=settings["inference_handler_factory"] or _NATIVE_INFERENCE,
         )
         python = os.environ.get("REEF_PYTHON", sys.executable)
         driver = {
@@ -241,15 +241,15 @@ class SlimeDeployment(TrainingDeployment):
         }
         if max_staleness:
             runtime_config["max_staleness"] = max_staleness
-        inference_backend_factory = _configured_inference_backend_factory(settings["inference_backend_factory"])
-        if inference_backend_factory is not None:
-            runtime_config["inference_backend_factory"] = inference_backend_factory
-        if not isinstance(settings["inference_backend_config"], Mapping):
-            raise ValueError("reef.inference_backend_config must be an object")
-        if settings["inference_backend_config"]:
-            if inference_backend_factory is None:
-                raise ValueError("reef.inference_backend_config requires reef.inference_backend_factory")
-            runtime_config["inference_backend_config"] = dict(settings["inference_backend_config"])
+        inference_handler_factory = _configured_inference_handler_factory(settings["inference_handler_factory"])
+        if inference_handler_factory is not None:
+            runtime_config["inference_handler_factory"] = inference_handler_factory
+        if not isinstance(settings["inference_handler_config"], Mapping):
+            raise ValueError("reef.inference_handler_config must be an object")
+        if settings["inference_handler_config"]:
+            if inference_handler_factory is None:
+                raise ValueError("reef.inference_handler_config requires reef.inference_handler_factory")
+            runtime_config["inference_handler_config"] = dict(settings["inference_handler_config"])
         if connector is not None:
             runtime_config["connect"] = connector
         return runtime_config

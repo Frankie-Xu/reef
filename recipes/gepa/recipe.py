@@ -196,18 +196,18 @@ class GEPARecipe(CordisRecipe):
                 )
             )
 
-        def bind_archive(backend: Any) -> CandidateEvaluationPlugin:
-            return GEPAPlugin(backend, archive)
+        def bind_archive(candidate_backend: Any) -> CandidateEvaluationPlugin:
+            return GEPAPlugin(candidate_backend, archive)
 
         candidate_plugin = self.candidate_plugin
         if isinstance(candidate_plugin, _UnboundPlugin):
             candidate_plugin = bind_archive
         bound = dataclasses.replace(self, propose=propose, candidate_plugin=candidate_plugin)
-        training_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
+        candidate_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
         return bound._build_trainer(
             scenario,
             records,
-            training_backend,
+            candidate_backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )

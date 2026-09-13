@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from threading import RLock
-from typing import Protocol
 
 
-class InferenceMemoryOperations(Protocol):
+class InferenceMemoryOperations(ABC):
     """Synchronous engine operations; return only after every region is changed."""
 
+    @abstractmethod
     def release(self, regions: Sequence[str]) -> None: ...
 
+    @abstractmethod
     def resume(self, regions: Sequence[str]) -> None: ...
 
 

@@ -67,7 +67,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         assert http["depends_on"] == [driver["name"]]
         assert driver["executor"] == http["executor"] == "uni"
         assert "inference_url" not in reef
-        assert "SGLangChatTrainingInferenceBackend" in reef["inference_backend_factory"]
+        assert "SGLangInferenceHandler" in reef["inference_handler_factory"]
 
 
 @pytest.mark.parametrize(
@@ -123,7 +123,7 @@ def test_explicit_services_preserve_custom_training_topology(tmp_path):
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert config["services"] == raw["services"]
     assert "execution" not in config
-    assert "inference_backend_factory" not in config["reef"]
+    assert "inference_handler_factory" not in config["reef"]
 
 
 @pytest.mark.parametrize("checkpoint", ["/models/demo", "${inference.model-path}"])

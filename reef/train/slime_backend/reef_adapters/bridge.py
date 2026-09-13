@@ -14,14 +14,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.runtime.backends import TrainingBackend, TrainingContext, TrainingCoordinationConfig
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import resolve
-from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure
+from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.training_job.admission import _producing_runtime_load_ids
-from reef.runtime.training_job.execution import PreparedTrainingJob, TrainingCheckpoint, TrainingMetrics
+from reef.runtime.training_job.execution import (
+    PreparedTrainingJob,
+    TrainingCheckpoint,
+    TrainingJobBackend,
+    TrainingMetrics,
+)
 from reef.runtime.training_job.execution import max_staleness as _max_staleness
 from reef.runtime.training_job.marker import marker_rollouts
-from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
 from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
@@ -64,7 +69,7 @@ class _NullAlgorithm(SlimeAlgorithm):
         pass
 
 
-class SlimeTrainingOperations:
+class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     """Slime training, checkpointing and native sender operations.
 
     This adapter has no inference control object and never reads or advances
@@ -100,10 +105,10 @@ class SlimeTrainingOperations:
         self._critic_save_root = critic_save_root if critic_group is not None else None
         self._batch_processor = batch_processor
         self._save_hf_template = save_hf_template
-        self.config = TrainingCoordinationConfig(
+        self._config = TrainingCoordinationConfig(
             save_hf_template, colocate, lora, adapter_capacity, keep_lora_base_resident
         )
-        self.context = TrainingContext(
+        self._context = TrainingContext(
             next_rollout_id=start_rollout_id,
             history=ScenarioHistory(history_path(save_hf_template)) if lora and save_hf_template is not None else None,
         )
@@ -130,6 +135,14 @@ class SlimeTrainingOperations:
             if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
             else None
         )
+
+    @property
+    def config(self) -> TrainingCoordinationConfig:
+        return self._config
+
+    @property
+    def context(self) -> TrainingContext:
+        return self._context
 
     def start(self) -> None:
         for group in (self._group, self._critic_group):
@@ -158,9 +171,7 @@ class SlimeTrainingOperations:
     def prepare(
         self, payload: Mapping[str, Any], *, job_id: str, rollout_id: int, prior_marker: Mapping[str, Any] | None
     ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]:
-        return _SlimeTrainingBackend(self).prepare(
-            payload, job_id=job_id, rollout_id=rollout_id, prior_marker=prior_marker
-        )
+        return _SlimeJobBackend(self).prepare(payload, job_id=job_id, rollout_id=rollout_id, prior_marker=prior_marker)
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
@@ -228,10 +239,10 @@ class SlimeTrainingOperations:
         return resolve(value, timeout=_TRAIN_RPC_TIMEOUT_S)
 
 
-class _SlimeTrainingBackend:
+class _SlimeJobBackend(TrainingJobBackend):
     """Slime admission, scoring, tensorization and checkpoint reservations."""
 
-    def __init__(self, bridge: SlimeTrainingOperations) -> None:
+    def __init__(self, bridge: SlimeTrainingBackend) -> None:
         self._bridge = bridge
 
     @contextmanager
@@ -300,12 +311,12 @@ class _SlimeTrainingBackend:
             )
 
 
-class _SlimePreparedTrainingJob:
+class _SlimePreparedTrainingJob(PreparedTrainingJob):
     """One prepared Slime step; Reef controls when training and saving run."""
 
     def __init__(
         self,
-        bridge: SlimeTrainingOperations,
+        bridge: SlimeTrainingBackend,
         *,
         checkpoint: TrainingCheckpoint,
         job_id: str,
@@ -398,18 +409,18 @@ def prepare_bridge(
     return BridgePreparation(retention=retention, loss_family=loss_family, lora=lora)
 
 
-def create_training_operations(
+def create_training_backend(
     args: Any,
     actor_group: Any,
     critic_group: Any | None,
     *,
     preparation: BridgePreparation,
     loss_family_config: object | None = None,
-) -> SlimeTrainingOperations:
+) -> SlimeTrainingBackend:
     """Build a training-only adapter around already-started Slime workers."""
     from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
 
-    return SlimeTrainingOperations(
+    return SlimeTrainingBackend(
         actor_group,
         batch_processor=TrainingBatchProcessor(args, actor_group.train_parallel_config),
         save_hf_template=args.save_hf,

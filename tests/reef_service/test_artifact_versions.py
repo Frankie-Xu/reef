@@ -15,7 +15,7 @@ from reef.dispatcher import Dispatcher
 from reef.observability import NullExperimentLogger
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitLogScenarioStore
@@ -34,7 +34,7 @@ class RollbackRuntime(StubTrainingRuntime):
         self.candidate_versions: dict[str, str] = {}
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
     def prepare_training_step(
@@ -82,7 +82,7 @@ class RollbackRuntime(StubTrainingRuntime):
         return f"restored:{version}"
 
 
-class BlockingBackend(InferenceBackend):
+class BlockingBackend(InferenceHandler):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()

@@ -22,7 +22,7 @@ from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.train.runtime_backend import RuntimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 
 BACKEND = "reef_service._training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -51,7 +51,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
     for config in (file_config, cli_config):
         assert [process["name"] for process in config["services"]] == ["reef"]
         assert "execution" not in config
-        assert not {"ray_address", "ray_namespace", "inference_backend_factory"} & config["reef"].keys()
+        assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
         runtime, inference = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
         assert runtime.received_model_path == "/models/test"
@@ -128,10 +128,10 @@ def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_pat
     records = SQLiteRecordStore()
     try:
         trainer = recipe.build("scenario", records)
-        assert isinstance(trainer.training_backend, RuntimeTrainingBackend)
-        assert trainer.training_backend.inference_runtime is recipe.runtime
-        assert trainer.training_backend.training_runtime is recipe.training_runtime
-        assert trainer.training_backend.experiment_config()["runtime"] == "LocalRuntime"
+        assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
+        assert trainer.candidate_backend.inference_runtime is recipe.runtime
+        assert trainer.candidate_backend.training_runtime is recipe.training_runtime
+        assert trainer.candidate_backend.experiment_config()["runtime"] == "LocalRuntime"
     finally:
         recipe.runtime.shutdown()
         recipe.training_runtime.shutdown()

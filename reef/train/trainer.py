@@ -23,7 +23,7 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.storage.records import RecordStore
-from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.processors.base import DataProcessor, InstructionFailure
 from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
@@ -60,15 +60,15 @@ class Trainer:
         records: RecordStore,
         *,
         processor_factory: Callable[[ProcessorContext], DataProcessor],
-        training_backend: TrainingBackend | None = None,
+        candidate_backend: CandidateBackend | None = None,
         candidate_evaluator: CandidateEvaluationPlugin | None = None,
         algorithm_state: Mapping[str, Any] | None = None,
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
     ) -> Trainer:
-        if training_backend is None and candidate_evaluator is not None:
-            raise ValueError("candidate evaluation requires a training backend")
+        if candidate_backend is None and candidate_evaluator is not None:
+            raise ValueError("candidate evaluation requires a candidate backend")
         processor = processor_factory(
             ProcessorContext(
                 scenario=scenario,
@@ -80,13 +80,13 @@ class Trainer:
         if processor.training_mode != training_mode:
             processor.close()
             raise ValueError("processor_factory must preserve the requested training_mode")
-        default_state = training_backend.initial_state() if training_backend is not None else {}
+        default_state = candidate_backend.initial_state() if candidate_backend is not None else {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         return cls(
             scenario=scenario,
             records=records,
             processor=processor,
-            training_backend=training_backend,
+            candidate_backend=candidate_backend,
             candidate_evaluator=candidate_evaluator,
             state=initial_state,
         )
@@ -97,20 +97,20 @@ class Trainer:
         scenario: str,
         records: RecordStore,
         processor: DataProcessor,
-        training_backend: TrainingBackend | None,
+        candidate_backend: CandidateBackend | None,
         candidate_evaluator: CandidateEvaluationPlugin | None,
         state: Mapping[str, Any],
     ) -> None:
         self._scenario = scenario
         self._records = records
         self._processor = processor
-        self._training_backend = training_backend
-        if training_backend is None:
+        self._candidate_backend = candidate_backend
+        if candidate_backend is None:
             self._candidate_evaluator = None
         elif candidate_evaluator is not None:
             self._candidate_evaluator = candidate_evaluator
         else:
-            self._candidate_evaluator = BackendAlwaysSelectPlugin(training_backend)
+            self._candidate_evaluator = BackendAlwaysSelectPlugin(candidate_backend)
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
@@ -145,7 +145,7 @@ class Trainer:
             pending = self._pending
             if pending is None or pending.result is not None or pending.batch.request is None:
                 return False
-            metadata = {} if self._training_backend is None else self._training_backend.failed_step_metrics()
+            metadata = {} if self._candidate_backend is None else self._candidate_backend.failed_step_metrics()
             self._processor.mark_request_failed(pending.batch.request.id, error, metadata)
             return True
 
@@ -169,8 +169,8 @@ class Trainer:
         return self._processor.context.report_type
 
     @property
-    def training_backend(self) -> TrainingBackend | None:
-        return self._training_backend
+    def candidate_backend(self) -> CandidateBackend | None:
+        return self._candidate_backend
 
     @property
     def candidate_evaluator(self) -> CandidateEvaluationPlugin | None:
@@ -208,7 +208,7 @@ class Trainer:
         """Build the next batch and hold the processor to its declared schema.
 
         ``DataProcessor.output_schema`` is the processor's published contract
-        for what a training backend will receive; enforcing it at the only
+        for what a candidate backend will receive; enforcing it at the only
         place batches enter the trainer turns a drifting processor into a loud
         error instead of a backend-side shape failure.
         """
@@ -239,17 +239,17 @@ class Trainer:
                     return
 
     def run_once(self, scenario_step: int = 0) -> TrainStepResult | None:
-        """Consume available data and, with a training backend, prepare one step.
+        """Consume available data and, with a candidate backend, prepare one step.
 
-        Returns ``None`` when this trainer has no training backend (it
+        Returns ``None`` when this trainer has no candidate backend (it
         only advances record consumption, because a non-training scenario still
         has to drain and compact its store) or when the processor is not yet
         ready to produce a batch.
         """
-        if self._training_backend is not None and self._training_backend.dispatched:
-            raise RuntimeError("dispatched training backends must reserve a batch before execution")
+        if self._candidate_backend is not None and self._candidate_backend.dispatched:
+            raise RuntimeError("dispatched candidate backends must reserve a batch before execution")
         with self._lock:
-            if self._training_backend is None:
+            if self._candidate_backend is None:
                 self._consume_data()
                 return None
             if self._pending is not None:
@@ -267,7 +267,7 @@ class Trainer:
         # batch reserved, but release the trainer lock so status remains live.
         execution = self._execute_backend_step(batch, scenario_step)
         if execution.outcome != "commit" or execution.result is None:
-            raise RuntimeError(f"inline training backend returned {execution.outcome!r}")
+            raise RuntimeError(f"inline candidate backend returned {execution.outcome!r}")
         with self._lock:
             if self._pending is None or self._pending.batch_id != batch.batch_id:
                 raise RuntimeError("inline trainer reservation changed while its backend was executing")
@@ -275,7 +275,7 @@ class Trainer:
             return execution.result
 
     def _execute_backend_step(self, batch: TrainingBatch, scenario_step: int) -> StepExecution:
-        backend = self._training_backend
+        backend = self._candidate_backend
         if backend is None:
             raise RuntimeError("cannot execute a training step without a backend")
         request = batch.request
@@ -328,9 +328,9 @@ class Trainer:
 
     def reserve_training_batch(self) -> TrainingBatch | None:
         """Reserve one batch for a dispatched backend."""
-        backend = self._training_backend
+        backend = self._candidate_backend
         if backend is None or not backend.dispatched:
-            raise RuntimeError("trainer has no dispatched training backend")
+            raise RuntimeError("trainer has no dispatched candidate backend")
         with self._lock:
             if self._pending is not None:
                 return self._pending.batch
@@ -472,7 +472,7 @@ class Trainer:
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
-        backend = self._training_backend
+        backend = self._candidate_backend
         if backend is not None:
             backend.commit_applied(state)
 
@@ -486,8 +486,8 @@ class Trainer:
             try:
                 self._processor.close()
             finally:
-                if self._training_backend is not None:
-                    self._training_backend.close()
+                if self._candidate_backend is not None:
+                    self._candidate_backend.close()
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild processor memory from retained rows at or below a watermark.

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from reef.core.reports import ReportBase
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.surface.base import ArtifactValidator, Surface
 
 
@@ -16,7 +16,7 @@ class ScenarioBinding:
 
     surface: Surface
     runtime: InferenceRuntime | None
-    inference_backend: InferenceBackend | None
+    inference_handler: InferenceHandler | None
     artifact_validator: ArtifactValidator
     #: The report contract selected by the recipe while building its trainer;
     #: when set, every report on this scenario is parsed through it at

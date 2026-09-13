@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.runtime.base import InferenceRuntime
-from reef.runtime.inference import InferenceBackend, InferenceStream, UpstreamStatusError
+from reef.runtime.inference import InferenceHandler, InferenceStream, UpstreamStatusError
 from reef.runtime.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string, register_runtime_kind
 
 
@@ -60,7 +60,7 @@ def provider_request_headers(api_key: str) -> RequestHeadersFactory:
     return headers_for
 
 
-class HttpInferenceBackend(InferenceBackend):
+class HttpInferenceHandler(InferenceHandler):
     """POST native inference requests to an HTTP provider.
 
     The request headers are produced by a callable, so callers can inject
@@ -178,18 +178,18 @@ class HttpInferenceBackend(InferenceBackend):
         )
 
 
-def build_http_inference_backend(
+def build_http_inference_handler(
     upstream_url: str,
     *,
     model_path: str,
     timeout_s: float,
     **config: Any,
-) -> InferenceBackend:
-    """Default factory; ``model_path`` is reserved for tokenizer-aware backends."""
+) -> InferenceHandler:
+    """Default factory; ``model_path`` is reserved for tokenizer-aware handlers."""
 
     if config:
-        raise ValueError(f"default HTTP inference backend does not accept config keys: {sorted(config)}")
-    return HttpInferenceBackend(upstream_url, timeout_s=timeout_s)
+        raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
+    return HttpInferenceHandler(upstream_url, timeout_s=timeout_s)
 
 
 #: Provider API dialects the proxy can describe to the training side.
@@ -197,11 +197,11 @@ PROVIDER_APIS = ("openai", "responses", "anthropic")
 
 
 class InferenceProxyRuntime(InferenceRuntime):
-    """Inference runtime that wraps an HTTP inference backend.
+    """Inference runtime that wraps an HTTP inference handler.
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
-    Holds an HttpInferenceBackend with provider-native auth
-    and exposes it via inference_backend. Does not implement training
+    Holds an HttpInferenceHandler with provider-native auth
+    and exposes it via inference_handler. Does not implement training
     lifecycle methods.
     """
 
@@ -226,7 +226,7 @@ class InferenceProxyRuntime(InferenceRuntime):
         request_headers: RequestHeadersFactory = default_artifact_request_headers
         if api_key:
             request_headers = provider_request_headers(api_key)
-        self._inference_backend = HttpInferenceBackend(
+        self._inference_handler = HttpInferenceHandler(
             self.base_url,
             request_headers=request_headers,
             timeout_s=self.inference_timeout_s,
@@ -279,8 +279,8 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._api
 
     @property
-    def inference_backend(self) -> InferenceBackend:
-        return self._inference_backend
+    def inference_handler(self) -> InferenceHandler:
+        return self._inference_handler
 
 
 @dataclass(frozen=True)
@@ -365,12 +365,12 @@ def _env_value(values: Mapping[str, str], name: str) -> str | None:
 
 __all__ = [
     "PROVIDER_APIS",
-    "HttpInferenceBackend",
+    "HttpInferenceHandler",
     "InferenceProxyConfig",
     "InferenceProxyRuntime",
     "InferenceProxyRuntimeFactory",
     "RequestHeadersFactory",
-    "build_http_inference_backend",
+    "build_http_inference_handler",
     "content_identity_headers",
     "default_artifact_request_headers",
     "provider_request_headers",

@@ -26,12 +26,12 @@ from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.runtime.weights.candidates import StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import PolicyBatch, PolicySample
 
 
-class _StateOnlySaoBackend(TrainingBackend):
+class _StateOnlySaoBackend(CandidateBackend):
     @property
     def dispatched(self) -> bool:
         return True
@@ -357,7 +357,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         self._served_version = "slime-v3"
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
     def serving_runtime_load_id(self):
@@ -613,7 +613,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             first_store,
             processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
-            training_backend=_StateOnlySaoBackend(),
+            candidate_backend=_StateOnlySaoBackend(),
         )
         batch = first.reserve_training_batch()
         assert batch is not None
@@ -628,7 +628,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             second_store,
             processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
-            training_backend=_StateOnlySaoBackend(),
+            candidate_backend=_StateOnlySaoBackend(),
             algorithm_state={"steps": 1},
         )
         assert second.state == {"steps": 1}

@@ -7,22 +7,37 @@ import pytest
 from reef.runtime.base import TrainingJobResult
 from reef.runtime.training_job import execution
 from reef.runtime.training_job import marker as markers
-from reef.runtime.training_job.execution import TrainingCheckpoint, TrainingExecution, TrainingMetrics, training_job_id
+from reef.runtime.training_job.execution import (
+    PreparedTrainingJob,
+    TrainingCheckpoint,
+    TrainingExecution,
+    TrainingJobBackend,
+    TrainingMetrics,
+    training_job_id,
+)
 from reef.runtime.training_job.marker import TrainingJobState
 
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
 
-class MemoryTrainingBackend:
+class MemoryTrainingBackend(TrainingJobBackend, PreparedTrainingJob):
     def __init__(self, root):
         self.path = root / ".reef-latest-job.json"
-        self.checkpoint = TrainingCheckpoint(0, root / "checkpoint")
+        self._checkpoint = TrainingCheckpoint(0, root / "checkpoint")
         self.events = []
         self.fail = None
         self.early = None
         self.reserved = False
         self.state = TrainingJobState()
         self.prior = None
+
+    @property
+    def checkpoint(self):
+        return self._checkpoint
+
+    @checkpoint.setter
+    def checkpoint(self, value):
+        self._checkpoint = value
 
     def event(self, name):
         marker = markers.read_marker(self.path)
@@ -232,9 +247,9 @@ def test_missing_checkpoint_never_becomes_a_candidate(backend, monkeypatch):
 
 
 def test_training_and_publication_share_progress_and_keep_serving_unchanged_until_commit(backend):
-    from reef.runtime.training_job.publication import TrainingPublication
+    from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
 
-    class Publisher:
+    class Publisher(WeightPublisher):
         def __init__(self):
             self.version = "engine:0"
             self.paused = False
@@ -254,6 +269,9 @@ def test_training_and_publication_share_progress_and_keep_serving_unchanged_unti
 
         def recover(self, marker):
             raise AssertionError("fresh publication must not recover engines")
+
+        def republish(self, runtime_load_id, marker):
+            raise AssertionError("fresh publication must not republish weights")
 
         def restore_incumbent(self):
             raise AssertionError("candidate was not rejected")

@@ -2,10 +2,10 @@
 
 import pytest
 
-from reef.runtime.control.memory import InferenceMemory
+from reef.runtime.control.memory import InferenceMemory, InferenceMemoryOperations
 
 
-class _Memory:
+class _Memory(InferenceMemoryOperations):
     def __init__(self):
         self.resident = {"weights", "kv"}
         self.failure = None

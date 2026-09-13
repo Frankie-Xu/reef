@@ -78,8 +78,8 @@ def _settings(**overrides) -> ServiceConfig:
         "inference_url": "http://ray-head:30000",
         "model_path": "/models/demo",
         "inference_timeout_s": 30.0,
-        "inference_backend_factory": None,
-        "inference_backend_config": {},
+        "inference_handler_factory": None,
+        "inference_handler_config": {},
         "inference_retry_initial_s": 0.05,
         "inference_retry_max_s": 1.0,
         "inference_retry_timeout_s": 30.0,
@@ -105,8 +105,8 @@ def test_service_config_exposes_shared_batch_controls() -> None:
     assert not hasattr(args, "groups_per_step")
     assert args.recipe_settings["batch_size"] == 4
     assert "groups_per_step" not in args.recipe_settings
-    assert args.inference_backend_factory is None
-    assert args.inference_backend_config == {}
+    assert args.inference_handler_factory is None
+    assert args.inference_handler_config == {}
     assert (args.inference_retry_initial_s, args.inference_retry_max_s, args.inference_retry_timeout_s) == (
         0.05,
         1.0,
@@ -115,18 +115,18 @@ def test_service_config_exposes_shared_batch_controls() -> None:
 
 
 @pytest.mark.unit
-def test_service_config_preserves_inference_backend_config() -> None:
+def test_service_config_preserves_inference_handler_config() -> None:
     args = deploy.service_config_from_mapping(
         {
             "reef": {
                 "recipe": OPENCLAWRL_RECIPE,
-                "inference_backend_factory": "example.factory",
-                "inference_backend_config": {"tool_call_parser": "qwen25"},
+                "inference_handler_factory": "example.factory",
+                "inference_handler_config": {"tool_call_parser": "qwen25"},
             }
         }
     )
 
-    assert args.inference_backend_config == {"tool_call_parser": "qwen25"}
+    assert args.inference_handler_config == {"tool_call_parser": "qwen25"}
 
 
 @pytest.mark.unit
@@ -445,7 +445,7 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
 
 
 @pytest.mark.unit
-def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_loads_configured_inference_handler(monkeypatch, tmp_path) -> None:
     connected = {}
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
@@ -457,20 +457,20 @@ def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_pa
         connected.update(kwargs)
         return stub_runtimes()
 
-    dotted_path = "reef.inference.sglang.chat.SGLangChatTrainingInferenceBackend"
+    dotted_path = "reef.inference.sglang.chat.SGLangInferenceHandler"
     deploy.build_dispatcher(
         _settings(
-            inference_backend_factory=dotted_path,
-            inference_backend_config={"tool_call_parser": "qwen25"},
+            inference_handler_factory=dotted_path,
+            inference_handler_config={"tool_call_parser": "qwen25"},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
         connector=connector,
     )
 
-    factory = connected["inference_backend_factory"]
-    assert factory.__name__ == "SGLangChatTrainingInferenceBackend"
-    assert connected["inference_backend_config"] == {"tool_call_parser": "qwen25"}
+    factory = connected["inference_handler_factory"]
+    assert factory.__name__ == "SGLangInferenceHandler"
+    assert connected["inference_handler_config"] == {"tool_call_parser": "qwen25"}
 
 
 @pytest.mark.unit

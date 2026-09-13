@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
-from reef.runtime.adapters.http import HttpInferenceBackend
+from reef.runtime.adapters.http import HttpInferenceHandler
 from reef.runtime.inference import InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -217,7 +217,7 @@ def _build_sglang_tool_parser(tools: list[dict[str, Any]], parser_name: str) -> 
     return FunctionCallParser([Tool.model_validate(tool) for tool in tools], parser_name)
 
 
-class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
+class SGLangInferenceHandler(HttpInferenceHandler):
     """Serve OpenAI or Anthropic chat with engine-native policy tensors."""
 
     def __init__(
@@ -1260,7 +1260,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
             return None
         if not self._tool_call_parser:
             raise ValueError(
-                "tool calls require inference_backend_config.tool_call_parser to match the SGLang server configuration"
+                "tool calls require inference_handler_config.tool_call_parser to match the SGLang server configuration"
             )
         return self._tool_parser_factory(tools, self._tool_call_parser)
 
@@ -1304,7 +1304,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
     # Set when the chat template pre-opens ``<think>``: the sample then
     # carries only the closing tag, so a sample with no ``</think>`` is
     # reasoning that ran out of tokens, not an answer. Sniffed from the
-    # rendered template at first use; ``force_reasoning`` in the backend
+    # rendered template at first use; ``force_reasoning`` in the handler
     # config pins it either way.
     _force_reasoning: bool | None = None
 
@@ -1314,7 +1314,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         Qwen3-*-Thinking templates end the generation prompt with an open
         ``<think>``, so the sample carries only the closing tag and a sample
         without one is truncated reasoning. Sniffed once from the rendered
-        prompt; an explicit ``force_reasoning`` in the backend config wins.
+        prompt; an explicit ``force_reasoning`` in the handler config wins.
         """
         if self._force_reasoning is not None:
             return self._force_reasoning
@@ -1482,4 +1482,4 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         return "stop"
 
 
-__all__ = ["SGLangChatTrainingInferenceBackend"]
+__all__ = ["SGLangInferenceHandler"]

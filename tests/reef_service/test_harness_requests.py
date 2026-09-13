@@ -84,7 +84,7 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
             assert f"training request {request['id']} accepted" in capsys.readouterr().out
             if pending is not None:
                 assert pending.read_bytes() == before
-            assert not (Path(scenario.trainer.training_backend.proposals.directory) / "requests").exists()
+            assert not (Path(scenario.trainer.candidate_backend.proposals.directory) / "requests").exists()
             response = await client.post("/reef/scenarios/ask-scenario/update", json={"training_mode": "auto"})
             assert response.status == 200
             assert scenario.trainer.training_mode == "auto"
@@ -459,7 +459,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
             "agents",
             records,
             processor_factory=lambda ctx: RecordDrivenTraceProcessor(ctx.with_config({"batch_size": 1})),
-            training_backend=_RequiresBackend(written),
+            candidate_backend=_RequiresBackend(written),
             training_mode="manual",
         )
         try:

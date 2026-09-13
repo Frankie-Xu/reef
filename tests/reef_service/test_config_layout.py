@@ -54,6 +54,35 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
     assert native_arguments(settings.training_backend_options) == ["--lr=2e-6", "--optimizer=adam"]
 
 
+def test_request_handler_configuration_is_independent_of_native_backend_selection():
+    config = translate_layout(
+        {
+            "schema-version": 2,
+            "inference": {
+                "backend": "sglang",
+                "handler-factory": "example.handlers.InitialHandler",
+                "handler-config": {"tool_call_parser": "qwen25"},
+                "options": {"mem-fraction-static": 0.8},
+            },
+        }
+    )
+    overrides = _parse_overrides(
+        [
+            "--inference.handler-factory",
+            "example.handlers.SelectedHandler",
+            "--inference.handler-config",
+            '{"capture_topk": 5}',
+        ]
+    )
+    normalized = normalize_service_config(_apply_overrides(config, overrides))
+    settings = service_config_from_mapping(yaml.safe_load(yaml.safe_dump(normalized)))
+
+    assert settings.inference_backend == "sglang"
+    assert settings.inference_options == {"mem-fraction-static": 0.8}
+    assert settings.inference_handler_factory == "example.handlers.SelectedHandler"
+    assert settings.inference_handler_config == {"capture_topk": 5}
+
+
 @pytest.mark.parametrize(
     "value, message",
     [
@@ -63,6 +92,8 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
         ({"schema-version": 2, "services": []}, "does not accept service/services"),
         ({"schema-version": 2, "infernce": {}}, "unknown config sections"),
         ({"schema-version": 2, "inference": {"model-pth": {}}}, "unknown config fields"),
+        ({"schema-version": 2, "inference": {"backend-factory": "example.Factory"}}, "unknown config fields"),
+        ({"schema-version": 2, "inference": {"backend-config": {}}}, "unknown config fields"),
         ({"schema-version": 2, "reef": "oops"}, "must be an object"),
         ({"schema-version": 2, "inference": {"model-path": "a", "model_path": "b"}}, "duplicate"),
     ],

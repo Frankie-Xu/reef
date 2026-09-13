@@ -8,10 +8,10 @@ from typing import Any
 
 import ray
 
-from reef.runtime.control.health import EngineHealthTarget
+from reef.runtime.control.health import EngineHealthChecks, EngineHealthTarget
 
 
-class SGLangEngineHealthChecks:
+class SGLangEngineHealthChecks(EngineHealthChecks):
     """Snapshot node-0 probe targets with every node of the same logical engine."""
 
     def __init__(self, group: Any) -> None:
@@ -27,7 +27,7 @@ class SGLangEngineHealthChecks:
         ]
 
 
-class _SGLangEngineHealthTarget:
+class _SGLangEngineHealthTarget(EngineHealthTarget):
     def __init__(self, group: Any, offset: int, engines: tuple[Any, ...]) -> None:
         self._group = group
         self._offset = offset

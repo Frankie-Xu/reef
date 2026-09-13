@@ -1,4 +1,4 @@
-"""Backend contract for producing and selecting training candidates."""
+"""Candidate lifecycle shared by weight training and harness evolution."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ class StepExecution:
             raise ValueError(f"a {self.outcome} execution cannot carry storage status")
 
 
-class TrainingBackend(CandidateEvaluator, ABC):
+class CandidateBackend(CandidateEvaluator, ABC):
     """Prepare and evaluate updates while Reef owns candidate selection.
 
     The backend owns method-specific candidate construction and settlement,
@@ -183,4 +183,4 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["PreparedStep", "StepExecution", "TrainingBackend"]
+__all__ = ["CandidateBackend", "PreparedStep", "StepExecution"]

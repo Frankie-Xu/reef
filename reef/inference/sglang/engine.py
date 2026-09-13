@@ -18,7 +18,7 @@ from reef.inference.sglang.lora_schema import (
     require_lora_tensor_request_schema,
 )
 from reef.inference.sglang.process import launch_engine, local_gpu_id, node_address_and_port, wait_ready
-from reef.runtime.control.memory import InferenceMemory
+from reef.runtime.control.memory import InferenceMemory, InferenceMemoryOperations
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +430,7 @@ class ReefSGLangEngine:
         return self.config.request_timeout
 
 
-class _SGLangMemoryOperations:
+class _SGLangMemoryOperations(InferenceMemoryOperations):
     """Keep native tag names and HTTP acknowledgement at the SGLang boundary."""
 
     def __init__(self, engine: ReefSGLangEngine) -> None:

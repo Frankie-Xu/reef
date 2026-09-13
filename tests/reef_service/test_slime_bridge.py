@@ -60,7 +60,7 @@ def test_bridge_shutdown_releases_only_training_even_on_failure(monkeypatch):
 
     actor._publication = TrainingPublication(None, None)
     actor._owns_training = True
-    actor._training = object.__new__(bridge.SlimeTrainingOperations)
+    actor._training = object.__new__(bridge.SlimeTrainingBackend)
     actor._closed = False
     actor._operation_lock = Lock()
     actor._training._critic_group = group("critic")

@@ -1,8 +1,9 @@
-"""Inference backend: execute one request against one artifact handle.
+"""Inference request handlers and provider response streams.
 
 ``InferenceRuntime`` (``base.py``) owns the lifecycle and *composes* an
-``InferenceBackend``; this module defines the backend contract and the streaming wrapper the service
-forwards. HTTP execution and provider configuration live in ``adapters.http``.
+``InferenceHandler``; this module defines the request contract and the streaming
+wrapper the service forwards. HTTP execution and provider configuration live
+in ``adapters.http``.
 """
 
 from __future__ import annotations
@@ -32,11 +33,11 @@ class UpstreamStatusError(ReefError):
         self.status = status
 
 
-class InferenceBackend(ABC):
+class InferenceHandler(ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
     def reconnect(self, upstream_url: str) -> None:
-        """Retarget a managed endpoint, preserving backend-specific configuration."""
+        """Retarget a managed endpoint, preserving handler-specific configuration."""
         raise RuntimeError(f"{type(self).__name__} does not support inference endpoint replacement")
 
     @abstractmethod
@@ -56,9 +57,9 @@ class InferenceBackend(ABC):
     ) -> InferenceStream:
         """Return a stream for one native request payload.
 
-        Custom backends that only implement buffered inference keep working: the
+        Custom handlers that only implement buffered inference keep working: the
         default implementation exposes their JSON response as one chunk. HTTP
-        backends override this method to preserve provider-native streaming.
+        handlers override this method to preserve provider-native streaming.
         """
         value = await self.inference(artifact, path, payload)
 
@@ -72,8 +73,8 @@ class InferenceBackend(ABC):
         )
 
 
-class InferenceBackendFactory(Protocol):
-    """Construct a deployment-selected backend for one serving endpoint."""
+class InferenceHandlerFactory(Protocol):
+    """Construct a deployment-selected request handler for one serving endpoint."""
 
     def __call__(
         self,
@@ -82,7 +83,7 @@ class InferenceBackendFactory(Protocol):
         model_path: str,
         timeout_s: float,
         **config: Any,
-    ) -> InferenceBackend: ...
+    ) -> InferenceHandler: ...
 
 
 class InferenceStream:
@@ -104,7 +105,7 @@ class InferenceStream:
         self._close = close
         self._closed = False
         self.record_response = None if record_response is None else dict(record_response)
-        # Some custom backends can only construct their exact, provider-neutral
+        # Some custom handlers can only construct their exact, provider-neutral
         # recording response after the upstream stream reaches its terminal
         # event. RequestService keeps durable admission open for those streams
         # and validates the completed capture before accepting the record.
@@ -119,8 +120,8 @@ class InferenceStream:
 
 
 __all__ = [
-    "InferenceBackend",
-    "InferenceBackendFactory",
+    "InferenceHandler",
+    "InferenceHandlerFactory",
     "InferenceStream",
     "UpstreamStatusError",
 ]

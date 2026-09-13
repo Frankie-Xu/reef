@@ -5,14 +5,14 @@ Reef separates backend operations from scheduling and worker execution.
 ``TrainingRuntime`` prepares training and produces checkpoint candidates;
 ``InferenceRuntime`` controls request admission and served weights.
 ``reef.runtime.scheduler.RuntimeScheduler`` orders their operations and reconciles
-publication with the durable scenario commit. ``RuntimeTrainingBackend`` adapts
+publication with the durable scenario commit. ``RuntimeCandidateBackend`` adapts
 Recipe prepare/evaluate/select steps to this scheduler.
 
 An ``Executor`` owns worker launch, ordered control RPC, health and shutdown.
 Configuration selects a concrete executor while callers use the same methods.
 The managed model driver creates Reef's ``TrainingCoordinator`` through this
 interface; backend implementations supply its training and inference operations.
-These contracts live in ``reef.runtime.training_job.operations``, separately
+These contracts live in ``reef.runtime.backends``, separately
 from the coordinator implementation. Generic service connections and their
 configuration live in ``reef.runtime.adapters``; shared inference control lives
 in ``reef.runtime.control``, and weight versions, residency and transfer locks
@@ -25,13 +25,13 @@ live in ``reef.runtime.weights``.
        M --> TS[SlimeTrainingService]
        M --> IS[SGLangInferenceService]
        M --> C[Reef TrainingCoordinator]
-       R[Recipe / RuntimeTrainingBackend] --> S[Reef RuntimeScheduler]
+       R[Recipe / RuntimeCandidateBackend] --> S[Reef RuntimeScheduler]
        S --> T[TrainingRuntime]
        S --> I[InferenceRuntime]
        T --> C
        I --> C
-       C --> TO[TrainingOperations: train, checkpoint, send]
-       C --> IO[InferenceOperations: pause, load, resume]
+       C --> TO[TrainingBackend: train, checkpoint, send]
+       C --> IO[InferenceBackend: pause, load, resume]
        TO --> W[Slime workers / worker executor]
        IO --> E[SGLang engines / inference executor]
        W -. Native weight transport .-> E
@@ -448,8 +448,8 @@ The startup sequence is:
 #. Finish coordinator checkpoint/publication recovery and check inference
    health again before publishing readiness.
 
-``TrainingOperations`` implements training preparation, checkpoint storage,
-optimizer execution and native sending. ``InferenceOperations`` implements
+``TrainingBackend`` implements training preparation, checkpoint storage,
+optimizer execution and native sending. ``InferenceBackend`` implements
 receiver pause/resume, memory operations, recovery and version observation.
 The generic coordinator owns their ordering, publication journal, scenario
 adapter residency and commit barrier. The Slime adapter has no inference
@@ -669,10 +669,10 @@ replayed: durable reconciliation retains that decision. A request verifies
 serving health before admission, while the existing publication gate retains
 control of reopening admissions. Pending commits stay blocked across recovery.
 
-When the endpoint is discovered from coordinator health, the existing inference
-backend follows a replacement URL through ``InferenceBackend.reconnect``. HTTP
-and native SGLang chat backends preserve headers, capture configuration and
-provider payloads. Explicit gateway URLs remain fixed. Custom backends must
+When the endpoint is discovered from coordinator health, the existing request
+handler follows a replacement URL through ``InferenceHandler.reconnect``. HTTP
+and native SGLang chat handlers preserve headers, capture configuration and
+provider payloads. Explicit gateway URLs remain fixed. Custom handlers must
 implement endpoint replacement to support discovery across address changes.
 Already submitted requests and streams can fail during a crash and are not
 replayed by this mechanism.

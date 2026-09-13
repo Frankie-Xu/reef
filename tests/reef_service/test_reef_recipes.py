@@ -19,7 +19,7 @@ from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_
 from reef.runtime import InferenceProxyRuntime
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.processors.base import DataProcessor
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 
 from ._threshold_processor import ThresholdProcessor
 
@@ -111,10 +111,10 @@ def test_concrete_recipe_builds_its_processor_step_preparer_and_report_type(
     assert recipe.report_type is report_type
     assert isinstance(trainer.processor, processor_type)
     if step_preparer is None:
-        assert trainer.training_backend is None
+        assert trainer.candidate_backend is None
     else:
-        assert isinstance(trainer.training_backend, SlimeTrainingBackend)
-        assert trainer.training_backend.step_preparer == step_preparer
+        assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
+        assert trainer.candidate_backend.step_preparer == step_preparer
     assert trainer.report_type is report_type
 
 
@@ -157,7 +157,7 @@ def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process(
                 "from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings\n"
                 "trainer = TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), groups_per_step=1, rollouts_per_group=2)"
                 ".build('math', SQLiteRecordStore())\n"
-                "assert trainer.training_backend.step_preparer == 'tttd'\n"
+                "assert trainer.candidate_backend.step_preparer == 'tttd'\n"
             ),
         ],
         check=True,

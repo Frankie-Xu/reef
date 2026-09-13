@@ -2,42 +2,51 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from abc import ABC, abstractmethod
 
 
-class InferenceEngines(Protocol):
+class InferenceEngines(ABC):
     """Concrete operations on the inference engines attached to a trainer."""
 
     @property
+    @abstractmethod
     def owned(self) -> bool:
         """Whether engine replacement is controlled by this deployment."""
 
+    @abstractmethod
     def pause(self) -> object: ...
 
+    @abstractmethod
     def resume(self) -> object: ...
 
+    @abstractmethod
     def recover(self) -> None:
         """Replace dead engines; preserve healthy engines and initial attachment."""
 
+    @abstractmethod
     def terminate(self) -> int:
         """Retire owned engines after an uncertain update; never kill borrowed engines."""
 
 
-class InferenceMonitor(Protocol):
+class InferenceMonitor(ABC):
     """Background engine monitoring must respect publication/recovery barriers."""
 
+    @abstractmethod
     def pause(self) -> None:
         """Drain active checks and retirement before engine mutation; raise on timeout."""
 
+    @abstractmethod
     def resume(self) -> None: ...
 
 
-class WeightUpdateConnection(Protocol):
+class WeightUpdateConnection(ABC):
     """Connection fencing for direct worker-to-engine weight transport."""
 
+    @abstractmethod
     def is_usable(self) -> bool:
         """True only when the update lock is known to be idle and unpoisoned."""
 
+    @abstractmethod
     def replace(self) -> None:
         """Replace the uncertain update lock; existing worker connections become stale."""
 

@@ -9,13 +9,14 @@ from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.inference.sglang.service import RayHealthProbe
 from reef.runtime.adapters.ray import NamedRayTrainGroupHandle
+from reef.runtime.deployment import DeploymentHealth, ModelPlanSource
 from reef.service.training_driver import ModelDeployment, supervise_deployment
 
 from .test_model_deployment import plan_for
 from .test_ray_runtime import FakeTrainGroupHandle
 
 
-class FailedHealth:
+class FailedHealth(DeploymentHealth):
     def poll(self):
         raise RuntimeError("component died")
 
@@ -33,7 +34,7 @@ class Stopping:
         return len(self.waits) >= self.stop_at
 
 
-class Source:
+class Source(ModelPlanSource):
     def __init__(self, ready, *, error=None):
         self.ready = ready
         self.events = []
@@ -115,12 +116,12 @@ def test_managed_endpoint_refresh_preserves_backend_and_never_reopens_commit_gat
     async def run():
         handle = ReconnectingHandle()
         runtime = ExecutorRuntimeFixture(train_group_handle=handle)
-        backend = runtime.inference_backend
+        backend = runtime.inference_handler
         handle.endpoint = "http://replacement/"
         admission = await runtime.acquire_inference()
         admission.release()
         assert runtime.base_url == "http://replacement"
-        assert runtime.inference_backend is backend
+        assert runtime.inference_handler is backend
         assert backend._upstream_url == "http://replacement"
         runtime.inference.pause_admission()
         request = asyncio.create_task(runtime.acquire_inference())

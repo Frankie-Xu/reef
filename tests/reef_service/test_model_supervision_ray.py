@@ -16,12 +16,21 @@ import pytest
 
 from reef.inference.sglang.service import RayHealthProbe
 from reef.runtime.adapters.ray import connect_ray_runtime
-from reef.runtime.deployment import ComponentHealth, InferenceConnection, ModelDeploymentPlan
+from reef.runtime.backends import InferenceBackend, TrainingBackend
+from reef.runtime.deployment import (
+    ComponentHealth,
+    DeploymentResources,
+    InferenceConnection,
+    InferenceService,
+    ModelDeploymentPlan,
+    ModelPlanSource,
+    TrainingService,
+)
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.training_job.marker import read_marker, write_marker
-from reef.runtime.training_job.publication import TrainingPublication
+from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
 from reef.service.training_driver import run_deployment
-from reef.train.runtime_backend import RuntimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.slime_backend.resources import SlimeDeploymentResources
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
@@ -75,7 +84,7 @@ class ModelController:
         write_state(self.state_path, self.state)
 
 
-class Publisher:
+class Publisher(WeightPublisher):
     def __init__(self, controller):
         self.controller = controller
 
@@ -91,6 +100,18 @@ class Publisher:
 
     def abort(self):
         self.pause()
+
+    def recover(self, marker):
+        raise AssertionError("startup restores its checkpoint explicitly")
+
+    def publish(self, marker, *, force_full):
+        raise AssertionError("startup must not publish a new candidate")
+
+    def republish(self, runtime_load_id, marker):
+        raise AssertionError("startup restores its checkpoint explicitly")
+
+    def restore_incumbent(self):
+        raise AssertionError("startup must not reject a candidate")
 
 
 class Coordinator:
@@ -123,7 +144,7 @@ class Coordinator:
         self.publication.acknowledge(job_id)
 
 
-class Inference:
+class Inference(InferenceService):
     connection_protocol = "cpu-test-v1"
 
     def __init__(self, directory, namespace):
@@ -159,8 +180,11 @@ class Inference:
             # Deliberately skip child cleanup: the process lease must complete it.
             ray.kill(self.actor, no_restart=True)
 
+    def backend(self, connection):
+        raise AssertionError("unexpected backend in this fixture")
 
-class Training:
+
+class Training(TrainingService):
     weight_transfer_protocol = "cpu-test-v1"
 
     def __init__(self, directory, namespace):
@@ -194,8 +218,11 @@ class Training:
         if self.actor is not None:
             ray.kill(self.actor, no_restart=True)
 
+    def backend(self):
+        raise AssertionError("unexpected backend in this fixture")
 
-class Source:
+
+class Source(ModelPlanSource):
     def __init__(self, address, directory, namespace):
         self.address, self.directory, self.namespace = address, directory, namespace
 
@@ -297,8 +324,8 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
 
     ray, namespace = deployment.ray, deployment.namespace
     training, runtime = connect_ray_runtime(actor_name="training", namespace=namespace, inference_timeout_s=30)
-    RuntimeTrainingBackend(training, "sft", inference_runtime=runtime)
-    backend = runtime.inference_backend
+    RuntimeCandidateBackend(training, "sft", inference_runtime=runtime)
+    backend = runtime.inference_handler
 
     async def infer():
         lease = await runtime.acquire_inference()
@@ -330,7 +357,7 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
             result = await request
             assert result == {"version": "checkpoint:1", "paused": False, "payload": {"messages": [], "custom": 7}}
             assert runtime.base_url == after["url"]
-            assert runtime.inference_backend is backend
+            assert runtime.inference_handler is backend
             assert ray.is_initialized()
         runtime.shutdown()
         training.shutdown()
@@ -355,7 +382,7 @@ def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployme
     training, runtime = connect_ray_runtime(
         actor_name="training", namespace=deployment.namespace, inference_timeout_s=30
     )
-    coordinator = RuntimeTrainingBackend(training, "sft", inference_runtime=runtime)
+    coordinator = RuntimeCandidateBackend(training, "sft", inference_runtime=runtime)
     path = deployment.directory / "job.json"
     marker = read_marker(path)
     (deployment.directory / "checkpoint.json").write_text(json.dumps({"version": "checkpoint:2"}))
@@ -424,15 +451,15 @@ class ScheduledSender:
         return os.getpid()
 
 
-class ScheduledTrainingOperations:
+class ScheduledTrainingBackend(TrainingBackend):
     def __init__(self, sender, receiver, directory):
-        from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
+        from reef.runtime.backends import TrainingContext, TrainingCoordinationConfig
 
         self.sender = sender
         self.receiver = receiver
         self.directory = Path(directory)
-        self.config = TrainingCoordinationConfig(save_hf_template=str(self.directory / "hf/{rollout_id}"))
-        self.context = TrainingContext()
+        self._config = TrainingCoordinationConfig(save_hf_template=str(self.directory / "hf/{rollout_id}"))
+        self._context = TrainingContext()
 
     def start(self):
         pass
@@ -457,8 +484,31 @@ class ScheduledTrainingOperations:
         (self.directory / "operations-closed").write_text(str(os.getpid()))
         ray.kill(self.sender, no_restart=True)
 
+    @property
+    def config(self):
+        return self._config
 
-class ScheduledInferenceOperations:
+    @property
+    def context(self):
+        return self._context
+
+    def prepare_training_step(self, batch, step_preparer, algorithm_state):
+        raise AssertionError("unexpected prepare_training_step in this fixture")
+
+    def prepare(self, payload, *, job_id, rollout_id, prior_marker):
+        raise AssertionError("unexpected prepare in this fixture")
+
+    def initialize_version(self, runtime_load_id):
+        raise AssertionError("unexpected initialize_version in this fixture")
+
+    def activate_scenario(self, scenario):
+        raise AssertionError("unexpected activate_scenario in this fixture")
+
+    def send_adapter(self, scenario, name):
+        raise AssertionError("unexpected send_adapter in this fixture")
+
+
+class ScheduledInferenceBackend(InferenceBackend):
     def __init__(self, receiver):
         self.receiver = receiver
 
@@ -483,8 +533,26 @@ class ScheduledInferenceOperations:
     def abort(self):
         self.pause()
 
+    def initialize_version(self, runtime_load_id):
+        raise AssertionError("unexpected initialize_version in this fixture")
 
-class ScheduledInferenceService:
+    def recover(self):
+        raise AssertionError("unexpected recover in this fixture")
+
+    def offload(self, tags):
+        raise AssertionError("unexpected offload in this fixture")
+
+    def onload_weights(self):
+        raise AssertionError("unexpected onload_weights in this fixture")
+
+    def onload_kv(self):
+        raise AssertionError("unexpected onload_kv in this fixture")
+
+    def unload_adapter(self, name):
+        raise AssertionError("unexpected unload_adapter in this fixture")
+
+
+class ScheduledInferenceService(InferenceService):
     connection_protocol = "scheduled-cpu-v1"
 
     def __init__(self):
@@ -499,8 +567,8 @@ class ScheduledInferenceService:
     def prepare_weight_transfer(self, connection):
         connection.control.rpc(0, "pause", timeout=30)
 
-    def operations(self, connection):
-        return ScheduledInferenceOperations(connection.control.workers[0])
+    def backend(self, connection):
+        return ScheduledInferenceBackend(connection.control.workers[0])
 
     def check_health(self):
         import ray
@@ -512,8 +580,11 @@ class ScheduledInferenceService:
 
         ray.kill(self.receiver, no_restart=True)
 
+    def poll(self):
+        raise AssertionError("unexpected poll in this fixture")
 
-class ScheduledTrainingService:
+
+class ScheduledTrainingService(TrainingService):
     weight_transfer_protocol = "scheduled-cpu-v1"
 
     def __init__(self, directory):
@@ -530,8 +601,8 @@ class ScheduledTrainingService:
     def attach_weight_transport(self, session):
         self.receiver = session.receiver.workers[0]
 
-    def operations(self):
-        return ScheduledTrainingOperations(self.sender, self.receiver, self.directory)
+    def backend(self):
+        return ScheduledTrainingBackend(self.sender, self.receiver, self.directory)
 
     def check_health(self):
         import ray
@@ -543,8 +614,11 @@ class ScheduledTrainingService:
 
         ray.kill(self.sender, no_restart=True)
 
+    def poll(self):
+        raise AssertionError("unexpected poll in this fixture")
 
-class BorrowedRayResources:
+
+class BorrowedRayResources(DeploymentResources):
     def start(self):
         pass
 

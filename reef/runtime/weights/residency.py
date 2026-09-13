@@ -19,11 +19,12 @@ pushes trained tensors) and is never interpreted here.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
@@ -60,8 +61,7 @@ class AdapterNotActive(AdapterResidencyError):
     """A request resolved to an adapter revision the engine does not hold."""
 
 
-@runtime_checkable
-class AdapterEngine(Protocol):
+class AdapterEngine(ABC):
     """Engine-side adapter operations the residency manager drives.
 
     ``load_adapter`` must return only once the engine can serve requests that
@@ -70,8 +70,10 @@ class AdapterEngine(Protocol):
     ``unload_adapter`` raising means the slot may still be occupied.
     """
 
+    @abstractmethod
     def load_adapter(self, name: str, payload: Any) -> None: ...
 
+    @abstractmethod
     def unload_adapter(self, name: str) -> None: ...
 
 

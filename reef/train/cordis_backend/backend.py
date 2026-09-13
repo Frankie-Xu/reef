@@ -52,7 +52,7 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
@@ -467,11 +467,11 @@ class ScoreComparisonMixin(CandidateEvaluationPlugin):
 
 
 class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
-    """Cordis's default evaluation: measure through the backend, decide by score comparison."""
+    """Cordis's default evaluation: measure through the candidate backend, decide by score comparison."""
 
-    def __init__(self, backend: Any, *, min_win_margin: int = 0) -> None:
+    def __init__(self, candidate_backend: Any, *, min_win_margin: int = 0) -> None:
         super().__init__(min_win_margin=min_win_margin)
-        self._backend = backend
+        self._candidate_backend = candidate_backend
 
 
 def _score_vectors(
@@ -494,7 +494,7 @@ def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[
     return wins, losses
 
 
-class CordisBackend(TrainingBackend):
+class CordisBackend(CandidateBackend):
     """Settle one proposal per step through episode pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies

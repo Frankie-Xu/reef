@@ -8,6 +8,7 @@ import pytest
 from executor_helpers import AttachedTestGroup
 
 from reef.runtime.executor import Executor, ExecutorFuture, resolve
+from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.train.slime_backend.reef_adapters import train_groups
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 
@@ -491,7 +492,7 @@ def test_attachment_rejects_missing_or_inconsistent_training_layout(make_group, 
 def test_failure_observer_follows_recreated_training_workers(make_group):
     failures = []
 
-    class Observer:
+    class Observer(ExecutorFailureListener):
         def on_executor_failure(self, failure):
             failures.append(failure)
 

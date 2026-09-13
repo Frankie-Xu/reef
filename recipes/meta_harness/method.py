@@ -378,9 +378,9 @@ class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
 class MetaHarnessPlugin(MetaHarnessSelectorMixin, BackendEvaluateMixin):
     """Meta-Harness's candidate evaluation: measure through the backend, decide on the population frontier."""
 
-    def __init__(self, backend: Any, store: PopulationStore) -> None:
+    def __init__(self, candidate_backend: Any, store: PopulationStore) -> None:
         super().__init__(store)
-        self._backend = backend
+        self._candidate_backend = candidate_backend
 
 
 def _adapter_kinds(descriptor: AdapterDescriptor) -> tuple[str, ...]:

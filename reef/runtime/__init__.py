@@ -8,7 +8,7 @@ artifact commit acknowledgement across the two interfaces.
 ``deployment.ModelDeployment`` owns component startup, weight-transport
 attachment, health and reverse-order cleanup. ``training_job.coordinator``
 implements publication, recovery, LoRA residency and colocated resource
-handoffs through separate ``TrainingOperations`` and ``InferenceOperations``
+handoffs through separate ``TrainingBackend`` and ``InferenceBackend``
 contracts. Backends supply native model operations and weight transport.
 
 ``model_config.ModelConfig`` is the in-memory model selection shared by a
@@ -16,8 +16,8 @@ scenario and its recipe. It has no file paths or persistence behavior.
 
 ``control`` groups inference pause/recovery, health probes and memory handoffs.
 ``weights`` groups version identity, candidates, LoRA residency and transfer locks.
-``training_job`` owns job execution and publication; its ``operations`` module
-defines the backend-facing contracts independently of the coordinator.
+``backends`` defines the paired native backend contracts independently of the
+coordinator. ``training_job`` owns job execution and publication.
 ``adapters`` implements generic HTTP and executor connections and their config.
 ``executor`` launches and controls workers without choosing a model framework.
 
@@ -47,6 +47,7 @@ from reef.runtime.adapters.ray import (
     connect_ray_runtime,
 )
 from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle
+from reef.runtime.backends import InferenceBackend, TrainingBackend
 from reef.runtime.base import (
     InferenceRuntime,
     PreparedTrainingStep,
@@ -73,6 +74,7 @@ __all__ = [
     "ExecutorInferenceRuntime",
     "ExecutorTrainGroupHandle",
     "ExecutorTrainingRuntime",
+    "InferenceBackend",
     "InferenceProxyRuntime",
     "InferenceRuntime",
     "ModelCandidate",
@@ -83,6 +85,7 @@ __all__ = [
     "RuntimeConfigError",
     "RuntimeFactory",
     "RuntimeRegistry",
+    "TrainingBackend",
     "TrainingGroupHandle",
     "TrainingJobResult",
     "TrainingRuntime",

@@ -2,11 +2,11 @@
 
 import pytest
 
-from reef.runtime.control.inference import InferenceControl
+from reef.runtime.control.inference import InferenceControl, InferenceEngines, InferenceMonitor, WeightUpdateConnection
 from reef.runtime.weights.lock import WeightUpdateLock
 
 
-class MemoryEngines:
+class MemoryEngines(InferenceEngines):
     owned = True
 
     def __init__(self, events):
@@ -39,7 +39,7 @@ class MemoryEngines:
         return 2
 
 
-class MemoryConnection:
+class MemoryConnection(WeightUpdateConnection):
     def __init__(self, events):
         self.events = events
         self.usable = True
@@ -58,7 +58,7 @@ class MemoryConnection:
         self.usable = True
 
 
-class MemoryMonitor:
+class MemoryMonitor(InferenceMonitor):
     def __init__(self, events):
         self.events = events
         self.paused = False
@@ -226,7 +226,7 @@ def test_weight_update_lock_rejects_invalid_phase_records(phase, error):
 @pytest.mark.parametrize("committed", [False, True])
 def test_republication_restores_engine_and_monitor_pause_through_commit_gate(control, tmp_path, committed):
     from reef.runtime.training_job.marker import read_marker, write_marker
-    from reef.runtime.training_job.publication import TrainingPublication
+    from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
 
     controller, engines, connection, monitor, events = control
     path = tmp_path / "job.json"
@@ -246,12 +246,15 @@ def test_republication_restores_engine_and_monitor_pause_through_commit_gate(con
     # new owner starts unpaused and needs to observe the barrier again.
     connection.usable = False
 
-    class Publisher:
+    class Publisher(WeightPublisher):
         def pause(self):
             controller.pause()
 
         def recover(self, marker):
             controller.recover()
+
+        def publish(self, marker, *, force_full):
+            raise AssertionError("republication must not publish a new candidate")
 
         def republish(self, runtime_load_id, marker):
             assert engines.paused and monitor.paused and controller.paused
@@ -266,6 +269,9 @@ def test_republication_restores_engine_and_monitor_pause_through_commit_gate(con
 
         def abort(self):
             controller.terminate()
+
+        def restore_incumbent(self):
+            raise AssertionError("republication must not reject a candidate")
 
     publication = TrainingPublication(path, Publisher())
     assert publication.republish("engine:1") == "engine:1"

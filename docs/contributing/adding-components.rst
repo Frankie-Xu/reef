@@ -74,7 +74,11 @@ Implementation
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
   implementation, framework adapters, bridge code, and plugins inside that
   subtree.
-- Change ``reef/train/backend.py`` or ``reef/runtime/base.py`` only when the
+- Implement ``TrainingBackend`` from ``reef/runtime/backends.py`` for native
+  training operations. ``TrainingRuntime`` in ``reef/runtime/base.py`` is Reef's
+  scheduling interface. The recipe candidate lifecycle is ``CandidateBackend``
+  in ``reef/train/backend.py``.
+- Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
 - Implement ``TrainingDeployment`` in the integration to describe process preparation
@@ -122,7 +126,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
   it must not import a concrete inference or training implementation.
   Implement the applicable contracts in
-  ``reef/runtime/training_job/operations.py`` when integrating with managed
+  ``reef/runtime/backends.py`` when integrating with managed
   training and publication. Import those contracts instead of the coordinator.
   Shared engine control belongs in ``runtime/control/`` and shared version,
   residency and transfer-lock mechanisms in ``runtime/weights/``.

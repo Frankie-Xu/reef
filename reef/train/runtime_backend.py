@@ -1,4 +1,4 @@
-"""Adapt recipe training steps to Reef's runtime scheduler."""
+"""Adapt recipe candidates to Reef's training and inference runtime scheduler."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ from reef.runtime.base import (
 )
 from reef.runtime.scheduler import RuntimeScheduler
 from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
-class RuntimeTrainingBackend(TrainingBackend):
+class RuntimeCandidateBackend(CandidateBackend):
     """Map candidate evaluation and selection onto the runtime scheduler."""
 
     def __init__(
@@ -201,4 +201,4 @@ class RuntimeTrainingBackend(TrainingBackend):
         return cls._model_candidate(candidate)
 
 
-__all__ = ["RuntimeTrainingBackend"]
+__all__ = ["RuntimeCandidateBackend"]

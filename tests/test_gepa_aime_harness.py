@@ -127,7 +127,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records)
         try:
-            backend = trainer.training_backend
+            backend = trainer.candidate_backend
             assert backend._worker_selection.settings.backend == "uni"
             assert [row.score for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
@@ -178,7 +178,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
         trainer = recipe.build("isolated", records)
         try:
-            backend = trainer.training_backend
+            backend = trainer.candidate_backend
             assert backend._worker_selection.settings.backend == ("mp" if executor == "auto" else executor)
             rows = backend._evaluate_pairings([({}, "problem"), ({}, "problem")])
             assert [row.score for row in rows] == [1.0, 1.0]
@@ -324,9 +324,9 @@ def test_episode_files_merge_the_transient_binding_into_the_served_tree(load, mo
 
 
 def _stub_backend():
-    from reef.runtime.inference import InferenceBackend
+    from reef.runtime.inference import InferenceHandler
 
-    class StubModel(InferenceBackend):
+    class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):
             del artifact, path, payload
             return {"choices": [{"message": {"role": "assistant", "content": "### 42"}}]}
@@ -359,7 +359,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_backend=_stub_backend(),
+        inference_handler=_stub_backend(),
     )
     service.start()
     try:

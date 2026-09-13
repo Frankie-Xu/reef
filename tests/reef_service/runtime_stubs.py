@@ -8,7 +8,7 @@ from typing import Any
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.runtime.base import PreparedTrainingStep, TrainingRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 from reef.train.types import TrainingBatch
 
@@ -35,7 +35,7 @@ class StubTrainingRuntime(TrainingRuntime):
         return self._max_staleness
 
     @property
-    def inference_backend(self) -> InferenceBackend | None:  # type: ignore[override]
+    def inference_handler(self) -> InferenceHandler | None:  # type: ignore[override]
         """No backend: smoke tests never route inference through the stub."""
         return None
 
@@ -90,8 +90,8 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         self.fixture = training
 
     @property
-    def inference_backend(self):
-        return self.fixture.inference_backend
+    def inference_handler(self):
+        return self.fixture.inference_handler
 
     def serving_runtime_load_id(self):
         return self.fixture.serving_runtime_load_id()
@@ -111,9 +111,9 @@ class StubInferenceRuntime(InferenceProxyRuntime):
 
 def runtime_bindings(value):
     """Bind independent components from a test fixture or deployment result."""
-    from reef.train.runtime_backend import RuntimeTrainingBackend
+    from reef.train.runtime_backend import RuntimeCandidateBackend
 
-    if isinstance(value, RuntimeTrainingBackend):
+    if isinstance(value, RuntimeCandidateBackend):
         return {"runtime": value.inference_runtime, "training_runtime": value.training_runtime}
     if isinstance(value, tuple):
         return {"runtime": value[1], "training_runtime": value[0]}
@@ -122,11 +122,11 @@ def runtime_bindings(value):
     return {"runtime": value}
 
 
-def training_backend(value, step_preparer, **kwargs):
-    from reef.train.runtime_backend import RuntimeTrainingBackend
+def candidate_backend(value, step_preparer, **kwargs):
+    from reef.train.runtime_backend import RuntimeCandidateBackend
 
     bindings = runtime_bindings(value)
-    return RuntimeTrainingBackend(
+    return RuntimeCandidateBackend(
         bindings["training_runtime"],
         step_preparer,
         inference_runtime=bindings["runtime"],
@@ -134,10 +134,10 @@ def training_backend(value, step_preparer, **kwargs):
     )
 
 
-from reef.train.runtime_backend import RuntimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 
 
-class ExecutorRuntimeFixture(RuntimeTrainingBackend):
+class ExecutorRuntimeFixture(RuntimeCandidateBackend):
     """Test fixture assembling two runtimes and the actual training backend."""
 
     def __init__(self, components=None, **kwargs):
@@ -179,8 +179,8 @@ class ExecutorRuntimeFixture(RuntimeTrainingBackend):
         return self.training_runtime.concurrent_training_scenarios
 
     @property
-    def inference_backend(self):
-        return self.inference_runtime.inference_backend
+    def inference_handler(self):
+        return self.inference_runtime.inference_handler
 
     @property
     def inference_admission_status(self):

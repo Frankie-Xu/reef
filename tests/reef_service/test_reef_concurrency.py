@@ -41,7 +41,7 @@ class CountingRuntime(StubTrainingRuntime):
         self.train_calls = 0
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
     def prepare_training_step(

@@ -385,9 +385,9 @@ class GEPASelectorMixin(CandidateEvaluationPlugin):
 class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin):
     """GEPA's candidate evaluation: measure through the backend, decide by valset mean."""
 
-    def __init__(self, backend: Any, archive: Archive) -> None:
+    def __init__(self, candidate_backend: Any, archive: Archive) -> None:
         super().__init__(archive)
-        self._backend = backend
+        self._candidate_backend = candidate_backend
 
 
 def _scores(values: Any) -> list[float]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from reef_service.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, runtime_bindings, training_backend
+from reef_service.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, candidate_backend, runtime_bindings
 
 import reef.train.processors.reported as reported_module
 from recipes.sao import SAOProcessor
@@ -15,7 +15,7 @@ from reef.recipe import WeightTrainingRecipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.evaluation import (
     BackendEvaluateMixin,
     CandidateEvaluationPlugin,
@@ -41,11 +41,11 @@ def policy_plugin(backend: object, policy: type) -> CandidateEvaluationPlugin:
         pass
 
     plugin = _Plugin()
-    plugin._backend = backend
+    plugin._candidate_backend = backend
     return plugin
 
 
-class _PreparingBackend(TrainingBackend):
+class _PreparingBackend(CandidateBackend):
     """Dispatched test backend that commits only the preparer's state transition."""
 
     def __init__(self, preparer: str = "sft") -> None:
@@ -83,11 +83,11 @@ def test_training_backend_names_both_sides_of_the_durable_commit_handshake() -> 
 
     runtime = StubTrainingRuntime()
     runtime.inference = Receiver(runtime, base_url="http://inference")
-    backend = training_backend(runtime, "sft")
+    backend = candidate_backend(runtime, "sft")
 
-    assert not hasattr(TrainingBackend, "reconcile")
-    assert hasattr(TrainingBackend, "recover_pending_step")
-    assert hasattr(TrainingBackend, "acknowledge_commit")
+    assert not hasattr(CandidateBackend, "reconcile")
+    assert hasattr(CandidateBackend, "recover_pending_step")
+    assert hasattr(CandidateBackend, "acknowledge_commit")
     backend.recover_pending_step(4)
     assert calls == []
     backend.acknowledge_commit(5, "job-4")
@@ -434,7 +434,7 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(ProcessorContext(context.scenario, {"batch_size": 1})),
-        training_backend=_PreparingBackend(),
+        candidate_backend=_PreparingBackend(),
     )
 
     batch = trainer.reserve_training_batch()
@@ -458,7 +458,7 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -> None:
     calls = []
 
-    class Backend(TrainingBackend):
+    class Backend(CandidateBackend):
         def initial_state(self):
             return {"steps": 0}
 
@@ -491,7 +491,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-        training_backend=backend,
+        candidate_backend=backend,
         candidate_evaluator=policy_plugin(backend, Policy),
     )
 
@@ -506,7 +506,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
 def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback() -> None:
     calls = []
 
-    class Backend(TrainingBackend):
+    class Backend(CandidateBackend):
         def initial_state(self):
             return {}
 
@@ -542,7 +542,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-        training_backend=Backend(),
+        candidate_backend=Backend(),
         candidate_evaluator=candidate_evaluator,
     )
 
@@ -561,7 +561,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
 def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
     calls = []
 
-    class Backend(TrainingBackend):
+    class Backend(CandidateBackend):
         def initial_state(self):
             return {}
 
@@ -591,7 +591,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-        training_backend=backend,
+        candidate_backend=backend,
         candidate_evaluator=policy_plugin(backend, BrokenPolicy),
     )
 
@@ -604,7 +604,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
 def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> None:
     calls = []
 
-    class Backend(TrainingBackend):
+    class Backend(CandidateBackend):
         def initial_state(self):
             return {}
 
@@ -639,7 +639,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-        training_backend=Backend(),
+        candidate_backend=Backend(),
         candidate_evaluator=ReplacingEvaluator(),
     )
 
@@ -662,7 +662,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(ProcessorContext(context.scenario, {"batch_size": 1})),
-        training_backend=_PreparingBackend(),
+        candidate_backend=_PreparingBackend(),
     )
 
     first_batch = first.reserve_training_batch()
@@ -684,7 +684,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
         "math",
         records,
         processor_factory=lambda context: ThresholdProcessor(ProcessorContext(context.scenario, {"batch_size": 1})),
-        training_backend=_PreparingBackend(),
+        candidate_backend=_PreparingBackend(),
         algorithm_state=recovered_state,
     )
 
@@ -715,7 +715,7 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
             "math",
             first_store,
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-            training_backend=_PreparingBackend(),
+            candidate_backend=_PreparingBackend(),
         )
         batch = first.reserve_training_batch()
         assert batch is not None
@@ -739,7 +739,7 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
             "math",
             second_store,
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-            training_backend=_PreparingBackend(),
+            candidate_backend=_PreparingBackend(),
             algorithm_state={"steps": 1},
         )
         assert second.state == {"steps": 1}
@@ -770,7 +770,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             self.calls = []
 
         @property
-        def inference_backend(self):
+        def inference_handler(self):
             return None
 
         def prepare_training_step(
@@ -817,7 +817,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
                 scenario,
                 records,
                 processor_factory=lambda context: GroupedPolicyProcessor(context.with_config({"batch_size": 1})),
-                training_backend=training_backend(self.training_runtime, self.step_preparer),
+                candidate_backend=candidate_backend(self.training_runtime, self.step_preparer),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
             )

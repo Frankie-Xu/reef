@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from threading import RLock
-from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,8 @@ class ExecutorFailedError(RuntimeError):
         return type(self), (self.failure,)
 
 
-class ExecutorFailureListener(Protocol):
+class ExecutorFailureListener(ABC):
+    @abstractmethod
     def on_executor_failure(self, failure: ExecutorFailure) -> None:
         """Observe terminal failure once; do not block the monitor thread."""
 

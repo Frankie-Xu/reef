@@ -84,7 +84,7 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     service, resources, _events = service_and_resources(monkeypatch, critic=True)
     service.start(resources)
     with pytest.raises(RuntimeError, match="attached weight transport"):
-        service.operations()
+        service.backend()
     control = RayExecutor.from_workers([object()])
     service.attach_weight_transport(WeightTransferSession(service.weight_transfer_protocol, control, "session-1"))
     captured = []
@@ -95,8 +95,8 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
         captured.append((args, preparation, loss_family_config))
         return object()
 
-    monkeypatch.setattr(training, "create_training_operations", create)
-    assert service.operations() is service.operations()
+    monkeypatch.setattr(training, "create_training_backend", create)
+    assert service.backend() is service.backend()
     assert captured == [(service.args, service.preparation, "recipe-settings")]
     service.close()
 

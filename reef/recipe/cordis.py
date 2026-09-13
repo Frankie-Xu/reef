@@ -54,13 +54,13 @@ from reef.train.trainer import Trainer
 
 
 class CandidatePluginFactory(Protocol):
-    """Builds a candidate-evaluation plugin over a training backend.
+    """Builds a candidate-evaluation plugin over a candidate backend.
 
     Cordis chooses one at config time and applies it to the backend when it
     builds the trainer; gepa and meta-harness override it with their own.
     """
 
-    def __call__(self, backend: Any) -> CandidateEvaluationPlugin: ...
+    def __call__(self, candidate_backend: Any, /) -> CandidateEvaluationPlugin: ...
 
 
 _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
@@ -561,11 +561,11 @@ class CordisRecipe(Recipe):
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:
             kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
-        training_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
+        candidate_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
             records,
-            training_backend,
+            candidate_backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -604,7 +604,7 @@ class CordisRecipe(Recipe):
         self,
         scenario: str,
         records: RecordStore,
-        training_backend: CordisBackend,
+        candidate_backend: CordisBackend,
         *,
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
@@ -628,8 +628,8 @@ class CordisRecipe(Recipe):
                     }
                 )
             ),
-            training_backend=training_backend,
-            candidate_evaluator=self.candidate_plugin(training_backend),
+            candidate_backend=candidate_backend,
+            candidate_evaluator=self.candidate_plugin(candidate_backend),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,

@@ -215,7 +215,7 @@ class Dispatcher:
     def _wake_training(self, current: Scenario) -> None:
         if current.training_runtime is not None:
             self._training.ready.set()
-        elif current.trainer.training_backend is not None:
+        elif current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
@@ -246,7 +246,7 @@ class Dispatcher:
             self._publication.forget(scenario)
             self._record_training_error(scenario, None)
             if dropped is not None:
-                backend = dropped.trainer.training_backend
+                backend = dropped.trainer.candidate_backend
                 if backend is not None:
                     backend.retire_scenario(scenario)
                 dropped.close()
@@ -374,7 +374,7 @@ class Dispatcher:
                 return existing
             if current.trainer.training_mode == "auto":
                 raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-            if current.trainer.training_backend is None:
+            if current.trainer.candidate_backend is None:
                 raise ValueError("explicit training requests require a training backend")
             request = TrainingRequest.from_dict(item.payload)
             if item.references:
@@ -395,7 +395,7 @@ class Dispatcher:
         if current.training_runtime is not None:
             self._training.ready.set()
             return stored
-        if current.trainer.training_backend is not None:
+        if current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
             return stored
         result = current.prepare_training_step()
@@ -440,7 +440,7 @@ class Dispatcher:
             logger.exception("experiment tracker failed to record committed training step")
 
     def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
-        backend = current.trainer.training_backend
+        backend = current.trainer.candidate_backend
         try:
             backend_config = None if backend is None else dict(backend.experiment_config())
         except Exception:
@@ -584,7 +584,7 @@ class Dispatcher:
         current = self._registry.get_optional(scenario)
         if current is None:
             raise RuntimeContractError(f"local backend scenario {scenario!r} is not loaded")
-        if current.trainer.training_backend is None:
+        if current.trainer.candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
         try:
@@ -707,7 +707,7 @@ class Dispatcher:
         # A crash may leave remote serving updated but paused after Reef's
         # commit, or checkpointed before the weight update. Recover that
         # pending step before deciding whether another batch is available.
-        backend = current.trainer.training_backend
+        backend = current.trainer.candidate_backend
         if backend is None or not backend.dispatched:
             raise RuntimeContractError(f"training scenario {current.name!r} has no dispatched training backend")
         backend.recover_pending_step(

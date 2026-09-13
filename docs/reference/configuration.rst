@@ -285,8 +285,8 @@ only this effective config and ignore an ambient ``SLIME_ARGS_FILE``. Explicit
 unversioned ``services`` stacks retain ``SLIME_ARGS_FILE`` and driver command flags, which
 take precedence over the options object; avoid specifying a flag in both places.
 
-``inference.backend-config`` has a different owner: it configures Reef's
-selected ``inference.backend-factory`` adapter, for example its tool parser.
+``inference.handler-config`` has a different owner: it configures Reef's
+selected ``inference.handler-factory`` adapter, for example its tool parser.
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
@@ -359,7 +359,7 @@ objects are preserved, and an explicit container replaces the YAML value:
 .. code:: bash
 
    reef serve -c stack.yaml --reef.tokens '[]' \
-     --inference.backend-config '{"tool_call_parser": "qwen25"}'
+     --inference.handler-config '{"tool_call_parser": "qwen25"}'
 
 The parsed public values are also supplied to service commands and the HTTP
 child's config. Existing empty/null service values retain their defaulting

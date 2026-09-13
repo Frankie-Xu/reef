@@ -11,7 +11,7 @@ from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.health import SGLangEngineHealthChecks
 from reef.inference.sglang.launch import SGLangCluster, engine_environment
 from reef.runtime.control.health import EngineHealthMonitor, HealthMonitorConfig
-from reef.runtime.control.inference import InferenceControl
+from reef.runtime.control.inference import InferenceControl, InferenceEngines, InferenceMonitor, WeightUpdateConnection
 from reef.runtime.weights.lock import WeightUpdateLock
 
 
@@ -228,7 +228,7 @@ class SGLangWorker:
         self._routers = []
 
 
-class _SGLangInferenceEngines:
+class _SGLangInferenceEngines(InferenceEngines):
     """Ray fan-out and SGLang engine replacement behind Reef's control contract."""
 
     def __init__(self, worker: SGLangWorker) -> None:
@@ -281,7 +281,7 @@ class _SGLangInferenceEngines:
         return len(indexed_engines)
 
 
-class _SGLangWeightUpdateConnection:
+class _SGLangWeightUpdateConnection(WeightUpdateConnection):
     """Keep Ray lock handles and their replacement private to the integration."""
 
     def __init__(self, worker: SGLangWorker) -> None:
@@ -298,7 +298,7 @@ class _SGLangWeightUpdateConnection:
             ray.kill(old_lock, no_restart=True)
 
 
-class _SGLangInferenceMonitor:
+class _SGLangInferenceMonitor(InferenceMonitor):
     def __init__(self, worker: SGLangWorker) -> None:
         self._worker = worker
 

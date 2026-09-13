@@ -30,7 +30,7 @@ Requests
 
 **409 on an inference request.** Either the ``x-reef-release-id`` header names a version that conflicts with the scenario's binding, or, on a training deployment, the engine answered with a runtime load ID other than the one frozen for the request. The second case is a backend contract violation and should not happen with the bundled stack; ``/reef/status`` shows the current runtime load ID.
 
-**A streaming request is refused on a training scenario.** Streaming through a training deployment requires the token-capturing backend (``inference_backend_factory`` set to the SGLang chat backend, as in the bundled configs); the plain HTTP proxy backend cannot stream there.
+**A streaming request is refused on a training scenario.** Streaming through a training deployment requires the token-capturing backend (``inference_handler_factory`` set to the SGLang chat backend, as in the bundled configs); the plain HTTP proxy backend cannot stream there.
 
 **The provider's error came back as 400.** Provider 4xx responses are relayed with the provider's message; read it, the request body is usually the problem. A provider 5xx becomes 502.
 

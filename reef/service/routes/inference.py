@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (
@@ -76,14 +76,14 @@ async def _relay_inference_stream(
     payload: dict[str, Any],
     *,
     request_service: RequestService,
-    inference_backend: InferenceBackend | None,
+    inference_handler: InferenceHandler | None,
 ) -> web.StreamResponse:
     """Stream one upstream inference to the client and record what it sent."""
     upstream, pending = await request_service.start_stream(
         request.headers,
         payload,
         request.path,
-        inference_backend,
+        inference_handler,
     )
     response_headers = {
         name: value
@@ -162,7 +162,7 @@ def register_inference_routes(
     app: web.Application,
     *,
     request_service: RequestService,
-    inference_backend: InferenceBackend | None,
+    inference_handler: InferenceHandler | None,
 ) -> None:
     async def inference(request: web.Request) -> web.StreamResponse:
         payload = await read_object(request)
@@ -171,13 +171,13 @@ def register_inference_routes(
                 request,
                 payload,
                 request_service=request_service,
-                inference_backend=inference_backend,
+                inference_handler=inference_handler,
             )
         response_payload, item = await request_service.infer_with_data(
             request.headers,
             payload,
             request.path,
-            inference_backend,
+            inference_handler,
         )
         headers = {"x-reef-agent-record-id": item.agent_record_id}
         headers.update(await _release_header(request_service, request.headers))

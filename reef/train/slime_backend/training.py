@@ -5,18 +5,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from reef.runtime.deployment import DeploymentResources, WeightTransferSession
+from reef.runtime.backends import TrainingBackend
+from reef.runtime.deployment import DeploymentResources, TrainingService, WeightTransferSession
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.training_job.operations import TrainingOperations
 from reef.train.slime_backend.reef_adapters.bridge import (
     BridgePreparation,
     create_train_groups,
-    create_training_operations,
+    create_training_backend,
 )
 from reef.train.slime_backend.resources import SlimeDeploymentResources
 
 
-class SlimeTrainingService:
+class SlimeTrainingService(TrainingService):
     """Own actor/critic workers and a sender attachment, never the coordinator."""
 
     weight_transfer_protocol = "slime-sglang-control-v2"
@@ -33,7 +33,7 @@ class SlimeTrainingService:
         self.loss_family_config = loss_family_config
         self._actor_group: Any = None
         self._critic_group: Any = None
-        self._operations: TrainingOperations | None = None
+        self._backend: TrainingBackend | None = None
         self._session_id: str | None = None
         self._started = False
         self._closed = False
@@ -47,7 +47,7 @@ class SlimeTrainingService:
         self._actor_group, self._critic_group = create_train_groups(
             self.args, resources.placement_groups, rollout_manager=None
         )
-        # Ongoing observation belongs to operations in the coordinator
+        # Ongoing observation belongs to the backend in the coordinator
         # process. Watching these driver-side handles would report intentional
         # release_train retirement as a deployment failure after serialization.
 
@@ -72,18 +72,18 @@ class SlimeTrainingService:
                 group.set_rollout_manager(receiver.workers[0])
         self._session_id = session.session_id
 
-    def operations(self) -> TrainingOperations:
+    def backend(self) -> TrainingBackend:
         if self._actor_group is None or self._session_id is None or self._closed:
-            raise RuntimeError("training operations require initialized workers and attached weight transport")
-        if self._operations is None:
-            self._operations = create_training_operations(
+            raise RuntimeError("training backend requires initialized workers and attached weight transport")
+        if self._backend is None:
+            self._backend = create_training_backend(
                 self.args,
                 self._actor_group,
                 self._critic_group,
                 preparation=self.preparation,
                 loss_family_config=self.loss_family_config,
             )
-        return self._operations
+        return self._backend
 
     def check_health(self) -> None:
         self.poll()

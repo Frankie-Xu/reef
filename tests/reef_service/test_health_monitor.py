@@ -5,10 +5,15 @@ from time import monotonic
 
 import pytest
 
-from reef.runtime.control.health import EngineHealthMonitor, HealthMonitorConfig
+from reef.runtime.control.health import (
+    EngineHealthChecks,
+    EngineHealthMonitor,
+    EngineHealthTarget,
+    HealthMonitorConfig,
+)
 
 
-class Target:
+class Target(EngineHealthTarget):
     def __init__(self):
         self.entered = Event()
         self.release = Event()
@@ -32,7 +37,7 @@ class Target:
         self.retired = True
 
 
-class Checks:
+class Checks(EngineHealthChecks):
     def __init__(self, target):
         self.target = target
 

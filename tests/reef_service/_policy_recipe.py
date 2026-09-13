@@ -15,7 +15,7 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
 from ._threshold_processor import ThresholdProcessor
@@ -65,7 +65,7 @@ class TestPolicyRecipe(WeightTrainingRecipe):
                     }
                 )
             ),
-            training_backend=SlimeTrainingBackend(
+            candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime, "sft", inference_runtime=self.runtime, scenario=scenario
             ),
             algorithm_state=algorithm_state,

@@ -237,7 +237,7 @@ class ScenarioFactory:
                     surface=surface,
                     runtime=runtime,
                     training_runtime=recipe.training_runtime,
-                    inference_backend=recipe.inference_backend,
+                    inference_handler=recipe.inference_handler,
                     artifact_validator=recipe.build_artifact_validator(),
                     report_type=trainer.report_type,
                 ),

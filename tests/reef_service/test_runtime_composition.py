@@ -8,11 +8,14 @@ from pathlib import Path
 import pytest
 
 import reef
-from reef.runtime import InferenceRuntime, PreparedTrainingStep, TrainingRuntime
+import reef.runtime.backends as native_backends
+from reef.runtime import InferenceBackend, InferenceRuntime, PreparedTrainingStep, TrainingBackend, TrainingRuntime
 from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
 from reef.runtime.adapters.executor_training import ExecutorTrainingRuntime, connect_executor_runtimes
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.weights.candidates import ModelCandidate
-from reef.train.runtime_backend import RuntimeTrainingBackend
+from reef.train import CandidateBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 
 from .test_executor_runtime import Coordinator
 
@@ -41,9 +44,14 @@ class CheckpointTrainer(TrainingRuntime):
 
 def test_training_exports_checkpoint_without_inference_or_aggregate_runtime(tmp_path):
     training = CheckpointTrainer(tmp_path / "checkpoint")
+    assert TrainingBackend is native_backends.TrainingBackend
+    assert InferenceBackend is native_backends.InferenceBackend
+    assert not issubclass(TrainingBackend, CandidateBackend)
+    assert not issubclass(InferenceBackend, InferenceHandler)
     assert not issubclass(TrainingRuntime, InferenceRuntime)
+    assert not issubclass(InferenceRuntime, TrainingRuntime)
     assert not hasattr(reef, "ModelRuntime")
-    for attribute in ("base_url", "inference_backend", "acquire_inference", "activate_candidate", "inference"):
+    for attribute in ("base_url", "inference_handler", "acquire_inference", "activate_candidate", "inference"):
         assert not hasattr(training, attribute)
     candidate = training.train_candidate({"value": 7})
     assert Path(candidate.checkpoint_path).read_text() == "7"
@@ -55,7 +63,7 @@ def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(co
     async def run():
         control = Coordinator(colocate=colocate)
         training, inference = connect_executor_runtimes(train_group_handle=control)
-        backend = RuntimeTrainingBackend(training, "sft", inference_runtime=inference)
+        backend = RuntimeCandidateBackend(training, "sft", inference_runtime=inference)
         assert isinstance(training, ExecutorTrainingRuntime)
         assert isinstance(inference, ExecutorInferenceRuntime)
         assert not hasattr(inference, "train_candidate")
@@ -105,7 +113,7 @@ def test_receiver_shutdown_does_not_stop_training_workers():
 def test_recovery_retargets_only_the_inference_component():
     control = Coordinator(inference_url="http://old-engine")
     training, inference = connect_executor_runtimes(train_group_handle=control)
-    backend = RuntimeTrainingBackend(training, "sft", inference_runtime=inference)
+    backend = RuntimeCandidateBackend(training, "sft", inference_runtime=inference)
     control.inference_url = "http://replacement-engine/"
     backend.recover_pending_step(0)
     assert inference.base_url == "http://replacement-engine"
@@ -132,7 +140,7 @@ def test_attached_receiver_waits_for_coordinator_recovery():
     control = Coordinator()
     training, inference = connect_executor_runtimes(train_group_handle=control)
     assert not inference.inference_admission_status["open"]
-    RuntimeTrainingBackend(training, "sft", inference_runtime=inference)
+    RuntimeCandidateBackend(training, "sft", inference_runtime=inference)
     assert inference.inference_admission_status["open"]
     training.shutdown()
     inference.shutdown()

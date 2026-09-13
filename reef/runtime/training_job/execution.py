@@ -6,11 +6,12 @@ import hashlib
 import json
 import sys
 import traceback
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from reef.runtime.base import TrainingJobResult
 from reef.runtime.training_job.marker import (
@@ -80,7 +81,7 @@ class TrainingMetrics:
     durable: Mapping[str, Any] = field(default_factory=dict)
 
 
-class PreparedTrainingJob(Protocol):
+class PreparedTrainingJob(ABC):
     """A prepared job whose reservation stays held through checkpoint recording.
 
     ``train`` may change model/optimizer state and returns all training metrics.
@@ -90,14 +91,17 @@ class PreparedTrainingJob(Protocol):
     """
 
     @property
+    @abstractmethod
     def checkpoint(self) -> TrainingCheckpoint: ...
 
+    @abstractmethod
     def train(self) -> TrainingMetrics: ...
 
+    @abstractmethod
     def save_checkpoint(self) -> None: ...
 
 
-class TrainingJobBackend(Protocol):
+class TrainingJobBackend(ABC):
     """Prepare/admit jobs without changing model or optimizer state.
 
     Validation, scoring, data packing and storage admission finish before the
@@ -106,6 +110,7 @@ class TrainingJobBackend(Protocol):
     exceptions. An early result may only be stale or storage-blocked.
     """
 
+    @abstractmethod
     def prepare(
         self,
         payload: Mapping[str, Any],

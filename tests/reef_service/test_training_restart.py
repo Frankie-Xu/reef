@@ -10,7 +10,7 @@ import pytest
 from reef.runtime.control.inference import InferenceControl
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.training_job.marker import read_marker, write_marker
-from reef.runtime.training_job.publication import TrainingPublication
+from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -113,7 +113,7 @@ class RestartInference:
         }
 
 
-class CheckpointPublisher:
+class CheckpointPublisher(WeightPublisher):
     def __init__(self, control):
         self.control = control
 
@@ -125,6 +125,18 @@ class CheckpointPublisher:
 
     def abort(self):
         self.control.rpc(0, "terminate_updatable_engines", timeout=30)
+
+    def recover(self, marker):
+        raise AssertionError("startup restores its checkpoint explicitly")
+
+    def publish(self, marker, *, force_full):
+        raise AssertionError("startup must not publish a new candidate")
+
+    def republish(self, runtime_load_id, marker):
+        raise AssertionError("startup restores its checkpoint explicitly")
+
+    def restore_incumbent(self):
+        raise AssertionError("startup must not reject a candidate")
 
     def restore(self, marker):
         import ray

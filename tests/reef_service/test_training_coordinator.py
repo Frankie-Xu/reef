@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from reef.runtime.backends import InferenceBackend, TrainingBackend, TrainingContext, TrainingCoordinationConfig
 from reef.runtime.training_job.coordinator import TrainingCoordinator
-from reef.runtime.training_job.execution import TrainingCheckpoint, TrainingMetrics
+from reef.runtime.training_job.execution import PreparedTrainingJob, TrainingCheckpoint, TrainingMetrics
 from reef.runtime.training_job.marker import marker_path, read_marker
-from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
 
 
-class Receiver:
+class Receiver(InferenceBackend):
     def __init__(self, events):
         self.events = events
         self.versions = ["inc:0", "inc:0"]
@@ -57,10 +57,10 @@ class Receiver:
         self.events.append(("inference.unload", name))
 
 
-class Trainer:
+class Trainer(TrainingBackend):
     def __init__(self, tmp_path, receiver, events, *, colocate=False):
-        self.config = TrainingCoordinationConfig(str(tmp_path / "step-{rollout_id}"), colocate=colocate)
-        self.context = TrainingContext(runtime_load_id="inc:0")
+        self._config = TrainingCoordinationConfig(str(tmp_path / "step-{rollout_id}"), colocate=colocate)
+        self._context = TrainingContext(runtime_load_id="inc:0")
         # Fake transport endpoint: production adapters exchange tensor data
         # through native transport, never through coordinator control methods.
         self.receiver = receiver
@@ -111,11 +111,32 @@ class Trainer:
             self.events,
         )
 
+    @property
+    def config(self):
+        return self._config
 
-class Job:
+    @property
+    def context(self):
+        return self._context
+
+    def prepare_training_step(self, batch, step_preparer, algorithm_state):
+        raise AssertionError("unexpected prepare_training_step in this fixture")
+
+    def activate_scenario(self, scenario):
+        raise AssertionError("unexpected activate_scenario in this fixture")
+
+    def send_adapter(self, scenario, name):
+        raise AssertionError("unexpected send_adapter in this fixture")
+
+
+class Job(PreparedTrainingJob):
     def __init__(self, checkpoint, events):
-        self.checkpoint = checkpoint
+        self._checkpoint = checkpoint
         self.events = events
+
+    @property
+    def checkpoint(self):
+        return self._checkpoint
 
     def train(self):
         self.events.append("training.train")
@@ -252,9 +273,9 @@ def test_fresh_full_and_lora_deployments_use_a_reef_owned_incarnation(tmp_path, 
     events = []
     inference = Receiver(events)
     training = Trainer(tmp_path, inference, events)
-    training.context = TrainingContext()
+    training._context = TrainingContext()
     initial = training.context.runtime_load_id
-    training.config = TrainingCoordinationConfig(str(tmp_path / "step-{rollout_id}"), lora=lora)
+    training._config = TrainingCoordinationConfig(str(tmp_path / "step-{rollout_id}"), lora=lora)
     coordinator = TrainingCoordinator(training, inference)
     expected = initial if lora else initial.rsplit(":", 1)[0] + ":1"
     assert coordinator.serving_runtime_load_id() == expected

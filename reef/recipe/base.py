@@ -21,7 +21,7 @@ from reef.recipe.config_fields import config_field, parse_int, recipe_config_fie
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.adapters.http import resolve_proxy_runtime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.model_config import ModelConfig
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
@@ -148,13 +148,13 @@ class Recipe:
         )
 
     @property
-    def inference_backend(self) -> InferenceBackend | None:
+    def inference_handler(self) -> InferenceHandler | None:
         """The inference backend composed by this recipe's runtime, if any.
 
         Use ``runtime`` for the runtime itself.
         """
         runtime = self.runtime
-        return runtime.inference_backend if runtime is not None else None
+        return runtime.inference_handler if runtime is not None else None
 
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.
@@ -383,7 +383,7 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        from reef.train.runtime_backend import RuntimeTrainingBackend
+        from reef.train.runtime_backend import RuntimeCandidateBackend
 
         spec = type(self).training_spec()
         processor_class = spec.processor
@@ -420,7 +420,7 @@ class WeightTrainingRecipe(Recipe):
             scenario,
             records,
             processor_factory=lambda context: processor_class(context.with_config(config)),
-            training_backend=RuntimeTrainingBackend(
+            candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
                 spec.step_preparer,
                 inference_runtime=self.runtime,

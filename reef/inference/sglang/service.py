@@ -7,10 +7,10 @@ from typing import Any, Protocol, runtime_checkable
 
 import ray
 
+from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.launch import engine_environment
-from reef.inference.sglang.operations import SGLangInferenceOperations
-from reef.runtime.deployment import DeploymentResources, InferenceConnection
+from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceService
 from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 
@@ -42,7 +42,7 @@ class RayHealthProbe:
             raise RuntimeError(f"model component failed its health check: {result!r}")
 
 
-class SGLangInferenceService:
+class SGLangInferenceService(InferenceService):
     """Own engines and the control actor; borrow the deployment allocation."""
 
     connection_protocol = INFERENCE_PROTOCOL
@@ -79,11 +79,11 @@ class SGLangInferenceService:
         )
         return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._inference.workers))
 
-    def operations(self, connection: InferenceConnection) -> SGLangInferenceOperations:
+    def backend(self, connection: InferenceConnection) -> SGLangInferenceBackend:
         """Adapt a compatible borrowed connection for Reef's coordinator."""
         if connection.protocol != self.connection_protocol:
             raise ValueError(f"incompatible SGLang inference connection: {connection.protocol!r}")
-        return SGLangInferenceOperations(connection.control)
+        return SGLangInferenceBackend(connection.control)
 
     def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
         """Fence engines and release shared memory before trainer allocation."""

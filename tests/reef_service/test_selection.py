@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
-from reef.train.backend import TrainingBackend
+from reef.train.backend import CandidateBackend
 from reef.train.cordis_backend import ScoreComparisonMixin, ScoreComparisonPlugin
 from reef.train.evaluation import (
     AlwaysSelectMixin,
@@ -45,7 +45,7 @@ def evaluation() -> EvaluationResult:
 
 
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:
-    assert issubclass(TrainingBackend, CandidateEvaluator)
+    assert issubclass(CandidateBackend, CandidateEvaluator)
     # The shipped plugins are whole plugins: they evaluate and decide.
     for plugin in (BackendAlwaysSelectPlugin, ScoreComparisonPlugin):
         assert issubclass(plugin, CandidateEvaluationPlugin)
@@ -185,7 +185,7 @@ def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
     class Plugin(AlwaysSelectMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
         def __init__(self, backend: object) -> None:
             super().__init__()
-            self._backend = backend
+            self._candidate_backend = backend
 
     candidate = UpdateCandidate("job-7")
     plugin = Plugin(Backend())

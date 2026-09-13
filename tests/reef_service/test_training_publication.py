@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 
 from reef.runtime.training_job import marker as markers
-from reef.runtime.training_job.publication import TrainingPublication
+from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
 from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed
 
 
-class MemoryPublisher:
+class MemoryPublisher(WeightPublisher):
     def __init__(self, path):
         self.path = path
         self.events = []

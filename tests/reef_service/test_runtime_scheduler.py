@@ -7,7 +7,7 @@ import pytest
 from reef.core.batches import TrainingBatch
 from reef.core.evaluation import EvaluationResult, SelectionDecision
 from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.scheduler import RuntimeScheduler
 from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
@@ -73,7 +73,7 @@ class WeightReceiver(InferenceRuntime):
         self.ack_failure = None
 
     @property
-    def inference_backend(self) -> InferenceBackend:
+    def inference_handler(self) -> InferenceHandler:
         raise NotImplementedError("scheduler tests never execute provider requests")
 
     def serving_runtime_load_id(self):

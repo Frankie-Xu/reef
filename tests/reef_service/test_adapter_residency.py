@@ -8,6 +8,7 @@ import pytest
 
 from reef.runtime.weights.residency import (
     AdapterCapacityExhausted,
+    AdapterEngine,
     AdapterEvictionFailed,
     AdapterNotActive,
     AdapterResidencyError,
@@ -16,7 +17,7 @@ from reef.runtime.weights.residency import (
 from reef.surface import adapter_name
 
 
-class FakeEngine:
+class FakeEngine(AdapterEngine):
     """Records loads/unloads and can be told to fail either."""
 
     def __init__(self) -> None:

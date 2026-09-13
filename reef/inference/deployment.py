@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 from collections.abc import Mapping
 from importlib.metadata import entry_points
-from typing import Any, cast
+from typing import Any
 
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import InferenceService
@@ -33,7 +33,6 @@ def inference_service_for(name: str | None, config: Mapping[str, Any]) -> Infere
     if not callable(factory):
         raise DeployConfigError("inference backend must name an inference service factory")
     service = factory(config)
-    required = ("start", "prepare_weight_transfer", "operations", "check_health", "poll", "close")
-    if not all(callable(getattr(service, method, None)) for method in required):
+    if not isinstance(service, InferenceService):
         raise DeployConfigError("inference backend factory must return an InferenceService")
-    return cast(InferenceService, service)
+    return service

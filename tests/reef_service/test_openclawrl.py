@@ -15,7 +15,7 @@ from reef.core import AgentRecord, RequestType
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.processors.computed import JudgingWorker
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import PolicyBatch, PolicySample, ProcessorContext
 
@@ -320,8 +320,8 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     assert isinstance(surface.loader, WeightLoader)
     assert isinstance(surface.inference, WeightInferenceHooks)
     trainer = recipe.build("s", SQLiteRecordStore())
-    assert isinstance(trainer.training_backend, SlimeTrainingBackend)
-    assert trainer.training_backend.step_preparer == "openclawrl"
+    assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
+    assert trainer.candidate_backend.step_preparer == "openclawrl"
     trainer.close()
 
 
@@ -619,18 +619,18 @@ def test_truncated_reasoning_never_comes_back_as_the_reply() -> None:
     cap, not an answer. Handing it back as content is what makes a judge score
     chain-of-thought as the agent's reply.
     """
-    from reef.inference.sglang.chat import SGLangChatTrainingInferenceBackend
+    from reef.inference.sglang.chat import SGLangInferenceHandler
 
     truncated = "Okay, the user wants me to solve this. First I should read the file"
-    leaked, _ = SGLangChatTrainingInferenceBackend._assistant_message(truncated, None)
+    leaked, _ = SGLangInferenceHandler._assistant_message(truncated, None)
     assert leaked["content"] == truncated  # unguarded default is unchanged
 
-    caught, _ = SGLangChatTrainingInferenceBackend._assistant_message(truncated, None, force_reasoning=True)
+    caught, _ = SGLangInferenceHandler._assistant_message(truncated, None, force_reasoning=True)
     assert caught["content"] == ""
     assert caught["reasoning_content"] == truncated
 
     closed = "<think>pondering</think>The answer is 36."
-    parsed, _ = SGLangChatTrainingInferenceBackend._assistant_message(closed, None, force_reasoning=True)
+    parsed, _ = SGLangInferenceHandler._assistant_message(closed, None, force_reasoning=True)
     assert parsed["content"] == "The answer is 36."
     assert parsed["reasoning_content"] == "pondering"
 

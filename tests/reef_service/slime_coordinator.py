@@ -1,9 +1,9 @@
 """Explicit test assembly of Reef coordination and the two native adapters."""
 
-from reef.inference.sglang.operations import SGLangInferenceOperations
+from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.training_job.coordinator import TrainingCoordinator
-from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingOperations
+from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingBackend
 
 
 class FixtureCoordinator(TrainingCoordinator):
@@ -17,14 +17,14 @@ class FixtureCoordinator(TrainingCoordinator):
         return self._training._group.next_runtime_load_id()
 
 
-class FixtureInferenceOperations(SGLangInferenceOperations):
+class FixtureInferenceBackend(SGLangInferenceBackend):
     def initialize_version(self, runtime_load_id):
         # These fixtures begin with the selected identity already loaded.
         pass
 
 
 def build_slime_coordinator(actor_group, inference, **kwargs) -> TrainingCoordinator:
-    training = SlimeTrainingOperations(actor_group, **kwargs)
+    training = SlimeTrainingBackend(actor_group, **kwargs)
     training.context.runtime_load_id = training.current_runtime_load_id()
-    receiver = FixtureInferenceOperations(RayExecutor.from_workers([inference]))
+    receiver = FixtureInferenceBackend(RayExecutor.from_workers([inference]))
     return FixtureCoordinator(training, receiver)

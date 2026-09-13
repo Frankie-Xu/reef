@@ -4,8 +4,8 @@ One package, mirroring how a well-scoped training subsystem is usually
 organized: a coordinator (:class:`Trainer`) that turns raw records into
 reserved, typed batches (``processors/``, ``reef.core.batches``), the recipe's candidate
 evaluation that gates each produced update (``evaluation/``), and one
-:class:`TrainingBackend` lifecycle. Harness evolution implements it directly;
-Weight recipes map their batches through ``RuntimeTrainingBackend`` and delegate
+:class:`CandidateBackend` lifecycle. Harness evolution implements it directly;
+Weight recipes map their batches through ``RuntimeCandidateBackend`` and delegate
 coordination of separate training and inference runtimes to ``RuntimeScheduler``.
 The GPU stack is reached by full path so importing ``reef.train`` itself stays light.
 
@@ -26,12 +26,13 @@ for service-facing contracts, with runnable examples owned by their method
 packages.
 """
 
-from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.trainer import Trainer
 from reef.train.types import ProcessorContext, TrainingBatch, TrainStepResult
 
 __all__ = [
+    "CandidateBackend",
     "DataProcessor",
     "PreparedStep",
     "ProcessorContext",
@@ -39,6 +40,5 @@ __all__ = [
     "StepExecution",
     "TrainStepResult",
     "Trainer",
-    "TrainingBackend",
     "TrainingBatch",
 ]

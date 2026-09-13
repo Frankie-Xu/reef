@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from aiohttp import web
 
 from reef.dispatcher import Dispatcher
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
@@ -38,7 +38,7 @@ def create_app(
     *,
     tokens: str | Iterable[str] | None = None,
     console_origins: Iterable[str] = (),
-    inference_backend: InferenceBackend | None = None,
+    inference_handler: InferenceHandler | None = None,
     inference_retry_policy: InferenceRetryPolicy | None = None,
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
@@ -52,7 +52,7 @@ def create_app(
     register_routes(
         app,
         request_service=request_service,
-        inference_backend=inference_backend,
+        inference_handler=inference_handler,
     )
     if record_retention is not None:
 

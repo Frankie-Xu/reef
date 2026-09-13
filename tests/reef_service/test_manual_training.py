@@ -84,7 +84,7 @@ def build(records, backend, processor=RecordDrivenTraceProcessor, mode="manual",
         "s",
         records,
         processor_factory=lambda ctx: processor(ctx.with_config({"batch_size": batch_size})),
-        training_backend=backend,
+        candidate_backend=backend,
         training_mode=mode,
     )
 
@@ -396,7 +396,7 @@ def test_factory_cannot_silently_change_the_processor_mode():
             "s",
             records,
             processor_factory=lambda ctx: DataProcessor(replace(ctx, training_mode="auto")),
-            training_backend=CaptureBackend(),
+            candidate_backend=CaptureBackend(),
             training_mode="manual",
         )
     records.close()
@@ -411,7 +411,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     recipe = replace(_recipe(tmp_path, propose), training_mode="manual", recheck_every=1)
     records = SQLiteRecordStore()
     trainer = recipe.build("s", records)
-    backend = trainer.training_backend
+    backend = trainer.candidate_backend
     state = dict(backend.initial_state())
     state["rollback_entries"] = state["entries"]
     backend.proposals.submit(
@@ -930,7 +930,7 @@ def test_the_dispatched_training_thread_skips_a_failed_instruction(tmp_path):
                 scenario,
                 records,
                 processor_factory=lambda ctx: RecordDrivenTraceProcessor(ctx.with_config({"batch_size": 1})),
-                training_backend=RaisingBackend(dispatched=True),
+                candidate_backend=RaisingBackend(dispatched=True),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
                 training_mode=self.training_mode,
@@ -980,7 +980,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         assert [row["steps"] for row in rows] == [1, 2]
         assert trainer.run_once(2) is None
 
-        backend = trainer.training_backend
+        backend = trainer.candidate_backend
         state = {**backend.initial_state(), "steps": 5}
         automatic = backend.prepare_step(TraceBatch("auto", ()), state, 5)
         assert automatic.metrics["skipped"] == "step budget of 1 exhausted"
@@ -993,7 +993,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
     records = SQLiteRecordStore()
     trainer = streak.build("s", records)
     try:
-        backend = trainer.training_backend
+        backend = trainer.candidate_backend
         state = {**backend.initial_state(), "failure_streak": 1}
         automatic = backend.prepare_step(TraceBatch("auto", ()), state, 0)
         assert automatic.metrics["skipped"] == "failure streak breaker open after 1 consecutive rejections"

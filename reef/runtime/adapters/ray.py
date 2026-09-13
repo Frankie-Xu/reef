@@ -17,12 +17,12 @@ from typing import Any
 from reef.core.config import config_option
 from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE, RuntimeConnectionConfig
 from reef.runtime.adapters.executor_training import connect_executor_runtimes
-from reef.runtime.adapters.http import build_http_inference_backend
+from reef.runtime.adapters.http import build_http_inference_handler
 from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle
 from reef.runtime.base import InferenceRuntime, TrainingRuntime, TrainingRuntimeError
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.inference import InferenceBackendFactory
+from reef.runtime.inference import InferenceHandlerFactory
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 
 RayRuntimeError = TrainingRuntimeError
@@ -116,8 +116,8 @@ def connect_ray_runtime(
     inference_timeout_s: float = 300.0,
     train_timeout_s: float | None = None,
     max_staleness: int = 0,
-    inference_backend_factory: InferenceBackendFactory = build_http_inference_backend,
-    inference_backend_config: Mapping[str, Any] | None = None,
+    inference_handler_factory: InferenceHandlerFactory = build_http_inference_handler,
+    inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Connect to a named training actor and return separate training and inference runtimes.
 
@@ -140,8 +140,8 @@ def connect_ray_runtime(
         model_path=model_path,
         inference_timeout_s=inference_timeout_s,
         max_staleness=max_staleness,
-        inference_backend_factory=inference_backend_factory,
-        inference_backend_config=inference_backend_config,
+        inference_handler_factory=inference_handler_factory,
+        inference_handler_config=inference_handler_config,
     )
 
 
@@ -169,7 +169,7 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
         # Existing Python assembly can inject these objects. They are not YAML
         # fields and must never be serialized through the argument parser.
-        injected = {key: config[key] for key in ("connect", "inference_backend_factory") if key in config}
+        injected = {key: config[key] for key in ("connect", "inference_handler_factory") if key in config}
         values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
         return {**{key: value for key, value in values.items() if key in config}, **injected}
 
@@ -192,8 +192,8 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
             "inference_timeout_s",
             "train_timeout_s",
             "max_staleness",
-            "inference_backend_factory",
-            "inference_backend_config",
+            "inference_handler_factory",
+            "inference_handler_config",
         ):
             if key in config:
                 kwargs[key] = config[key]

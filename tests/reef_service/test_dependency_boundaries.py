@@ -338,8 +338,8 @@ def test_slime_training_operations_import_does_not_load_megatron_stack() -> None
         "ray.remote = lambda **kwargs: lambda actor: actor; "
         "sys.modules['ray'] = ray; "
         "from reef.train.slime_backend.reef_adapters.bridge "
-        "import SlimeTrainingOperations; "
-        "assert SlimeTrainingOperations; "
+        "import SlimeTrainingBackend; "
+        "assert SlimeTrainingBackend; "
         "assert 'slime.ray.placement_group' not in sys.modules"
     )
 
@@ -446,7 +446,7 @@ def test_runtime_scheduler_does_not_depend_on_connection_adapters() -> None:
 
 
 def test_backend_operations_do_not_depend_on_coordinator_implementation() -> None:
-    paths = [REPO_ROOT / "reef/runtime/training_job/operations.py"]
+    paths = [REPO_ROOT / "reef/runtime/backends.py"]
     for directory in ("reef/train", "reef/inference"):
         paths.extend(sorted((REPO_ROOT / directory).rglob("*.py")))
     for path in paths:

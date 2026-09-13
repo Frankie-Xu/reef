@@ -14,7 +14,7 @@ from reef.runtime import PreparedTrainingStep, RayRuntimeError, RayTrainGroupHan
 from reef.runtime.adapters.ray import RemoteRayTrainGroupHandle
 from reef.runtime.base import InferenceAdmissionController
 from reef.runtime.executor import ray as ray_executor
-from reef.runtime.inference import InferenceBackend, InferenceStream
+from reef.runtime.inference import InferenceHandler, InferenceStream
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
 from reef.surface import RuntimeLoadMismatch, create_weight_surface
@@ -200,7 +200,7 @@ def test_ray_runtime_is_a_training_runtime() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
     assert isinstance(runtime.training_runtime, TrainingRuntime)
-    assert runtime.inference_backend is not None
+    assert runtime.inference_handler is not None
 
 
 @pytest.mark.unit
@@ -263,11 +263,11 @@ def test_ray_runtime_builds_a_tokenizer_aware_inference_backend() -> None:
         inference_url="http://router/",
         model_path="/models/qwen",
         inference_timeout_s=42,
-        inference_backend_factory=factory,
-        inference_backend_config={"tool_call_parser": "qwen25"},
+        inference_handler_factory=factory,
+        inference_handler_config={"tool_call_parser": "qwen25"},
     )
 
-    assert runtime.inference_backend is sentinel
+    assert runtime.inference_handler is sentinel
     assert captured == {
         "upstream_url": "http://router",
         "model_path": "/models/qwen",
@@ -1194,7 +1194,7 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         recipe = "test"
         repository = None
         surface = create_weight_surface()
-        inference_backend = None
+        inference_handler = None
 
         def __init__(self) -> None:
             self.runtime = runtime.inference_runtime
@@ -1222,7 +1222,7 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
             del kwargs
             return item
 
-    class RecordingBackend(InferenceBackend):
+    class RecordingBackend(InferenceHandler):
         def __init__(self) -> None:
             self.versions: list[str] = []
 
@@ -1282,7 +1282,7 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         recipe = "test"
         repository = None
         surface = create_weight_surface()
-        inference_backend = None
+        inference_handler = None
 
         @staticmethod
         def current_artifact_ref():
@@ -1303,7 +1303,7 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
             del kwargs
             return item
 
-    class StreamingBackend(InferenceBackend):
+    class StreamingBackend(InferenceHandler):
         async def inference(self, artifact, path, payload):
             raise AssertionError("streaming path expected")
 
@@ -1320,12 +1320,12 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
                 record_response={"metadata": {"runtime_load_id": "engine:0"}},
             )
 
-    class FailingBackend(InferenceBackend):
+    class FailingBackend(InferenceHandler):
         async def inference(self, artifact, path, payload):
             del artifact, path, payload
             raise RuntimeError("backend failed")
 
-    class DeferredStreamingBackend(InferenceBackend):
+    class DeferredStreamingBackend(InferenceHandler):
         async def inference(self, artifact, path, payload):
             raise AssertionError("streaming path expected")
 
@@ -1350,7 +1350,7 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
             holder["stream"] = stream
             return stream
 
-    class UnverifiableStreamingBackend(InferenceBackend):
+    class UnverifiableStreamingBackend(InferenceHandler):
         async def inference(self, artifact, path, payload):
             raise AssertionError("streaming path expected")
 

@@ -11,7 +11,7 @@ from reef.core.batches import TrainingBatch, policy_samples
 from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.adapters.config import RuntimeConnectionConfig
-from reef.runtime.adapters.http import build_http_inference_backend
+from reef.runtime.adapters.http import build_http_inference_handler
 from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, training_job_status
 from reef.runtime.base import (
     InferenceRuntime,
@@ -21,7 +21,7 @@ from reef.runtime.base import (
     TrainingRuntimeError,
 )
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.inference import InferenceBackendFactory
+from reef.runtime.inference import InferenceHandlerFactory
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 from reef.runtime.weights.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
@@ -171,8 +171,8 @@ def connect_executor_runtimes(
     model_path: str = "",
     inference_timeout_s: float = 300.0,
     max_staleness: int = 0,
-    inference_backend_factory: InferenceBackendFactory = build_http_inference_backend,
-    inference_backend_config: Mapping[str, Any] | None = None,
+    inference_handler_factory: InferenceHandlerFactory = build_http_inference_handler,
+    inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Assemble independent components over the existing deployment connection."""
     from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
@@ -186,8 +186,8 @@ def connect_executor_runtimes(
             inference_url=inference_url,
             model_path=model_path,
             inference_timeout_s=inference_timeout_s,
-            inference_backend_factory=inference_backend_factory,
-            inference_backend_config=inference_backend_config,
+            inference_handler_factory=inference_handler_factory,
+            inference_handler_config=inference_handler_config,
         )
     return training, inference
 
@@ -244,7 +244,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
 
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
         injected = {
-            key: config[key] for key in ("executor", "inference", "inference_backend_factory") if key in config
+            key: config[key] for key in ("executor", "inference", "inference_handler_factory") if key in config
         }
         values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
         return {**values, **injected}
@@ -283,8 +283,8 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
                 "inference_url",
                 "inference_timeout_s",
                 "max_staleness",
-                "inference_backend_factory",
-                "inference_backend_config",
+                "inference_handler_factory",
+                "inference_handler_config",
             ):
                 if key in config:
                     kwargs[key] = config[key]

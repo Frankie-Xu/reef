@@ -52,7 +52,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.http import HttpInferenceBackend, InferenceProxyRuntime, provider_request_headers
+from reef.runtime.adapters.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
@@ -190,7 +190,7 @@ class RunService:
         upstream_url: str,
         upstream_key: str,
         port: int,
-        inference_backend: Any | None = None,
+        inference_handler: Any | None = None,
     ) -> None:
         self.scenario = scenario
         self.recipe_name = recipe_name
@@ -205,8 +205,8 @@ class RunService:
         )
         self._app = create_app(
             self.dispatcher,
-            inference_backend=inference_backend
-            or HttpInferenceBackend(
+            inference_handler=inference_handler
+            or HttpInferenceHandler(
                 upstream_url,
                 request_headers=provider_request_headers(upstream_key),
                 timeout_s=EPISODE_TIMEOUT_S,

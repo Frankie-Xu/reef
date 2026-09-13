@@ -12,7 +12,7 @@ from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.dispatcher import Dispatcher
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.weights.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -50,7 +50,7 @@ class DurableRuntime(StubTrainingRuntime):
         self.candidate_versions: dict[str, str] = {}
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
     def serving_runtime_load_id(self):
@@ -133,7 +133,7 @@ def _training(runtime_load_id: str) -> dict:
     return {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": [-0.2], "runtime_load_id": runtime_load_id}
 
 
-class ImmediateBackend(InferenceBackend):
+class ImmediateBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         assert payload["return_meta_info"] is True
         return {"metadata": {"runtime_load_id": "v0"}}
@@ -384,7 +384,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     event = tracker.events[0]
     assert event.context.scenario == "math"
     assert event.context.recipe == "test_policy"
-    assert event.context.backend == "RuntimeTrainingBackend"
+    assert event.context.backend == "RuntimeCandidateBackend"
     assert event.context.backend_config == {"runtime": "DurableRuntime", "step_preparer": "sft"}
     assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced

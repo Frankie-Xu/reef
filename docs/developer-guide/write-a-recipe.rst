@@ -236,8 +236,8 @@ factory discovery does not make arbitrary backend pairs compatible.
 3. Call ``TrainingService.start(resources)`` without an inference connection.
 4. Attach a ``WeightTransferSession`` to the trainer's native sender. Its protocol,
    borrowed receiver executor and fresh session identity describe one attachment.
-5. Start Reef's ``TrainingCoordinator`` with separate ``TrainingOperations`` and
-   ``InferenceOperations``, then verify readiness after durable recovery.
+5. Start Reef's ``TrainingCoordinator`` with separate ``TrainingBackend`` and
+   ``InferenceBackend``, then verify readiness after durable recovery.
 
 Shutdown closes the coordinator's active operations, training, inference and
 reservations in reverse order. Every close operation must handle partial startup
@@ -254,23 +254,23 @@ options; the SGLang factory constructs ``SGLangConfig`` and checks receiver
 capabilities. The ``slime-sglang-control-v2`` attachment remains an explicitly
 scoped native protocol, not a universal tensor format.
 
-At the recipe boundary, ``RuntimeTrainingBackend`` maps batches and delegates
+At the recipe boundary, ``RuntimeCandidateBackend`` maps batches and delegates
 candidate activation, rejection and durable acknowledgement to
 ``reef.runtime.scheduler.RuntimeScheduler``. The scheduler receives separate
 ``TrainingRuntime`` and ``InferenceRuntime`` objects; neither inherits the other
 and there is no aggregate ``ModelRuntime``.
 
 For a native trainer such as Slime or MLX, the backend integration interface is
-``TrainingOperations`` in ``reef/runtime/training_job/operations.py``. It exposes
+``TrainingBackend`` in ``reef/runtime/backends.py``. It exposes
 batch preparation, training, checkpoints and separate weight preparation/sending.
-Slime implements it with ``SlimeTrainingOperations`` in
+Slime implements it with ``SlimeTrainingBackend`` in
 ``reef/train/slime_backend/reef_adapters/bridge.py``. This is distinct from
-``TrainingBackend`` in ``reef/train/backend.py``: that recipe-facing interface
+``CandidateBackend`` in ``reef/train/backend.py``: that recipe-facing interface
 prepares, evaluates and settles candidates, including harness updates that need
-no model trainer. ``RuntimeTrainingBackend`` connects that recipe interface to
+no model trainer. ``RuntimeCandidateBackend`` connects that recipe interface to
 the runtime scheduler.
 
-Alongside ``TrainingOperations``, ``InferenceOperations`` exposes pause,
+Alongside ``TrainingBackend``, ``InferenceBackend`` exposes pause,
 resume, recovery, version verification, adapter unload and memory operations.
 ``TrainingCoordinator`` owns staleness admission, LoRA residency and colocated
 handoffs. The native sender transfers weights directly to receiver workers;
@@ -351,6 +351,8 @@ user-facing runtime selector for weight training: runtime wiring belongs to
 the selected backend. Method dependencies remain the Recipe's responsibility.
 
 Weight recipes pass their separate ``training_runtime`` and inference ``runtime``
-to ``RuntimeTrainingBackend``, which coordinates the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
-an alias. Experiment metadata now reports ``RuntimeTrainingBackend`` and the
+to ``RuntimeCandidateBackend``, which adapts the shared candidate lifecycle to
+Reef's runtime scheduler. The former candidate-layer ``SlimeTrainingBackend``
+alias is removed; the name now belongs to Slime's native trainer implementation.
+Experiment metadata reports ``RuntimeCandidateBackend`` and the
 actual runtime class instead of labeling all weight training as Slime.

@@ -11,7 +11,7 @@ from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.model_config import ModelConfig
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
@@ -79,9 +79,9 @@ class Scenario:
         return self._binding.report_type
 
     @property
-    def inference_backend(self) -> InferenceBackend | None:
+    def inference_handler(self) -> InferenceHandler | None:
         runtime = self.model_config.runtime
-        return runtime.inference_backend if runtime is not None else self._binding.inference_backend
+        return runtime.inference_handler if runtime is not None else self._binding.inference_handler
 
     @property
     def repository(self) -> Repository:

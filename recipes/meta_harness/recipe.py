@@ -179,7 +179,9 @@ class MetaHarnessRecipe(CordisRecipe):
                 )
             )
         bound = dataclasses.replace(
-            self, propose=propose, candidate_plugin=lambda backend: MetaHarnessPlugin(backend, store)
+            self,
+            propose=propose,
+            candidate_plugin=lambda candidate_backend: MetaHarnessPlugin(candidate_backend, store),
         )
         backend = MetaHarnessBackend(population_store=store, **bound._backend_kwargs())
         return bound._build_trainer(

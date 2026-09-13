@@ -94,7 +94,7 @@ class ScenarioRegistry:
         local = tuple(
             scenario.name
             for scenario in scenarios
-            if scenario.name not in dispatched and scenario.trainer.training_backend is not None
+            if scenario.name not in dispatched and scenario.trainer.candidate_backend is not None
         )
         return (*dispatched, *local)
 

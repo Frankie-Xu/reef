@@ -8,35 +8,39 @@ Concrete integrations keep framework arguments and allocation handles private.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4
 
+from reef.runtime.backends import InferenceBackend, TrainingBackend
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.training_job.coordinator import TrainingCoordinator
-from reef.runtime.training_job.operations import InferenceOperations, TrainingOperations
 
 
-class DeploymentResources(Protocol):
+class DeploymentResources(ABC):
     """A coordinated allocation and its runtime connection, owned by Reef."""
 
+    @abstractmethod
     def start(self) -> None:
         """Acquire resources; close must also handle a partially failed start."""
 
+    @abstractmethod
     def close(self) -> None:
         """Release owned reservations and connections, idempotently."""
 
 
-class DeploymentHealth(Protocol):
+class DeploymentHealth(ABC):
     """Nonblocking observation of an already started deployment."""
 
+    @abstractmethod
     def poll(self) -> None:
         """Raise on failure; an outstanding probe is not a failed component."""
 
 
-class ComponentHealth:
+class ComponentHealth(DeploymentHealth):
     """Observe selected components without importing their implementations."""
 
     def __init__(self, *components: DeploymentHealth) -> None:
@@ -47,9 +51,10 @@ class ComponentHealth:
             component.poll()
 
 
-class ModelPlanSource(Protocol):
+class ModelPlanSource(ABC):
     """Rebuild components and rerun durable recovery preflight for each attempt."""
 
+    @abstractmethod
     def create(self) -> ModelDeploymentPlan:
         """Return a fresh, unallocated plan from the original configuration."""
 
@@ -86,54 +91,68 @@ class WeightTransferSession:
             raise ValueError("weight transfer sessions require a protocol and identity")
 
 
-class InferenceService(Protocol):
+class InferenceService(DeploymentHealth):
     """An inference component that owns its engines but borrows reservations."""
 
     @property
+    @abstractmethod
     def connection_protocol(self) -> str:
         """Control protocol provided by the selected engine integration."""
 
+    @abstractmethod
     def start(self, resources: DeploymentResources) -> InferenceConnection:
         """Start engines in supplied resources and return a borrowed connection."""
 
+    @abstractmethod
     def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
         """Fence the receiver and release shared resources before trainer startup."""
 
-    def operations(self, connection: InferenceConnection) -> InferenceOperations:
-        """Return this receiver's operations for Reef-owned coordination."""
+    @abstractmethod
+    def backend(self, connection: InferenceConnection) -> InferenceBackend:
+        """Return this receiver's backend for Reef-owned coordination."""
 
+    @abstractmethod
     def check_health(self) -> None:
         """Raise when the component is not ready."""
 
+    @abstractmethod
     def poll(self) -> None:
         """Observe component failures without blocking behind active work."""
 
+    @abstractmethod
     def close(self) -> None:
         """Release owned engines, including partial starts, idempotently."""
 
 
-class TrainingService(Protocol):
+class TrainingService(DeploymentHealth):
     """Training workers allocated independently of the inference component."""
 
     @property
+    @abstractmethod
     def weight_transfer_protocol(self) -> str | None:
         """Native weight transport consumed by a separately attached sender."""
 
+    @abstractmethod
     def start(self, resources: DeploymentResources) -> None:
         """Start training workers using only their supplied reservations."""
 
+    @abstractmethod
     def attach_weight_transport(self, session: WeightTransferSession) -> None:
         """Configure a sender after allocation without taking receiver ownership."""
 
-    def operations(self) -> TrainingOperations:
-        """Return training-only operations for Reef-owned coordination."""
+    @abstractmethod
+    def backend(self) -> TrainingBackend:
+        """Return the training backend for Reef-owned coordination."""
 
+    @abstractmethod
     def check_health(self) -> None:
         """Raise when the component is not ready."""
 
+    @abstractmethod
     def poll(self) -> None:
         """Observe component failures without blocking behind active work."""
 
+    @abstractmethod
     def close(self) -> None:
         """Release owned training objects, including partial starts, idempotently."""
 
@@ -237,7 +256,7 @@ class ModelDeployment:
                 workers=(
                     WorkerSpec(
                         TrainingCoordinator,
-                        args=(self.plan.training.operations(), inference.operations(connection)),
+                        args=(self.plan.training.backend(), inference.backend(connection)),
                         kwargs={"owns_training": True},
                     ),
                 ),

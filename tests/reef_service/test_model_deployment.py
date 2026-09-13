@@ -6,14 +6,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.deployment import CoordinatorConfig, InferenceConnection, ModelDeploymentPlan
+from reef.runtime.backends import InferenceBackend, TrainingBackend
+from reef.runtime.deployment import (
+    CoordinatorConfig,
+    DeploymentResources,
+    InferenceConnection,
+    InferenceService,
+    ModelDeploymentPlan,
+    TrainingService,
+)
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import training_driver
 from reef.service.training_driver import ModelDeployment
 from reef.train.deployment import TrainingDeploymentPlan
 
 
-class Resources:
+class Resources(DeploymentResources):
     def __init__(self, events, failures):
         self.events = events
         self.failures = failures
@@ -38,7 +46,7 @@ class Engine:
         self.weight = weight
 
 
-class Inference:
+class Inference(InferenceService, InferenceBackend):
     connection_protocol = "test-weights-v1"
 
     def __init__(self, resources):
@@ -56,7 +64,7 @@ class Inference:
     def prepare_weight_transfer(self, connection):
         self.resources.event("transfer-prepare")
 
-    def operations(self, connection):
+    def backend(self, connection):
         self.resources.event("inference-operations")
         return self
 
@@ -89,8 +97,23 @@ class Inference:
     def poll(self):
         self.resources.event("inference-poll")
 
+    def recover(self):
+        raise AssertionError("unexpected recover in this fixture")
 
-class Training:
+    def offload(self, tags):
+        raise AssertionError("unexpected offload in this fixture")
+
+    def onload_weights(self):
+        raise AssertionError("unexpected onload_weights in this fixture")
+
+    def onload_kv(self):
+        raise AssertionError("unexpected onload_kv in this fixture")
+
+    def unload_adapter(self, name):
+        raise AssertionError("unexpected unload_adapter in this fixture")
+
+
+class Training(TrainingService):
     weight_transfer_protocol = "test-weights-v1"
 
     def __init__(self, resources):
@@ -106,7 +129,7 @@ class Training:
         self.resources.event("training-attach")
         session.receiver.rpc(0, "update", args=(7,))
 
-    def operations(self):
+    def backend(self):
         self.resources.event("training-operations")
         return self
 
@@ -364,7 +387,8 @@ def test_rebuild_assigns_a_new_weight_transfer_session():
 
 def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
     from dataclasses import replace
-    from reef.runtime.training_job.operations import TrainingContext, TrainingCoordinationConfig
+
+    from reef.runtime.backends import TrainingContext, TrainingCoordinationConfig
 
     plan, events = plan_for()
     plan.training.config = TrainingCoordinationConfig(save_hf_template=None)
@@ -372,7 +396,7 @@ def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
 
     # The native operations may recreate workers inside the coordinator.
     # Its shutdown closes that copy; the service still handles partial starts.
-    class Operations:
+    class Operations(TrainingBackend):
         config = plan.training.config
         context = plan.training.context
 
@@ -388,7 +412,25 @@ def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
         def close(self):
             events.append("operations-close")
 
-    plan.training.operations = lambda: Operations()
+        def prepare_training_step(self, batch, step_preparer, algorithm_state):
+            raise AssertionError("unexpected prepare_training_step in this fixture")
+
+        def prepare(self, payload, *, job_id, rollout_id, prior_marker):
+            raise AssertionError("unexpected prepare in this fixture")
+
+        def prepare_weights(self, runtime_load_id, *, force_full):
+            raise AssertionError("unexpected prepare_weights in this fixture")
+
+        def send_weights(self, runtime_load_id, *, force_full):
+            raise AssertionError("unexpected send_weights in this fixture")
+
+        def activate_scenario(self, scenario):
+            raise AssertionError("unexpected activate_scenario in this fixture")
+
+        def send_adapter(self, scenario, name):
+            raise AssertionError("unexpected send_adapter in this fixture")
+
+    plan.training.backend = lambda: Operations()
     plan = replace(plan, coordinator=CoordinatorConfig(backend="uni"))
     deployment = ModelDeployment(plan)
     deployment.start()
@@ -402,6 +444,7 @@ def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
 
 def test_coordinator_construction_failure_releases_started_backends(monkeypatch):
     from dataclasses import replace
+
     from reef.runtime.executor import Executor
 
     plan, events = plan_for()

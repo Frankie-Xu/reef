@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from reef.runtime.backends import InferenceBackend, TrainingBackend
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.training_job.admission import (
     _admission_runtime_load_id_groups,
@@ -25,15 +26,20 @@ from reef.runtime.training_job.execution import (
     PreparedTrainingJob,
     TrainingCheckpoint,
     TrainingExecution,
+    TrainingJobBackend,
     TrainingMetrics,
     max_staleness,
     uses_staleness_admission,
 )
 from reef.runtime.training_job.marker import marker_path, marker_result, read_marker, write_marker
-from reef.runtime.training_job.operations import InferenceOperations, TrainingOperations
-from reef.runtime.training_job.publication import TrainingPublication
+from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
 from reef.runtime.training_job.scenarios import ScenarioHistory
-from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
+from reef.runtime.weights.residency import (
+    AdapterCapacityExhausted,
+    AdapterEngine,
+    AdapterEvictionFailed,
+    AdapterResidencyManager,
+)
 from reef.runtime.weights.version import RuntimeLoadId
 from reef.surface.adapter import adapter_name, parse_adapter_name
 
@@ -44,10 +50,10 @@ class _AdapterTransfer:
     name: str
 
 
-class _CoordinatedAdapterEngine:
+class _CoordinatedAdapterEngine(AdapterEngine):
     """Reef residency operations across an explicit sender and receiver."""
 
-    def __init__(self, training: TrainingOperations, inference: InferenceOperations) -> None:
+    def __init__(self, training: TrainingBackend, inference: InferenceBackend) -> None:
         self._training = training
         self._inference = inference
 
@@ -63,9 +69,7 @@ class _CoordinatedAdapterEngine:
 class TrainingCoordinator:
     """Serialize backend work and preserve Reef's serving commit barrier."""
 
-    def __init__(
-        self, training: TrainingOperations, inference: InferenceOperations, *, owns_training: bool = True
-    ) -> None:
+    def __init__(self, training: TrainingBackend, inference: InferenceBackend, *, owns_training: bool = True) -> None:
         self._training = training
         self._inference = inference
         self._owns_training = owns_training
@@ -85,7 +89,7 @@ class TrainingCoordinator:
         self._generation_paused = False
         path = marker_path(config.save_hf_template) if config.save_hf_template is not None else None
         self._publication = TrainingPublication(path, _CoordinatedWeightPublisher(self))
-        self._execution = TrainingExecution(path, _ScheduledTrainingBackend(self), self._publication.state)
+        self._execution = TrainingExecution(path, _ScheduledJobBackend(self), self._publication.state)
         self._closed = False
         self._completed_train_steps = 0
         self._last_train_rollout_id: int | None = None
@@ -478,7 +482,7 @@ class TrainingCoordinator:
         return marker
 
 
-class _ScheduledTrainingBackend:
+class _ScheduledJobBackend(TrainingJobBackend):
     """Apply Reef's resource barrier only after a backend admits the job."""
 
     def __init__(self, coordinator: TrainingCoordinator) -> None:
@@ -532,7 +536,7 @@ class _ScheduledTrainingBackend:
                 yield _ScheduledTrainingJob(self._coordinator, prepared, metrics)
 
 
-class _ScheduledTrainingJob:
+class _ScheduledTrainingJob(PreparedTrainingJob):
     def __init__(
         self, coordinator: TrainingCoordinator, prepared: PreparedTrainingJob, admission_metrics: Mapping[str, Any]
     ) -> None:
@@ -553,7 +557,7 @@ class _ScheduledTrainingJob:
         self._prepared.save_checkpoint()
 
 
-class _CoordinatedWeightPublisher:
+class _CoordinatedWeightPublisher(WeightPublisher):
     """Reef publication operations across independent sender and receiver interfaces."""
 
     def __init__(self, bridge: TrainingCoordinator) -> None:

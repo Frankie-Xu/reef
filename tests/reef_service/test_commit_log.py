@@ -17,7 +17,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings, training_backend
+from reef_service.runtime_stubs import StubTrainingRuntime, candidate_backend, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -33,7 +33,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult
+from reef.train import CandidateBackend, PreparedStep, RetentionDecision, Trainer, TrainStepResult
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
@@ -344,7 +344,7 @@ class RecordingRuntime(StubTrainingRuntime):
         self._candidate_versions: dict[str, str] = {}
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
     def prepare_training_step(
@@ -444,7 +444,7 @@ def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") 
     raise AssertionError("async training did not commit")
 
 
-class _SavedArtifactBackend(TrainingBackend):
+class _SavedArtifactBackend(CandidateBackend):
     def __init__(self, artifact_path: Path) -> None:
         self._artifact_path = artifact_path
         self.batch_ids: list[str] = []
@@ -474,7 +474,7 @@ class _SavedArtifactBackend(TrainingBackend):
 
 @dataclass(frozen=True)
 class _SavedArtifactRecipe(Recipe):
-    backend: TrainingBackend
+    backend: CandidateBackend
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         del experiment_logger
@@ -482,7 +482,7 @@ class _SavedArtifactRecipe(Recipe):
             scenario,
             records,
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-            training_backend=self.backend,
+            candidate_backend=self.backend,
             algorithm_state=algorithm_state,
         )
 
@@ -617,7 +617,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             processor_factory=lambda context: ProtectAllProcessor(
                 context.with_config({"batch_size": self.batch_size, "min_score": self.min_score})
             ),
-            training_backend=training_backend(self.training_runtime, "sft"),
+            candidate_backend=candidate_backend(self.training_runtime, "sft"),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -985,7 +985,7 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None) -> Trainer:
         from reef.train.cordis_backend.processor import CordisProcessor
 
-        training_backend = CordisBackend(
+        candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
             score_episode=resolve_episode_scorer(self.evaluate),
@@ -999,8 +999,8 @@ class _HarnessEvolveTestRecipe(Recipe):
             processor_factory=lambda context: CordisProcessor(
                 context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
             ),
-            training_backend=training_backend,
-            candidate_evaluator=ScoreComparisonPlugin(training_backend),
+            candidate_backend=candidate_backend,
+            candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )

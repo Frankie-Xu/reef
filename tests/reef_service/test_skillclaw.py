@@ -442,9 +442,9 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
 
 
 def _stub_backend() -> Any:
-    from reef.runtime.inference import InferenceBackend
+    from reef.runtime.inference import InferenceHandler
 
-    class StubModel(InferenceBackend):
+    class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):
             del artifact, path, payload
             return {"choices": [{"message": {"role": "assistant", "content": "42"}}]}
@@ -506,7 +506,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_backend=_stub_backend(),
+        inference_handler=_stub_backend(),
     )
     service.start()
     try:
@@ -605,7 +605,7 @@ def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_pat
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_backend=_stub_backend(),
+        inference_handler=_stub_backend(),
     )
     try:
         scenario = service.dispatcher.get_or_create_scenario("dry2")

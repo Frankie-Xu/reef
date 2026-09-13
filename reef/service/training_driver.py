@@ -63,7 +63,7 @@ def _write_ready_file(path: Path, marker: str = READY_MARKER) -> None:
         temporary.unlink(missing_ok=True)
 
 
-class ConfiguredModelPlanSource:
+class ConfiguredModelPlanSource(ModelPlanSource):
     """Reparse the resolved configuration and inspect current checkpoints."""
 
     def __init__(self, config: Mapping[str, Any], loss_family: str) -> None:

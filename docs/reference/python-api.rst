@@ -43,6 +43,58 @@ Start with Recipe and add only what the method actually needs.
 Method code should depend only on what this page documents. Anything else under
 ``reef.`` is an implementation detail and may change.
 
+Backend and runtime contracts
+-----------------------------
+
+Native backends implement model operations; Reef runtimes expose the scheduling
+interface used by recipes and serving. The two sides are independent:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 35 40
+
+   * - Layer
+     - Training
+     - Inference
+   * - Native backend
+     - ``TrainingBackend``
+     - ``InferenceBackend``
+   * - Reef scheduling
+     - ``TrainingRuntime``
+     - ``InferenceRuntime``
+
+.. code:: python
+
+   from reef.runtime import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
+
+The native contracts are abstract base classes in ``reef/runtime/backends.py``.
+Implementations inherit the corresponding interface and provide every abstract
+operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
+SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
+coordinator owns publication and recovery ordering across them. Component
+allocation and service shutdown belong to ``TrainingService`` and
+``InferenceService`` in ``reef/runtime/deployment.py``. Those service interfaces
+also require explicit inheritance; inference factory discovery rejects objects
+that only happen to expose similarly named methods.
+
+Two other extension points have separate names and purposes:
+
+- ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
+  including harness edits. ``RuntimeCandidateBackend`` connects weight updates
+  to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
+- ``reef.runtime.inference.InferenceHandler`` executes one buffered or streaming
+  request. Runtime and recipe objects expose it as ``inference_handler``;
+  ``create_app`` accepts the same keyword for an injected handler.
+
+Native backend selectors remain ``training.backend`` and ``inference.backend``.
+Custom request adapters use ``inference.handler-factory`` and
+``inference.handler-config``. These replace the previous request-adapter
+``backend-factory`` and ``backend-config`` names. Python extensions migrate the
+old recipe-facing ``TrainingBackend`` to ``CandidateBackend`` and the old
+request-facing ``InferenceBackend`` to ``InferenceHandler``; the names now
+reserved for native interfaces must not be used as replacement import aliases
+for those different contracts.
+
 Recipe
 ------
 
@@ -876,7 +928,7 @@ inherits from the other, and there is no aggregate runtime.
 * ``InferenceRuntime`` executes requests, manages admission and reconnection,
   loads selected weights or adapters, and reports serving versions. It restores
   serving weights without restoring optimizer state.
-* The existing ``RuntimeTrainingBackend`` coordinates both: prepare/train,
+* The existing ``RuntimeCandidateBackend`` coordinates both: prepare/train,
   evaluate, activate or reject, then acknowledge publication after Reef's durable
   commit. ``ScenarioCommitter`` coordinates rollback across both runtimes and
   commits the restored artifact before reopening inference.

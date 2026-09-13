@@ -45,9 +45,9 @@ inference:
     tool-call-parser: "qwen25"
   model-path: /root/models/Qwen3-4B-Thinking-2507
   timeout-s: 7200
-  backend-factory: >-
-    reef.inference.sglang.chat.SGLangChatTrainingInferenceBackend
-  backend-config:
+  handler-factory: >-
+    reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
     tool_call_parser: qwen25
     # Old-policy top-K capture (S^q / ell_old) for the top-K objective.
     capture_topk: 4

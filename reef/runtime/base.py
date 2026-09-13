@@ -14,7 +14,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.inference import InferenceHandler
 from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
 
 
@@ -178,8 +178,8 @@ class PreparedTrainingStep:
 class InferenceRuntime(ABC):
     """Own inference requests, serving weights and admission.
 
-    An InferenceBackend executes individual requests. This runtime owns that
-    backend and its endpoint, weight activation and serving version state;
+    An InferenceHandler executes individual requests. This runtime owns that
+    handler and its endpoint, weight activation and serving version state;
     training and optimizer state belong to a separate TrainingRuntime.
     """
 
@@ -223,16 +223,16 @@ class InferenceRuntime(ABC):
         self._inference_admission.open()
 
     def reconnect(self, base_url: str) -> None:
-        """Retarget the request backend after managed inference recovery."""
+        """Retarget the request handler after managed inference recovery."""
         if not base_url:
             raise ValueError("base_url must be non-empty")
-        self.inference_backend.reconnect(base_url)
+        self.inference_handler.reconnect(base_url)
         self._base_url = base_url.rstrip("/")
 
     @property
     @abstractmethod
-    def inference_backend(self) -> InferenceBackend:
-        """The inference backend owned by this runtime."""
+    def inference_handler(self) -> InferenceHandler:
+        """The inference request handler owned by this runtime."""
 
     def shutdown(self) -> None:
         """Release owned resources after all users of this runtime have stopped.

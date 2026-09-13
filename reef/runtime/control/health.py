@@ -4,28 +4,33 @@ from __future__ import annotations
 
 import logging
 import math
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from threading import Condition, Thread
 from time import monotonic
-from typing import Protocol
+
+from reef.runtime.control.inference import InferenceMonitor
 
 logger = logging.getLogger(__name__)
 
 
-class EngineHealthTarget(Protocol):
+class EngineHealthTarget(ABC):
     """One captured engine identity, including any nodes that retire together."""
 
+    @abstractmethod
     def check(self, timeout: float) -> None:
         """Raise on failure and bound the probe by the supplied timeout."""
 
+    @abstractmethod
     def retire(self, timeout: float) -> None:
         """Retire captured handles only; never substitute newer occupants of their slots."""
 
 
-class EngineHealthChecks(Protocol):
+class EngineHealthChecks(ABC):
     """Snapshot current targets without changing engine ownership."""
 
+    @abstractmethod
     def targets(self) -> Sequence[EngineHealthTarget]: ...
 
 
@@ -45,7 +50,7 @@ class HealthMonitorConfig:
                 )
 
 
-class EngineHealthMonitor:
+class EngineHealthMonitor(InferenceMonitor):
     """Schedule probes; pause/stop drain any active probe or retirement.
 
     The owner serializes lifecycle calls. Engine replacement and offload must

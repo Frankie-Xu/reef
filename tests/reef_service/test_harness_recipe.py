@@ -632,7 +632,7 @@ def test_seed_boots_the_composition_tree(tmp_path: Path) -> None:
         return
 
     trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", SQLiteRecordStore())
-    b = trainer.training_backend
+    b = trainer.candidate_backend
     assert isinstance(b, CordisBackend)
     state = b.initial_state()
     assert state == {"steps": 0, "entries": [SEED_MODELS, SEED_SETTINGS]}
@@ -1461,7 +1461,7 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
         runtime=runtime(),
     )
     trainer = built.build("demo", SQLiteRecordStore())
-    backend = trainer.training_backend
+    backend = trainer.candidate_backend
     assert isinstance(backend, CordisBackend)
 
     run_backend_step(backend, batch(), backend.initial_state())
@@ -2450,7 +2450,7 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
     trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
         "demo", SQLiteRecordStore()
     )
-    inbox = trainer.training_backend.proposals
+    inbox = trainer.candidate_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
     assert not inbox.directory.exists()
 

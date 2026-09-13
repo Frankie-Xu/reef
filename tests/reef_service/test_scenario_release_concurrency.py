@@ -17,13 +17,13 @@ from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import PreparedStep, Trainer, TrainingBackend, TrainStepResult
+from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 
 from ._threshold_processor import ThresholdProcessor
 
 
-class _LocalBackend(TrainingBackend):
+class _LocalBackend(CandidateBackend):
     """An ordinary local candidate cycle with controllable preparation/evaluation."""
 
     def __init__(self, artifact_dir: Path) -> None:
@@ -68,14 +68,14 @@ class _LocalBackend(TrainingBackend):
 
 @dataclass(frozen=True)
 class _LocalRecipe(Recipe):
-    backend: TrainingBackend
+    backend: CandidateBackend
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         return Trainer.build(
             scenario,
             records,
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-            training_backend=self.backend,
+            candidate_backend=self.backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
