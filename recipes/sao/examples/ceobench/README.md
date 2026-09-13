@@ -412,17 +412,64 @@ what it rewards: doing nothing is a small negative every week, and growth
 is a large negative now for an uncertain positive later. One episode each
 at temperature 1.0, so the comparison is indicative, not a measurement.
 
+### Trained episode, seed 42, attempt 2 (complete)
+
+`results/2026-09-13-ttt-qwen3.6-27b-seed42-attempt2/` holds the same files
+as attempt 1. Same seed, simulator roles and stack; the runner's limits
+widened as above; a fresh stack, so the adapter again started from the
+base model.
+
+| | |
+| --- | --- |
+| Outcome | completed all 71 weeks (day 497); not bankrupt; final cash $358,251, `reward` 0.358 |
+| Turns | 377 in 3h23m; 357 (95%) fit the 24k window and were reported |
+| Training | 22 releases: 10 critic-only warm-up steps, then 12 actor updates, the first served from week 19 (day 133). The pacer held 22 week starts for 84 minutes in all, 8.8 minutes at most |
+| Trainer | peak 69 to 74 GB per GPU; no engine errors, no runner timeouts |
+
+| Week | Day | Cash | Subscribers |
+| ---: | ---: | ---: | ---: |
+| 1 | 7 | $989,758 | 3 |
+| 3 | 21 | $788,503 | 10 |
+| 7 | 49 | $419,478 | 22 |
+| 10 | 70 | $406,573 | 47 |
+| 15 | 105 | $399,276 | 44 |
+| 20 | 140 | $392,321 | 37 |
+| 30 | 210 | $382,758 | 6 |
+| 37 | 259 | $378,485 | 1 |
+| 45 | 315 | $373,721 | 0 |
+| 55 | 385 | $367,771 | 0 |
+| 71 | 497 | $358,251 | 0 |
+
+The shape repeats attempt 1: two R&D purchases while the critic was still
+warming up (week 2, -$191,675; week 6, -$336,888) set the cash level, and
+from the first actor update on the policy spent between $587 and $1,426 a
+week (median $595), let the subscriber base run off, and finished as a
+company with no customers.
+
+Seed 42, same simulator roles, one episode each:
+
+| Policy | Outcome | Final cash |
+| --- | --- | ---: |
+| `Qwen3.6-27B`, untrained | bankrupt on day 255 | -$66 |
+| trained in the episode, attempt 1 | runner timeout at day 385 | $252,634 |
+| trained in the episode, attempt 2 | completed, day 497 | $358,251 |
+
+The trained episodes end with cash and the untrained one does not, which
+is what the benchmark scores and what the weekly cash-delta reward asks
+for. What the policy learned to reach it is worth as much as the number:
+under a reward that scores each week's cash change, the safest week is one
+where nothing is bought and nothing is built, and the untrained agent's
+growth strategy (671 subscribers by week 11 in the baseline, then a cash
+collapse) is exactly what the critic learns to discount. A less myopic
+signal is the next experiment, not a larger run of this one.
+
 ### Not yet run
 
 - The untrained baseline with the benchmark's Anthropic simulator roles and
-  more seeds (issue #428, acceptance criterion 1).
-- A trained episode that reaches day 497: attempt 2 runs with the runner's
-  limits widened (above). The resident stack's step was validated on a
-  short paced episode first (2026-09-13): 16 turns in about 7.5 minutes on
-  first use, compile warm-up included, peak 78 GB per GPU with turns of up
-  to 32k tokens.
+  more seeds (issue #428, acceptance criterion 1); replicates of the trained
+  episode on other seeds.
 - A less myopic reward: a lag of `k` weeks or a judged turn-level signal
-  (see reward shaping), given what attempt 1's policy converged to.
+  (see reward shaping), given what both trained episodes converged to.
 
 ## Open items
 
