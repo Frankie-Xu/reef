@@ -312,7 +312,7 @@ def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "
         "from reef.train.slime_backend.reef_adapters import RetentionConfig; "
-        "from reef.runtime.training_job import durable_io; "
+        "from reef.runtime import recovery; "
         "from reef.train.slime_backend.reef_adapters.training_job import storage"
     )
 
@@ -347,7 +347,7 @@ def test_slime_training_operations_import_does_not_load_megatron_stack() -> None
 
 
 def test_model_config_and_file_operations_do_not_depend_on_scenario() -> None:
-    for module_name in ("reef.runtime.model_config", "reef.storage.model_config"):
+    for module_name in ("reef.inference.model_config", "reef.storage.model_config"):
         module = importlib.import_module(module_name)
         imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
         for dependency in ("reef.scenario", "reef.recipe", "reef.train", "reef.storage"):
@@ -412,8 +412,8 @@ def test_training_publication_import_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher; "
-        "from reef.runtime.training_job.execution import TrainingExecution, TrainingJobBackend"
+        "from reef.runtime.publication import TrainingPublication, WeightPublisher; "
+        "from reef.runtime.scheduler import TrainingExecution, TrainingJobBackend"
     )
 
 
@@ -421,9 +421,9 @@ def test_inference_recovery_and_update_lock_require_no_model_framework() -> None
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.control.inference import InferenceControl; "
-        "from reef.runtime.control.health import EngineHealthMonitor; "
-        "from reef.runtime.weights.lock import WeightUpdateLock"
+        "from reef.runtime.recovery import InferenceControl; "
+        "from reef.runtime.recovery import EngineHealthMonitor; "
+        "from reef.runtime.publication import WeightUpdateLock"
     )
 
 
@@ -442,20 +442,65 @@ def test_runtime_coordination_never_imports_concrete_model_backends() -> None:
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
 
+def test_runtime_directory_has_only_its_owned_modules() -> None:
+    root = REPO_ROOT / "reef/runtime"
+    expected = {"interfaces.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "executor"}
+
+    assert {path.name for path in root.iterdir() if path.name != "__pycache__"} == expected
+    assert (root / "executor").is_dir()
+    assert all((root / name).is_file() for name in expected - {"executor"})
+
+
+def test_runtime_modules_follow_their_dependency_order() -> None:
+    # Include imports inside functions: delaying an import does not make a
+    # publication/recovery dependency cycle a valid module boundary.
+    allowed = {
+        "interfaces.py": (),
+        "publication.py": ("reef.runtime.interfaces",),
+        "recovery.py": ("reef.runtime.interfaces", "reef.runtime.publication"),
+        "scheduler.py": ("reef.runtime.interfaces", "reef.runtime.publication", "reef.runtime.recovery"),
+        "deployment.py": (
+            "reef.runtime.interfaces",
+            "reef.runtime.publication",
+            "reef.runtime.recovery",
+            "reef.runtime.scheduler",
+            "reef.runtime.executor",
+        ),
+        "executor": ("reef.runtime.interfaces", "reef.runtime.executor"),
+    }
+    root = REPO_ROOT / "reef/runtime"
+    for path in sorted(root.rglob("*.py")):
+        owner = path.relative_to(root).parts[0]
+        assert owner in allowed, f"unowned runtime module: {path.relative_to(REPO_ROOT)}"
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        for target in _imports_of(imported, "reef.runtime"):
+            assert any(
+                target == prefix or target.startswith(prefix + ".") for prefix in allowed[owner]
+            ), f"{path.relative_to(REPO_ROOT)} imports {target} against the runtime dependency order"
+
+
 def test_runtime_scheduler_does_not_depend_on_connection_adapters() -> None:
     module = importlib.import_module("reef.runtime.scheduler")
     imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.runtime")
-    assert _imports_of(imported, "reef.runtime.adapters") == []
+    assert _imports_of(imported, "reef.runtime.executor") == []
 
 
 def test_backend_operations_do_not_depend_on_coordinator_implementation() -> None:
-    paths = [REPO_ROOT / "reef/runtime/backends.py"]
+    paths = [REPO_ROOT / "reef/runtime/interfaces.py"]
     for directory in ("reef/train", "reef/inference"):
         paths.extend(sorted((REPO_ROOT / directory).rglob("*.py")))
     for path in paths:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        assert _imports_of(imported, "reef.runtime.training_job.coordinator") == [], str(path.relative_to(REPO_ROOT))
+        # Scheduling helpers share one module now. Recipe adapters may consume
+        # RuntimeScheduler and native engines may use InferenceMemory, but a
+        # backend must not construct or reach into the remote coordinator.
+        assert _imports_of(imported, "reef.runtime.scheduler.TrainingCoordinator") == [], str(
+            path.relative_to(REPO_ROOT)
+        )
+        assert "reef.runtime.scheduler" not in imported, str(path.relative_to(REPO_ROOT))
+        assert "reef.runtime.scheduler.*" not in imported, str(path.relative_to(REPO_ROOT))
 
 
 def test_inference_backends_never_import_training_implementations() -> None:

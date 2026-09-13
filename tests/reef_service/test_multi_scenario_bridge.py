@@ -12,9 +12,9 @@ pytest.importorskip("ray")
 from reef_service.slime_coordinator import build_slime_coordinator
 from reef_service.test_sao_bridge import _RecordingGroup
 
-from reef.runtime.control.memory import InferenceMemory
-from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
-from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
+from reef.runtime.publication import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
+from reef.runtime.recovery import ScenarioHistory, history_path
+from reef.runtime.scheduler import InferenceMemory
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
 
 from .test_sao_bridge import _FakeRank, _FakeRolloutManager, _payload, _RemoteMethod, _sao_row
@@ -545,7 +545,7 @@ def test_the_default_still_releases_everything_and_restores_both_halves(tmp_path
 def test_the_base_stays_released_without_lora_or_colocation(tmp_path, _local_ray_get) -> None:
     """Full-weight training rewrites the served weights; releasing them is the point."""
     actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), keep_lora_base_resident=True)
-    assert actor._release_tags is None
+    assert actor._weight_publisher.release_tags is None
 
 
 @pytest.mark.unit

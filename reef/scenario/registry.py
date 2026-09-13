@@ -20,9 +20,9 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
 )
 from reef.core.errors import ReefError, UnknownScenario
+from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.runtime.model_config import ModelConfig
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.model_config import archive_model_config, read_model_config, write_model_config

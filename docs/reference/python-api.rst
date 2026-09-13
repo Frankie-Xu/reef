@@ -65,9 +65,9 @@ interface used by recipes and serving. The two sides are independent:
 
 .. code:: python
 
-   from reef.runtime import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
+   from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
 
-The native contracts are abstract base classes in ``reef/runtime/backends.py``.
+The native contracts are abstract base classes in ``reef/runtime/interfaces.py``.
 Implementations inherit the corresponding interface and provide every abstract
 operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
 SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
@@ -82,7 +82,7 @@ Two other extension points have separate names and purposes:
 - ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
   including harness edits. ``RuntimeCandidateBackend`` connects weight updates
   to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
-- ``reef.runtime.inference.InferenceHandler`` executes one buffered or streaming
+- ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
   ``create_app`` accepts the same keyword for an injected handler.
 
@@ -104,8 +104,10 @@ This also applies to repository factories, candidate evaluation plugins, harness
 plugins, and surface capabilities. Implement optional capabilities only when
 supported: adapter weight residency, artifact activation, and request leases
 remain separate interfaces. CI rejects ``typing.Protocol``,
-``typing_extensions.Protocol``, and ``runtime_checkable`` in Reef, recipes,
-examples, and tests; these findings cannot be baselined.
+``typing_extensions.Protocol``, and ``runtime_checkable`` in all first-party
+Python files, including scripts and tutorials; these findings cannot be baselined.
+Third-party, generated result and golden fixture exclusions follow the
+contribution policy.
 
 Recipe
 ------
@@ -324,7 +326,7 @@ local directory for scenario model settings. Configure it to retain those
 settings across restarts even when records and commits use a remote adapter.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
-``reef.runtime.model_config``. ``ModelConfig.from_value(value)`` validates the
+``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
 model override; its ``runtime`` field holds an ``InferenceProxyRuntime``, or
 ``None`` for the recipe default. ``view()`` returns the credential-redacted
 API representation. The type holds no file path and performs no file I/O.
@@ -957,8 +959,8 @@ inherits from the other, and there is no aggregate runtime.
   loads selected weights or adapters, and reports serving versions. It restores
   serving weights without restoring optimizer state.
 * The existing ``RuntimeCandidateBackend`` coordinates both: prepare/train,
-  evaluate, activate or reject, then acknowledge publication after Reef's durable
-  commit. ``ScenarioCommitter`` coordinates rollback across both runtimes and
+  evaluate, activate or reject, delegating scheduling and durable publication
+  acknowledgement to ``RuntimeScheduler``. ``ScenarioCommitter`` coordinates rollback across both runtimes and
   commits the restored artifact before reopening inference.
 
 Weight recipes hold ``training_runtime: TrainingRuntime`` and
@@ -970,9 +972,10 @@ Weight recipes hold ``training_runtime: TrainingRuntime`` and
 
 Training deployment factories return ``(training_runtime, inference_runtime)``;
 inference-only factories return an ``InferenceRuntime``. ``connect_ray_runtime``
-and ``connect_executor_runtimes`` return the same pair.
-``ExecutorTrainingRuntime`` and ``ExecutorInferenceRuntime`` use the existing
-``TrainingGroupHandle`` control connection for their respective operations. That
+and ``connect_executor_runtimes`` in ``reef.service.runtime`` return the same pair.
+``ExecutorTrainingRuntime`` in ``reef.train.runtime`` and
+``ExecutorInferenceRuntime`` in ``reef.inference.runtime`` use the existing
+``CoordinatorClient`` control connection for their respective operations. That
 legacy RPC connection still exposes both training and publication operations;
 it is not a public runtime or a new backend-neutral weight transport.
 
@@ -982,3 +985,13 @@ classes and the ``RayRuntime`` alias are removed. The ``executor_training`` and
 ``ray_training`` config kinds, control RPCs and stored artifact formats remain
 unchanged. Adding another backend combination still requires compatible native
 weight transport and recovery behavior.
+
+``reef.runtime`` is a namespace package without an import facade. Its five modules
+are ``interfaces``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
+``executor/`` contains worker transports. Import the ABCs and shared values from
+``reef.runtime.interfaces`` and the factory registry from
+``reef.runtime.deployment``. Concrete scheduling connections live in their owning
+integration: ``SlimeTrainingRuntime`` in ``reef.train.slime_backend.runtime`` and
+``SGLangInferenceRuntime`` in ``reef.inference.sglang.runtime``. These remain
+distinct from the native ``TrainingBackend``/``InferenceBackend`` pair consumed by
+Reef's coordinator.

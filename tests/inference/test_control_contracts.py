@@ -2,11 +2,16 @@
 
 import pytest
 
-from reef.runtime.control.health import EngineHealthChecks, EngineHealthTarget
-from reef.runtime.control.inference import InferenceEngines, InferenceMonitor, WeightUpdateConnection
-from reef.runtime.control.memory import InferenceMemoryOperations
 from reef.runtime.executor.failure import ExecutorFailureListener
-from reef.runtime.weights.residency import AdapterEngine
+from reef.runtime.interfaces import (
+    AdapterEngine,
+    EngineHealthChecks,
+    EngineHealthTarget,
+    InferenceEngines,
+    InferenceMemoryOperations,
+    InferenceMonitor,
+    WeightUpdateConnection,
+)
 
 
 @pytest.mark.parametrize(

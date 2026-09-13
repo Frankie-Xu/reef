@@ -1,21 +1,31 @@
-"""Coordinator RPC connections shared by training and inference adapters."""
+"""Attach to Reef coordinators through executor RPC or named Ray actors.
+
+Only read-only health/version operations retry after actor replacement.
+Borrowed handles never shut down the remote coordinator.
+"""
 
 from __future__ import annotations
 
 import math
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
 from reef.core.batches import TrainingBatch
-from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntimeError
 from reef.runtime.executor import Executor
+from reef.runtime.executor.failure import ExecutorFailedError
+from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingRuntimeError
+
+DEFAULT_ACTOR_NAME = "reef-train-bridge"
+DEFAULT_NAMESPACE = "reef"
 
 
-class TrainingGroupHandle(ABC):
-    """Train group handle: the transport-independent training backend contract.
+class CoordinatorClient(ABC):
+    """Client contract for Reef coordinator RPCs, shared by both runtimes.
 
-    Legacy transport used by the separate training and inference adapters.
+    The transport is shared by the separate training and inference runtimes.
     It is not a runtime or a recipe-facing interface. Backends keep their
     actor groups and payload formats private.
     """
@@ -58,7 +68,7 @@ class TrainingGroupHandle(ABC):
         return
 
 
-class ExecutorTrainGroupHandle(TrainingGroupHandle):
+class ExecutorCoordinatorClient(CoordinatorClient):
     """Drive a training coordinator through an executor's control RPC.
 
     The coordinator owns any backend-specific distributed training group.
@@ -130,7 +140,7 @@ class ExecutorTrainGroupHandle(TrainingGroupHandle):
         self._executor.shutdown()
 
 
-def training_job_status(handle: TrainingGroupHandle) -> Mapping[str, Any]:
+def training_job_status(handle: CoordinatorClient) -> Mapping[str, Any]:
     health = handle.health()
     if not isinstance(health, Mapping):
         raise TrainingRuntimeError(f"train group handle returned invalid health: {type(health).__name__}")
@@ -189,3 +199,104 @@ def training_job_status(handle: TrainingGroupHandle) -> Mapping[str, Any]:
         "lora_adapters": dict(lora_adapters) if lora_adapters else {},
         "adapter_residency": dict(adapter_residency) if adapter_residency is not None else None,
     }
+
+
+RayRuntimeError = TrainingRuntimeError
+RayCoordinatorClient = CoordinatorClient
+
+
+def _require_ray():
+    """Import Ray lazily so other executors need not install it."""
+    try:
+        import ray
+    except ImportError as exc:
+        raise RayRuntimeError(
+            "remote Ray runtimes require the 'ray' package; install it to connect to a training backend"
+        ) from exc
+    return ray
+
+
+class RemoteRayCoordinatorClient(ExecutorCoordinatorClient):
+    """Attach a non-owning executor to an existing Ray training coordinator."""
+
+    def __init__(self, train_group_actor: Any, *, timeout_s: float = 300.0) -> None:
+        super().__init__(
+            RayExecutor.from_workers((train_group_actor,), owned=False),
+            timeout_s=timeout_s,
+        )
+
+
+class NamedRayCoordinatorClient(RemoteRayCoordinatorClient):
+    """Discover the current coordinator before each RPC, without replaying writes.
+
+    A missing name is retried within the operation's timeout. Once an RPC is
+    submitted, a write's error reaches the caller even if a replacement appears.
+    Only liveness/version reads retry actor loss. Durable training reconciliation
+    decides whether a training operation is replayable.
+    """
+
+    reconnects = True
+
+    def __init__(
+        self, actor_name: str, namespace: str, *, timeout_s: float = 300, health_timeout_s: float = 300
+    ) -> None:
+        if (
+            isinstance(health_timeout_s, bool)
+            or not isinstance(health_timeout_s, (int, float))
+            or not math.isfinite(health_timeout_s)
+            or health_timeout_s <= 0
+        ):
+            raise TrainingRuntimeError("health timeout must be a positive finite number")
+        super().__init__(_require_ray().get_actor(actor_name, namespace=namespace), timeout_s=timeout_s)
+        self._actor_name = actor_name
+        self._namespace = namespace
+        self._closed = False
+        self._health_timeout_s = min(health_timeout_s, timeout_s)
+
+    def _rpc(self, method: str, *args: Any) -> Any:
+        ray = _require_ray()
+        timeout = self._health_timeout_s if method in {"health", "serving_runtime_load_id"} else self._timeout_s
+        deadline = time.monotonic() + timeout
+        while not self._closed:
+            try:
+                actor = ray.get_actor(self._actor_name, namespace=self._namespace)
+            except ValueError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TrainingRuntimeError("training coordinator is unavailable during recovery") from exc
+                time.sleep(min(0.1, remaining))
+                continue
+            executor = RayExecutor.from_workers((actor,), owned=False)
+            try:
+                return executor.rpc(0, method, args=args, timeout=max(0.001, deadline - time.monotonic()))
+            except (ray.exceptions.RayActorError, ExecutorFailedError):
+                if method not in {"health", "serving_runtime_load_id"} or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            finally:
+                executor.shutdown()
+        raise TrainingRuntimeError("training coordinator connection is closed")
+
+    def shutdown(self) -> None:
+        self._closed = True
+        super().shutdown()
+
+
+def connect_ray_coordinator(
+    *,
+    actor_name: str = DEFAULT_ACTOR_NAME,
+    namespace: str = DEFAULT_NAMESPACE,
+    ray_address: str | None = None,
+    inference_timeout_s: float = 300.0,
+    train_timeout_s: float | None = None,
+) -> NamedRayCoordinatorClient:
+    """Connect to the current named coordinator, borrowing its workers."""
+    ray = _require_ray()
+    if not ray.is_initialized():
+        ray.init(address=ray_address or "auto", namespace=namespace)
+    return NamedRayCoordinatorClient(
+        actor_name,
+        namespace,
+        timeout_s=train_timeout_s if train_timeout_s is not None else inference_timeout_s,
+        health_timeout_s=inference_timeout_s,
+    )

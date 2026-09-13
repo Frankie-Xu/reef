@@ -1,42 +1,39 @@
-"""Backend-neutral training runtime and executor-backed configuration."""
+"""Generic training runtime over Reef's backend-neutral coordinator client.
+
+Native integrations choose their connection and retain their own model code.
+This runtime prepares scenario jobs and returns exported checkpoint candidates.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
-from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 from reef.core.batches import TrainingBatch, policy_samples
-from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.adapters.config import RuntimeConnectionConfig
-from reef.runtime.adapters.http import HttpInferenceHandler
-from reef.runtime.adapters.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, training_job_status
-from reef.runtime.base import (
-    InferenceRuntime,
+from reef.runtime.executor.connection import CoordinatorClient, training_job_status
+from reef.runtime.interfaces import (
+    CandidateTrainingDeferred,
+    ModelCandidate,
     PreparedTrainingStep,
+    StaleCandidate,
     TrainingJobResult,
     TrainingRuntime,
     TrainingRuntimeError,
 )
-from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.inference import InferenceHandler
-from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
-from reef.runtime.weights.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
 
 class ExecutorTrainingRuntime(TrainingRuntime):
     """Train and export checkpoints through a supplied worker control connection."""
 
-    def __init__(self, train_group_handle: TrainingGroupHandle, *, max_staleness: int = 0) -> None:
+    def __init__(self, train_group_handle: CoordinatorClient, *, max_staleness: int = 0) -> None:
         if not isinstance(max_staleness, int) or isinstance(max_staleness, bool) or max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
         self._train_group_handle = train_group_handle
         self._max_staleness = max_staleness
 
     @property
-    def train_group_handle(self) -> TrainingGroupHandle:
+    def train_group_handle(self) -> CoordinatorClient:
         return self._train_group_handle
 
     @property
@@ -161,136 +158,3 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         if not isinstance(result, TrainingJobResult):
             raise TrainingRuntimeError(f"train group handle returned invalid training result: {type(result).__name__}")
         return result
-
-
-def connect_executor_runtimes(
-    *,
-    train_group_handle: TrainingGroupHandle,
-    inference: InferenceRuntime | None = None,
-    inference_url: str | None = None,
-    model_path: str = "",
-    inference_timeout_s: float = 300.0,
-    max_staleness: int = 0,
-    inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
-    inference_handler_config: Mapping[str, Any] | None = None,
-) -> tuple[TrainingRuntime, InferenceRuntime]:
-    """Assemble independent components over the existing deployment connection."""
-    from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
-
-    if inference is not None and inference_url is not None:
-        raise ValueError("pass inference or inference_url, not both")
-    training = ExecutorTrainingRuntime(train_group_handle, max_staleness=max_staleness)
-    if inference is None:
-        inference = ExecutorInferenceRuntime(
-            control=train_group_handle,
-            inference_url=inference_url,
-            model_path=model_path,
-            inference_timeout_s=inference_timeout_s,
-            inference_handler_factory=inference_handler_factory,
-            inference_handler_config=inference_handler_config,
-        )
-    return training, inference
-
-
-def _executor_config(value: Mapping[str, Any]) -> ExecutorConfig:
-    workers = value.get("workers", ())
-    if not isinstance(workers, Sequence) or isinstance(workers, (str, bytes)):
-        raise RuntimeConfigError("runtime.executor.workers must be a sequence of worker specifications")
-    specs = []
-    for worker in workers:
-        if isinstance(worker, WorkerSpec):
-            specs.append(worker)
-        elif isinstance(worker, Mapping):
-            try:
-                specs.append(WorkerSpec(**dict(worker)))
-            except (TypeError, ValueError) as exc:
-                raise RuntimeConfigError(f"invalid runtime.executor worker: {exc}") from exc
-        else:
-            raise RuntimeConfigError("runtime.executor.workers entries must be WorkerSpec objects or mappings")
-    try:
-        return ExecutorConfig(
-            backend=value.get("backend", "auto"),
-            workers=tuple(specs),
-            options=value.get("options", {}),
-        )
-    except (TypeError, ValueError) as exc:
-        raise RuntimeConfigError(f"invalid runtime.executor configuration: {exc}") from exc
-
-
-@dataclass(frozen=True)
-class ExecutorRuntimeConfig(RuntimeConnectionConfig):
-    coordinator_rank: int = config_option(0, help="Rank of the training coordinator worker.")
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.coordinator_rank < 0:
-            raise ValueError("runtime.coordinator_rank must be non-negative")
-
-
-@register_runtime_kind
-class ExecutorTrainingRuntimeFactory(RuntimeFactory):
-    """Create a training coordinator using a configured executor.
-
-    The executor entry accepts an existing Executor, an ExecutorConfig, or a
-    mapping with backend, workers, and options. The worker at coordinator_rank
-    (default 0) implements TrainingGroupHandle's methods; it may manage its
-    own model-parallel worker group.
-    """
-
-    kind = "executor_training"
-
-    def config_type(self) -> type:
-        return ExecutorRuntimeConfig
-
-    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
-        injected = {
-            key: config[key] for key in ("executor", "inference", "inference_handler_factory") if key in config
-        }
-        values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
-        return {**values, **injected}
-
-    def __call__(
-        self,
-        config: Mapping[str, Any],
-        model_path: str,
-        recipe_config: Mapping[str, Any],
-        environ: Mapping[str, str],
-    ) -> tuple[TrainingRuntime, InferenceRuntime]:
-        value = config.get("executor")
-        if isinstance(value, Mapping):
-            value = _executor_config(value)
-        created = False
-        if isinstance(value, ExecutorConfig):
-            executor = Executor.create(value)
-            created = True
-        elif isinstance(value, Executor):
-            executor = value
-        else:
-            raise RuntimeConfigError("runtime.executor must be an Executor, ExecutorConfig, or configuration mapping")
-        try:
-            handle = ExecutorTrainGroupHandle(
-                executor,
-                rank=config.get("coordinator_rank", 0),
-                timeout_s=(
-                    config["train_timeout_s"]
-                    if config.get("train_timeout_s") is not None
-                    else config.get("inference_timeout_s", 300.0)
-                ),
-            )
-            kwargs: dict[str, Any] = {"train_group_handle": handle, "model_path": model_path}
-            for key in (
-                "inference",
-                "inference_url",
-                "inference_timeout_s",
-                "max_staleness",
-                "inference_handler_factory",
-                "inference_handler_config",
-            ):
-                if key in config:
-                    kwargs[key] = config[key]
-            return connect_executor_runtimes(**kwargs)
-        except BaseException:
-            if created:
-                with suppress(Exception):
-                    executor.shutdown()
-            raise

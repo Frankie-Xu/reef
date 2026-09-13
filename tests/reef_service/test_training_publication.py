@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from reef.runtime.training_job import marker as markers
-from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
-from reef.runtime.weights.residency import AdapterCapacityExhausted, AdapterEvictionFailed
+from reef.runtime import recovery as markers
+from reef.runtime.publication import (
+    AdapterCapacityExhausted,
+    AdapterEvictionFailed,
+    TrainingPublication,
+    WeightPublisher,
+)
+from reef.runtime.recovery import FileTrainingJobStore
 
 
 class MemoryPublisher(WeightPublisher):
@@ -69,7 +74,7 @@ def publication(tmp_path):
         },
     )
     publisher = MemoryPublisher(path)
-    return TrainingPublication(path, publisher), publisher, path
+    return TrainingPublication(FileTrainingJobStore(path), publisher), publisher, path
 
 
 def test_publication_waits_for_durable_head_and_replays_without_transfer(publication):
@@ -121,7 +126,7 @@ def test_failed_publication_retries_at_the_durable_stage(publication, failure, s
     publisher.fail = None
     publisher.events.clear()
     # A new coordinator has no process-local transaction state to rely on.
-    recovered = TrainingPublication(path, publisher)
+    recovered = TrainingPublication(FileTrainingJobStore(path), publisher)
     recovered.publish("job-1")
     names = [name for name, _ in publisher.events]
     assert names == (["recover", "pause", "full-transfer"] if status == "UPDATING_WEIGHTS" else ["pause", "transfer"])
@@ -139,7 +144,7 @@ def test_resume_failure_retries_without_republishing(publication):
     assert marker["status"] == "HEAD_COMMITTED" and marker["commit_acknowledged"]
     publisher.fail = None
     publisher.events.clear()
-    TrainingPublication(path, publisher).acknowledge("job-1")
+    TrainingPublication(FileTrainingJobStore(path), publisher).acknowledge("job-1")
     assert publisher.events == [("resume", "HEAD_COMMITTED")]
 
 
@@ -189,7 +194,7 @@ def test_rejection_persists_before_restoration_and_retries(publication):
     assert publisher.events == [("restore", "REJECTING")]
     assert markers.read_marker(path)["status"] == "REJECTING"
     publisher.fail = None
-    TrainingPublication(path, publisher).reject("job-1")
+    TrainingPublication(FileTrainingJobStore(path), publisher).reject("job-1")
     assert markers.read_marker(path)["status"] == "REJECTED"
     count = len(publisher.events)
     coordinator.reject("job-1")
@@ -238,7 +243,7 @@ def test_capacity_refusal_does_not_terminate_unrelated_adapters(publication, err
             raise error("no capacity")
 
     publisher = CapacityPublisher(path)
-    coordinator = TrainingPublication(path, publisher)
+    coordinator = TrainingPublication(FileTrainingJobStore(path), publisher)
     with pytest.raises(error):
         coordinator.publish("job-1")
     assert any(name == "abort" for name, _ in publisher.events) == abort
@@ -279,7 +284,7 @@ def test_failed_completion_record_retries_only_resume(publication, monkeypatch):
     # The durable head already authorizes serving; repeating its resume is safe.
     assert not publisher.paused
     publisher.events.clear()
-    TrainingPublication(path, publisher).acknowledge("job-1")
+    TrainingPublication(FileTrainingJobStore(path), publisher).acknowledge("job-1")
     assert publisher.events == [("resume", "HEAD_COMMITTED")]
     assert markers.read_marker(path)["status"] == "COMPLETE"
 
@@ -337,7 +342,7 @@ def test_republication_refuses_trainer_state_that_may_contain_a_candidate(public
 def test_republication_without_a_job_resumes_verified_weights(publication, configured_path):
     _, publisher, path = publication
     path.unlink()
-    coordinator = TrainingPublication(path if configured_path else None, publisher)
+    coordinator = TrainingPublication(FileTrainingJobStore(path) if configured_path else None, publisher)
     assert coordinator.republish("engine:1") == "engine:1"
     assert [name for name, _ in publisher.events] == ["pause", "recover", "republish", "resume"]
     assert not path.exists()

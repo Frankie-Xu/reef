@@ -24,7 +24,7 @@ def test_configured_handler_rejects_a_function() -> None:
     from reef.train.slime_backend.launch import _configured_inference_handler_factory
 
     with pytest.raises(ValueError, match="must inherit InferenceHandler"):
-        _configured_inference_handler_factory("reef.runtime.adapters.http.provider_request_headers")
+        _configured_inference_handler_factory("reef.inference.http.provider_request_headers")
 
 
 class _Process:

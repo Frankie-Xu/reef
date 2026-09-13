@@ -15,7 +15,7 @@ import pytest
 import yaml
 from reef_service._training_deployment import LocalDeployment
 
-from reef.runtime.registry import RuntimeConfigError
+from reef.runtime.deployment import RuntimeConfigError
 from reef.service.assembly import _connect_training_runtime, _training_recipe
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
@@ -106,7 +106,7 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
 def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
     from reef_service._training_deployment import runtime_factory
 
-    from reef.runtime.adapters.http import InferenceProxyRuntime
+    from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(base_url="http://unused")
     closed = []

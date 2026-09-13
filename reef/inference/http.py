@@ -15,9 +15,8 @@ from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
-from reef.runtime.base import InferenceRuntime
-from reef.runtime.inference import InferenceHandler, InferenceStream, UpstreamStatusError
-from reef.runtime.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string, register_runtime_kind
+from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
 
 
 class RequestHeadersFactory(ABC):
@@ -305,7 +304,6 @@ class InferenceProxyConfig:
             raise ValueError("runtime.timeout_s must be positive")
 
 
-@register_runtime_kind
 class InferenceProxyRuntimeFactory(RuntimeFactory):
     """Build an :class:`InferenceProxyRuntime` from a runtime config section."""
 

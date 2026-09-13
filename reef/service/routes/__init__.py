@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.inference import register_inference_routes
 from reef.service.routes.records import register_record_routes

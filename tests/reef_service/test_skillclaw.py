@@ -18,10 +18,10 @@ import yaml
 
 from reef.core import AgentRecord, RequestType
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.http import InferenceProxyRuntime
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -442,7 +442,7 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
 
 
 def _stub_backend() -> Any:
-    from reef.runtime.inference import InferenceHandler
+    from reef.runtime.interfaces import InferenceHandler
 
     class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):

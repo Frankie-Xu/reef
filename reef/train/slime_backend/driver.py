@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.config import config_value
-from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.deployment import CoordinatorConfig
+from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.algos.registry import loss_family_refs
 from reef.train.deployment import TrainingDeploymentPlan
 from reef.train.slime_backend.launch import driver_arguments

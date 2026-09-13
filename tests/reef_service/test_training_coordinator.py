@@ -7,10 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.backends import InferenceBackend, TrainingBackend, TrainingContext, TrainingCoordinationConfig
-from reef.runtime.training_job.coordinator import TrainingCoordinator
-from reef.runtime.training_job.execution import PreparedTrainingJob, TrainingCheckpoint, TrainingMetrics
-from reef.runtime.training_job.marker import marker_path, read_marker
+from reef.runtime.interfaces import (
+    InferenceBackend,
+    PreparedTrainingJob,
+    TrainingBackend,
+    TrainingCheckpoint,
+    TrainingContext,
+    TrainingCoordinationConfig,
+    TrainingMetrics,
+)
+from reef.runtime.recovery import marker_path, read_marker
+from reef.runtime.scheduler import TrainingCoordinator
 
 
 class Receiver(InferenceBackend):
@@ -248,7 +255,7 @@ def test_reef_selects_and_persists_target_before_partial_transfer(tmp_path):
     assert inference.paused
 
 
-def test_sender_cannot_choose_a_different_published_identity(tmp_path):
+def test_sender_cannot_choose_a_different_published_identity(tmp_path, monkeypatch):
     coordinator, training, inference, _ = build(tmp_path)
     result = coordinator.execute_training_job({"rollout_id": 0, "expected_runtime_load_id": "inc:1"})
 
@@ -258,7 +265,7 @@ def test_sender_cannot_choose_a_different_published_identity(tmp_path):
             return "inc:99"
 
     wrong = WrongSender(tmp_path, inference, training.events)
-    coordinator._training = wrong
+    monkeypatch.setattr(training, "send_weights", wrong.send_weights)
     with pytest.raises(RuntimeError, match="expected 'inc:2'"):
         coordinator.update_serving_weights(result.training_job_id)
     assert coordinator.serving_runtime_load_id() == "inc:1"

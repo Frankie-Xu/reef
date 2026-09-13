@@ -11,9 +11,15 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.dispatcher import Dispatcher
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult
-from reef.runtime.inference import InferenceHandler
-from reef.runtime.weights.candidates import CandidateTrainingDeferred, StaleCandidate
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    CandidateTrainingDeferred,
+    InferenceHandler,
+    ModelCandidate,
+    PreparedTrainingStep,
+    StaleCandidate,
+    TrainingJobResult,
+)
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 

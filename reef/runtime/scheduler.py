@@ -1,30 +1,406 @@
-"""Reef scheduling and publication ordering across independent backend contracts.
-
-The scheduler coordinates training execution, inference admission and recovery
-against the durable scenario head. It never executes inference requests or
-implements a backend: each operation crosses one of the two runtime contracts.
-The remote training-job coordinator owns worker operations and their persisted
-journal; this scheduler completes that journal's handshake with Reef commits.
-"""
+"""Scenario scheduling, serialized training execution, admission, and resource handoffs."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from contextlib import suppress
-from dataclasses import replace
-from typing import Any
+import hashlib
+import json
+import sys
+import traceback
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, replace
+from threading import Lock, RLock
+from typing import Any, Literal
 
+from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import TrainingBatch
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.base import (
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    CandidateTrainingDeferred,
+    InferenceBackend,
+    InferenceMemoryOperations,
     InferenceRuntime,
+    ModelCandidate,
+    PreparedTrainingJob,
     PreparedTrainingStep,
     RuntimeContractError,
+    ScenarioHistoryStore,
+    StaleCandidate,
+    TrainingBackend,
+    TrainingCheckpoint,
+    TrainingJobBackend,
     TrainingJobResult,
+    TrainingJobState,
+    TrainingJobStore,
+    TrainingMetrics,
     TrainingRuntime,
     TrainingRuntimeError,
 )
-from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
+from reef.runtime.publication import BackendWeightPublisher, TrainingPublication
+from reef.runtime.recovery import (
+    FileTrainingJobStore,
+    TrainingRecovery,
+    marker_checkpoint_result,
+    marker_disposition,
+    marker_path,
+    marker_result,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _StalenessDecision:
+    action: Literal["admit", "drop"]
+    metrics: Mapping[str, Any]
+
+
+def _source_agent_record_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    samples = payload.get("samples")
+    if not isinstance(samples, Sequence) or isinstance(samples, str | bytes):
+        return ()
+    return tuple(
+        str(row[0]) for row in samples if isinstance(row, Sequence) and not isinstance(row, str | bytes) and row
+    )
+
+
+def _producing_runtime_load_ids(payload: Mapping[str, Any]) -> Sequence[Any]:
+    versions = payload.get("producing_runtime_load_ids")
+    if not isinstance(versions, Sequence) or isinstance(versions, str | bytes) or not versions:
+        raise ValueError("bounded staleness admission requires producing_runtime_load_ids")
+    source_ids = _source_agent_record_ids(payload)
+    if len(versions) != len(source_ids):
+        raise ValueError(
+            "bounded staleness admission requires one producing runtime load ID "
+            f"per sample: {len(versions)} versions for {len(source_ids)} samples"
+        )
+    return versions
+
+
+def _admission_runtime_load_id_groups(payload: Mapping[str, Any]) -> list[list[Any]]:
+    """Return each sample's exact span versions for bounded admission."""
+    versions = _producing_runtime_load_ids(payload)
+    raw_groups = payload.get("producing_runtime_load_spans")
+    if raw_groups is None:
+        return [[version] for version in versions]
+    if not isinstance(raw_groups, Sequence) or isinstance(raw_groups, str | bytes) or len(raw_groups) != len(versions):
+        raise ValueError("producing_runtime_load_spans must contain one span list per sample")
+    samples = payload["samples"]
+    groups: list[list[Any]] = []
+    for sample_index, (raw_spans, scalar) in enumerate(zip(raw_groups, versions, strict=True)):
+        if not raw_spans:
+            groups.append([scalar])
+            continue
+        row = samples[sample_index]
+        response_length = len(row[2]) if isinstance(row, Sequence) and len(row) > 2 else None
+        spans = parse_runtime_load_spans(
+            raw_spans,
+            field_name=f"producing_runtime_load_spans[{sample_index}]",
+            response_length=response_length,
+        )
+        group = [span.runtime_load_id for span in spans]
+        span_versions = set(group)
+        if scalar is not None and span_versions != {scalar}:
+            raise ValueError(f"producing runtime load ID for sample {sample_index} disagrees with its token spans")
+        groups.append(group)
+    return groups
+
+
+def _stale_drop_decision(
+    payload: Mapping[str, Any],
+    *,
+    serving_runtime_load_id: str,
+    producing_runtime_load_ids: Sequence[Any],
+    reason: str,
+    policy_lags: Sequence[int] = (),
+) -> _StalenessDecision:
+    source_ids = _source_agent_record_ids(payload)
+    metrics: dict[str, Any] = {
+        "staleness/samples_dropped": len(source_ids) or len(producing_runtime_load_ids),
+        "staleness/drop_reason": reason,
+        "staleness/source_agent_record_ids": list(source_ids),
+        "staleness/producing_runtime_load_ids": [
+            None if version is None else str(version) for version in producing_runtime_load_ids
+        ],
+        "staleness/serving_runtime_load_id": serving_runtime_load_id,
+    }
+    if policy_lags:
+        metrics["staleness/drop_policy_lags"] = list(policy_lags)
+    return _StalenessDecision(action="drop", metrics=metrics)
+
+
+def _staleness_admission(
+    payload: Mapping[str, Any],
+    *,
+    serving_runtime_load_id: str,
+    max_staleness: int,
+) -> _StalenessDecision:
+    from reef.runtime.interfaces import RuntimeLoadId
+
+    try:
+        serving = RuntimeLoadId.parse(serving_runtime_load_id)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"cannot classify staleness from serving runtime load ID {serving_runtime_load_id!r}"
+        ) from exc
+    if str(serving) != serving_runtime_load_id:
+        raise RuntimeError(f"cannot classify staleness from non-canonical serving version {serving_runtime_load_id!r}")
+    producing_groups = _admission_runtime_load_id_groups(payload)
+    producing_versions = [version for group in producing_groups for version in group]
+
+    lags: list[int] = []
+    sample_lags: list[int] = []
+
+    def drop(reason: str) -> _StalenessDecision:
+        return _stale_drop_decision(
+            payload,
+            serving_runtime_load_id=serving_runtime_load_id,
+            producing_runtime_load_ids=producing_versions,
+            reason=reason,
+            policy_lags=lags,
+        )
+
+    for group in producing_groups:
+        group_lags: list[int] = []
+        previous_sequence: int | None = None
+        for value in group:
+            if not isinstance(value, str) or not value:
+                return drop("missing_producing_runtime_load_id")
+            try:
+                producing = RuntimeLoadId.parse(value)
+            except (TypeError, ValueError):
+                return drop("malformed_producing_runtime_load_id")
+            if str(producing) != value:
+                return drop("malformed_producing_runtime_load_id")
+            if producing.incarnation != serving.incarnation:
+                return drop("cross_incarnation")
+            if previous_sequence is not None and producing.sequence <= previous_sequence:
+                return drop("non_monotonic_producing_runtime_load_ids")
+            previous_sequence = producing.sequence
+            lag = serving.sequence - producing.sequence
+            lags.append(lag)
+            group_lags.append(lag)
+            if lag < 0:
+                return drop("future_producing_runtime_load_id")
+            if lag > max_staleness:
+                return drop("policy_lag_exceeded")
+        sample_lags.append(max(group_lags))
+    return _StalenessDecision(
+        action="admit",
+        metrics={
+            "staleness/samples_fresh": sum(lag == 0 for lag in sample_lags),
+            "staleness/samples_admitted_stale": sum(lag > 0 for lag in sample_lags),
+        },
+    )
+
+
+def _scenario_staleness_admission(
+    payload: Mapping[str, Any],
+    *,
+    scenario: str,
+    history: ScenarioHistoryStore,
+    serving_runtime_load_id: str,
+    max_staleness: int,
+) -> _StalenessDecision:
+    """Bounded admission against one scenario's own publication history.
+
+    The engine's runtime load ID advances on every scenario's publication, so
+    the global sequence gap overstates this scenario's staleness. A sample's
+    lag is the number of *this* scenario's publications that postdate the
+    version its tokens were produced under.
+    """
+    from reef.runtime.interfaces import RuntimeLoadId
+
+    if uses_staleness_admission(payload):
+        producing_groups = _admission_runtime_load_id_groups(payload)
+    else:
+        expected = payload.get("expected_runtime_load_id")
+        producing_groups = [[expected]]
+    producing_versions = [version for group in producing_groups for version in group]
+    lags: list[int] = []
+    sample_lags: list[int] = []
+
+    def drop(reason: str) -> _StalenessDecision:
+        return _stale_drop_decision(
+            payload,
+            serving_runtime_load_id=serving_runtime_load_id,
+            producing_runtime_load_ids=producing_versions,
+            reason=reason,
+            policy_lags=lags,
+        )
+
+    for group in producing_groups:
+        group_lags: list[int] = []
+        for value in group:
+            if not isinstance(value, str) or not value:
+                return drop("missing_producing_runtime_load_id")
+            try:
+                producing = RuntimeLoadId.parse(value)
+            except (TypeError, ValueError):
+                return drop("malformed_producing_runtime_load_id")
+            lag = history.lag(scenario, producing)
+            if lag is None:
+                return drop("cross_incarnation")
+            lags.append(lag)
+            group_lags.append(lag)
+            if lag > max_staleness:
+                return drop("policy_lag_exceeded")
+        sample_lags.append(max(group_lags))
+    return _StalenessDecision(
+        action="admit",
+        metrics={
+            "staleness/samples_fresh": sum(lag == 0 for lag in sample_lags),
+            "staleness/samples_admitted_stale": sum(lag > 0 for lag in sample_lags),
+            "staleness/scenario": scenario,
+        },
+    )
+
+
+def max_staleness(payload: Mapping[str, Any]) -> int:
+    value = payload.get("max_staleness", 0)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("training job max_staleness must be a non-negative integer")
+    return value
+
+
+def uses_staleness_admission(payload: Mapping[str, Any]) -> bool:
+    """Whether the serving version is an admission fence, not job identity."""
+    return max_staleness(payload) > 0 or "producing_runtime_load_ids" in payload
+
+
+class InferenceMemory:
+    """Pair releases and resumes, including cold startup and partial failures.
+
+    Repeating an acknowledged operation is safe. A failed operation can have
+    changed only part of an engine, so its state remains uncertain until the
+    owning deployment replaces that engine.
+    """
+
+    def __init__(self, operations: InferenceMemoryOperations, regions: Sequence[str]) -> None:
+        self._operations = operations
+        self._regions = tuple(regions)
+        self._released: set[str] = set()
+        self._uncertain = False
+        self._lock = RLock()
+
+    def _selection(self, regions: Sequence[str] | None) -> tuple[str, ...]:
+        if self._uncertain:
+            raise RuntimeError("inference memory state is uncertain; replace the engine before reuse")
+        selected = self._regions if regions is None else tuple(dict.fromkeys(regions))
+        if unknown := set(selected).difference(self._regions):
+            raise ValueError(f"unknown inference memory regions: {sorted(unknown)}")
+        return selected
+
+    def release(self, regions: Sequence[str] | None = None) -> None:
+        with self._lock:
+            selected = tuple(region for region in self._selection(regions) if region not in self._released)
+            if not selected:
+                return
+            try:
+                self._operations.release(selected)
+            except BaseException:
+                self._uncertain = True
+                raise
+            self._released.update(selected)
+
+    def resume(self, regions: Sequence[str] | None = None) -> None:
+        with self._lock:
+            selected = tuple(region for region in self._selection(regions) if region in self._released)
+            if not selected:
+                return
+            try:
+                self._operations.resume(selected)
+            except BaseException:
+                self._uncertain = True
+                raise
+            self._released.difference_update(selected)
+
+
+def training_job_id(payload: Mapping[str, Any]) -> str:
+    """Preserve the retry-stable identity of the shared training payload."""
+    identity = dict(payload)
+    identity.pop("max_staleness", None)
+    if uses_staleness_admission(payload):
+        # A newer admission fence on retry must not repeat an optimizer step.
+        identity.pop("expected_runtime_load_id", None)
+    encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class TrainingExecution:
+    """Own retry classification, RUNNING/CHECKPOINT transitions and train ordering.
+
+    The caller serializes execution with publication and shutdown. Replay never
+    prepares a backend job. RUNNING is intentionally ambiguous after a failure:
+    Reef cannot infer whether an optimizer stepped, so automatic retry refuses.
+    """
+
+    def __init__(self, store: TrainingJobStore | None, backend: TrainingJobBackend, state: TrainingJobState) -> None:
+        self._store = store
+        self._backend = backend
+        self._state = state
+
+    def recover(self) -> dict[str, Any] | None:
+        """Read restart state without guessing whether an optimizer step completed."""
+        marker = self._store.read() if self._store is not None else None
+        if marker is not None and marker["status"] == "RUNNING":
+            raise RuntimeError(f"ambiguous training job {marker['job_id']}")
+        return marker
+
+    def execute(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        job_id = training_job_id(payload)
+        rollout_id = payload.get("rollout_id")
+        if not isinstance(rollout_id, int) or isinstance(rollout_id, bool) or rollout_id < 0:
+            raise ValueError("training job rollout_id must be non-negative")
+        if self._store is None:
+            raise RuntimeError("training job checkpoint path is not configured")
+        marker = self._store.read()
+        disposition = marker_disposition(marker, job_id)
+        if disposition == "conflict":
+            if marker is None:
+                raise RuntimeError("conflicting training disposition has no marker")
+            raise RuntimeError(f"training marker is {marker['status']}; operator recovery required")
+        if disposition != "fresh":
+            if marker is None:
+                raise RuntimeError("replayed training disposition has no marker")
+            if marker["status"] == "COMPLETE":
+                return marker_result(marker)
+            return marker_checkpoint_result(marker)
+        with self._backend.prepare(payload, job_id=job_id, rollout_id=rollout_id, prior_marker=marker) as prepared:
+            if isinstance(prepared, TrainingJobResult):
+                if prepared.outcome not in {"stale", "storage_blocked"}:
+                    raise RuntimeError("training preparation may only return stale or storage_blocked")
+                return prepared
+            checkpoint = prepared.checkpoint
+            running: dict[str, Any] = {"status": "RUNNING", "job_id": job_id, "rollout_id": checkpoint.rollout_id}
+            parent_runtime_load_id = payload.get("expected_runtime_load_id")
+            if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
+                running["parent_runtime_load_id"] = parent_runtime_load_id
+            if checkpoint.scenario is not None:
+                running.update(scenario=checkpoint.scenario, scenario_step=checkpoint.scenario_step)
+            self._store.write(running)
+            self._state.phase = "training"
+            try:
+                metrics = prepared.train()
+                self._state.phase = "checkpointing"
+                prepared.save_checkpoint()
+                if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
+                    raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
+                # Replay must see all telemetry with the checkpoint, even if
+                # the process dies immediately after this transition.
+                updates: dict[str, Any] = {"checkpoint_path": str(checkpoint.path)}
+                if metrics.durable:
+                    updates["metrics"] = dict(metrics.durable)
+                if metrics.training:
+                    updates["train_metrics"] = dict(metrics.training)
+                self._store.transition(running, "CHECKPOINT", **updates)
+            except BaseException:
+                self._state.phase = "training_failed" if self._state.phase == "training" else "checkpoint_failed"
+                # Later retries replace the RPC error; retain the original
+                # worker/checkpoint failure in the coordinator's process log.
+                traceback.print_exc(file=sys.stderr)
+                raise
+            return marker_checkpoint_result(running)
+        raise RuntimeError("training preparation suppressed an execution failure")
 
 
 class RuntimeScheduler:
@@ -249,4 +625,220 @@ class RuntimeScheduler:
         return result
 
 
-__all__ = ["RuntimeScheduler"]
+class TrainingCoordinator:
+    """Serialize backend jobs and their publication behind Reef's commit barrier."""
+
+    def __init__(self, training: TrainingBackend, inference: InferenceBackend, *, owns_training: bool = True) -> None:
+        self._training = training
+        self._owns_training = owns_training
+        self._context = training.context
+        self._config = training.config
+        path = marker_path(self._config.save_hf_template) if self._config.save_hf_template is not None else None
+        self._store = FileTrainingJobStore(path) if path is not None else None
+        state = TrainingJobState()
+        self._weight_publisher = BackendWeightPublisher(training, inference, state, self._store)
+        self._publication = TrainingPublication(self._store, self._weight_publisher, state)
+        self._execution = TrainingExecution(self._store, _ScheduledJobBackend(self), state)
+        self._closed = False
+        self._completed_train_steps = 0
+        self._last_train_rollout_id: int | None = None
+        self._last_train_metrics: dict[str, Any] = {}
+        self._operation_lock = Lock()
+        self._training.start()
+        self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(
+            self._execution.recover()
+        )
+
+    def prepare_training_step(
+        self, batch: Any, step_preparer: str, algorithm_state: Mapping[str, Any]
+    ) -> PreparedTrainingStep:
+        return self._training.prepare_training_step(batch, step_preparer, algorithm_state)
+
+    def shutdown(self) -> None:
+        """Close training workers; deployment ownership closes inference separately."""
+        with self._operation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._publication.phase = "stopped"
+            if self._owns_training:
+                self._training.close()
+
+    def health(self) -> dict[str, Any]:
+        """Return a lightweight liveness marker for container health checks."""
+        self._training.check_health()
+        training_job: dict[str, Any] = {
+            "deferred_weight_update": self._config.save_hf_template is not None,
+            "status": "COMPLETE" if self._config.save_hf_template is None else "IDLE",
+        }
+        if self._store is not None and (marker := self._store.read()) is not None:
+            training_job.update(
+                status=marker["status"],
+                training_job_id=marker["job_id"],
+                # Reef reasons in scenario steps; in per-scenario mode the
+                # marker's rollout id is the bridge-global checkpoint index.
+                rollout_id=marker.get("scenario_step", marker["rollout_id"]),
+                runtime_load_id=marker.get("runtime_load_id"),
+                commit_acknowledged=marker.get("commit_acknowledged", False),
+            )
+            if "scenario" in marker:
+                training_job["scenario"] = marker["scenario"]
+        ok = self._publication.phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed", "stopped"}
+        return {
+            "ok": ok,
+            # A publication failure with a durable UPDATING_WEIGHTS marker is
+            # replayable in place: ``update_serving_weights`` recovers the
+            # engines and republishes from the checkpoint. The coordinator decides
+            # which failures are retryable so callers never re-derive it from
+            # phase and marker.
+            "recoverable": not ok
+            and self._publication.phase == "weight_sync_failed"
+            and training_job.get("status") == "UPDATING_WEIGHTS",
+            "start_rollout_id": self._context.next_rollout_id,
+            "phase": self._publication.phase,
+            "colocate": self._config.colocate,
+            # Where the serving engines answer; Reef dials this when the
+            # deployment leaves ``reef.inference_url`` unset.
+            "inference_url": self._inference_url,
+            "lora_adapter": None,
+            "lora_mode": "scenario" if self._config.lora else None,
+            "lora_adapters": {} if self._context.history is None else self._context.history.status(),
+            "adapter_residency": (
+                None if self._weight_publisher.residency is None else self._weight_publisher.residency.status()
+            ),
+            "completed_train_steps": self._completed_train_steps,
+            "last_train_rollout_id": self._last_train_rollout_id,
+            "last_train_metrics": dict(self._last_train_metrics),
+            "training_job": training_job,
+        }
+
+    def start_rollout_id(self) -> int:
+        return self._context.next_rollout_id
+
+    def republish_serving(self) -> str:
+        """Recover serving actors and republish unchanged weights in place.
+
+        This path is for an inference-engine replacement, not a training step.
+        Keep the current token because the checkpoint/model tensors have not
+        changed; the next optimizer-backed publication advances it normally.
+        """
+        with self._operation_lock:
+            return self._publication.republish(self._context.runtime_load_id)
+
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        """Delegate job replay, train ordering and checkpoint recording to Reef."""
+        if self._config.save_hf_template is None:
+            raise RuntimeError("training checkpoint path is not configured")
+        with self._operation_lock:
+            return self._execution.execute(payload)
+
+    def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
+        """Delegate durable publication ordering to Reef's shared coordinator."""
+        with self._operation_lock:
+            publication = self._publication.publish(training_job_id)
+            marker = publication.marker
+            if publication.published:
+                rollout_id = int(marker["rollout_id"])
+                self._context.next_rollout_id = max(self._context.next_rollout_id, rollout_id + 1)
+                self._completed_train_steps += 1
+                self._last_train_rollout_id = rollout_id
+                recorded_train_metrics = marker.get("train_metrics")
+                self._last_train_metrics = (
+                    dict(recorded_train_metrics) if isinstance(recorded_train_metrics, Mapping) else {}
+                )
+            return marker_result(marker)
+
+    def reject_training_candidate(self, training_job_id: str) -> None:
+        """Finish a checkpointed job without changing the serving weights."""
+        with self._operation_lock:
+            marker = self._publication.reject(training_job_id)
+            self._context.next_rollout_id = max(self._context.next_rollout_id, int(marker["rollout_id"]) + 1)
+
+    def acknowledge_training_commit(self, training_job_id: str) -> None:
+        """Resume requests only through Reef's durable commit gate."""
+        with self._operation_lock:
+            self._publication.acknowledge(training_job_id)
+
+    def serving_runtime_load_id(self) -> str:
+        """Return the last successfully published serving-runtime load ID.
+
+        Failed swaps can consume a backend counter before raising, so this
+        caches only completed publications. Reef recovery uses the value to
+        reconcile the serving engine with its recovered head.
+        """
+        return self._context.runtime_load_id
+
+
+class _ScheduledJobBackend(TrainingJobBackend):
+    """Apply Reef's resource barrier only after a backend admits the job."""
+
+    def __init__(self, coordinator: TrainingCoordinator) -> None:
+        self._coordinator = coordinator
+
+    @contextmanager
+    def prepare(
+        self, payload: Mapping[str, Any], *, job_id: str, rollout_id: int, prior_marker: Mapping[str, Any] | None
+    ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
+        coordinator = self._coordinator
+        scenario = payload.get("scenario") if coordinator._context.history is not None else None
+        window = max_staleness(payload)
+        metrics: Mapping[str, Any] = {}
+        serving = coordinator._context.runtime_load_id
+        decision = None
+        if coordinator._context.history is not None:
+            if not isinstance(scenario, str) or not scenario:
+                raise ValueError("per-scenario LoRA training jobs must name their scenario")
+            decision = _scenario_staleness_admission(
+                payload,
+                scenario=scenario,
+                history=coordinator._context.history,
+                serving_runtime_load_id=serving,
+                max_staleness=window,
+            )
+        elif uses_staleness_admission(payload):
+            if payload.get("expected_runtime_load_id") != serving:
+                versions = [value for group in _admission_runtime_load_id_groups(payload) for value in group]
+                decision = _stale_drop_decision(
+                    payload,
+                    serving_runtime_load_id=serving,
+                    producing_runtime_load_ids=versions,
+                    reason="execution_fence_mismatch",
+                )
+            else:
+                decision = _staleness_admission(payload, serving_runtime_load_id=serving, max_staleness=window)
+        elif payload.get("expected_runtime_load_id") != serving:
+            yield TrainingJobResult(outcome="stale", runtime_load_id=serving)
+            return
+        if decision is not None:
+            if decision.action == "drop":
+                yield TrainingJobResult(outcome="stale", runtime_load_id=serving, metrics=decision.metrics)
+                return
+            metrics = decision.metrics
+        with self._coordinator._training.prepare(
+            payload, job_id=job_id, rollout_id=rollout_id, prior_marker=prior_marker
+        ) as prepared:
+            if isinstance(prepared, TrainingJobResult):
+                yield prepared
+            else:
+                yield _ScheduledTrainingJob(self._coordinator, prepared, metrics)
+
+
+class _ScheduledTrainingJob(PreparedTrainingJob):
+    def __init__(
+        self, coordinator: TrainingCoordinator, prepared: PreparedTrainingJob, admission_metrics: Mapping[str, Any]
+    ) -> None:
+        self._coordinator = coordinator
+        self._prepared = prepared
+        self._admission_metrics = admission_metrics
+
+    @property
+    def checkpoint(self) -> TrainingCheckpoint:
+        return self._prepared.checkpoint
+
+    def train(self) -> TrainingMetrics:
+        self._coordinator._weight_publisher.prepare_training()
+        metrics = self._prepared.train()
+        return TrainingMetrics(training=metrics.training, durable={**self._admission_metrics, **metrics.durable})
+
+    def save_checkpoint(self) -> None:
+        self._prepared.save_checkpoint()

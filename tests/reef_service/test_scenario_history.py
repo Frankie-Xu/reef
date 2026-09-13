@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
-from reef.runtime.weights.version import RuntimeLoadId
+from reef.runtime.interfaces import RuntimeLoadId
+from reef.runtime.recovery import ScenarioHistory, history_path
 
 
 def test_history_round_trips_and_computes_per_scenario_lag(tmp_path: Path) -> None:

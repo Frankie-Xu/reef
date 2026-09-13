@@ -15,7 +15,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface

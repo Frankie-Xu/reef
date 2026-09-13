@@ -21,8 +21,8 @@ from typing import Any
 from reef.recipe.base import Recipe
 from reef.recipe.config import load_recipe_config, recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.registry import RuntimeRegistry
+from reef.runtime.deployment import RuntimeRegistry
+from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RecipeType = type[Recipe]

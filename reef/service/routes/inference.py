@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (

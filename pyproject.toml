@@ -108,7 +108,9 @@ fallback_version = "0.0.0.dev0"
 # declared dependency; the reef wheel must not ship its source.
 # `reef` is the shared machinery. The sibling `recipes` tree is a cookbook,
 # not package code, so neither its methods nor its runnable examples ship.
+# runtime/ intentionally contains only its five modules and executor/ (PEP 420).
 [tool.setuptools.packages.find]
+namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]

@@ -6,15 +6,18 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.runtime.base import (
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    CandidateTrainingDeferred,
     InferenceRuntime,
+    ModelCandidate,
     PreparedTrainingStep,
     RuntimeContractError,
+    StaleCandidate,
     TrainingJobResult,
     TrainingRuntime,
 )
 from reef.runtime.scheduler import RuntimeScheduler
-from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
 

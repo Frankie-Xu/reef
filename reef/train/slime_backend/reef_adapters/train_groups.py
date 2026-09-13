@@ -17,7 +17,7 @@ from typing import Any
 from reef.runtime.executor import Executor, ExecutorConfig, resolve
 from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.weights.version import RuntimeLoadId
+from reef.runtime.interfaces import RuntimeLoadId
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
 )

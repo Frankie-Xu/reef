@@ -27,8 +27,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceAdmissionHandle
-from reef.runtime.inference import InferenceHandler, InferenceStream
+from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page

@@ -8,7 +8,7 @@ from typing import Any
 
 import ray
 
-from reef.runtime.control.health import EngineHealthChecks, EngineHealthTarget
+from reef.runtime.interfaces import EngineHealthChecks, EngineHealthTarget
 
 
 class SGLangEngineHealthChecks(EngineHealthChecks):

@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from reef.runtime.backends import TrainingBackend
 from reef.runtime.deployment import DeploymentResources, TrainingService, WeightTransferSession
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.interfaces import TrainingBackend
 from reef.train.slime_backend.reef_adapters.bridge import (
     BridgePreparation,
     create_train_groups,

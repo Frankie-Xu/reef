@@ -1,23 +1,24 @@
-"""Backend-neutral component contracts for model deployment ownership.
-
-These contracts describe startup, health observation and cleanup. Training steps, weight
-transport and commit-gated activation keep their existing runtime contracts.
-Concrete integrations keep framework arguments and allocation handles private.
-"""
+"""Deployment plans, resource ownership, connection configuration, and runtime selection."""
 
 from __future__ import annotations
 
+import importlib
 import logging
+import math
+import os
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from reef.runtime.backends import InferenceBackend, TrainingBackend
+from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
+from reef.core.errors import ReefError
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
+from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.failure import ExecutorFailedError
-from reef.runtime.training_job.coordinator import TrainingCoordinator
+from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
+from reef.runtime.scheduler import TrainingCoordinator
 
 
 class DeploymentResources(ABC):
@@ -336,3 +337,255 @@ class ModelDeployment:
                     _logger.exception("Failed to close deployment component %s", type(component).__name__)
         if errors:
             raise errors[0]
+
+
+class RuntimeConfigError(ReefError):
+    """Raised when runtime configuration is invalid or required keys are missing."""
+
+
+class RuntimeFactory(ABC):
+    """Base class for runtime factories.
+
+    Required (subclass must set):
+        ``kind`` — canonical kind name used in config ``type``.
+
+    Implement:
+        ``__call__`` — receive ``(config, model_path, recipe_config, environ)``
+        and return an :class:`InferenceRuntime` or a ``(TrainingRuntime, InferenceRuntime)`` pair.
+    """
+
+    kind: str
+
+    def config_type(self) -> type | None:
+        """Return this adapter's settings dataclass, or None for legacy factories.
+
+        Declarations use ``reef.core.config.config_option``. Discovery reads
+        metadata only; it must not connect services or allocate resources.
+        """
+        return None
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        """Parse only this selected adapter's configuration."""
+        settings_type = self.config_type()
+        if settings_type is None:
+            return dict(config)
+        try:
+            values = parse_config_values(
+                config_arguments(settings_type, prefix=("runtime",)),
+                {key: value for key, value in config.items() if key != "type"},
+                environ=environ,
+            )
+            # Component constructors retain range and cross-field validation.
+            settings_type(**values)
+            return {"type": config.get("type", self.kind), **values}
+        except ValueError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
+
+    @abstractmethod
+    def __call__(
+        self,
+        config: Mapping[str, Any],
+        model_path: str,
+        recipe_config: Mapping[str, Any],
+        environ: Mapping[str, str],
+    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+        """Build inference alone or separate training and inference components."""
+
+
+class _CallableRuntimeFactory(RuntimeFactory):
+    """Adapter wrapping a plain callable as a :class:`RuntimeFactory` instance.
+
+    Used when a dotted ``"module:callable"`` reference resolves to a function
+    rather than a ``RuntimeFactory`` subclass instance, so
+    :func:`runtime_factory_for` always returns a uniform type.
+    """
+
+    kind = ""
+
+    def __init__(self, fn: Callable[..., InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]]) -> None:
+        self._fn = fn
+
+    def __call__(
+        self,
+        config: Mapping[str, Any],
+        model_path: str,
+        recipe_config: Mapping[str, Any],
+        environ: Mapping[str, str],
+    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+        return self._fn(config, model_path, recipe_config, environ)
+
+
+_runtime_kinds: dict[str, RuntimeFactory] = {}
+
+
+"""Explicitly registered extensions and cached instances of selected builtin factories."""
+
+
+_BUILTIN_FACTORIES = {
+    "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
+    "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
+    "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
+    "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
+    "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
+}
+
+
+def register_runtime_kind(cls: type[RuntimeFactory]) -> type[RuntimeFactory]:
+    """Register an extension factory when its owning module is explicitly loaded.
+
+    Builtins use lazy references so importing runtime contracts loads no integration.
+    """
+    instance = cls()
+    kind = instance.kind
+    if kind in _runtime_kinds or kind in _BUILTIN_FACTORIES:
+        raise ValueError(f"runtime kind {kind!r} is already registered")
+    _runtime_kinds[kind] = instance
+    return cls
+
+
+def register_runtime_factory(factory: RuntimeFactory) -> RuntimeFactory:
+    """Register an external runtime factory (module-level convenience)."""
+    if not isinstance(factory, RuntimeFactory):
+        raise TypeError(f"a runtime factory registers a RuntimeFactory, got {type(factory).__name__}")
+    kind = factory.kind
+    if kind in _runtime_kinds or kind in _BUILTIN_FACTORIES:
+        raise ValueError(f"runtime kind {kind!r} is already registered")
+    _runtime_kinds[kind] = factory
+    return factory
+
+
+def runtime_kinds() -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*_BUILTIN_FACTORIES, *_runtime_kinds)))
+
+
+def runtime_factory_for(kind: str) -> RuntimeFactory | None:
+    """Return the runtime factory for ``kind``.
+
+    A kind is either a registered name or a dotted reference
+    ``package.module:factory_name`` to a factory reef does not bundle —
+    the config path's way of serving deployment-specific runtimes without a
+    hand-rolled service assembly.
+    """
+    registered = _runtime_kinds.get(kind)
+    if registered is not None:
+        return registered
+    reference = _BUILTIN_FACTORIES.get(kind, kind)
+    if ":" not in reference:
+        return None
+    module_name, _, attribute = reference.partition(":")
+    if not module_name or not attribute:
+        raise RuntimeConfigError(f"dotted runtime kind {kind!r} must be 'package.module:factory_name'")
+    try:
+        candidate = getattr(importlib.import_module(module_name), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeConfigError(f"cannot import runtime kind {kind!r}: {exc}") from exc
+    if isinstance(candidate, RuntimeFactory):
+        return candidate
+    if isinstance(candidate, type) and issubclass(candidate, RuntimeFactory):
+        factory = candidate()
+        if kind in _BUILTIN_FACTORIES:
+            _runtime_kinds[kind] = factory
+        return factory
+    if callable(candidate):
+        return _CallableRuntimeFactory(candidate)
+    raise RuntimeConfigError(f"runtime kind {kind!r} is not callable")
+
+
+class RuntimeRegistry:
+    def __init__(self, factories: Mapping[str, RuntimeFactory] | None = None) -> None:
+        self._factories: dict[str, RuntimeFactory] = dict(factories or {})
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(set(self._factories) | set(runtime_kinds())))
+
+    def build(
+        self,
+        config: Mapping[str, Any],
+        *,
+        model_path: str,
+        recipe_config: Mapping[str, Any] | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+        runtime_type = config.get("type")
+        if not isinstance(runtime_type, str) or not runtime_type:
+            raise RuntimeConfigError("runtime.type must be a non-empty string")
+        factory = self._factories.get(runtime_type)
+        if factory is None:
+            factory = runtime_factory_for(runtime_type)
+        if factory is None:
+            available = ", ".join(self.names)
+            raise RuntimeConfigError(f"unknown runtime type {runtime_type!r}; available runtimes: {available}")
+        recipe_context = {} if recipe_config is None else recipe_config
+        values = os.environ if environ is None else environ
+        if isinstance(factory, RuntimeFactory):
+            config = factory.parse_config(config, values)
+        return factory(config, model_path, recipe_context, values)
+
+
+def config_string(config: Mapping[str, Any], name: str) -> str:
+    """A required non-empty string key of a runtime config section."""
+    value = config.get(name)
+    if not isinstance(value, str) or not value:
+        raise RuntimeConfigError(f"runtime.{name} must be a non-empty string")
+    return value
+
+
+def config_secret(
+    config: Mapping[str, Any],
+    environ: Mapping[str, str],
+    name: str,
+    env_name: str,
+) -> str | None:
+    """An optional secret: literal ``name`` wins, else the variable named by ``env_name``."""
+    value = config.get(name)
+    if value is not None:
+        if not isinstance(value, str) or not value:
+            raise RuntimeConfigError(f"runtime.{name} must be a non-empty string")
+        return value
+    configured_env = config.get(env_name)
+    if configured_env is None:
+        return None
+    if not isinstance(configured_env, str) or not configured_env:
+        raise RuntimeConfigError(f"runtime.{env_name} must be a non-empty string")
+    return environ.get(configured_env)
+
+
+@dataclass(frozen=True)
+class RuntimeConnectionConfig:
+    """Connection and request options; model-worker topology stays with the backend."""
+
+    inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
+    inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
+    train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
+    max_staleness: int = config_option(0, help="Maximum admitted training-version lag.")
+    inference_handler_config: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
+    )
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("inference_timeout_s", self.inference_timeout_s),
+            ("train_timeout_s", self.train_timeout_s),
+        ):
+            if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"runtime.{name} must be a positive finite number")
+        if isinstance(self.max_staleness, bool) or self.max_staleness < 0:
+            raise ValueError("runtime.max_staleness must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class ExecutorRuntimeConfig(RuntimeConnectionConfig):
+    coordinator_rank: int = config_option(0, help="Rank of the training coordinator worker.")
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.coordinator_rank < 0:
+            raise ValueError("runtime.coordinator_rank must be non-negative")
+
+
+@dataclass(frozen=True)
+class RayRuntimeConfig(RuntimeConnectionConfig):
+    actor_name: str = config_option(DEFAULT_ACTOR_NAME, help="Training coordinator actor name.")
+    namespace: str = config_option(DEFAULT_NAMESPACE, help="Ray namespace containing the coordinator.")
+    ray_address: str | None = config_option(None, help="Ray cluster address.")

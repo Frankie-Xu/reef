@@ -2,7 +2,8 @@
 
 import pytest
 
-from reef.runtime.control.memory import InferenceMemory, InferenceMemoryOperations
+from reef.runtime.interfaces import InferenceMemoryOperations
+from reef.runtime.scheduler import InferenceMemory
 
 
 class _Memory(InferenceMemoryOperations):

@@ -100,14 +100,14 @@ def test_slime_input_mapping_imports_no_receiver_implementation_or_framework():
 import json
 import sys
 from types import SimpleNamespace
-sys.modules.update(dict.fromkeys(('reef.inference', 'sglang', 'torch', 'megatron')))
+sys.modules.update(dict.fromkeys(('reef.inference.sglang', 'sglang', 'torch', 'megatron')))
 from reef.train.slime_backend.inference import inference_config
 from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
 values = inference_config(SimpleNamespace(hf_checkpoint='model', rollout_num_gpus=1, rollout_num_gpus_per_engine=1, num_gpus_per_node=1))
 assert values['model_path'] == 'model'
 assert values['executor'] == 'auto'
 json.dumps(values)
-assert not any(name.startswith('reef.inference.') for name in sys.modules)
+assert not any(name.startswith('reef.inference.sglang.') for name in sys.modules)
 """,
         ],
         capture_output=True,

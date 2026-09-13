@@ -24,7 +24,7 @@ from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
 from recipes.beta.coral.reporter import AttemptReport
 from reef.dispatcher import build_default_dispatcher
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 

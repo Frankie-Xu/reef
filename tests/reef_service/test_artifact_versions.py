@@ -14,8 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import NullExperimentLogger
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import ActivatedModel, InferenceHandler, ModelCandidate, PreparedTrainingStep
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitLogScenarioStore

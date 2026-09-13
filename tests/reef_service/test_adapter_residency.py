@@ -6,9 +6,9 @@ from typing import Any
 
 import pytest
 
-from reef.runtime.weights.residency import (
+from reef.runtime.interfaces import AdapterEngine
+from reef.runtime.publication import (
     AdapterCapacityExhausted,
-    AdapterEngine,
     AdapterEvictionFailed,
     AdapterNotActive,
     AdapterResidencyError,

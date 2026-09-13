@@ -10,11 +10,16 @@ from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.artifact import LiveWeightArtifactRef
 from reef.core import RuntimeLoadSpan
-from reef.runtime import PreparedTrainingStep, RayRuntimeError, RayTrainGroupHandle, TrainingJobResult, TrainingRuntime
-from reef.runtime.adapters.ray import RemoteRayTrainGroupHandle
-from reef.runtime.base import InferenceAdmissionController
 from reef.runtime.executor import ray as ray_executor
-from reef.runtime.inference import InferenceHandler, InferenceStream
+from reef.runtime.executor.connection import RayCoordinatorClient, RayRuntimeError, RemoteRayCoordinatorClient
+from reef.runtime.interfaces import (
+    InferenceAdmissionController,
+    InferenceHandler,
+    InferenceStream,
+    PreparedTrainingStep,
+    TrainingJobResult,
+    TrainingRuntime,
+)
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
 from reef.surface import RuntimeLoadMismatch, create_weight_surface
@@ -39,7 +44,7 @@ def _prepare_test_sft(batch, state) -> StepSignal:
     )
 
 
-class FakeTrainGroupHandle(RayTrainGroupHandle):
+class FakeTrainGroupHandle(RayCoordinatorClient):
     def health(self) -> Mapping[str, Any]:
         return {
             "colocate": False,
@@ -252,7 +257,7 @@ def test_ray_runtime_rejects_a_malformed_served_adapter_name() -> None:
 @pytest.mark.unit
 def test_ray_runtime_builds_a_tokenizer_aware_inference_backend() -> None:
     captured = {}
-    from reef.runtime.inference import InferenceHandler
+    from reef.runtime.interfaces import InferenceHandler
 
     class ConfiguredHandler(InferenceHandler):
         @classmethod
@@ -300,7 +305,7 @@ def test_runtime_rejects_a_structural_handler_factory() -> None:
 
 @pytest.mark.unit
 def test_runtime_rejects_invalid_handler_factory_result() -> None:
-    from reef.runtime.adapters.http import HttpInferenceHandler
+    from reef.inference.http import HttpInferenceHandler
 
     class InvalidHandler(HttpInferenceHandler):
         @classmethod
@@ -823,7 +828,7 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
 
     monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
     actor = Bridge()
-    handle = RemoteRayTrainGroupHandle(train_group_actor=actor)
+    handle = RemoteRayCoordinatorClient(train_group_actor=actor)
 
     prepared = handle.prepare_training_step(policy_batch(), "openclawrl", {"steps": 2})
 
@@ -850,7 +855,7 @@ def test_remote_handle_probes_the_named_serving_runtime_load_id_method(monkeypat
 
     monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
-    handle = RemoteRayTrainGroupHandle(train_group_actor=Bridge())
+    handle = RemoteRayCoordinatorClient(train_group_actor=Bridge())
 
     assert handle.serving_runtime_load_id() == "engine-incarnation:3"
     assert handle._timeout_s == 300.0
@@ -873,12 +878,12 @@ def test_remote_handle_preserves_missing_serving_runtime_load_id(monkeypatch) ->
 
     monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
-    assert RemoteRayTrainGroupHandle(train_group_actor=Bridge()).serving_runtime_load_id() is None
+    assert RemoteRayCoordinatorClient(train_group_actor=Bridge()).serving_runtime_load_id() is None
 
 
 @pytest.mark.unit
 def test_remote_handle_rejects_an_old_actor_before_training_side_effects() -> None:
-    handle = RemoteRayTrainGroupHandle(train_group_actor=object())
+    handle = RemoteRayCoordinatorClient(train_group_actor=object())
 
     with pytest.raises(RayRuntimeError, match="restart the Reef service and training actor together"):
         handle.health()
@@ -905,7 +910,7 @@ def test_remote_handle_forwards_durable_training_payload(monkeypatch) -> None:
     monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     actor = Bridge()
-    handle = RemoteRayTrainGroupHandle(train_group_actor=actor)
+    handle = RemoteRayCoordinatorClient(train_group_actor=actor)
 
     assert handle.execute_training_job({"loss": "pg"}) == TrainingJobResult(outcome="stale", runtime_load_id="v1")
     assert actor.execute_training_job.calls == [({"loss": "pg"},)]

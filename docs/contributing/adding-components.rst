@@ -74,10 +74,14 @@ Implementation
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
   implementation, framework adapters, bridge code, and plugins inside that
   subtree.
-- Implement ``TrainingBackend`` from ``reef/runtime/backends.py`` for native
-  training operations. ``TrainingRuntime`` in ``reef/runtime/base.py`` is Reef's
+- Implement ``TrainingBackend`` from ``reef/runtime/interfaces.py`` for native
+  training operations. ``TrainingRuntime`` in ``reef/runtime/interfaces.py`` is Reef's
   scheduling interface. The recipe candidate lifecycle is ``CandidateBackend``
   in ``reef/train/backend.py``.
+- Put the integration's scheduling connection in ``runtime.py`` within its
+  package. Reuse ``reef.train.runtime.ExecutorTrainingRuntime`` when the backend
+  uses Reef's coordinator RPC; keep native optimizer and weight-transfer operations
+  in its ``TrainingBackend`` implementation.
 - Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
@@ -115,7 +119,7 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/runtime/base.py`` before adding configuration.
+``reef/runtime/interfaces.py`` before adding configuration.
 
 - For an external runtime, expose a factory as
   ``package.module:factory_name`` and use that dotted value as the runtime
@@ -126,15 +130,21 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
   it must not import a concrete inference or training implementation.
   Implement the applicable contracts in
-  ``reef/runtime/backends.py`` when integrating with managed
+  ``reef/runtime/interfaces.py`` when integrating with managed
   training and publication. Import those contracts instead of the coordinator.
-  Shared engine control belongs in ``runtime/control/`` and shared version,
-  residency and transfer-lock mechanisms in ``runtime/weights/``.
+  Put the integration's ``InferenceRuntime`` implementation in its ``runtime.py``;
+  it may reuse ``reef.inference.runtime.ExecutorInferenceRuntime`` with an explicit
+  request handler. Shared monitoring and engine recovery belong in
+  ``runtime/recovery.py``; publication, residency and transfer locking belong in
+  ``runtime/publication.py``. Shared contracts and version values belong in
+  ``runtime/interfaces.py``.
 - For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
-  and load the selected integration from service assembly. Generic runtime
-  adapters may stay under ``reef/runtime/adapters/`` when they contain no
-  backend-specific behavior.
+  and load the selected integration from service assembly. ``RuntimeFactory`` and
+  factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
+  package: importing ``reef.runtime`` does not register integrations or re-export
+  classes. Keep its top level limited to ``interfaces.py``, ``scheduler.py``,
+  ``deployment.py``, ``publication.py``, ``recovery.py`` and ``executor/``.
 - A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from aiohttp import web
 
 from reef.dispatcher import Dispatcher
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors

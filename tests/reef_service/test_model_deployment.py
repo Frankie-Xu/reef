@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.backends import InferenceBackend, TrainingBackend
 from reef.runtime.deployment import (
     CoordinatorConfig,
     DeploymentResources,
@@ -16,6 +15,7 @@ from reef.runtime.deployment import (
     TrainingService,
 )
 from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.runtime.interfaces import InferenceBackend, TrainingBackend
 from reef.service import training_driver
 from reef.service.training_driver import ModelDeployment
 from reef.train.deployment import TrainingDeploymentPlan
@@ -388,7 +388,7 @@ def test_rebuild_assigns_a_new_weight_transfer_session():
 def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
     from dataclasses import replace
 
-    from reef.runtime.backends import TrainingContext, TrainingCoordinationConfig
+    from reef.runtime.interfaces import TrainingContext, TrainingCoordinationConfig
 
     plan, events = plan_for()
     plan.training.config = TrainingCoordinationConfig(save_hf_template=None)
@@ -451,7 +451,7 @@ def test_coordinator_construction_failure_releases_started_backends(monkeypatch)
     plan = replace(plan, coordinator=CoordinatorConfig(backend="uni"))
 
     def fail(config):
-        assert config.workers[0].worker_cls.__module__ == "reef.runtime.training_job.coordinator"
+        assert config.workers[0].worker_cls.__module__ == "reef.runtime.scheduler"
         assert events[-2:] == ["training-operations", "inference-operations"]
         raise RuntimeError("coordinator recovery failed")
 

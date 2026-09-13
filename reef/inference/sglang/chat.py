@@ -18,8 +18,8 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
-from reef.runtime.adapters.http import HttpInferenceHandler
-from reef.runtime.inference import InferenceStream
+from reef.inference.http import HttpInferenceHandler
+from reef.runtime.interfaces import InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"

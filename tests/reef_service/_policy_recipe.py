@@ -13,7 +13,7 @@ from typing import Any
 
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.trainer import Trainer

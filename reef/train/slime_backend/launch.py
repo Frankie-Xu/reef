@@ -10,13 +10,12 @@ from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
-from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.runtime.interfaces import InferenceHandler
 from reef.train.deployment import TrainingDeployment, TrainingDeploymentPlan
 
-_NATIVE_INFERENCE = "reef.inference.sglang.chat.SGLangInferenceHandler"
 _READY_PROBE = (
     "import os, pathlib, sys; "
     "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "
@@ -195,7 +194,7 @@ class SlimeDeployment(TrainingDeployment):
             training_backend_options=options,
             ray_namespace=settings["ray_namespace"] or DEFAULT_NAMESPACE,
             ray_actor_name=settings["ray_actor_name"] or DEFAULT_ACTOR_NAME,
-            inference_handler_factory=settings["inference_handler_factory"] or _NATIVE_INFERENCE,
+            inference_handler_factory=settings["inference_handler_factory"],
         )
         python = os.environ.get("REEF_PYTHON", sys.executable)
         driver = {
@@ -231,7 +230,8 @@ class SlimeDeployment(TrainingDeployment):
         if settings["train_timeout_s"] is not None and settings["train_timeout_s"] <= 0:
             raise ValueError("reef.train_timeout_s must be positive when set")
         runtime_config: dict[str, Any] = {
-            "type": "ray_training",
+            "type": "slime_training",
+            "inference_runtime": settings["inference_backend"] or "sglang",
             "inference_url": inference_url or None,
             "actor_name": settings["ray_actor_name"],
             "namespace": settings["ray_namespace"],
@@ -247,8 +247,6 @@ class SlimeDeployment(TrainingDeployment):
         if not isinstance(settings["inference_handler_config"], Mapping):
             raise ValueError("reef.inference_handler_config must be an object")
         if settings["inference_handler_config"]:
-            if inference_handler_factory is None:
-                raise ValueError("reef.inference_handler_config requires inference.handler-factory")
             runtime_config["inference_handler_config"] = dict(settings["inference_handler_config"])
         if connector is not None:
             runtime_config["connect"] = connector

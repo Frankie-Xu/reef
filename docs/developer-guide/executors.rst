@@ -12,11 +12,20 @@ An ``Executor`` owns worker launch, ordered control RPC, health and shutdown.
 Configuration selects a concrete executor while callers use the same methods.
 The managed model driver creates Reef's ``TrainingCoordinator`` through this
 interface; backend implementations supply its training and inference operations.
-These contracts live in ``reef.runtime.backends``, separately
-from the coordinator implementation. Generic service connections and their
-configuration live in ``reef.runtime.adapters``; shared inference control lives
-in ``reef.runtime.control``, and weight versions, residency and transfer locks
-live in ``reef.runtime.weights``.
+These contracts live in ``reef.runtime.interfaces``, separately from the
+coordinator implementation in ``reef.runtime.scheduler``. Runtime's other modules
+are ``deployment`` for lifecycle and factory configuration, ``publication`` for
+weight/adapter publication, and ``recovery`` for persisted state and engine
+restoration. ``executor/`` owns worker transport and coordinator RPC clients.
+The namespace package has no ``__init__.py``; import classes from their owning
+modules.
+
+Generic training and inference connections live in ``reef.train.runtime`` and
+``reef.inference.runtime``. ``SlimeTrainingRuntime`` in
+``reef.train.slime_backend.runtime`` and ``SGLangInferenceRuntime`` in
+``reef.inference.sglang.runtime`` specialize those connections. The native
+``SlimeTrainingBackend`` and ``SGLangInferenceBackend`` implement individual
+worker operations; they do not implement or own Reef's scheduling state machine.
 
 .. code:: mermaid
 
@@ -152,13 +161,14 @@ topology resizing or checkpoint resharding.
 Training runtime configuration
 ------------------------------
 
-Existing ``type: ray_training`` configurations keep discovering a named Ray
+The compatibility factories in ``reef.service.runtime`` keep existing
+``type: ray_training`` configurations discovering a named Ray
 coordinator in the selected namespace and return separate ``ExecutorTrainingRuntime``
-and ``ExecutorInferenceRuntime`` instances. ``RayTrainGroupHandle`` remains a
-compatibility alias for ``TrainingGroupHandle``.
+and ``ExecutorInferenceRuntime`` instances. ``RayCoordinatorClient`` remains a
+compatibility alias for ``CoordinatorClient``.
 
 For a custom coordinator, ``executor_training`` creates its executor from
-configuration. The selected worker implements ``TrainingGroupHandle``'s RPC
+configuration. The selected worker implements ``CoordinatorClient``'s RPC
 methods, including durable health and checkpoint results:
 
 .. code:: yaml
@@ -491,7 +501,7 @@ backend pair. Further deployment and backend combinations are tracked in
 Inference recovery and reconnect
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.control.inference.InferenceControl`` owns pause intent and
+``reef.runtime.recovery.InferenceControl`` owns pause intent and
 recovery/reconnect ordering through three backend contracts: ``InferenceEngines``
 for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
 and replacement, and ``InferenceMonitor`` for background recovery. The SGLang
@@ -514,7 +524,7 @@ The training publication coordinator retains the durable commit gate. An
 external deployment with an uncertain lock requires operator restart, and the
 shared controller never terminates borrowed engines.
 
-``reef.runtime.weights.lock.WeightUpdateLock`` owns lock poisoning and transport
+``reef.runtime.publication.WeightUpdateLock`` owns lock poisoning and transport
 phase-result bookkeeping without Slime or Ray imports. The legacy
 ``ReefRolloutLock`` entrypoint wraps it as a serial Ray actor. Existing weight
 updaters use the same lock methods and continue transferring directly between
@@ -609,7 +619,7 @@ transfers the update and restores KV/graphs. Commit acknowledgement permits
 generation to resume. Keeping the base resident still requires enough physical
 memory for that base and the active training workload.
 
-``reef.runtime.control.memory`` tracks acknowledged release/resume operations
+``reef.runtime.scheduler`` tracks acknowledged release/resume operations
 per engine. Repeated operations skip regions already in the requested state.
 A failed operation leaves memory state uncertain and prevents reuse until that
 engine is replaced. SGLang supplies the concrete memory API adapter. This also
@@ -685,7 +695,7 @@ checkpoint performance still require the supported GPU environment.
 Engine health monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.control.health.EngineHealthMonitor`` owns probe scheduling.
+``reef.runtime.recovery.EngineHealthMonitor`` owns probe scheduling.
 ``pause()`` disables new checks and waits for the active probe or retirement to
 finish before the owner can replace, offload or terminate engines. A late probe
 failure after pause begins is discarded. A drain timeout leaves checks disabled,
@@ -710,7 +720,7 @@ owning controller.
 Training-step coordination
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.training_job.execution.TrainingExecution`` owns job identity,
+``reef.runtime.scheduler.TrainingExecution`` owns job identity,
 retry classification and the order of training and checkpoint recording. Reef's
 ``TrainingCoordinator`` invokes it under the same operation lock used by
 publication and shutdown. Execution and ``TrainingPublication`` share ``TrainingJobState`` for
@@ -744,7 +754,7 @@ remain compatible with existing deployments.
 Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.training_job.publication.TrainingPublication`` owns the shared
+``reef.runtime.publication.TrainingPublication`` owns the shared
 checkpoint-publication transaction. Reef's ``TrainingCoordinator`` delegates
 publication, candidate rejection, commit acknowledgement and startup commit
 gating to it. Its ``WeightPublisher`` implementation coordinates the two
@@ -775,7 +785,11 @@ stays paused after recovery. Rejection persists ``REJECTING`` before restoring
 incumbent resources and records ``REJECTED`` only on success. Plain LoRA capacity
 refusal preserves unrelated engines; failed eviction follows engine recovery.
 
-Marker and durable JSON helpers now live in ``reef.runtime.training_job``.
+Marker and durable JSON helpers live in ``reef.runtime.recovery``.
+``FileTrainingJobStore`` implements the ``TrainingJobStore`` interface consumed
+by publication, so the publication module does not import recovery. The scheduler
+passes the recovered marker into ``TrainingRecovery``; recovery does not import
+the scheduler or replay training itself.
 The on-disk filename, checkpoint-derived location and transitions are unchanged.
 An optional ``target_runtime_load_id`` records a pending transfer; older markers
 remain readable. Slime retains checkpoint layout, optimizer execution and native
@@ -888,7 +902,7 @@ Independent SGLang backend
 engine process, router, Ray engine groups and inference lifecycle. Native
 ``ServerArgs`` and ``launch_server`` come directly from SGLang; Reef no longer
 calls Slime's ``start_rollout_servers`` or inherits its ``SGLangEngine``.
-The runtime-load-ID value type lives in ``reef.runtime.weights.version``.
+The runtime-load-ID value type lives in ``reef.runtime.interfaces``.
 
 Install ``reef-infra[sglang]`` for Python-side inference dependencies and install
 native SGLang in the selected GPU environment. This extra does not install

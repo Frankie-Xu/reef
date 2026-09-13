@@ -13,10 +13,10 @@ from recipes.sao import SAOProcessor, SAORecipe
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor, TTTDRecipe
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime import InferenceProxyRuntime
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.processors.base import DataProcessor
 from reef.train.runtime_backend import RuntimeCandidateBackend

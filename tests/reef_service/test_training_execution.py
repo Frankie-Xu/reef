@@ -4,18 +4,17 @@ from contextlib import contextmanager
 
 import pytest
 
-from reef.runtime.base import TrainingJobResult
-from reef.runtime.training_job import execution
-from reef.runtime.training_job import marker as markers
-from reef.runtime.training_job.execution import (
+from reef.runtime import recovery as markers
+from reef.runtime.interfaces import (
     PreparedTrainingJob,
     TrainingCheckpoint,
-    TrainingExecution,
     TrainingJobBackend,
+    TrainingJobResult,
+    TrainingJobState,
     TrainingMetrics,
-    training_job_id,
 )
-from reef.runtime.training_job.marker import TrainingJobState
+from reef.runtime.recovery import FileTrainingJobStore
+from reef.runtime.scheduler import TrainingExecution, training_job_id
 
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
@@ -75,7 +74,7 @@ def backend(tmp_path):
 
 
 def coordinator(backend):
-    return TrainingExecution(backend.path, backend, backend.state)
+    return TrainingExecution(FileTrainingJobStore(backend.path), backend, backend.state)
 
 
 def test_train_checkpoint_and_telemetry_are_recorded_before_releasing_reservation(backend):
@@ -130,10 +129,10 @@ def test_failure_after_running_cannot_automatically_repeat_optimizer(backend, fa
 
 
 def test_running_write_failure_does_not_train(backend, monkeypatch):
-    def fail_write(path, value):
+    def fail_write(store, value):
         raise OSError("disk full")
 
-    monkeypatch.setattr(execution, "write_marker", fail_write)
+    monkeypatch.setattr(FileTrainingJobStore, "write", fail_write)
     with pytest.raises(OSError, match="disk full"):
         coordinator(backend).execute(PAYLOAD)
     assert backend.events == [("prepare", None), ("release", None)]
@@ -141,10 +140,10 @@ def test_running_write_failure_does_not_train(backend, monkeypatch):
 
 
 def test_checkpoint_record_failure_leaves_ambiguous_state(backend, monkeypatch):
-    def fail_write(path, value):
+    def fail_transition(store, marker, status, **updates):
         raise OSError("disk full")
 
-    monkeypatch.setattr(markers, "write_marker", fail_write)
+    monkeypatch.setattr(FileTrainingJobStore, "transition", fail_transition)
     with pytest.raises(OSError, match="disk full"):
         coordinator(backend).execute(PAYLOAD)
     assert backend.checkpoint.path.is_dir()
@@ -247,7 +246,7 @@ def test_missing_checkpoint_never_becomes_a_candidate(backend, monkeypatch):
 
 
 def test_training_and_publication_share_progress_and_keep_serving_unchanged_until_commit(backend):
-    from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
+    from reef.runtime.publication import TrainingPublication, WeightPublisher
 
     class Publisher(WeightPublisher):
         def __init__(self):
@@ -280,7 +279,7 @@ def test_training_and_publication_share_progress_and_keep_serving_unchanged_unti
             raise AssertionError("publication must not fail")
 
     publisher = Publisher()
-    publication = TrainingPublication(backend.path, publisher)
+    publication = TrainingPublication(FileTrainingJobStore(backend.path), publisher)
     backend.state = publication.state
     job = coordinator(backend).execute(PAYLOAD)
     assert publisher.version == "engine:0"

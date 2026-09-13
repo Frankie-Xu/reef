@@ -34,7 +34,7 @@ from reef.observability import (
 )
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.runtime.base import RuntimeContractError, TrainingRuntime
+from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention

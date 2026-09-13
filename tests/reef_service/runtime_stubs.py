@@ -6,10 +6,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.adapters.http import InferenceProxyRuntime
-from reef.runtime.base import PreparedTrainingStep, TrainingRuntime
-from reef.runtime.inference import InferenceHandler
-from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
+from reef.inference.http import InferenceProxyRuntime
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    InferenceHandler,
+    ModelCandidate,
+    PreparedTrainingStep,
+    TrainingRuntime,
+)
 from reef.train.types import TrainingBatch
 
 
@@ -141,7 +145,7 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
     """Test fixture assembling two runtimes and the actual training backend."""
 
     def __init__(self, components=None, **kwargs):
-        from reef.runtime.adapters.executor_training import connect_executor_runtimes
+        from reef.service.runtime import connect_executor_runtimes
 
         training, inference = components if components is not None else connect_executor_runtimes(**kwargs)
         super().__init__(training, "sft", inference_runtime=inference)

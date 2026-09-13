@@ -402,7 +402,7 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.dispatcher import Dispatcher
-    from reef.runtime.inference import InferenceHandler
+    from reef.runtime.interfaces import InferenceHandler
     from reef.service.app import RequestService
 
     class SkillRecipe(Recipe):

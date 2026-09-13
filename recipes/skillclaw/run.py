@@ -73,9 +73,9 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.tree.render import render_composition
+from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER

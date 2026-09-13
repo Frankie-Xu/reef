@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from reef.runtime import ModelCandidate
+from reef.runtime.interfaces import ModelCandidate
 from reef.train.evaluation import (
     CandidateEvaluationPlugin,
     CandidateEvaluationPluginFactory,

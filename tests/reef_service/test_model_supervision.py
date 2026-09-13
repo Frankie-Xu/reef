@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
-from reef.runtime.adapters.ray import NamedRayTrainGroupHandle
 from reef.runtime.deployment import DeploymentHealth, ModelPlanSource
+from reef.runtime.executor.connection import NamedRayCoordinatorClient
 from reef.service.training_driver import ModelDeployment, supervise_deployment
 
 from .test_model_deployment import plan_for
@@ -150,7 +150,7 @@ def test_explicit_endpoint_is_not_replaced():
 
 
 def test_named_handle_rediscovers_and_never_replays_a_submitted_write(monkeypatch):
-    from reef.runtime.adapters import ray as ray_runtime
+    from reef.runtime.executor import connection as ray_runtime
 
     class ActorDied(Exception):
         pass
@@ -182,7 +182,7 @@ def test_named_handle_rediscovers_and_never_replays_a_submitted_write(monkeypatc
 
     monkeypatch.setattr(ray_runtime, "_require_ray", lambda: ray)
     monkeypatch.setattr(ray_runtime, "RayExecutor", Executor)
-    handle = NamedRayTrainGroupHandle("bridge", "test", timeout_s=7200, health_timeout_s=30)
+    handle = NamedRayCoordinatorClient("bridge", "test", timeout_s=7200, health_timeout_s=30)
     handle.health()
     state.actor = "new"
     handle.health()

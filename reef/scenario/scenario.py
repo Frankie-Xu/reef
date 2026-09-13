@@ -9,10 +9,9 @@ from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
+from reef.inference.model_config import ModelConfig
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceHandler
-from reef.runtime.model_config import ModelConfig
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for

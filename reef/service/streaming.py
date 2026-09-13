@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.inference import InferenceStream
+from reef.runtime.interfaces import InferenceStream
 
 
 class SSEFrameDecoder:

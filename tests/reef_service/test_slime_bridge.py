@@ -17,9 +17,9 @@ import ray
 from reef_service.slime_coordinator import build_slime_coordinator
 from slime.utils.misc import Box
 
-from reef.runtime.base import TrainingJobResult
-from reef.runtime.training_job.coordinator import TrainingCoordinator
-from reef.runtime.training_job.marker import read_marker, transition_marker, write_marker
+from reef.runtime.interfaces import TrainingJobResult
+from reef.runtime.recovery import read_marker, transition_marker, write_marker
+from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -56,7 +56,7 @@ def test_bridge_shutdown_releases_only_training_even_on_failure(monkeypatch):
         return train_group
 
     actor = object.__new__(TrainingCoordinator)
-    from reef.runtime.training_job.publication import TrainingPublication
+    from reef.runtime.publication import TrainingPublication
 
     actor._publication = TrainingPublication(None, None)
     actor._owns_training = True
@@ -70,7 +70,7 @@ def test_bridge_shutdown_releases_only_training_even_on_failure(monkeypatch):
         actor.shutdown()
     actor.shutdown()
     assert events == ["critic", "actor"]
-    assert actor._phase == "stopped"
+    assert actor._publication.phase == "stopped"
 
 
 def _row(
@@ -1929,7 +1929,7 @@ def test_republication_reconciles_cached_pause_and_preserves_identity_after_fail
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=None)
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     manager.lifecycle_calls.clear()
-    actor._generation_paused = True
+    actor._weight_publisher.generation_paused = True
     terminated = []
     manager.terminate_updatable_engines = _RemoteMethod(lambda: terminated.append(True))
     group._actor_handlers[0].version = manager.version = "unexpected"
@@ -1939,14 +1939,14 @@ def test_republication_reconciles_cached_pause_and_preserves_identity_after_fail
     assert terminated
     assert actor.health()["phase"] == "weight_sync_failed"
     assert actor.serving_runtime_load_id() == "v1"
-    assert actor._generation_paused
+    assert actor._weight_publisher.generation_paused
     group._actor_handlers[0].version = manager.version = "v1"
     assert actor.republish_serving() == "v1"
     assert group.republication_calls == ["v1", "v1"]
     assert group.update_generation_management == [False, False]
     assert group.update_force_full == [True, True]
     assert manager.lifecycle_calls[-3:] == ["pause_generation", "recover_engines", "continue_generation"]
-    assert not actor._generation_paused
+    assert not actor._weight_publisher.generation_paused
     assert actor.health()["phase"] == "serving"
 
 

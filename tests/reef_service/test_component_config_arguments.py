@@ -14,11 +14,11 @@ import yaml
 from reef_service.runtime_stubs import runtime_bindings, runtime_fixture
 
 from reef.core.config import config_arguments, config_option, parse_config_values
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.runtime import InferenceProxyRuntime, RuntimeConfigError, RuntimeRegistry
+from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, RuntimeRegistry
 from reef.runtime.executor.config import executor_settings
-from reef.runtime.registry import RuntimeFactory
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
@@ -294,7 +294,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
 
 @pytest.mark.parametrize("runtime_type", ["ray_training", "executor_training"])
 def test_training_adapters_share_typed_fields_without_allocating_resources(runtime_type):
-    from reef.runtime.registry import runtime_factory_for
+    from reef.runtime.deployment import runtime_factory_for
 
     factory = runtime_factory_for(runtime_type)
     parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", "max_staleness": "2"}, {})

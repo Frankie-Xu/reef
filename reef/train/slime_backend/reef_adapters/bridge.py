@@ -14,20 +14,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.backends import TrainingBackend, TrainingContext, TrainingCoordinationConfig
-from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
-from reef.runtime.training_job.admission import _producing_runtime_load_ids
-from reef.runtime.training_job.execution import (
+from reef.runtime.interfaces import (
     PreparedTrainingJob,
+    PreparedTrainingStep,
+    ScenarioHistoryStore,
+    TrainingBackend,
     TrainingCheckpoint,
+    TrainingContext,
+    TrainingCoordinationConfig,
     TrainingJobBackend,
+    TrainingJobResult,
     TrainingMetrics,
 )
-from reef.runtime.training_job.execution import max_staleness as _max_staleness
-from reef.runtime.training_job.marker import marker_rollouts
-from reef.runtime.training_job.scenarios import ScenarioHistory, history_path
+from reef.runtime.recovery import ScenarioHistory, history_path, marker_rollouts
+from reef.runtime.scheduler import _producing_runtime_load_ids
+from reef.runtime.scheduler import max_staleness as _max_staleness
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -165,7 +168,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         return self.context.next_rollout_id
 
     @property
-    def _history(self) -> ScenarioHistory | None:
+    def _history(self) -> ScenarioHistoryStore | None:
         return self.context.history
 
     def prepare(
@@ -203,7 +206,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         if errors:
             raise errors[0]
 
-    def _require_history(self) -> ScenarioHistory:
+    def _require_history(self) -> ScenarioHistoryStore:
         """The per-scenario history; only LoRA runs with a checkpoint save path keep one."""
         if self._history is None:
             raise RuntimeError("scenario bookkeeping requires LoRA training with a checkpoint save path")

@@ -7,7 +7,7 @@ of a half-started cluster.
 
 from __future__ import annotations
 
-from reef.runtime.training_job.marker import marker_rollouts, read_marker
+from reef.runtime.recovery import marker_rollouts, read_marker
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 

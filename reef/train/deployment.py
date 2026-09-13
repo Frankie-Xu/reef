@@ -9,9 +9,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import CoordinatorConfig, DeploymentResources, TrainingService
+from reef.runtime.deployment import CoordinatorConfig, DeploymentResources, TrainingService, runtime_factory_for
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.registry import runtime_factory_for
 
 
 @dataclass(frozen=True)

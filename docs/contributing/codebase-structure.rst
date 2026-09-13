@@ -157,18 +157,40 @@ with surface contracts, while checkpoint cadence is recipe policy.
 ``recipe/cordis.py`` assembles the harness training backend, and
 ``service/training_driver.py`` independently selects training and inference
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
-``runtime/scheduler.py`` coordinates recipe-facing candidate and commit operations.
-``runtime/training_job/`` owns job identity/replay, staleness admission,
-train/checkpoint ordering and commit-gated publication. ``runtime/backends.py``
-defines ``TrainingBackend`` and ``InferenceBackend``, the native contracts consumed
-by the coordinator. ``runtime/base.py`` defines the separate ``TrainingRuntime``
-and ``InferenceRuntime`` scheduling interfaces.
-Concrete training integrations retain model operations, checkpoint and tensor I/O.
-``runtime/control/`` groups inference pause/recovery, health probes and memory
-handoffs. ``runtime/weights/`` groups version identity, candidates, LoRA residency
-and transport locking. ``runtime/adapters/`` connects the runtime interfaces to
-HTTP providers and executor workers; its connection configuration lives alongside
-those adapters. ``runtime/executor/`` owns worker launch and control.
+``runtime/`` is a namespace package with exactly five Python modules and the
+``executor/`` package; it has no ``__init__.py`` or import facade:
+
+.. code:: text
+
+   runtime/
+     interfaces.py
+     scheduler.py
+     deployment.py
+     publication.py
+     recovery.py
+     executor/
+
+``interfaces.py`` defines the independent ``TrainingRuntime`` and
+``InferenceRuntime`` scheduling interfaces, the native ``TrainingBackend`` and
+``InferenceBackend`` contracts, and shared values and storage interfaces.
+``scheduler.py`` owns recipe-facing candidate/commit coordination, remote job
+serialization, staleness admission and train/checkpoint ordering.
+``publication.py`` owns weight publication, version allocation, LoRA residency
+and transfer locking. ``recovery.py`` owns durable markers, scenario history,
+engine monitoring and restart recovery. ``deployment.py`` owns component
+lifecycle, runtime configuration and factory resolution. ``executor/`` owns
+worker launch, control RPC and coordinator connections.
+
+Dependencies run from deployment through scheduling, recovery and publication
+to interfaces. Executor implementations depend only on interfaces and their own
+package. Runtime coordination has no direct imports of concrete inference or
+training code; the deployment registry resolves the selected factory explicitly.
+Generic connection implementations live in ``inference/runtime.py`` and
+``train/runtime.py``; HTTP provider handling lives in ``inference/http.py``.
+``inference/sglang/runtime.py`` supplies ``SGLangInferenceRuntime`` and
+``train/slime_backend/runtime.py`` supplies ``SlimeTrainingRuntime``. These
+implement the scheduling interfaces; their native Backend implementations retain
+model operations, checkpoint and tensor I/O.
 ``inference/sglang/`` owns SGLang engine launch, capture and control independently
 of training. ``train/slime_backend/inference.py`` only translates Slime options
 into plain launch data; the selected inference factory constructs its own configuration.
@@ -196,7 +218,7 @@ The extension points those packages expose are in `Python API
   lock. ``history.py`` pages retained records and commits. ``registry.py`` owns
   loaded instances, model configuration caching, updates, and scenario
   archival coordination. Recipes, scenarios, and the factory use the concrete
-  ``ModelConfig`` in ``reef/runtime/model_config.py``. The factory receives
+  ``ModelConfig`` in ``reef/inference/model_config.py``. The factory receives
   one configuration per creation or recovery; it owns no configuration cache.
   The registry calls ``reef/storage/model_config.py`` functions directly for
   the fixed local JSON files. This is its only storage implementation import:

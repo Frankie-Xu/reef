@@ -7,8 +7,7 @@ from pathlib import Path
 from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.core.config import config_option
-from reef.runtime.adapters.config import RuntimeConnectionConfig
-from reef.runtime.registry import RuntimeFactory
+from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeFactory
 from reef.train.deployment import InProcessTrainingDeployment
 
 

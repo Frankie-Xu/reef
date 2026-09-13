@@ -9,35 +9,32 @@ import pytest
 from aiohttp import web
 from reef_service.runtime_stubs import ExecutorRuntimeFixture, runtime_bindings, runtime_fixture
 
-import reef.runtime as public_runtime
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.inference.runtime import ExecutorInferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_named_recipe
-from reef.runtime import (
-    Executor,
-    ExecutorConfig,
-    ExecutorTrainGroupHandle,
-    PreparedTrainingStep,
-    RayRuntimeError,
-    RayTrainGroupHandle,
-    RuntimeConfigError,
-    RuntimeRegistry,
-    TrainingGroupHandle,
-    TrainingRuntimeError,
-    WorkerSpec,
-)
-from reef.runtime.adapters import ray as ray_runtime
-from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
-from reef.runtime.adapters.executor_training import ExecutorTrainingRuntime
-from reef.runtime.base import TrainingRuntimeError as ContractTrainingRuntimeError
+from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.runtime.executor import connection as ray_runtime
 from reef.runtime.executor import ray as ray_executor
+from reef.runtime.executor.connection import (
+    CoordinatorClient,
+    ExecutorCoordinatorClient,
+    RayCoordinatorClient,
+    RayRuntimeError,
+)
 from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.runtime.interfaces import PreparedTrainingStep
+from reef.runtime.interfaces import TrainingRuntimeError
+from reef.runtime.interfaces import TrainingRuntimeError as ContractTrainingRuntimeError
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceConfig
+from reef.service.runtime import connect_ray_runtime
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import EvaluationResult, SelectionDecision
+from reef.train.runtime import ExecutorTrainingRuntime
 
 from .test_ray_runtime import DeferredWeightUpdateTrainGroupHandle, policy_batch
 
@@ -61,13 +58,10 @@ class Coordinator(DeferredWeightUpdateTrainGroupHandle):
         self.shutdown_events.append("shutdown")
 
 
-def test_ray_public_names_remain_compatible_aliases():
-    assert public_runtime.ExecutorTrainingRuntime is ExecutorTrainingRuntime
-    assert public_runtime.ExecutorInferenceRuntime is ExecutorInferenceRuntime
-    assert public_runtime.RemoteRayTrainGroupHandle is ray_runtime.RemoteRayTrainGroupHandle
-    assert public_runtime.connect_ray_runtime is ray_runtime.connect_ray_runtime
+def test_ray_coordinator_client_uses_the_generic_executor_contract():
+    assert issubclass(ray_runtime.RemoteRayCoordinatorClient, ExecutorCoordinatorClient)
     assert RayRuntimeError is TrainingRuntimeError is ContractTrainingRuntimeError
-    assert RayTrainGroupHandle is TrainingGroupHandle
+    assert RayCoordinatorClient is CoordinatorClient
 
 
 @pytest.mark.parametrize("backend", ["uni", UniProcExecutor, "reef.runtime.executor.uniproc:UniProcExecutor"])
@@ -82,7 +76,7 @@ def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
         )
     )
     assert isinstance(runtime, ExecutorRuntimeFixture)
-    assert isinstance(runtime.train_group_handle, ExecutorTrainGroupHandle)
+    assert isinstance(runtime.train_group_handle, ExecutorCoordinatorClient)
     worker = runtime.train_group_handle.executor.workers[0]
     try:
         assert runtime.model_path == "model-path"
@@ -206,7 +200,7 @@ def test_training_handle_rejects_invalid_timeout(timeout):
     executor = UniProcExecutor.from_workers((Coordinator(),))
     try:
         with pytest.raises(TrainingRuntimeError, match="training timeout"):
-            ExecutorTrainGroupHandle(executor, timeout_s=timeout)
+            ExecutorCoordinatorClient(executor, timeout_s=timeout)
     finally:
         executor.shutdown()
 
@@ -216,7 +210,7 @@ def test_training_handle_rejects_invalid_coordinator_rank(rank):
     executor = UniProcExecutor.from_workers((Coordinator(),))
     try:
         with pytest.raises(TrainingRuntimeError, match="coordinator rank"):
-            ExecutorTrainGroupHandle(executor, rank=rank)
+            ExecutorCoordinatorClient(executor, rank=rank)
     finally:
         executor.shutdown()
 
@@ -251,9 +245,7 @@ def test_named_ray_connection_honors_namespace_even_in_an_existing_session(monke
 
     monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
     monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
-    runtime = runtime_fixture(
-        ray_runtime.connect_ray_runtime(actor_name="trainer", namespace="reef-other", train_timeout_s=900)
-    )
+    runtime = runtime_fixture(connect_ray_runtime(actor_name="trainer", namespace="reef-other", train_timeout_s=900))
     try:
         assert ("get_actor", "trainer", "reef-other") in calls
         assert runtime.train_group_handle._timeout_s == 900
@@ -304,7 +296,7 @@ runtime:
     )
     worker = Coordinator()
     runtime = ExecutorRuntimeFixture(
-        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))
     )
     registry = RuntimeRegistry({"injected": lambda *args: runtime})
     with pytest.raises(RecipeConfigError, match="checkpoint_every_n_versions"):
@@ -320,7 +312,7 @@ def test_dispatcher_closes_runtime_after_all_scenarios_but_not_on_reload(tmp_pat
     events = []
     worker = SharedCoordinator(shutdown_events=events)
     runtime = ExecutorRuntimeFixture(
-        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -355,7 +347,7 @@ def test_dispatchers_close_their_runtimes_without_stopping_external_workers(tmp_
     worker = Coordinator()
     for _ in range(2):
         executor = UniProcExecutor.from_workers((worker,), owned=False)
-        runtime = ExecutorRuntimeFixture(train_group_handle=ExecutorTrainGroupHandle(executor))
+        runtime = ExecutorRuntimeFixture(train_group_handle=ExecutorCoordinatorClient(executor))
         dispatcher = Dispatcher(
             Recipe(**runtime_bindings(runtime)),
             InMemoryRepositoryBackend.factory(tmp_path),
@@ -377,7 +369,7 @@ def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monk
     monkeypatch.setattr(Dispatcher, "_start_training", lambda *args: None)
     worker = Coordinator()
     runtime = ExecutorRuntimeFixture(
-        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -404,7 +396,7 @@ def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monk
 def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_path):
     worker = Coordinator()
     runtime = ExecutorRuntimeFixture(
-        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))
     )
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: Recipe(**runtime_bindings(runtime)))
     monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())
@@ -423,7 +415,7 @@ def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_
 def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     worker = Coordinator()
     runtime = ExecutorRuntimeFixture(
-        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))
     )
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: Recipe(**runtime_bindings(runtime)))
     monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())

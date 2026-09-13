@@ -1,4 +1,8 @@
-"""Inference requests and weight publication over an existing control connection."""
+"""Generic inference scheduling client over Reef coordinator RPC.
+
+The selected integration supplies request handling. This client tracks serving
+versions and the coordinator's admission barrier without choosing a trainer.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +10,16 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.adapters.http import HttpInferenceHandler
-from reef.runtime.adapters.training_group import TrainingGroupHandle, training_job_status
-from reef.runtime.base import InferenceAdmissionHandle, InferenceRuntime, TrainingJobResult, TrainingRuntimeError
-from reef.runtime.inference import InferenceHandler
-from reef.runtime.weights.candidates import ActivatedModel, ModelCandidate
+from reef.runtime.executor.connection import CoordinatorClient, training_job_status
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    InferenceAdmissionHandle,
+    InferenceHandler,
+    InferenceRuntime,
+    ModelCandidate,
+    TrainingJobResult,
+    TrainingRuntimeError,
+)
 
 
 class ExecutorInferenceRuntime(InferenceRuntime):
@@ -19,11 +28,11 @@ class ExecutorInferenceRuntime(InferenceRuntime):
     def __init__(
         self,
         *,
-        control: TrainingGroupHandle,
+        control: CoordinatorClient,
         inference_url: str | None = None,
         model_path: str = "",
         inference_timeout_s: float = 300.0,
-        inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
+        inference_handler_factory: type[InferenceHandler] | None = None,
         inference_handler_config: Mapping[str, Any] | None = None,
     ) -> None:
         if not isinstance(inference_handler_factory, type) or not issubclass(

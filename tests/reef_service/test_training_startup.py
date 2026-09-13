@@ -67,7 +67,8 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         assert http["depends_on"] == [driver["name"]]
         assert driver["executor"] == http["executor"] == "uni"
         assert "inference_url" not in reef
-        assert "SGLangInferenceHandler" in reef["inference_handler_factory"]
+        assert reef["inference_backend"] == "sglang"
+        assert reef["inference_handler_factory"] is None
 
 
 @pytest.mark.parametrize(

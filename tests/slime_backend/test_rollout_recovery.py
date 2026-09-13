@@ -667,7 +667,7 @@ def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
 
 
 def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
-    from reef.runtime.control.health import EngineHealthMonitor, HealthMonitorConfig
+    from reef.runtime.recovery import EngineHealthMonitor, HealthMonitorConfig
 
     _, module = _load_manager_module(monkeypatch, serving=True)
     group = types.SimpleNamespace(all_engines=[], nodes_per_engine=1)

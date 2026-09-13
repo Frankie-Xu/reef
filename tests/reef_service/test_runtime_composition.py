@@ -8,13 +8,20 @@ from pathlib import Path
 import pytest
 
 import reef
-import reef.runtime.backends as native_backends
-from reef.runtime import InferenceBackend, InferenceRuntime, PreparedTrainingStep, TrainingBackend, TrainingRuntime
-from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
-from reef.runtime.adapters.executor_training import ExecutorTrainingRuntime, connect_executor_runtimes
-from reef.runtime.inference import InferenceHandler
-from reef.runtime.weights.candidates import ModelCandidate
+import reef.runtime.interfaces as native_backends
+from reef.inference.runtime import ExecutorInferenceRuntime
+from reef.runtime.interfaces import (
+    InferenceBackend,
+    InferenceHandler,
+    InferenceRuntime,
+    ModelCandidate,
+    PreparedTrainingStep,
+    TrainingBackend,
+    TrainingRuntime,
+)
+from reef.service.runtime import connect_executor_runtimes
 from reef.train import CandidateBackend
+from reef.train.runtime import ExecutorTrainingRuntime
 from reef.train.runtime_backend import RuntimeCandidateBackend
 
 from .test_executor_runtime import Coordinator
@@ -123,7 +130,7 @@ def test_recovery_retargets_only_the_inference_component():
 
 
 def test_assembly_returns_two_components_and_rejects_conflicting_inference_selection():
-    from reef.runtime.adapters.http import InferenceProxyRuntime
+    from reef.inference.http import InferenceProxyRuntime
 
     chosen = InferenceProxyRuntime(base_url="http://chosen-engine")
     control = Coordinator(inference_url=None)

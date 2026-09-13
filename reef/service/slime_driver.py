@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.adapters.config import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.service.deploy.config_utils import load_config
 from reef.service.training_driver import _driver_options as model_driver_options
 from reef.service.training_driver import (

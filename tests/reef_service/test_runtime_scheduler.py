@@ -6,10 +6,17 @@ import pytest
 
 from reef.core.batches import TrainingBatch
 from reef.core.evaluation import EvaluationResult, SelectionDecision
-from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingRuntime
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    CandidateTrainingDeferred,
+    InferenceHandler,
+    InferenceRuntime,
+    ModelCandidate,
+    PreparedTrainingStep,
+    StaleCandidate,
+    TrainingRuntime,
+)
 from reef.runtime.scheduler import RuntimeScheduler
-from reef.runtime.weights.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 
 
 class CheckpointTrainer(TrainingRuntime):

@@ -7,10 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.control.inference import InferenceControl
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.training_job.marker import read_marker, write_marker
-from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
+from reef.runtime.publication import TrainingPublication, WeightPublisher
+from reef.runtime.recovery import FileTrainingJobStore, InferenceControl, read_marker, write_marker
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -157,7 +156,7 @@ class RestartCoordinator:
         self.control = serving
         self.control.rpc(0, "prepare_training_connection", timeout=30)
         publisher = CheckpointPublisher(self.control)
-        self.publication = TrainingPublication(Path(marker_path), publisher)
+        self.publication = TrainingPublication(FileTrainingJobStore(Path(marker_path)), publisher)
         marker = read_marker(Path(marker_path))
         with self.publication.recovery(marker):
             version = publisher.restore(marker)

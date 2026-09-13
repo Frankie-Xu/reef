@@ -327,7 +327,7 @@ def test_episode_files_merge_the_transient_binding_into_the_served_tree(load, mo
 
 
 def _stub_backend():
-    from reef.runtime.inference import InferenceHandler
+    from reef.runtime.interfaces import InferenceHandler
 
     class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):

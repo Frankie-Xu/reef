@@ -17,14 +17,13 @@ from typing import Any
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.adapters.config import RuntimeConnectionConfig
-from reef.runtime.adapters.http import InferenceProxyRuntime
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.registry import RuntimeRegistry
+from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry
+from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for

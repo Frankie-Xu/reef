@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from reef.core.reports import ReportBase
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.surface.base import ArtifactValidator, Surface
 
 

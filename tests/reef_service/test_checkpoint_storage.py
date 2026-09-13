@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.training_job import durable_io
+from reef.runtime import recovery as durable_io
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
@@ -307,7 +307,7 @@ class TestCheckpointStorage:
 
     def test_lora_control_files_are_owned_not_unknown(self, tmp_path: Path) -> None:
         """The scenario history and adapter-slot snapshots live in the managed roots by design."""
-        from reef.runtime.training_job.scenarios import SCENARIO_HISTORY_FILENAME
+        from reef.runtime.recovery import SCENARIO_HISTORY_FILENAME
         from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 
         storage = _storage(tmp_path)

@@ -2,8 +2,9 @@
 
 import pytest
 
-from reef.runtime.control.inference import InferenceControl, InferenceEngines, InferenceMonitor, WeightUpdateConnection
-from reef.runtime.weights.lock import WeightUpdateLock
+from reef.runtime.interfaces import InferenceEngines, InferenceMonitor, WeightUpdateConnection
+from reef.runtime.publication import WeightUpdateLock
+from reef.runtime.recovery import FileTrainingJobStore, InferenceControl
 
 
 class MemoryEngines(InferenceEngines):
@@ -225,8 +226,8 @@ def test_weight_update_lock_rejects_invalid_phase_records(phase, error):
 
 @pytest.mark.parametrize("committed", [False, True])
 def test_republication_restores_engine_and_monitor_pause_through_commit_gate(control, tmp_path, committed):
-    from reef.runtime.training_job.marker import read_marker, write_marker
-    from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
+    from reef.runtime.publication import TrainingPublication, WeightPublisher
+    from reef.runtime.recovery import read_marker, write_marker
 
     controller, engines, connection, monitor, events = control
     path = tmp_path / "job.json"
@@ -273,7 +274,7 @@ def test_republication_restores_engine_and_monitor_pause_through_commit_gate(con
         def restore_incumbent(self):
             raise AssertionError("republication must not reject a candidate")
 
-    publication = TrainingPublication(path, Publisher())
+    publication = TrainingPublication(FileTrainingJobStore(path), Publisher())
     assert publication.republish("engine:1") == "engine:1"
     assert events[:6] == [
         "pause_monitor",

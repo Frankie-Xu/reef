@@ -305,7 +305,18 @@ jobs:
           expected_backend_files.add("reef/inference/__init__.py")
           installed_files = {str(path) for path in reef.files or ()}
           assert expected_backend_files <= installed_files
-          assert "reef/runtime/weights/version.py" in installed_files
+          runtime_roots = {
+              Path(path).parts[2]
+              for path in installed_files
+              if path.startswith("reef/runtime/") and path.endswith(".py")
+          }
+          assert runtime_roots == {
+              "interfaces.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "executor"
+          }, runtime_roots
+          assert {
+              "reef/inference/runtime.py", "reef/inference/http.py", "reef/train/runtime.py",
+              "reef/inference/sglang/runtime.py", "reef/train/slime_backend/runtime.py",
+          } <= installed_files
           assert not any(path.startswith("reef/runtime/sglang/") for path in installed_files)
           assert not any(path.startswith("reef/train/slime_backend/reef_adapters/sglang/") for path in installed_files)
           assert {

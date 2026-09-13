@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from reef.runtime.adapters.http import InferenceProxyRuntime
+from reef.inference.http import InferenceProxyRuntime
 
 
 @dataclass(eq=False)

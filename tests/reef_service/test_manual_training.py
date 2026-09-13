@@ -17,7 +17,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe, RecipeConfigError
-from reef.runtime.base import TrainingRuntime
+from reef.runtime.interfaces import TrainingRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import PreparedStep

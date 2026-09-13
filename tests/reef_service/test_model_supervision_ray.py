@@ -14,11 +14,11 @@ from uuid import uuid4
 
 import pytest
 
+from reef.runtime.recovery import FileTrainingJobStore
+
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from reef.inference.sglang.service import RayHealthProbe
-from reef.runtime.adapters.ray import connect_ray_runtime
-from reef.runtime.backends import InferenceBackend, TrainingBackend
 from reef.runtime.deployment import (
     ComponentHealth,
     DeploymentResources,
@@ -29,8 +29,10 @@ from reef.runtime.deployment import (
     TrainingService,
 )
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.training_job.marker import read_marker, write_marker
-from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher
+from reef.runtime.interfaces import InferenceBackend, TrainingBackend
+from reef.runtime.publication import TrainingPublication, WeightPublisher
+from reef.runtime.recovery import read_marker, write_marker
+from reef.service.runtime import connect_ray_runtime
 from reef.service.training_driver import run_deployment
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.slime_backend.resources import SlimeDeploymentResources
@@ -122,7 +124,7 @@ class Coordinator:
 
         self.path = Path(directory) / "job.json"
         self.endpoint = ray.get(controller.health.remote())["url"]
-        self.publication = TrainingPublication(self.path, Publisher(controller))
+        self.publication = TrainingPublication(FileTrainingJobStore(self.path), Publisher(controller))
         marker = read_marker(self.path)
         with self.publication.recovery(marker):
             self.version = json.loads((Path(directory) / "checkpoint.json").read_text())["version"]
@@ -455,7 +457,7 @@ class ScheduledSender:
 
 class ScheduledTrainingBackend(TrainingBackend):
     def __init__(self, sender, receiver, directory):
-        from reef.runtime.backends import TrainingContext, TrainingCoordinationConfig
+        from reef.runtime.interfaces import TrainingContext, TrainingCoordinationConfig
 
         self.sender = sender
         self.receiver = receiver

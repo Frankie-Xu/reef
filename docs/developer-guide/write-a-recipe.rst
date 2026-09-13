@@ -280,8 +280,15 @@ candidate activation, rejection and durable acknowledgement to
 ``TrainingRuntime`` and ``InferenceRuntime`` objects; neither inherits the other
 and there is no aggregate ``ModelRuntime``.
 
+Both interfaces live in ``reef.runtime.interfaces``. Concrete scheduling
+connections live in the integration's ``runtime.py``: for example,
+``reef.train.slime_backend.runtime.SlimeTrainingRuntime`` and
+``reef.inference.sglang.runtime.SGLangInferenceRuntime``. They can reuse the
+generic coordinator clients in ``reef.train.runtime`` and ``reef.inference.runtime``;
+adding another backend must not require importing Slime or SGLang.
+
 For a native trainer such as Slime or MLX, the backend integration interface is
-``TrainingBackend`` in ``reef/runtime/backends.py``. It exposes
+``TrainingBackend`` in ``reef/runtime/interfaces.py``. It exposes
 batch preparation, training, checkpoints and separate weight preparation/sending.
 Slime implements it with ``SlimeTrainingBackend`` in
 ``reef/train/slime_backend/reef_adapters/bridge.py``. This is distinct from
@@ -297,7 +304,10 @@ handoffs. The native sender transfers weights directly to receiver workers;
 weight tensors never pass through the HTTP service or the scheduler.
 
 The coordinator composes ``TrainingExecution`` for durable job ordering and
-``TrainingPublication`` for commit gating. Training adapters return a
+``TrainingPublication`` for commit gating. These live in ``reef.runtime.scheduler``
+and ``reef.runtime.publication`` respectively. ``reef.runtime.recovery`` owns the
+marker store and startup reconstruction; publication depends on the shared
+``TrainingJobStore`` interface rather than the file implementation. Training adapters return a
 ``PreparedTrainingJob`` whose ``train`` returns ``TrainingMetrics`` and whose
 ``save_checkpoint`` synchronously persists model/optimizer state and recovery
 metadata. Reef writes the durable markers. Reef selects and persists a target
@@ -307,7 +317,7 @@ acknowledged. Retrying a partial transfer reuses its target; republication of
 unchanged weights preserves the committed identity. A failed restore or
 ambiguous optimizer step cannot reopen serving.
 
-Inference backends can compose ``reef.runtime.control.inference.InferenceControl``
+Inference backends can compose ``reef.runtime.recovery.InferenceControl``
 with concrete engine, monitoring and update-connection adapters. Serialize calls
 in the owning actor, and route legacy monitoring controls through the same pause
 state. Its ``resume`` is an internal operation authorized by the training commit

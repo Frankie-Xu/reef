@@ -7,10 +7,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.registry import build_named_recipe
-from reef.runtime import InferenceProxyRuntime, InferenceRuntime, RuntimeConfigError, RuntimeRegistry
-from reef.runtime.inference import InferenceHandler
+from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -24,7 +25,7 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
     )
 
     assert isinstance(proxy, InferenceProxyRuntime)
-    assert repository.names == ("executor_training", "inference_proxy", "ray_training")
+    assert repository.names == ("executor_training", "inference_proxy", "ray_training", "sglang", "slime_training")
 
 
 @pytest.mark.unit

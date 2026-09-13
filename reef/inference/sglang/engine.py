@@ -18,7 +18,8 @@ from reef.inference.sglang.lora_schema import (
     require_lora_tensor_request_schema,
 )
 from reef.inference.sglang.process import launch_engine, local_gpu_id, node_address_and_port, wait_ready
-from reef.runtime.control.memory import InferenceMemory, InferenceMemoryOperations
+from reef.runtime.interfaces import InferenceMemoryOperations
+from reef.runtime.scheduler import InferenceMemory
 
 logger = logging.getLogger(__name__)
 
