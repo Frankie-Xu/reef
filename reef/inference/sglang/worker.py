@@ -222,7 +222,13 @@ class SGLangWorker:
         # External engines and shared placement groups are borrowed resources.
         if self.servers:
             retire_engines(
-                [engine for server in self.servers.values() for engine in server.all_engines if engine is not None]
+                [
+                    engine
+                    for server in self.servers.values()
+                    for group in server.server_groups
+                    for engine in group.all_engines
+                    if engine is not None
+                ]
             )
             self.servers = {}
         lock = getattr(self, "rollout_engine_lock", None)
