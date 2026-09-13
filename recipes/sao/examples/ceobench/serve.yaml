@@ -6,11 +6,11 @@
 # architecture flags are Slime's reference set for the Qwen3.5 hybrid
 # (scripts/models/qwen3.5-27B.sh; sizes come from the HF config) and the
 # objective settings are the SAO example's, with the learning rates raised
-# for adapters. SAO trains one rollout at a time: batch_size 1 means one train
-# step the moment a report is accepted. Here a rollout is one agent turn of
-# the benchmark's bash agent; a finished week's turns are reported together
-# with that week's cash change (harness/report.py), so max_staleness admits
-# the turns of a week that the steps before them have already aged.
+# for adapters. A rollout is one agent turn of the benchmark's bash agent; a
+# finished week's turns are reported together with that week's cash change
+# (harness/report.py). batch_size 16 trains about a week of turns per step
+# (the SAO example trains one rollout per step; the paper trains 128), and
+# max_staleness admits the turns of a week that earlier steps have aged.
 #
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
 # until the agent calls next-week, and the agent reads the benchmark's docs
@@ -23,8 +23,11 @@
 #
 # GPU budget: four actor GPUs (TP4, the critic colocated) and a two-GPU
 # rollout engine (TP2), the devices docker-compose.yaml hands the container.
-# Paths are the container's; run.sh mounts the model directory and the run
-# directory.
+# The actor and the critic stay resident (no offload between their steps:
+# two frozen 27B bases at TP4 fit beside one step's activations), the critic
+# checkpoints every eighth commit, and a step trains 16 turns, so training
+# keeps pace with the game (about a week of play per step). Paths are the
+# container's; run.sh mounts the model directory and the run directory.
 
 schema-version: 2
 reef:
@@ -48,7 +51,7 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: 1                      # MUST equal training.config.global_batch_size
+    batch-size: 16                     # MUST equal training.config.global_batch_size
     max-staleness: 64
     checkpoint-every-n-versions: 20
 training:
@@ -66,7 +69,7 @@ training:
       max_storage_fraction: 0.80
       min_free_space_fraction: 0.10
       policy: latest
-    global_batch_size: 1
+    global_batch_size: 16
   # SAO objective as slime flags: --use-critic creates the value-model group;
   # the algorithm spec sets the skip-observation GAE and hard-masked DIS hook
   # paths. Value-model settings are the paper's: critic lr 5e-6 against the
@@ -77,6 +80,11 @@ training:
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     megatron-to-hf-mode: "bridge"
     hf-checkpoint: "${inference.model-path}"
+    # Both models stay on the GPUs; --use-critic would otherwise offload
+    # whichever is idle. The critic's weights and optimizer checkpoint every
+    # eighth commit instead of every one (a full 27B save each time).
+    no-offload-train: true
+    critic-save-interval: "8"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "100"

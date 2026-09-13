@@ -274,7 +274,13 @@ Earlier attempts, same harness:
   attention and MLP projections, the critic's value head trainable. This is
   the first critic-bearing recipe to use Reef's Megatron LoRA, which until
   now applied to the actor only (`prepare_critic_args` now keeps the adapters
-  for the critic). Full-parameter training of the 27B pair would need about
+  for the critic). Two frozen bases fit beside one step's activations, so
+  the stack passes `--no-offload-train` (Reef otherwise offloads whichever
+  model is idle between critic and actor steps, a cycle that cost about
+  three minutes of a five-minute step in the smoke run), checkpoints the
+  critic every eighth commit (`--critic-save-interval`) instead of at every
+  one, and trains 16 turns per step (`batch-size: 16`), about a week of
+  play, so training keeps pace with the game. Full-parameter training of the 27B pair would need about
   216 GB for weights and gradients alone. The engine serves a 128k window;
   the trainer's is 48k, bounded by its fp32 full-vocabulary logits (248k
   entries per token), so the harness reports only turns that fit
