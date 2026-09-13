@@ -368,19 +368,22 @@ From a Reef checkout:
    cd tutorials/evolve-your-harness
    ./run.sh
 
-To run the same recipe as a plain deployment, without the example's driver,
-start its profile and name the model:
+To run a harness-evolving deployment without the example's driver, start
+the built-in Reefine profile and name the model:
 
 .. code:: bash
 
-   reef serve --recipe harness-evolve \
+   reef serve --recipe reefine \
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b
 
-The profile is the harness evolve recipe's own default (loopback, port 8900,
-no token, state under ``.reef/harness-evolve/``); it points at this
-tutorial's proposer and evaluator, so it runs from a reef checkout. `The CLI
-reference <../reference/cli.rst>`__ describes provider settings and legacy shorthand.
+The profile is Reefine's own default (loopback, port 8901, token
+``reef-local``, state under ``.reef/reefine/``); its proposer and evaluator
+ship in the wheel, so it needs no checkout, and ``--recipe harness-evolve``,
+the former name of the profile folded into it, starts the same profile. This
+example's own stack stays in ``configs/serve.yaml``, which ``run.sh`` passes
+with ``-c``. `The CLI reference <../reference/cli.rst>`__ describes provider
+settings and legacy shorthand.
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit

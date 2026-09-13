@@ -67,8 +67,7 @@ def test_invalid_evolution_config_is_rejected(evolution: object) -> None:
         ReefineRecipe.from_environment({}, config={"evolution": evolution})
 
 
-def test_profile_preparation_needs_no_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", tmp_path)
+def test_profile_preparation_needs_no_checkout() -> None:
     environ: dict[str, str] = {}
     _prepare_profile("reefine", "ollama/gemma4:26b", environ)
     assert Path(environ["REEF_RECIPE_CONFIG_DIR"]) == profile_path("reefine").parent
