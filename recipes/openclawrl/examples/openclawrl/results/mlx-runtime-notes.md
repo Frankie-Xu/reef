@@ -106,6 +106,35 @@ hybrid architectures keep a KV cache on only a quarter of their blocks:
 Qwen3.8-27B prefilled 16384 tokens at 20.56 GB and 65536 at 28.65 GB. Prefill
 runs about 100–125 tok/s, which is the binding cost at those lengths, not memory.
 
+## Serving latency and the harness's turn budget
+
+A turn is one `hermes chat` invocation, and the reference harness kills it at
+`TURN_TIMEOUT_S`, 600 s by default. A killed turn is not an error the stream
+reports — the benchmark records a dead turn as a `no-reply` failure, so on a
+runtime slower than the reference's GPUs that constant quietly converts serving
+latency into policy failures, and those failures then feed the training signal.
+
+Measured over a 72-session Hermes + Harbor stream (Qwen3.5-9B-4bit, all 32
+layers, single-sequence serving, M4 Pro, candidate gate on):
+
+| | seconds |
+| --- | --- |
+| turn, median | 397 |
+| turn, slowest | 1141 |
+| the harness's ceiling | 600 |
+
+44 sessions replied; **28 died at the ceiling**, every one of them between 605 s
+and 610 s. They are not the policy falling silent: at each of the run's 36
+training steps the same weights answered 8 of 8 probe prompts
+(`answered_rate` 1.0). The margin over the default is about 1.5x, so a longer
+reply, a tool round-trip, or a training step landing mid-turn is enough to
+cross it. Raise `OPENCLAWRL_TURN_TIMEOUT_S` on this runtime.
+
+Two costs share that headroom. A training backward blocks serving for its
+duration, and a candidate gate generates `probe_size × max_tokens` before a
+step can publish — on every step, including the ones it then rejects, since the
+probe is what produces the decision.
+
 ## Tuning for your machine
 
 Unified memory scales with the number of sequences held in one backward pass
