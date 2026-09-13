@@ -26,6 +26,8 @@ PROTOCOL_IGNORED_DIRECTORIES = {
     "__pycache__",
     "__pypackages__",
     ".cache",
+    ".uv-cache",
+    ".ci-uv",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",

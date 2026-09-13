@@ -176,6 +176,40 @@ def test_protocol_discovery_prunes_custom_virtual_environment(tmp_path, monkeypa
     assert list(policy._protocol_python_files()) == []
 
 
+@pytest.mark.parametrize(
+    "cached_path",
+    [
+        ".uv-cache/archive-v0/package/python_discovery/_compat.py",
+        ".ci-uv/lib/python3.12/site-packages/uv/_find_uv.py",
+    ],
+)
+def test_protocol_ban_skips_ci_uv_dependencies_but_rejects_owned_source(
+    tmp_path, monkeypatch, capsys, cached_path: str
+) -> None:
+    policy = _load_policy()
+    dependency = tmp_path / cached_path
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text("from typing import Protocol\n")
+    owned = tmp_path / "reef" / "owned.py"
+    owned.parent.mkdir()
+    owned.write_text("from typing import Protocol\n")
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    roots = tuple(tmp_path / name for name in ("reef", "recipes", "tests"))
+    monkeypatch.setattr(policy, "ROOT", tmp_path)
+    monkeypatch.setattr(policy, "BASELINE", baseline)
+    monkeypatch.setattr(policy, "DESIGN_ROOTS", roots)
+    monkeypatch.setattr(policy, "REQUIRED_ROOTS", roots)
+
+    assert policy.main() == 1
+    output = capsys.readouterr().out
+    assert "reef/owned.py:1: PYD005" in output
+    assert cached_path not in output
+
+    owned.write_text("from abc import ABC\n")
+    assert policy.main() == 0
+
+
 @pytest.mark.parametrize("relative", ["tutorials/example.py", ".github/scripts/example.py", "setup.py"])
 def test_protocol_scope_does_not_expand_legacy_design_rules(tmp_path, monkeypatch, relative: str) -> None:
     policy = _load_policy()
