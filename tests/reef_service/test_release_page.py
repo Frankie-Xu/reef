@@ -406,6 +406,9 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     )
     assert '<tr><td>calendar</td><td>service</td><td class="id"></td></tr>' in setup
     assert "reef-pi setup" in setup and "carried from earlier steps" not in setup
+    assert "refused by the step" not in setup
+    # No proposal notes on the row: no Design and no Review section.
+    assert _sections(page) == ["Why", "What changed", "Verdict", "Setup", "Chain"]
     data = _data(page)
     assert data["metrics"]["training_request"]["text"] == "caf\u00e9 <script>alert(1)</script>"
     assert data["metrics"]["training_request"]["requires"][1]["check"] == "osascript -e '1 < 2'"
@@ -591,3 +594,165 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
     assert '<span class="hunk">--- pi-agent/extensions/hello.ts (rel-0)</span>' in changed
     assert '<span class="hunk">+++ pi-agent/extensions/hello.ts (rel-1)</span>' in changed
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
+
+
+def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    notes = {
+        "design": "Add an <away> command.\n\nA rule alone would assume the state holds.",
+        "review": {
+            "verdict": "partial",
+            "covered": ["the /away command toggles the state", "the rule reads a < b"],
+            "uncovered": ["no <b>notice</b> when the state clears"],
+        },
+        "undeclared_env": ["SLACK_WEBHOOK", "X<Y"],
+    }
+    row = {
+        "release_id": "rel-1",
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away mode"}, "proposal_notes": notes},
+    }
+    page = build_release_page(1, [creation, row])
+    page.encode("ascii")
+    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Verdict", "Setup", "Chain"]
+    design = _section(page, "Design")
+    assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
+    review = _section(page, "Review")
+    assert 'the proposer\'s review of its entries against the request: <span class="partial">partial</span>' in review
+    assert (
+        "<h3>covered</h3><ul><li>the /away command toggles the state</li><li>the rule reads a &lt; b</li></ul>"
+        in review
+    )
+    assert "<h3>uncovered</h3><ul><li>no &lt;b&gt;notice&lt;/b&gt; when the state clears</li></ul>" in review
+    assert (
+        "the extension reads these variables and no requires item names them: "
+        '<span class="id">SLACK_WEBHOOK, X&lt;Y</span>' in review
+    )
+    assert "<away>" not in page and "<b>notice" not in page and "X<Y" not in page
+    assert _data(page)["metrics"]["proposal_notes"] == notes
+    # A complete review with nothing left uncovered says so.
+    complete = {"review": {"verdict": "complete", "covered": ["the command"], "uncovered": []}}
+    review = _section(
+        build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": complete}}]), "Review"
+    )
+    assert '<span class="complete">complete</span>' in review
+    assert '<h3>uncovered</h3><p class="empty">nothing left uncovered</p>' in review
+    assert "no requires item names them" not in review
+    # The review call failed: no verdict on record, but the undeclared variables still show.
+    failed = {"design": "One command.", "undeclared_env": ["TWILIO_SID"]}
+    page = build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": failed}}])
+    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Verdict", "Setup", "Chain"]
+    review = _section(page, "Review")
+    assert '<p class="empty">no review on record</p>' in review and "<h3>covered</h3>" not in review
+    assert '<span class="id">TWILIO_SID</span>' in review
+
+
+def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    plain = ["Why", "What changed", "Verdict", "Setup", "Chain"]
+    for metrics in (
+        {"selected": True},
+        {"selected": True, "proposal_notes": {}},
+        # Other methods write other keys; an empty design and a review that is not a mapping count as absent.
+        {"selected": True, "proposal_notes": {"design": "  ", "review": "complete", "plan": "other keys"}},
+        {"skipped": "no proposal"},
+    ):
+        row = {"release_id": "rel-1", "parent_release_id": "rel-0", "operation": "training", "metrics": metrics}
+        page = build_release_page(1, [creation, row])
+        assert _sections(page) == plain and "Design" not in page.partition("<script")[0]
+
+
+def test_the_verdict_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    row = {
+        "release_id": "rel-1",
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "metrics": {
+            "selected": True,
+            "passed": 1,
+            "failed": 0,
+            "floor_score": 1.0,
+            "gate_sides": ["candidate"],
+            "candidate_score": 1.0,
+            "episode_failures": 0,
+            "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},
+            "selection": {
+                "policy": "floor",
+                "policy_version": "1",
+                "reason": "candidate met the floor on all 1 tasks",
+            },
+        },
+    }
+    verdict = _section(build_release_page(1, [creation, row]), "Verdict")
+    assert '<td class="selected">selected</td>' in verdict
+    assert "<th>passed</th><td>1</td>" in verdict and "<th>failed</th><td>0</td>" in verdict
+    assert "<th>floor score</th><td>1.0</td>" in verdict and "<th>gate sides</th><td>candidate</td>" in verdict
+    assert "<th>candidate score</th><td>1.0</td>" in verdict and "<th>episode failures</th><td>0</td>" in verdict
+    for absent in ("current score", "wins", "losses", "ties"):
+        assert f"<th>{absent}</th>" not in verdict
+    # The floor fields sit between the comparison's and the scores.
+    assert verdict.index("<th>passed</th>") < verdict.index("<th>candidate score</th>")
+    assert "<th>gate tokens</th><td>300 in, 20 out</td>" in verdict
+    assert "candidate met the floor on all 1 tasks" in verdict
+    both = {**row, "metrics": {**row["metrics"], "gate_sides": ["candidate", "current"], "ties": 0}}
+    verdict = _section(build_release_page(1, [creation, both]), "Verdict")
+    assert "<th>gate sides</th><td>candidate, current</td>" in verdict
+    assert verdict.index("<th>ties</th>") < verdict.index("<th>passed</th>")
+
+
+def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reasons() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    by_backend = [
+        {
+            "item": {"name": "bad name", "kind": "env", "check": 'test -n "$X" && echo 1 < 2'},
+            "reason": "requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        },
+        # A malformed item need not be an object; its JSON stands where the name would.
+        {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
+    ]
+    by_method = [
+        {"item": {"name": "phone", "kind": "sms"}, "reason": "kind must be one of ('permission', 'env', 'service')"}
+    ]
+    row = {
+        "release_id": "rel-1",
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "metrics": {
+            "selected": True,
+            "training_request": {
+                "id": "q-1",
+                "text": "text me",
+                "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}],
+                "refused_requires": by_backend,
+            },
+            "proposal_notes": {"refused_requires": by_method},
+        },
+    }
+    page = build_release_page(1, [creation, row])
+    page.encode("ascii")
+    setup = _section(page, "Setup")
+    own, _, refused = setup.partition("<h3>refused by the step</h3>")
+    assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td></tr>' in own and "reef-pi setup" in own
+    assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>reason</th></tr></thead>" in refused
+    assert (
+        '<tr><td>bad name</td><td>env</td><td class="id">test -n &quot;$X&quot; &amp;&amp; echo 1 &lt; 2</td>'
+        "<td>requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$</td></tr>" in refused
+    )
+    assert (
+        '<tr><td>&quot;SLACK_WEBHOOK&quot;</td><td></td><td class="id"></td>'
+        "<td>requires[0] must be an object with a name and a kind</td></tr>" in refused
+    )
+    assert (
+        '<tr><td>phone</td><td>sms</td><td class="id"></td>'
+        "<td>kind must be one of (&#x27;permission&#x27;, &#x27;env&#x27;, &#x27;service&#x27;)</td></tr>" in refused
+    )
+    # The backend's records first, then the method's.
+    assert refused.index("bad name") < refused.index("SLACK_WEBHOOK") < refused.index("phone")
+    assert "echo 1 < 2" not in page.partition("<script")[0]
+    # With nothing to set up, the refused table still closes the section.
+    only_refused = {**row, "metrics": {"selected": True, "proposal_notes": {"refused_requires": by_method}}}
+    setup = _section(build_release_page(1, [creation, only_refused]), "Setup")
+    assert "nothing to set up" in setup and "<td>phone</td>" in setup
+    assert setup.index("nothing to set up") < setup.index("<h3>refused by the step</h3>")
