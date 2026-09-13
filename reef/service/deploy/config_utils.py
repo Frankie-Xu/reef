@@ -77,14 +77,51 @@ def interpolate_config_values(config: Mapping[str, Any], value: Any) -> Any:
     return value
 
 
+def _repeated_keys(node: yaml.Node, path: str = "") -> list[str]:
+    """Describe every mapping key that appears twice, with the lines of both occurrences."""
+    repeated: list[str] = []
+    if isinstance(node, yaml.MappingNode):
+        first_lines: dict[str, int] = {}
+        for key_node, value_node in node.value:
+            if not isinstance(key_node, yaml.ScalarNode):
+                continue
+            name = f"{path}.{key_node.value}" if path else key_node.value
+            line = key_node.start_mark.line + 1
+            if key_node.value in first_lines:
+                repeated.append(f"{name} (lines {first_lines[key_node.value]} and {line})")
+            else:
+                first_lines[key_node.value] = line
+            repeated.extend(_repeated_keys(value_node, name))
+    elif isinstance(node, yaml.SequenceNode):
+        for index, item in enumerate(node.value):
+            repeated.extend(_repeated_keys(item, f"{path}[{index}]"))
+    return repeated
+
+
+def _load_yaml_document(handle: Any) -> tuple[Any, list[str]]:
+    """Load one YAML document as ``yaml.safe_load`` does, also reporting repeated mapping keys."""
+    loader = yaml.SafeLoader(handle)
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None, []
+        return loader.construct_document(node), _repeated_keys(node)
+    finally:
+        loader.dispose()
+
+
 def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dict[str, Any]:
-    """Read a config relative to the working directory; optionally defer interpolation."""
+    """Read a config relative to the working directory; optionally defer interpolation.
+
+    A ``schema-version: 2`` file that repeats a YAML key is an error naming
+    both lines; unversioned files keep YAML's last-occurrence-wins reading.
+    """
     path = Path(config_path).expanduser().resolve()
     if not path.exists():
         raise DeployConfigError(f"config not found: {path}\n  pass a deployment stack with: reef serve -c <path>")
     try:
         with open(path) as handle:
-            config = yaml.safe_load(handle)
+            config, repeated = _load_yaml_document(handle)
     except yaml.YAMLError as exc:
         raise DeployConfigError(f"config {path} is not valid YAML: {exc}") from exc
     except OSError as exc:
@@ -93,6 +130,8 @@ def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dic
         config = {}
     if not isinstance(config, dict):
         raise DeployConfigError(f"config {path} must be a YAML object at the root, not {type(config).__name__}")
+    if repeated and config.get("schema-version") == 2:
+        raise DeployConfigError(f"config {path} repeats YAML keys: {'; '.join(repeated)}")
     return interpolate_environment(config, path) if interpolate_env else config
 
 
