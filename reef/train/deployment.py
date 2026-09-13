@@ -76,6 +76,7 @@ class InProcessTrainingDeployment(TrainingDeployment):
             "tensor_parallel_size",
             "inference_num_gpus",
             "inference_options",
+            "colocate",
         } & config["reef"].keys()
         if unsupported or {"training", "rollout"} & config.get("execution", {}).keys():
             raise DeployConfigError(

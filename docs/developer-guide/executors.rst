@@ -468,8 +468,10 @@ The generic coordinator owns their ordering, publication journal, scenario
 adapter residency and commit barrier. The Slime adapter has no inference
 lifecycle object and does not own the publication state machine.
 
-The native placement helper still reserves training and inference GPUs in one
-call. Inference borrows its reservation and owns a separate control actor;
+Reef reserves training and inference GPUs itself, in one placement group per
+deployment (``reef.runtime.executor.placement``), and slices it per component;
+``training.colocate`` hands both components the same bundles. Inference
+borrows its slice and owns a separate control actor;
 its CPU reservation does not duplicate engine GPU reservations. The local
 training batch processor performs tensorization and DP partitioning without
 an inference RPC relay. NIXL tensor transport remains an executor option on

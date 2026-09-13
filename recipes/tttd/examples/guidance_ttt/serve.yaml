@@ -31,6 +31,7 @@ recipe:
     checkpoint-every-n-versions: 2
 training:
   backend: slime
+  colocate: true
   ready-timeout: 3600
   ray-namespace: reef
   ray-actor-name: reef-train-bridge
@@ -62,7 +63,6 @@ training:
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
     num-gpus-per-node: "${training.config.num_gpus}"
-    colocate: true
     tensor-model-parallel-size: "${training.config.tensor_parallel_size}"
     pipeline-model-parallel-size: "1"
     context-parallel-size: "1"

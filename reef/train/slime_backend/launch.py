@@ -59,6 +59,9 @@ _INFERENCE_LAUNCH_OPTIONS = {
     "rollout-external-engine-addrs",
     "prefill-num-servers",
 }
+# Colocation is Reef's placement decision (training.colocate); its native
+# spellings would let the trainer and the reservation disagree.
+_PLACEMENT_OPTIONS = {"colocate", "offload-rollout"}
 _INFERENCE_RESERVED_OPTIONS = {
     "model",
     "model-path",
@@ -113,6 +116,8 @@ def prepare_inference_config(
                 f"training.options.{name} configures inference; use inference.num-gpus, "
                 "inference.tensor-parallel-size or inference.options instead"
             )
+        if any(flag.startswith(name) for flag in _PLACEMENT_OPTIONS):
+            raise DeployConfigError(f"training.options.{name} places the model; use training.colocate instead")
     parallel_size = settings["tensor_parallel_size"]
     parallel_size = 1 if parallel_size is None else parallel_size
     num_gpus = settings["inference_num_gpus"]
@@ -131,6 +136,7 @@ def prepare_inference_config(
         inference_num_gpus=num_gpus,
         tensor_parallel_size=parallel_size,
         inference_options=options,
+        colocate=bool(settings["colocate"]),
     )
 
 
@@ -141,13 +147,20 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
     process stacks without inference_num_gpus retain their native argument path.
     """
     reef = config.get("reef", {})
-    arguments = native_arguments(reef.get("training_backend_options", {}))
+    training_options = reef.get("training_backend_options", {})
+    arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
     options = {
         "rollout-num-gpus": reef["inference_num_gpus"],
         "rollout-num-gpus-per-engine": reef["tensor_parallel_size"],
     }
+    if reef.get("colocate"):
+        # Slime's workers still read these flags; Reef derives them from one decision.
+        options["colocate"] = True
+        options["offload-rollout"] = True
+        if "offload-train" not in training_options:
+            options["offload-train"] = True
     for name, value in reef.get("inference_options", {}).items():
         # Slime has dedicated router bind flags and passes other router flags
         # directly to RouterArgs. Engine flags are all prefixed by Slime.

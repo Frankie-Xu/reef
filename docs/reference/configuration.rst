@@ -101,8 +101,11 @@ definitions independently, starts each component, then attaches a weight-transfe
 session. Training workers send directly to inference workers; batch processing
 uses Slime's adapter inside Reef's coordinator. Publication, version verification,
 LoRA residency and colocated memory handoffs live in ``reef.runtime``.
-Native engine launch and control live in ``reef.inference.sglang``. Slime's
-placement helper still reserves the coordinated model allocation once.
+Native engine launch and control live in ``reef.inference.sglang``. Reef
+reserves the model GPUs itself (``reef.runtime.executor.placement``): one
+placement group per deployment, ordered by node and device, sliced for the
+training and inference components; ``training.colocate`` gives both the same
+bundles.
 External-engine paths use the same component lifecycle while borrowing their
 external engines; automatic cold-rebuild supervision remains disabled for them.
 HTTP and the driver share the Ray address, namespace, actor name and resolved
@@ -148,6 +151,7 @@ tensor parallel size. An external provider does not accept local GPU requests.
        router-port: 30000  # Slime-integrated inference only
    training:
      backend: slime
+     colocate: false  # true trains on the inference GPUs
      options:
        actor-num-nodes: 1
        actor-num-gpus-per-node: 1
@@ -177,6 +181,8 @@ Migration from the previous version 2 training configuration:
      - ``inference.options.context-length`` (remove the prefix)
    * - ``training.options.sglang-router-port``
      - ``inference.options.router-port``
+   * - ``training.options.colocate`` (with ``offload-train`` and ``offload-rollout``)
+     - ``training.colocate``
 
 Managed launches reject the previous inference flags in ``training.options``,
 even if their values agree with the new fields. Native options cannot override
@@ -200,8 +206,9 @@ Training GPU capacity remains in ``training.options.actor-num-*``; the shared
 physical node size remains ``training.options.num-gpus-per-node``. Inference
 and training share one allocation plan, with no duplicate model-GPU
 reservations. Full-weight, LoRA and colocated training borrow Reef-owned
-inference. Use ``training.options.colocate`` to share GPU reservations; native
-training and inference offload must both be enabled.
+inference. ``training.colocate`` shares the GPU reservation between them; Reef
+derives the native training and inference offload flags from it, and managed
+launches reject their spellings in ``training.options``.
 ``training.options.keep-lora-base-resident`` retains the frozen inference base
 during later colocated LoRA steps; cold startup still releases all inference
 memory before training initializes. The separate inference control actor requires
@@ -822,6 +829,7 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in, installed entry-point name, or dotted TrainingDeployment class
+   training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.

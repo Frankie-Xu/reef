@@ -1,7 +1,7 @@
-"""Slime placement integration instantiated by Reef's model driver.
+"""Reef-owned Ray session and model GPU reservations for a Slime deployment.
 
-The native Slime allocator reserves inference and training GPUs together.
-Reef owns the allocation; the separate components borrow their reservations.
+Reef reserves the model GPUs itself from the parsed Slime topology; the
+separate components borrow their bundles from that one reservation.
 """
 
 from __future__ import annotations
@@ -12,7 +12,18 @@ from uuid import uuid4
 import ray
 
 from reef.runtime.deployment import InferenceResources
+from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
+
+
+def model_gpu_layout(args: Any) -> ModelGpuLayout:
+    """The deployment's GPU layout from Slime's parsed topology flags."""
+    return ModelGpuLayout(
+        training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node),
+        inference_gpus=int(getattr(args, "rollout_num_gpus", 0) or 0),
+        colocate=bool(getattr(args, "colocate", False)),
+        external_inference=bool(getattr(args, "rollout_external", False)),
+    )
 
 
 class SlimeDeploymentResources(InferenceResources):
@@ -32,7 +43,10 @@ class SlimeDeploymentResources(InferenceResources):
         self.namespace = namespace
         self.runtime_env = runtime_env
         self.allocate_models = allocate_models
-        self.placement_groups: dict[str, Any] = {}
+        #: Slime's view of the reservation: the actor and critic groups share
+        #: the training bundles, rollout engines take the inference bundles.
+        self.placement_groups: dict[str, GpuBundles | None] = {}
+        self._reservation: ModelGpuReservation | None = None
         self._started = False
         self._closed = False
         self._owns_session = False
@@ -58,29 +72,26 @@ class SlimeDeploymentResources(InferenceResources):
         if self._process_lease is not None:
             self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
         if self.allocate_models:
-            from slime.ray.placement_group import create_placement_groups
-
-            self.placement_groups = create_placement_groups(self.args)
+            self._reservation = reserve_model_gpus(model_gpu_layout(self.args))
+            self.placement_groups = {
+                "actor": self._reservation.training,
+                "critic": self._reservation.training if getattr(self.args, "use_critic", False) else None,
+                "rollout": self._reservation.inference,
+            }
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        from ray.util.placement_group import remove_placement_group
-
         errors = []
-        released = set()
         try:
-            for placement in self.placement_groups.values():
-                if placement is None or placement[0] is None or placement[0].id in released:
-                    continue
-                released.add(placement[0].id)
+            if self._reservation is not None:
                 try:
-                    remove_placement_group(placement[0])
+                    self._reservation.release()
                 except Exception as exc:
                     errors.append(exc)
         finally:
-            self.placement_groups.clear()
+            self.placement_groups = {}
             if self._owns_session:
                 # Disconnect this job; never stop an externally owned cluster.
                 # Job-scoped reservations also expire if a launch helper failed

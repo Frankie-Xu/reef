@@ -62,7 +62,8 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
         assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == str(
             config["training"]["num_gpus"]
         )
-        assert config["reef"]["training_backend_options"]["colocate"] is True
+        assert config["reef"]["colocate"] is True
+        assert "colocate" not in config["reef"]["training_backend_options"]
     elif "sao" in relative:
         assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "1"
         assert config["reef"]["inference_num_gpus"] == 1

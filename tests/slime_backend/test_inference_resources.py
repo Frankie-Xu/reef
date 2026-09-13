@@ -1,6 +1,5 @@
 """Slime components borrow connections and share one Reef-owned allocation."""
 
-import importlib
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -9,6 +8,7 @@ import pytest
 from reef.inference.sglang import service as inference_service
 from reef.inference.sglang.config import SGLangConfig
 from reef.runtime.deployment import ModelDeploymentPlan
+from reef.runtime.executor.placement import ModelGpuLayout
 from reef.service.training_driver import ModelDeployment
 from reef.train.slime_backend import resources
 
@@ -34,13 +34,17 @@ def resource_runtime(monkeypatch):
         state.initialized = False
         event("disconnect")
 
-    def allocate(args):
-        state.args = args
+    def allocate(layout):
+        state.layout = layout
         event("allocate")
-        return dict(placements)
+        return SimpleNamespace(
+            training=placements["actor"],
+            inference=placements["rollout"],
+            release=lambda: event("release-" + allocation.id),
+        )
 
+    monkeypatch.setattr(resources, "reserve_model_gpus", allocate)
     for name, values in (
-        ("slime.ray.placement_group", {"create_placement_groups": allocate}),
         ("slime.ray.utils", {"add_default_ray_env_vars": lambda values: values}),
         ("reef.train.slime_backend.reef_adapters.worker_hooks", {"reef_rollout_env_vars": lambda: {"TEST": "1"}}),
     ):
@@ -51,8 +55,6 @@ def resource_runtime(monkeypatch):
     monkeypatch.setattr(resources.ray, "init", connect)
     monkeypatch.setattr(resources.ray, "shutdown", disconnect)
     monkeypatch.setattr(resources.ray, "nodes", list)
-    placement_module = importlib.import_module("ray.util.placement_group")
-    monkeypatch.setattr(placement_module, "remove_placement_group", lambda pg: event("release-" + pg.id))
 
     class Executor:
         def __init__(self, config):
@@ -75,7 +77,15 @@ def resource_runtime(monkeypatch):
 
 
 def plan_for(state, *, colocate=False):
-    args = SimpleNamespace(rollout_num_gpus=4, rollout_num_gpus_per_engine=2, colocate=colocate)
+    args = SimpleNamespace(
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=2,
+        rollout_num_gpus=4,
+        rollout_num_gpus_per_engine=2,
+        colocate=colocate,
+        rollout_external=False,
+        use_critic=False,
+    )
     allocation = resources.SlimeDeploymentResources(
         args,
         ray_address="external",
@@ -116,9 +126,8 @@ def test_deployment_allocates_once_and_closes_training_inference_then_reservatio
     config = resource_runtime.config
     assert config.options["num_gpus"] == 0 and config.options["num_cpus"] == 1
     assert config.workers[0].args[1] is resource_runtime.placements["rollout"]
-    assert resource_runtime.args.colocate == colocate
-    assert resource_runtime.args.rollout_num_gpus == 4
-    assert resource_runtime.args.rollout_num_gpus_per_engine == 2
+    assert resource_runtime.layout == ModelGpuLayout(training_gpus=2, inference_gpus=4, colocate=colocate)
+    assert plan.resources.placement_groups["critic"] is None
     assert resource_runtime.ray_options == {
         "address": "external",
         "namespace": "test",

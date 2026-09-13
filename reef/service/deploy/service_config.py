@@ -83,6 +83,11 @@ class ServiceConfig:
             "Options owned by the selected training backend.", public_path=("training", "options")
         ),
     )
+    colocate: bool = config_option(
+        False,
+        public_path=("training", "colocate"),
+        help="Train on the inference GPUs; Reef reserves one shared allocation and hands memory between them.",
+    )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and

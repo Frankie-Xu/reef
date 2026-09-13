@@ -12,7 +12,7 @@ import yaml
 
 from reef.cli import main
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config_utils import interpolate_config
+from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
@@ -319,7 +319,7 @@ HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
                 os.kill(pid, 0)
 
 
-@pytest.mark.parametrize("mode", [{}, {"colocate": True}, {"megatron-lora-rank": 8}])
+@pytest.mark.parametrize("mode", [{}, {"colocate": True}, {"options": {"megatron-lora-rank": 8}}])
 def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_path, mode):
     from reef.train.slime_backend.launch import driver_arguments
 
@@ -331,7 +331,9 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
             "options": {"mem_fraction_static": 0.8, "router-port": 30000, "disable-cuda-graph": True},
         }
     )
-    raw["training"]["options"].update(mode)
+    raw["training"]["options"].update(mode.get("options", {}))
+    if mode.get("colocate"):
+        raw["training"]["colocate"] = True
     overrides = {
         "inference.num-gpus": "4",
         "inference.tensor-parallel-size": "2",
@@ -340,7 +342,9 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
     }
     config, _ = resolve_deployment_config(raw, overrides, tmp_path / "serve.yaml")
     equivalent = training_config()
-    equivalent["training"]["options"].update(mode)
+    equivalent["training"]["options"].update(mode.get("options", {}))
+    if mode.get("colocate"):
+        equivalent["training"]["colocate"] = True
     equivalent["inference"].update(
         {
             "num-gpus": 4,
@@ -358,6 +362,19 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
     assert "--sglang-disable-cuda-graph" not in argv
     assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
     assert raw["inference"]["num-gpus"] == 2
+    colocated = {"--colocate", "--offload-rollout", "--offload-train"}
+    assert colocated <= set(argv) if mode.get("colocate") else not colocated & set(argv)
+    assert config["reef"]["colocate"] is bool(mode.get("colocate"))
+    assert "colocate" not in config["reef"]["training_backend_options"]
+
+
+def test_native_placement_flags_are_rejected_in_training_options(tmp_path):
+    raw = training_config()
+    raw["training"]["options"]["colocate"] = True
+    with pytest.raises(
+        DeployConfigError, match=r"training\.options\.colocate places the model; use training\.colocate"
+    ):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 def test_inference_capacity_defaults_to_one_tensor_parallel_engine(tmp_path):
