@@ -111,15 +111,24 @@ them:
 * ``undeclared_env``: the variables a written extension reads through
   ``process.env`` that no ``requires`` item names. Nothing adds them; the
   page shows them so you can set them or ask for the item.
+* ``failure``: why a request step produced no change: the model call
+  failed (how long it took, the reply budget and the endpoint's error; a
+  reply without text adds that a thinking model may have spent the budget
+  on its reasoning and names ``REEF_PROPOSER_MAX_TOKENS``) or the reply
+  held no usable entry. The verdict line in the session and from ``--wait``
+  quotes it, and the page shows it as ``proposer failure`` in the Verdict
+  section.
 
 All ``CordisRecipe`` evolution settings remain available, including custom
 proposers, seeds, execution settings, and publication policies.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
-call budgets. Defaults are 120 seconds and 4096 reply tokens for an
-instruction, 60 seconds and 1024 tokens for its review, and 60 seconds and
-2048 tokens for failure-driven proposals. The tutorial's ``run.sh`` raises
-these to 900 seconds and 16384 tokens for its local model.
+call budgets. Defaults are 120 seconds and 16384 reply tokens for an
+instruction, 60 seconds and 2048 tokens for its review, and 60 seconds and
+4096 tokens for failure-driven proposals; the reply budgets are sized for a
+thinking model, which spends part of the budget on its reasoning before the
+JSON. The tutorial's ``run.sh`` raises the timeout to 900 seconds for its
+local model and pins the 16384 token budget.
 
 Migration
 ---------

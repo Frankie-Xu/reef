@@ -927,11 +927,17 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
 
 
 class _FakeReef:
-    """A reef that records every call: inference answers with a receipt, the request route with ``answer``, and
-    ``GET /reef/harness/releases`` with ``rows``."""
+    """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
+    ``GET /reef/harness/releases`` with ``rows`` and the request's record route with ``record`` (404 without one)."""
 
     def __init__(
-        self, answer: dict, *, status: int = 200, receipt: str = "ask-receipt", rows: list[dict] | None = None
+        self,
+        answer: dict,
+        *,
+        status: int = 200,
+        receipt: str = "ask-receipt",
+        rows: list[dict] | None = None,
+        record: dict | None = None,
     ) -> None:
         import http.server
         import threading
@@ -954,6 +960,8 @@ class _FakeReef:
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path == "/reef/harness/releases":
                     self._answer(200, {"scenario": "ask-scenario", "releases": rows or []})
+                elif self.path == "/reef/scenarios/ask-scenario/records/q-1" and record is not None:
+                    self._answer(200, record)
                 else:
                     self._answer(404, {})
 
@@ -1257,8 +1265,23 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
             1,
             ["reef-pi: 'text me when you are blocked' produced no change (no proposal). Nothing changed."],
         ),
+        (
+            # The proposer's own reason rides the skip line when the step recorded one.
+            _step_row(
+                "rel-0",
+                {
+                    "skipped": "no proposal",
+                    "proposal_notes": {"failure": "model call failed after 58.2 s (max_tokens=16384): timed out"},
+                },
+            ),
+            1,
+            [
+                "reef-pi: 'text me when you are blocked' produced no change (no proposal: model call failed after "
+                "58.2 s (max_tokens=16384): timed out). Nothing changed."
+            ],
+        ),
     ],
-    ids=["selected", "pending", "rejected", "skipped"],
+    ids=["selected", "pending", "rejected", "skipped", "skipped-failure"],
 )
 def test_harness_wait_prints_the_verdict_line_and_exits_by_it(tmp_path, capsys, row, status, lines) -> None:
     reef = _FakeReef(
@@ -1300,6 +1323,37 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
         "reef-pi: training request q-1 accepted",
         "reef-pi: reef is running the step; add --wait to stay here, or check /reef-versions later",
     ]
+
+
+@pytest.mark.unit
+def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path, capsys) -> None:
+    """Until a step takes the request its record's compacted_at is null; once it is set the wait says so, once,
+    and stops reading the record. A record the service does not answer is no reason to stop waiting."""
+    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    record_path = "/reef/scenarios/ask-scenario/records/q-1"
+    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "compacted_at": 1700000000.5})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert out[2] == "reef-pi: the step started; usually one to three minutes"
+    assert out[3].startswith("reef-pi: no verdict yet for 'text me' after 0.1 s") and len(out) == 4
+    record_reads = [call for call in reef.seen if call["path"] == record_path]
+    assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
+    assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
+    # Queued (compacted_at null) or unanswered (404): no line, and the record is read again at every poll.
+    for name, record in (("queued", {"agent_record_id": "q-1", "compacted_at": None}), ("missing", None)):
+        reef = _FakeReef(answer, rows=rows, record=record)
+        (tmp_path / name).mkdir()
+        compose, captures = _ask_tree(tmp_path / name, reef.port)
+        with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+            assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
+        reef.close()
+        out = capsys.readouterr().out.splitlines()
+        assert len(out) == 3 and out[2].startswith("reef-pi: no verdict yet")
+        assert len([call for call in reef.seen if call["path"] == record_path]) >= 3
 
 
 @pytest.mark.unit

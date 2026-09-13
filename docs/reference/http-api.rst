@@ -210,7 +210,9 @@ the review call failed), ``refused_requires`` (the items the method itself
 dropped, in the same ``{item, reason}`` shape) and ``undeclared_env`` (the
 variables a written extension reads through ``process.env`` that no
 ``requires`` item names; nothing adds them, the version page shows them).
-Other methods may write other keys.
+A request step that produced nothing records ``failure``, why: the model
+call failed (how long it took, the reply budget and the endpoint's error)
+or the reply held no usable entry. Other methods may write other keys.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
@@ -661,7 +663,8 @@ only when the row carries a review or that list), Verdict (the verdict with
 ``floor_score``, ``gate_sides``, ``current_score``, ``candidate_score`` and
 ``episode_failures``, each when the row carries it, so a ``floor`` gate,
 which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
-and no ``current_score``, and the step record directory when
+and no ``current_score``, ``proposal_notes.failure`` as ``proposer failure``
+when the step recorded one, and the step record directory when
 ``evolution.step_record_dir`` is set), Setup (the request's ``requires`` with
 name, kind and check, then the items the release carries from earlier steps
 in its chain, the same union the install script and ``reef-<adapter> setup``

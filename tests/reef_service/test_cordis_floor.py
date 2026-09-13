@@ -225,12 +225,12 @@ def test_a_step_proposal_without_mutations_is_no_proposal(tmp_path: Path) -> Non
     result = run_backend_step(b, batch(), b.initial_state())
     assert result.metrics["skipped"] == "no proposal" and "proposal_notes" not in result.metrics
     assert result.state["entries"] == []
-    # The notes ride the skip too, so the page can show why the method wrote nothing; a list of mutations is fine.
-    b = backend(tmp_path, lambda n, s, m: StepProposal([], {"design": "nothing to do"}))
+    # The notes ride the skip too, so the page and the session can show why the method wrote nothing (Reefine
+    # records that under "failure"); a list of mutations is fine.
+    notes = {"design": "nothing to do", "failure": "the reply holds no usable entry"}
+    b = backend(tmp_path, lambda n, s, m: StepProposal([], notes))
     result = run_backend_step(b, batch(), b.initial_state())
-    assert result.metrics["skipped"] == "no proposal" and result.metrics["proposal_notes"] == {
-        "design": "nothing to do"
-    }
+    assert result.metrics["skipped"] == "no proposal" and result.metrics["proposal_notes"] == notes
     assert StepProposal([MARKER]).mutations == (MARKER,)
     with pytest.raises(TypeError, match="notes must be a mapping"):
         StepProposal((), ["not", "a", "mapping"])

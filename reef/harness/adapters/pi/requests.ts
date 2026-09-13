@@ -5,7 +5,9 @@
 // --direct, or headless, the command files it as is. A filed request goes to
 // reef with this session's id and the installed release through native manual
 // training; the service proposer writes the change, and a watch here polls the
-// catalog and reports the step's verdict in the session. /reef-versions lists
+// catalog, shows in the footer whether the request is queued or its step is
+// running and for how long, and reports the step's verdict in the session,
+// with why the proposer produced nothing when it did. /reef-versions lists
 // the release chain with each step's verdict and request, prints a step's page
 // and, for a pending release, the promote action and a trial install, and runs
 // the promote after a confirmation. Nothing here writes a mutation. Kept free
@@ -18,7 +20,8 @@ import { join } from "node:path";
 
 // The release file the install script and harness_pull write at the tree root.
 const RELEASE_FILE = ".reef-harness-release";
-// The watch polls the catalog once per interval and gives up at the cap.
+// The watch polls the catalog (and, until a step takes the request, its record) once per interval and gives up
+// at the cap.
 const WATCH_INTERVAL_MS = 5000;
 const WATCH_CAP_MS = 30 * 60 * 1000;
 // The service caps a request's text; the filed text stays within it.
@@ -133,6 +136,18 @@ function uncoveredOf(row) {
   return items.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
 }
 
+// Why the proposer produced nothing, when the step recorded it beside its notes.
+function failureOf(row) {
+  const notes = metricsOf(row).proposal_notes;
+  return notes && typeof notes === "object" && typeof notes.failure === "string" ? notes.failure.trim() : "";
+}
+
+// An elapsed time as the footer shows it: minutes and two digit seconds.
+function elapsedText(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
 export default function requests(pi) {
   if (process.env.PI_OFFLINE) return; // hermetic episodes never see the commands or the tools
   const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -193,6 +208,15 @@ export default function requests(pi) {
     return Array.isArray(rows) ? rows : [];
   };
 
+  // The request's own record: its compacted_at is null while the request is queued and a time once a step
+  // took it, which is when the wait a person sees starts.
+  const requestRecord = async (recordId) => {
+    const path = `/reef/scenarios/${encodeURIComponent(scenario)}/records/${encodeURIComponent(recordId)}`;
+    const response = await fetch(`${serviceUrl}${path}`, { headers: reefHeaders() });
+    if (!response.ok) throw new Error(`reef refused the record read (HTTP ${response.status})`);
+    return await response.json();
+  };
+
   // A promoted row stays pending in the catalog; the promote is a later row naming it, so with the rows given
   // the pending row reads "promoted at step N".
   const verdictOf = (row, rows = []) => {
@@ -209,13 +233,18 @@ export default function requests(pi) {
   };
 
   // The one line a settled step earns, with the next action, quoting the request; the wrapper prints the same.
+  // Every line names the step, whose page holds the details.
   const settledText = (step, rows, ask) => {
     const row = rows[step];
     const metrics = metricsOf(row);
     const release = String(row.release_id || "").slice(0, 8);
     const verdict = verdictOf(row, rows);
+    const details = ` Details: /reef-versions ${step}.`;
     if (verdict === "selected") {
-      return `reef: '${ask}' is published as release ${release}. Restart reef-pi to install it (the update notice offers it).`;
+      return (
+        `reef: '${ask}' is published as release ${release}. Restart reef-pi to install it (the update notice ` +
+        `offers it).${details}`
+      );
     }
     if (verdict === "pending") {
       return (
@@ -225,9 +254,16 @@ export default function requests(pi) {
     }
     if (verdict === "rejected") {
       const reason = metrics.selection && metrics.selection.reason ? metrics.selection.reason : "no reason recorded";
-      return `reef: '${ask}' did not pass the gate (${reason}). Nothing changed; rephrase or split the request.`;
+      return (
+        `reef: '${ask}' did not pass the gate (${reason}). Nothing changed; rephrase or split the request.` + details
+      );
     }
-    if (verdict === "skipped") return `reef: '${ask}' produced no change (${metrics.skipped}). Nothing changed.`;
+    if (verdict === "skipped") {
+      // The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
+      const failure = failureOf(row);
+      const why = failure ? `${metrics.skipped}: ${failure}` : String(metrics.skipped);
+      return `reef: '${ask}' produced no change (${why}). Nothing changed.${details}`;
+    }
     return `reef: '${ask}' settled as ${verdict} (release ${release}); /reef-versions ${step} shows it.`;
   };
 
@@ -244,18 +280,22 @@ export default function requests(pi) {
   const startWatch = (recordId, text, ctx) => {
     stopWatch(ctx);
     const ask = clip(text.trim(), 60);
+    const id8 = recordId.slice(0, 8);
     const deadline = Date.now() + WATCH_CAP_MS;
-    const mine = { timer: null, polling: false };
-    const poll = async () => {
-      if (mine.polling) return; // a slow read never overlaps the next tick
-      mine.polling = true;
+    // startedAt is the first poll that saw a step holding the request; the footer counts from it.
+    const mine = { timer: null, polling: false, startedAt: null, status: null };
+    const show = (status) => {
+      if (status === mine.status) return; // the footer is redrawn only when its text changes
+      mine.status = status;
+      ctx.ui.setStatus("reef", status);
+    };
+    const tick = async () => {
       let rows = [];
       try {
         rows = await releases();
       } catch {
         // A failed read is one missed poll; the next tick reads again.
       }
-      mine.polling = false;
       if (watch !== mine) return; // replaced or shut down while the read was out
       const step = rows.findIndex((row) => requestIdOf(row) === recordId);
       if (step >= 0) {
@@ -264,16 +304,40 @@ export default function requests(pi) {
         const lines = [settledText(step, rows, ask)];
         if (uncovered.length) lines.push(`Not covered: ${uncovered.join("; ")}`);
         ctx.ui.notify(lines.join("\n"), "info");
-      } else if (Date.now() >= deadline) {
+        return;
+      }
+      if (Date.now() >= deadline) {
         stopWatch(ctx);
         ctx.ui.notify(`reef: no verdict yet for '${ask}'; /reef-versions shows it when it settles`, "warning");
+        return;
+      }
+      if (mine.startedAt === null) {
+        try {
+          const record = await requestRecord(recordId);
+          if (record && typeof record.compacted_at === "number") mine.startedAt = Date.now();
+        } catch {
+          // A failed record read keeps the footer as it was; the next tick reads again.
+        }
+        if (watch !== mine) return;
+      }
+      if (mine.startedAt !== null) {
+        show(`reef: step for request ${id8} running for ${elapsedText(Date.now() - mine.startedAt)}`);
+      }
+    };
+    const poll = async () => {
+      if (mine.polling) return; // a slow read never overlaps the next tick
+      mine.polling = true;
+      try {
+        await tick();
+      } finally {
+        mine.polling = false;
       }
     };
     mine.timer = setInterval(poll, watchIntervalMs());
     // A headless session exits when its turn ends; the timer must not hold the process open for the verdict.
     if (typeof mine.timer.unref === "function") mine.timer.unref();
     watch = mine;
-    ctx.ui.setStatus("reef", `reef: step for request ${recordId.slice(0, 8)} running`);
+    show(`reef: request ${id8} queued`);
   };
 
   pi.on("session_shutdown", async (_event, ctx) => stopWatch(ctx));
@@ -310,7 +374,12 @@ export default function requests(pi) {
       startWatch(recordId, text, ctx);
       return {
         content: [
-          { type: "text", text: `filed request ${recordId}; reef is running the step and will report here when it settles` },
+          {
+            type: "text",
+            text:
+              `filed request ${recordId}; reef is running the step, which usually takes one to three minutes, ` +
+              "and will report here when it settles",
+          },
         ],
         details: {},
       };
@@ -344,7 +413,7 @@ export default function requests(pi) {
         ctx.ui.notify(message(error), "error");
         return;
       }
-      ctx.ui.notify(`Training request ${recordId} accepted.`, "info");
+      ctx.ui.notify(`Training request ${recordId} accepted; the step usually takes one to three minutes.`, "info");
       startWatch(recordId, text, ctx);
     },
   });

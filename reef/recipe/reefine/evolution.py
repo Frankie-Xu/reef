@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -167,8 +168,11 @@ def propose(
     them, with the failures beside it as context (``hybrid`` hands over what
     an automatic batch would take next, ``manual`` none), and the step gets
     a :class:`StepProposal` whose notes carry the design and the review;
-    else it learns from the failures as before. Any endpoint or parse
-    failure returns ``None`` - a skipped step, never a crash.
+    else it learns from the failures as before. An endpoint or parse
+    failure never crashes the step: on the failure path it returns
+    ``None``, and for a request a :class:`StepProposal` without mutations
+    whose notes say why under ``failure``, so the skipped step's record and
+    the session's verdict line carry the reason.
     """
     if requests:
         return _answer_request(nodes, requests[0], samples, models, entries)
@@ -196,7 +200,8 @@ def propose(
         "Reuse an existing skill's name to update it (prefer improving 'answer-style'); "
         "use a new lowercase name to add one."
     )
-    reply = _ask(models, prompt, max_tokens=_max_tokens(2048), timeout_s=_timeout_s(60.0))
+    # The failure path keeps its contract: a failed call is a skipped step, with the reason in the log alone.
+    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(4096), timeout_s=_timeout_s(60.0))
     if reply is None:
         return None
     proposals = _without_reefs_own(_parse_proposal(reply) or ())
@@ -223,18 +228,23 @@ def _answer_request(
 
     A ``{"requires": [...]}`` object beside the entries is what the change
     needs from the user's machine; its items are appended to the request
-    mapping's ``requires``, where the backend reads them back."""
+    mapping's ``requires``, where the backend reads them back. When the call
+    fails or the reply gives nothing to apply, the proposal has no mutations
+    and its notes carry the reason under ``failure``."""
     prompt = _request_prompt(nodes, request, samples, entries)
-    # An extension is longer than a skill; a request gets twice the failure path's wait.
-    reply = _ask(models, prompt, max_tokens=_max_tokens(4096), timeout_s=_timeout_s(120.0))
+    # An extension is longer than a skill, and a thinking model spends part of the budget on its reasoning: a
+    # request gets four times the failure path's reply budget and twice its wait.
+    reply, failure = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
     if reply is None:
-        return None
+        return StepProposal((), {"failure": failure})
     proposals = _parse_proposal(reply, kinds=tuple(REQUEST_KINDS))
     if proposals is None:
-        return None
+        return _nothing_to_apply(reply, "the reply holds no usable entry")
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
-        return None
+        return _nothing_to_apply(
+            reply, "every entry in the reply was dropped: a reserved id, or an id another kind holds"
+        )
     own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
     added, refused = _parse_requires(reply)
     # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
@@ -253,6 +263,17 @@ def _answer_request(
     if undeclared:
         notes["undeclared_env"] = undeclared
     return StepProposal(tuple(mutations), notes)
+
+
+def _nothing_to_apply(reply: str, reason: str) -> StepProposal:
+    """A request step's record when the reply gave no mutation: the reason, and the design when the model wrote
+    one, so the page still shows what it planned."""
+    notes: dict[str, Any] = {}
+    design = _parse_design(reply)
+    if design is not None:
+        notes["design"] = design
+    notes["failure"] = reason if reply.strip() else "the reply is empty"
+    return StepProposal((), notes)
 
 
 def _request_prompt(
@@ -338,7 +359,7 @@ def _review(
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2),
     )
-    reply = _ask(models, prompt, max_tokens=_max_tokens(1024), timeout_s=_timeout_s(60.0))
+    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(2048), timeout_s=_timeout_s(60.0))
     return None if reply is None else _parse_review(reply)
 
 
@@ -417,7 +438,8 @@ def _max_tokens(default: int) -> int:
     """The reply budget of one proposer call: ``REEF_PROPOSER_MAX_TOKENS`` when set, else the caller's default.
 
     A thinking model spends the budget on its reasoning first, and a reply cut
-    there is empty; a local model may need several times the default."""
+    there has no text: the request path's default is sized for that, and a
+    local model may still need more."""
     raw = os.environ.get("REEF_PROPOSER_MAX_TOKENS", "").strip()
     try:
         return int(raw) if raw else default
@@ -433,16 +455,32 @@ def failures_text(samples: Sequence[TraceSample]) -> str:
     return json.dumps(views, indent=2, default=str)
 
 
-def _ask(models: ModelBindings, prompt: str, *, max_tokens: int, timeout_s: float = 60.0) -> str | None:
-    """One served model call; ``None`` when the endpoint fails, with the reason in the log."""
+#: What to add when the binding got a reply without text: a thinking model's reasoning took the budget.
+_NO_TEXT_HINT = "; a thinking model may have spent the reply budget on its reasoning, raise REEF_PROPOSER_MAX_TOKENS"
+
+
+def _ask(
+    models: ModelBindings, prompt: str, *, max_tokens: int, timeout_s: float = 60.0
+) -> tuple[str | None, str | None]:
+    """One served model call: the reply and no reason, or ``None`` and a one-line reason when the endpoint failed.
+
+    The reason names how long the call took and the reply budget, then the
+    exception's text (a 404 for a model name, a timeout, a reply without
+    text); it goes to the log, and a request step records it so the person
+    sees why nothing changed."""
+    started = time.monotonic()
     try:
         # A stalled endpoint holds the training thread for the whole timeout
         # before the step degrades to a skip; keep it short.
-        return models.served.chat([{"role": "user", "content": prompt}], timeout_s=timeout_s, max_tokens=max_tokens)
+        reply = models.served.chat([{"role": "user", "content": prompt}], timeout_s=timeout_s, max_tokens=max_tokens)
     except Exception as exc:
-        # The step records only "no proposal"; the reason (a 404 for a model name, a timeout) is here.
-        logging.getLogger(__name__).warning("propose: served model call failed: %s", exc)
-        return None
+        elapsed = time.monotonic() - started
+        reason = f"model call failed after {elapsed:.1f} s (max_tokens={max_tokens}): {exc}"
+        if "non-text content" in str(exc):
+            reason += _NO_TEXT_HINT
+        logging.getLogger(__name__).warning("propose: served %s", reason)
+        return None, reason
+    return reply, None
 
 
 def _entry_view(kind: str, config: Any, entry_id: Any = None) -> dict[str, Any]:

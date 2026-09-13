@@ -31,8 +31,9 @@ ACCEPTED = {"agent_record_id": "q-1", "scenario": "code-repair", "request_type":
 # One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command,
 # tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch, and prints what the
 # extension registered and every call it made. TEST_SELECT and TEST_INPUT script the dialogs, one answer per
-# call; TEST_SHUTDOWN_AFTER_MS fires session_shutdown mid run; TEST_CLOCK_SKEW_AFTER_MS moves the clock past
-# the watch's 30 minute cap.
+# call; TEST_SHUTDOWN_AFTER_MS fires session_shutdown mid run; TEST_CLOCK_SKEW_AFTER_MS moves the clock forward
+# by TEST_CLOCK_SKEW_MS, past the watch's 30 minute cap by default. An answer that is a list is consumed in
+# order, the last one repeating, for a route whose answer changes over the polls.
 RUNNER = """
 import requests from "./requests.mjs";
 
@@ -62,17 +63,25 @@ const ctx = {
   sessionManager: { getSessionId: () => "sess-1234" },
 };
 const answers = JSON.parse(process.env.TEST_ANSWERS || "{}");
+const answerFor = (key) => {
+  const entry = answers[key];
+  if (!Array.isArray(entry)) return entry;
+  return entry.length > 1 ? entry.shift() : entry[0];
+};
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method || "GET";
   events.push({ kind: "fetch", method, url, headers: init.headers ?? {}, body: init.body ? JSON.parse(init.body) : null });
-  const answer = answers[`${method} ${new URL(url).pathname}`];
+  const answer = answerFor(`${method} ${new URL(url).pathname}`);
   if (!answer) throw new Error(`connection refused: ${url}`);
   return { ok: answer.status < 400, status: answer.status, json: async () => answer.body, text: async () => JSON.stringify(answer.body) };
 };
 const realNow = Date.now;
 let skew = 0;
 Date.now = () => realNow() + skew;
-if (process.env.TEST_CLOCK_SKEW_AFTER_MS) setTimeout(() => { skew = 31 * 60 * 1000; }, Number(process.env.TEST_CLOCK_SKEW_AFTER_MS));
+if (process.env.TEST_CLOCK_SKEW_AFTER_MS) {
+  const skewMs = Number(process.env.TEST_CLOCK_SKEW_MS || 31 * 60 * 1000);
+  setTimeout(() => { skew = skewMs; }, Number(process.env.TEST_CLOCK_SKEW_AFTER_MS));
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 requests(pi);
 const out = { tools: Object.keys(tools), commands: Object.keys(commands), handlers: Object.keys(handlers).sort(), events, result: null, error: null, fetchesAtShutdown: null };
@@ -130,6 +139,7 @@ KNOBS = (
     "TEST_WAIT_MS",
     "TEST_SHUTDOWN_AFTER_MS",
     "TEST_CLOCK_SKEW_AFTER_MS",
+    "TEST_CLOCK_SKEW_MS",
 )
 
 
@@ -256,9 +266,15 @@ def test_the_command_submits_native_training_without_touching_receipts(tmp_path:
         "content-type": "application/json",
     }
     assert request["body"] == {"text": "text me when you are blocked", "session": "sess-1234", "release_id": "v1"}
-    assert _notices(out) == [{"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}]
+    assert _notices(out) == [
+        {
+            "kind": "notify",
+            "message": "Training request q-1 accepted; the step usually takes one to three minutes.",
+            "type": "info",
+        }
+    ]
     # The watch starts once the request is filed: the footer names the record until the step settles.
-    assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}]
+    assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}]
     assert _of_kind(out, "user_message") == []
 
 
@@ -268,7 +284,7 @@ def test_the_command_needs_no_capture_proxy_or_models_file(tmp_path: Path) -> No
     out = _ask(tmp_path, agent_dir, {"POST /reef/train": {"status": 200, "body": ACCEPTED}})
     assert out["error"] is None
     assert len(_fetches(out)) == 1
-    assert _notices(out)[0]["message"] == "Training request q-1 accepted."
+    assert _notices(out)[0]["message"] == "Training request q-1 accepted; the step usually takes one to three minutes."
 
 
 def test_the_command_surfaces_auto_mode_refusal(tmp_path: Path) -> None:
@@ -645,7 +661,10 @@ QUESTIONS = {
     ]
 }
 OTHER = "Other (type an answer)"
-FILED = "filed request q-1; reef is running the step and will report here when it settles"
+FILED = (
+    "filed request q-1; reef is running the step, which usually takes one to three minutes, and will report here "
+    "when it settles"
+)
 
 
 def test_the_command_with_a_ui_hands_the_request_to_the_session_model_and_files_nothing(tmp_path: Path) -> None:
@@ -682,10 +701,14 @@ def test_the_command_files_as_is_with_the_flag_or_without_a_ui(tmp_path: Path) -
         (request,) = _fetches(out)
         assert request["method"] == "POST" and request["body"]["text"] == "text me"
         assert _of_kind(out, "user_message") == []
-        assert _notices(out) == [{"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}]
-        assert _of_kind(out, "status") == [
-            {"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}
+        assert _notices(out) == [
+            {
+                "kind": "notify",
+                "message": "Training request q-1 accepted; the step usually takes one to three minutes.",
+                "type": "info",
+            }
         ]
+        assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}]
 
 
 def test_ask_user_returns_the_chosen_option_or_the_typed_answer(tmp_path: Path) -> None:
@@ -758,7 +781,7 @@ def test_file_request_composes_the_text_posts_it_and_starts_the_watch(tmp_path: 
         "release_id": "v1",
     }
     assert out["result"]["content"] == [{"type": "text", "text": FILED}]
-    assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}]
+    assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}]
     # Without clarifications the text is the request alone; the service's cap bounds it.
     out = _tool(tmp_path, agent_dir, "file_request", {"request": "x" * 5000}, TEST_ANSWERS=json.dumps(answers))
     assert _fetches(out)[0]["body"]["text"] == "x" * 4000
@@ -820,6 +843,14 @@ REJECTED_ROW = {
     },
 }
 SKIPPED_ROW = {**SELECTED_ROW, "release_id": "rel-0000-creation", "metrics": {"skipped": "no proposal", **REQUEST_ROW}}
+# The proposer's own reason, as Reefine records it when its model call fails.
+FAILURE = (
+    "model call failed after 58.2 s (max_tokens=16384): model endpoint returned non-text content; a thinking model "
+    "may have spent the reply budget on its reasoning, raise REEF_PROPOSER_MAX_TOKENS"
+)
+SKIPPED_FAILED_ROW = {**SKIPPED_ROW, "metrics": {**SKIPPED_ROW["metrics"], "proposal_notes": {"failure": FAILURE}}}
+# The request's record route: compacted_at is null while the request is queued and a time once a step took it.
+RECORD_PATH = "/reef/scenarios/code-repair/records/q-1"
 CREATION_ROW = RELEASES["releases"][0]
 
 
@@ -838,8 +869,8 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
     [
         (
             SELECTED_ROW,
-            f"reef: '{ASK}' is published as release rel-1111. Restart reef-pi to install it (the update notice offers it).\n"
-            "Not covered: two way replies; idle detection",
+            f"reef: '{ASK}' is published as release rel-1111. Restart reef-pi to install it (the update notice offers it)."
+            " Details: /reef-versions 1.\nNot covered: two way replies; idle detection",
         ),
         (
             PENDING_ROW,
@@ -849,11 +880,15 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
         (
             REJECTED_ROW,
             f"reef: '{ASK}' did not pass the gate (candidate missed the floor on 1 of 1 tasks). Nothing changed; "
-            "rephrase or split the request.",
+            "rephrase or split the request. Details: /reef-versions 1.",
         ),
-        (SKIPPED_ROW, f"reef: '{ASK}' produced no change (no proposal). Nothing changed."),
+        (SKIPPED_ROW, f"reef: '{ASK}' produced no change (no proposal). Nothing changed. Details: /reef-versions 1."),
+        (
+            SKIPPED_FAILED_ROW,
+            f"reef: '{ASK}' produced no change (no proposal: {FAILURE}). Nothing changed. Details: /reef-versions 1.",
+        ),
     ],
-    ids=["selected", "pending", "rejected", "skipped"],
+    ids=["selected", "pending", "rejected", "skipped", "skipped-failure"],
 )
 def test_the_watch_reports_the_verdict_and_what_the_review_left_uncovered(
     tmp_path: Path, row: dict[str, Any], expected: str
@@ -870,7 +905,7 @@ def test_the_watch_reports_the_verdict_and_what_the_review_left_uncovered(
     assert [event["kind"] for event in out["events"]] == ["fetch", "notify", "status", "fetch", "status", "notify"]
     catalog = out["events"][3]
     assert catalog["method"] == "GET" and catalog["url"] == "http://reef:8900/reef/harness/releases"
-    assert out["events"][2] == {"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}
+    assert out["events"][2] == {"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}
     assert out["events"][4] == {"kind": "status", "key": "reef", "text": None}
     assert out["events"][5] == {"kind": "notify", "message": expected, "type": "info"}
 
@@ -889,7 +924,9 @@ def test_the_watch_gives_up_after_its_cap_and_says_where_the_verdict_will_show(t
     )
     kinds = [event["kind"] for event in out["events"]]
     assert kinds[:3] == ["fetch", "notify", "status"] and kinds[-2:] == ["status", "notify"]
-    assert 2 <= kinds.count("fetch") <= 8  # a handful of polls, then no more once the cap passed
+    assert 2 <= kinds.count("fetch") <= 12  # a handful of polls (catalog and record), then no more past the cap
+    # The record route answered nothing, so the footer stayed at queued until the watch cleared it.
+    assert [event["text"] for event in _of_kind(out, "status")] == ["reef: request q-1 queued", None]
     assert out["events"][-2] == {"kind": "status", "key": "reef", "text": None}
     assert out["events"][-1] == {
         "kind": "notify",
@@ -905,7 +942,56 @@ def test_the_watch_gives_up_after_its_cap_and_says_where_the_verdict_will_show(t
         TEST_WAIT_MS="80",
     )
     assert len(_fetches(silent)) >= 3 and _notices(silent) == [
-        {"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}
+        {
+            "kind": "notify",
+            "message": "Training request q-1 accepted; the step usually takes one to three minutes.",
+            "type": "info",
+        }
+    ]
+
+
+def test_the_footer_says_queued_until_the_record_shows_a_step_took_the_request_then_counts(tmp_path: Path) -> None:
+    """Beside the catalog the watch reads the request's record until a step has taken it: the footer says queued
+    while compacted_at is null (a failed read keeps it), then running with the time since the poll that saw it,
+    after which the record is not read again."""
+    other = {**SELECTED_ROW, "metrics": {"selected": True, "training_request": {"id": "q-other", "text": "x"}}}
+    answers = {
+        **_catalog_with(other),
+        f"GET {RECORD_PATH}": [
+            {"status": 404, "body": {"error": "not retained"}},
+            {"status": 200, "body": {"agent_record_id": "q-1", "compacted_at": None}},
+            {"status": 200, "body": {"agent_record_id": "q-1", "compacted_at": 1700000000.5}},
+        ],
+    }
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        answers,
+        text=LONG_TEXT,
+        REEF_TOKEN="tok",
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_CLOCK_SKEW_AFTER_MS="80",
+        TEST_CLOCK_SKEW_MS="65000",
+        TEST_WAIT_MS="250",
+    )
+    assert out["error"] is None
+    # The footer is redrawn only when its text changes; the runner prints before its own shutdown clears it.
+    assert [event["text"] for event in _of_kind(out, "status")] == [
+        "reef: request q-1 queued",
+        "reef: step for request q-1 running for 0m 00s",
+        "reef: step for request q-1 running for 1m 05s",
+    ]
+    reads = [event for event in _fetches(out) if event["url"] == f"http://reef:8900{RECORD_PATH}"]
+    assert len(reads) == 3  # one per poll until the step was seen running, none after
+    assert reads[0]["method"] == "GET"
+    assert reads[0]["headers"] == {"x-reef-scenario": "code-repair", "authorization": "Bearer tok"}
+    assert len([event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]) > 3
+    assert _notices(out) == [
+        {
+            "kind": "notify",
+            "message": "Training request q-1 accepted; the step usually takes one to three minutes.",
+            "type": "info",
+        }
     ]
 
 
@@ -922,7 +1008,13 @@ def test_session_shutdown_clears_the_watch(tmp_path: Path) -> None:
     assert out["fetchesAtShutdown"] >= 2
     assert len(_fetches(out)) == out["fetchesAtShutdown"]  # no poll after the shutdown
     assert _of_kind(out, "status")[-1] == {"kind": "status", "key": "reef", "text": None}
-    assert _notices(out) == [{"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}]
+    assert _notices(out) == [
+        {
+            "kind": "notify",
+            "message": "Training request q-1 accepted; the step usually takes one to three minutes.",
+            "type": "info",
+        }
+    ]
 
 
 def test_a_second_filing_replaces_the_first_watch(tmp_path: Path) -> None:
@@ -942,9 +1034,9 @@ def test_a_second_filing_replaces_the_first_watch(tmp_path: Path) -> None:
     assert kinds == ["fetch", "status", "fetch", "status", "status", "fetch", "status", "notify"]
     assert [event["method"] for event in _fetches(out)] == ["POST", "POST", "GET"]
     assert [event["text"] for event in _of_kind(out, "status")] == [
-        "reef: step for request q-1 running",
+        "reef: request q-1 queued",
         None,
-        "reef: step for request q-1 running",
+        "reef: request q-1 queued",
         None,
     ]
 

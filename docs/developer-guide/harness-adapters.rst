@@ -573,10 +573,16 @@ two commands, two tools and two event handlers:
 - ``reef_file_request``, a tool: the request verbatim, then, when there are
   clarifications, a ``Clarifications:`` block of ``- Q:`` / ``A:`` pairs,
   capped at 4000 characters, filed the way the command files it. It returns
-  ``filed request <id>; reef is running the step and will report here when
-  it settles`` and throws the command's error messages.
-- The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: step for
-  request <id> running`` while the extension polls ``GET
+  ``filed request <id>; reef is running the step, which usually takes one to
+  three minutes, and will report here when it settles`` and throws the
+  command's error messages; the command's own filing notifies the same
+  expected time.
+- The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
+  <id> queued`` and, once the request's record (``GET
+  /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
+  carries a ``compacted_at`` time, ``reef: step for request <id> running for
+  <Nm SSs>``, counted from the first poll that saw it; a failed record read
+  keeps the footer as it was. Meanwhile the extension polls ``GET
   /reef/harness/releases`` every ``REEF_HARNESS_WATCH_MS`` milliseconds
   (5000 by default) for the row whose ``metrics.training_request.id`` is the
   filed record, for at most 30 minutes; one watch runs at a time, a second
@@ -586,9 +592,12 @@ two commands, two tools and two event handlers:
   (the update notice offers it); a pending one to review it with
   ``/reef-versions <step>`` and promote; a rejected step quotes
   ``selection.reason`` and says to rephrase or split the request; a skipped
-  step quotes ``metrics.skipped``. ``Not covered: ...`` follows when the
-  step's ``proposal_notes.review.uncovered`` lists items. Past the cap the
-  watch says ``/reef-versions`` shows the verdict when it settles.
+  step quotes ``metrics.skipped`` and, when the step recorded one,
+  ``proposal_notes.failure``, why the proposer produced nothing. The
+  selected, rejected and skipped lines end with ``Details: /reef-versions
+  <step>.``; ``Not covered: ...`` follows when the step's
+  ``proposal_notes.review.uncovered`` lists items. Past the cap the watch
+  says ``/reef-versions`` shows the verdict when it settles.
 - ``session_start``: with a UI, one info line says the two commands exist,
   and a second line counts the pending releases no promote has named yet:
   ``N release(s) await your review: /reef-versions <step>[, <step>]``.

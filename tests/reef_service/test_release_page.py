@@ -648,6 +648,39 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
     assert '<span class="id">TWILIO_SID</span>' in review
 
 
+def test_the_verdict_names_why_the_proposer_produced_nothing_when_the_step_recorded_it() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    failure = "model call failed after 58.2 s (max_tokens=16384): model endpoint returned <non-text> content"
+    row = {
+        "release_id": "rel-0",
+        "parent_release_id": None,
+        "operation": "training",
+        "metrics": {
+            "skipped": "no proposal",
+            "training_request": {"id": "q-1", "text": "text me"},
+            "proposal_notes": {"failure": failure},
+        },
+    }
+    page = build_release_page(1, [creation, row])
+    page.encode("ascii")
+    # A failure alone adds no Design or Review section; the Verdict table names it after the skip row, escaped.
+    assert _sections(page) == ["Why", "What changed", "Verdict", "Setup", "Chain"]
+    assert (
+        "<tr><th>skipped</th><td>no proposal</td></tr><tr><th>proposer failure</th><td>model call failed after "
+        "58.2 s (max_tokens=16384): model endpoint returned &lt;non-text&gt; content</td></tr>"
+    ) in _section(page, "Verdict")
+    assert "<non-text>" not in page.partition("<script")[0]
+    # Without the note, or with one that is not text, there is no such row.
+    for notes in ({}, {"failure": "  "}, {"failure": 3}):
+        without = {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
+        assert "proposer failure" not in build_release_page(1, [creation, without])
+    # A design written before the reply came to nothing keeps its section beside the row.
+    designed = {**row, "metrics": {**row["metrics"], "proposal_notes": {"design": "A tool.", "failure": failure}}}
+    page = build_release_page(1, [creation, designed])
+    assert _sections(page) == ["Why", "Design", "What changed", "Verdict", "Setup", "Chain"]
+    assert "<th>proposer failure</th>" in _section(page, "Verdict")
+
+
 def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     plain = ["Why", "What changed", "Verdict", "Setup", "Chain"]

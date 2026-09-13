@@ -4,11 +4,12 @@
 plus, for an extension update, the file the release replaced. A step whose
 method recorded ``proposal_notes`` (Reefine's design, review, refused
 requires and undeclared variables) also gets a Design section after Why and
-a Review section after What changed. The page loads no asset and carries its
-data inline, so one curl with the scenario header is the whole read. The
-step is the row's position in the catalog oldest first, the creation row
-being 0: a rejected step publishes nothing and its row carries the head's
-release id, so only the step names it.
+a Review section after What changed, and why the proposer produced nothing,
+when the step recorded that, is a row of the Verdict table. The page loads
+no asset and carries its data inline, so one curl with the scenario header
+is the whole read. The step is the row's position in the catalog oldest
+first, the creation row being 0: a rejected step publishes nothing and its
+row carries the head's release id, so only the step names it.
 """
 
 from __future__ import annotations
@@ -338,6 +339,10 @@ def _verdict(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[
         lines.append(f"<tr><th>meaning</th><td>{_esc(notes[verdict])}</td></tr>")
     if metrics.get("skipped"):
         lines.append(f"<tr><th>skipped</th><td>{_esc(metrics['skipped'])}</td></tr>")
+    failure = _notes(metrics).get("failure")
+    if isinstance(failure, str) and failure.strip():
+        # Why the proposer produced nothing: a failed model call, a reply with no entry.
+        lines.append(f"<tr><th>proposer failure</th><td>{_esc(failure)}</td></tr>")
     for field in VERDICT_FIELDS:
         if field in metrics:
             value = metrics[field]

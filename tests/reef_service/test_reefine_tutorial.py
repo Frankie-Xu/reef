@@ -363,7 +363,8 @@ def test_the_tutorial_is_listed_beside_the_other() -> None:
 
 def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     """run.sh exports REEF_PROPOSER_TIMEOUT_S because the method package's defaults (60 s for a failure step,
-    120 s for a request) are short of what a local 26B model needs; unset, the defaults stand."""
+    120 s for a request) are short of what a local 26B model needs, and pins REEF_PROPOSER_MAX_TOKENS at the
+    package's request default of 16384, the budget a thinking model needs; unset, the defaults stand."""
     from reef.recipe.reefine import evolution
 
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
@@ -373,11 +374,11 @@ def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", " ")
     assert evolution._timeout_s(60.0) == 60.0
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
-    assert evolution._max_tokens(4096) == 4096
-    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16384")
-    assert evolution._max_tokens(4096) == 16384
+    assert evolution._max_tokens(16384) == 16384
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
+    assert evolution._max_tokens(16384) == 32768
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
-    assert evolution._max_tokens(4096) == 4096
+    assert evolution._max_tokens(16384) == 16384
     run_sh = (TUTORIAL / "run.sh").read_text(encoding="utf-8")
     assert 'REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"' in run_sh
     assert 'REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"' in run_sh

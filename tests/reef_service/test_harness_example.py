@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import logging
+import re
 import sys
 import types
 from dataclasses import replace
@@ -102,6 +104,17 @@ class Model:
 
 def canned(reply: str) -> Model:
     return Model(reply)
+
+
+#: The reasons a request step records when the reply gave nothing to apply.
+NO_ENTRY = "the reply holds no usable entry"
+DROPPED = "every entry in the reply was dropped: a reserved id, or an id another kind holds"
+
+
+def failure_of(proposal) -> str:
+    """The reason a request step recorded for producing nothing: a StepProposal without mutations carries it."""
+    assert isinstance(proposal, StepProposal) and proposal.mutations == ()
+    return proposal.notes["failure"]
 
 
 def proposal(entry_id: str, name: str = "skill", *, config_name: str | None = None) -> str:
@@ -302,7 +315,7 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
         {"name": "rules", "config": {"text": "Answer in one sentence."}},
     )
     broken = request_reply({"id": "x", "name": "rules", "config": "Answer in one sentence."})
-    assert evolution.propose(NODES, (), canned(broken), requests=(REQUEST,)) is None
+    assert failure_of(evolution.propose(NODES, (), canned(broken), requests=(REQUEST,))) == NO_ENTRY
     # A flattened named kind carries both keys: "kind" is the kind and "name" the entry's own name.
     flat_skill = request_reply({"id": "plan-first", "kind": "skill", "name": "plan-first", "text": "# plan-first\n"})
     (mutation,) = evolution.propose(NODES, (), canned(flat_skill), requests=(REQUEST,)).mutations
@@ -318,37 +331,38 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
     assert mutation.op == "create"
     assert mutation.options == {"name": "rules", "config": {"text": "Show the command first."}}
     null_skill = request_reply({"id": None, "name": "skill", "config": {"text": "# x\n"}})
-    assert evolution.propose(NODES, (), canned(null_skill), requests=(REQUEST,)) is None
+    assert failure_of(evolution.propose(NODES, (), canned(null_skill), requests=(REQUEST,))) == NO_ENTRY
     # An id that is another kind's name would be refused at admission as an existing entry: a rules entry
     # takes its text's id instead, a named kind is dropped.
     reused = request_reply({"id": "answer-style", "kind": "rules", "config": {"text": "One sentence."}})
     (mutation,) = evolution.propose(NODES, (), canned(reused), requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id) == ("create", "rules-" + hashlib.sha256(b"One sentence.").hexdigest()[:8])
     reused_named = request_reply({"id": "answer-style", "kind": "agent_command", "config": {"text": "Review."}})
-    assert evolution.propose(NODES, (), canned(reused_named), requests=(REQUEST,)) is None
+    assert failure_of(evolution.propose(NODES, (), canned(reused_named), requests=(REQUEST,))) == DROPPED
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 120 s and 4096 tokens and reviews with 60 s and 1024, the failure path asks
-    with 60 s and 2048, unless REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that
-    is not a number is ignored rather than turning the step into an error."""
+    """The request path asks with 120 s and 16384 tokens and reviews with 60 s and 2048, the failure path asks
+    with 60 s and 4096 (a thinking model spends part of each budget on its reasoning before the JSON), unless
+    REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is ignored
+    rather than turning the step into an error."""
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 4096}, {"timeout_s": 60.0, "max_tokens": 1024}]
+    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 2048}]
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
-    assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 2048}]
+    assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 4096}]
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", "900")
-    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16384")
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}] * 2
+    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 32768}] * 2
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 4096}, {"timeout_s": 900.0, "max_tokens": 1024}]
+    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}, {"timeout_s": 900.0, "max_tokens": 2048}]
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
@@ -366,8 +380,9 @@ def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply
     only_reserved = json.dumps(
         {"id": "reef-pi-extension-api", "name": "skill", "config": {"name": "reef-pi-extension-api", "text": "x"}}
     )
-    assert evolution.propose(NODES, (), canned(only_reserved), requests=(REQUEST,)) is None
-    assert evolution.propose(NODES, (), canned("no json here"), requests=(REQUEST,)) is None
+    # A reply with nothing to apply is a proposal without mutations, the reason in its notes.
+    assert failure_of(evolution.propose(NODES, (), canned(only_reserved), requests=(REQUEST,))) == DROPPED
+    assert failure_of(evolution.propose(NODES, (), canned("no json here"), requests=(REQUEST,))) == NO_ENTRY
 
 
 def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
@@ -376,7 +391,8 @@ def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
     # The failure path still writes skills only, whatever kinds a request may name.
     assert evolution.propose(NODES, SAMPLES, canned(proposal("answer-style", name="rules"))) is None
     down = Model(failure=ModelBindingError("model endpoint unreachable: connection refused"))
-    assert evolution.propose(NODES, (), down, requests=(REQUEST,)) is None
+    failure = failure_of(evolution.propose(NODES, (), down, requests=(REQUEST,)))
+    assert failure.endswith("(max_tokens=16384): model endpoint unreachable: connection refused")
     # With the tree's entries in hand the failure path is what it was: one call, a bare Mutation, no design
     # and no review.
     model = canned(proposal("answer-style"))
@@ -455,7 +471,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     assert REQUEST["text"] in review_prompt and "[BEGIN user request" in review_prompt
     assert DESIGN in review_prompt and '"id": "run-tests"' in review_prompt and "# improved" in review_prompt
     assert '"verdict": "complete" or "partial"' in review_prompt
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 4096}, {"timeout_s": 60.0, "max_tokens": 1024}]
+    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 2048}]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
     model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
@@ -483,6 +499,39 @@ def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stan
     model = Model(designed(skill("run-tests")), json.dumps(lenient))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
     assert proposal.notes["review"] == {"verdict": "complete", "covered": ["a", "b"], "uncovered": []}
+
+
+def test_a_failed_model_call_is_the_request_steps_failure_note_and_still_a_skip_on_the_failure_path(
+    evolution, monkeypatch, caplog
+) -> None:
+    """A request whose model call fails gets a StepProposal without mutations whose notes say why, in one line:
+    how long the call took, the reply budget and the endpoint's error, with the budget hint when the reply had no
+    text; the reason is logged too. The failure path keeps returning None, the reason in the log alone."""
+    monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
+    no_text = ModelBindingError("model endpoint returned non-text content")
+    down = Model(failure=no_text)
+    with caplog.at_level(logging.WARNING):
+        proposal = evolution.propose(NODES, (), down, requests=(REQUEST,), entries=ENTRIES)
+    assert isinstance(proposal, StepProposal) and proposal.mutations == () and list(proposal.notes) == ["failure"]
+    assert re.fullmatch(
+        r"model call failed after \d+\.\d s \(max_tokens=16384\): model endpoint returned non-text content; "
+        r"a thinking model may have spent the reply budget on its reasoning, raise REEF_PROPOSER_MAX_TOKENS",
+        proposal.notes["failure"],
+    )
+    assert down.calls == 1  # nothing to review
+    assert "propose: served model call failed after" in caplog.text
+    # Any other error gets no budget hint, and the budget in the reason is the one the call was given.
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
+    unreachable = Model(failure=ModelBindingError("model endpoint unreachable: connection refused"))
+    failure = failure_of(evolution.propose(NODES, (), unreachable, requests=(REQUEST,)))
+    assert failure.endswith("(max_tokens=32768): model endpoint unreachable: connection refused")
+    assert "REEF_PROPOSER_MAX_TOKENS" not in failure
+    # A reply with nothing to apply says so, with the design when the model wrote one; an empty reply too.
+    proposal = evolution.propose(NODES, (), canned(designed()), requests=(REQUEST,))
+    assert proposal.mutations == () and proposal.notes == {"design": DESIGN, "failure": NO_ENTRY}
+    assert failure_of(evolution.propose(NODES, (), canned(""), requests=(REQUEST,))) == "the reply is empty"
+    # The failure path: still None, nothing recorded.
+    assert evolution.propose(NODES, SAMPLES, Model(failure=no_text)) is None
 
 
 def test_propose_lists_every_entry_id_and_updates_a_rules_entry_by_it(evolution) -> None:

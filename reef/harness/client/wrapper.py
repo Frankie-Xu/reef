@@ -28,9 +28,11 @@ When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are bloc
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics. With ``--wait`` the wrapper polls the release
   catalog every 5 s for the step that consumed the request (``--timeout``
-  seconds, 1800 by default) and prints its verdict with the next action:
-  exit 0 for a selected or pending release, 1 for a rejected or skipped
-  step, 2 when the timeout passes first.
+  seconds, 1800 by default), says once when the request's record shows a
+  step took it, and prints the verdict with the next action (a skipped
+  step's line quotes why the proposer produced nothing): exit 0 for a
+  selected or pending release, 1 for a rejected or skipped step, 2 when
+  the timeout passes first.
 
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
@@ -105,6 +107,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
@@ -825,6 +828,13 @@ def _uncovered(row: Mapping[str, Any]) -> list[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
+def _failure_of(row: Mapping[str, Any]) -> str:
+    """Why the proposer produced nothing, when the step recorded it under ``proposal_notes.failure``."""
+    notes = _metrics_of(row).get("proposal_notes")
+    failure = notes.get("failure") if isinstance(notes, Mapping) else None
+    return failure.strip() if isinstance(failure, str) else ""
+
+
 def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]]) -> str:
     """One line for a settled step: its verdict and the next action, quoting the request's first 60 characters.
 
@@ -847,13 +857,31 @@ def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]]) ->
         reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
         return f"'{ask}' did not pass the gate ({reason}). Nothing changed; rephrase or split the request."
     if verdict == "skipped":
-        return f"'{ask}' produced no change ({metrics.get('skipped')}). Nothing changed."
+        # The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
+        failure = _failure_of(row)
+        why = f"{metrics.get('skipped')}: {failure}" if failure else str(metrics.get("skipped"))
+        return f"'{ask}' produced no change ({why}). Nothing changed."
     return f"'{ask}' settled as {verdict} (release {release}); reef-{adapter} page {step} shows it."
 
 
 def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
     """The step whose row consumed the request ``record_id``: its position in the catalog, oldest first."""
     return next((step for step, row in enumerate(rows) if _request_of(row).get("id") == record_id), None)
+
+
+def _step_started(upstream: str, scenario: str, token: str | None, record_id: str) -> bool:
+    """Whether a step has taken the request: its record's ``compacted_at`` is set once one consumed it.
+
+    A read that fails is no reason to stop waiting, so it reads as not
+    started and the next poll asks again."""
+    path = f"/reef/scenarios/{urllib.parse.quote(scenario, safe='')}/records/{urllib.parse.quote(record_id, safe='')}"
+    req = urllib.request.Request(f"{upstream}{path}", headers=_reef_headers(scenario, token))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            record = json.loads(response.read())
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, Mapping) and record.get("compacted_at") is not None
 
 
 def _await_verdict(
@@ -869,10 +897,12 @@ def _await_verdict(
 ) -> int:
     """Poll the catalog until the step that consumed the request settles, print its verdict line, exit by it.
 
-    0 for a release to install or review, 1 for a step that changed nothing,
-    2 when ``timeout_s`` passes first: the step is still running, and
-    ``/reef-versions`` shows it when it settles."""
+    One line says when the request's record shows a step took it, so the
+    wait is seen to move. 0 for a release to install or review, 1 for a
+    step that changed nothing, 2 when ``timeout_s`` passes first: the step
+    is still running, and ``/reef-versions`` shows it when it settles."""
     deadline = time.monotonic() + timeout_s
+    started = False
     while True:
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
@@ -887,6 +917,9 @@ def _await_verdict(
                 f"reef-{adapter}: no verdict yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
             )
             return 2
+        if not started and _step_started(upstream, scenario, token, record_id):
+            started = True
+            print(f"reef-{adapter}: the step started; usually one to three minutes")
         time.sleep(poll_s)
 
 

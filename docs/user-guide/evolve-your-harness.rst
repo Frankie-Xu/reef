@@ -512,11 +512,14 @@ returns a training record id and does not mean the change has passed the
 gate: the wrapper says ``reef is running the step; add --wait to stay here,
 or check /reef-versions later``. With ``--wait`` (``--timeout SECONDS``,
 1800 by default) it polls the release catalog every 5 s for the step that
-consumed the request and prints one line with the verdict and the next
-action, quoting the request: a selected release to restart ``reef-pi`` for,
-a pending one to read with ``reef-pi page <step>`` and promote, a rejected
-step with the gate's reason, a skipped step with why; ``not covered: ...``
-follows when the step's review lists points the change left out. The exit
+consumed the request, says ``the step started; usually one to three
+minutes`` once the request's record shows a step took it, and prints one
+line with the verdict and the next action, quoting the request: a selected
+release to restart ``reef-pi`` for, a pending one to read with ``reef-pi
+page <step>`` and promote, a rejected step with the gate's reason, a skipped
+step with why (the proposer's own reason when the step recorded one, such
+as a failed model call); ``not covered: ...`` follows when the step's review
+lists points the change left out. The exit
 status is 0 for a selected or pending release, 1 for a rejected or skipped
 step, 2 when the timeout passes first. To return to failure driven
 evolution alone, use the same update endpoint with
@@ -529,8 +532,10 @@ training API with pi's current session id. In the session the model first
 thinks the request through and asks what is unclear, a few options plus a
 typed answer per question, then files the request with the answers;
 ``/reef-harness --direct <request>`` files it as is. A footer status shows
-the step running and one line reports the verdict when it settles, with the
-same next actions as ``--wait``; a session start says the commands exist and
+the request queued, then the step running and for how long, and one line
+reports the verdict when it settles, with the same next actions as
+``--wait`` and the step whose page has the details; a session start says
+the commands exist and
 counts the releases awaiting your review. Recovered trees keep their
 existing entries, as with ``version_check``. The proposer must explicitly
 accept ``requests``. The tutorial's proposer asks the served model for a

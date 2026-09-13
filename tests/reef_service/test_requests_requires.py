@@ -46,12 +46,14 @@ def test_the_requires_object_beside_the_entries_is_appended_to_the_request_mappi
     (mutation,) = evolution.propose(NODES, (), canned(reply), requests=(request,)).mutations
     assert (mutation.op, mutation.id) == ("create", "notify")
     assert request["requires"] == [{"name": "existing", "kind": "env"}, *REQUIRES_OBJECT["requires"]]
-    # No object: nothing is added; a reply with no usable entry is no proposal and adds nothing either.
+    # No object: nothing is added; a reply with no usable entry is a proposal without mutations, the reason in
+    # its notes, and adds nothing either.
     request = dict(REQUEST)
     evolution.propose(NODES, (), canned(request_reply(RULES)), requests=(request,))
     assert "requires" not in request
     request = dict(REQUEST)
-    assert evolution.propose(NODES, (), canned(json.dumps([REQUIRES_OBJECT])), requests=(request,)) is None
+    nothing = evolution.propose(NODES, (), canned(json.dumps([REQUIRES_OBJECT])), requests=(request,))
+    assert nothing.mutations == () and nothing.notes == {"failure": "the reply holds no usable entry"}
     assert "requires" not in request
 
 
