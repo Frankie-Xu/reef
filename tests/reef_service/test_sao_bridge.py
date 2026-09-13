@@ -301,6 +301,7 @@ def _sao_actor(
     critic_steps_per_actor=2,
     critic_only_steps=0,
     critic_save_root=None,
+    critic_save_interval=1,
 ):
     template = str(tmp_path / "checkpoint-{rollout_id}")
     actor_group = _RecordingGroup(template, worker_metrics=worker_metrics)
@@ -311,6 +312,7 @@ def _sao_actor(
         save_hf_template=template,
         critic_group=critic_group,
         critic_save_root=critic_save_root,
+        critic_save_interval=critic_save_interval,
         critic_steps_per_actor=critic_steps_per_actor,
         critic_only_steps=critic_only_steps,
         loss_family="sao",
@@ -412,6 +414,25 @@ def test_sao_critic_only_warmup_commit_also_saves_the_critic(tmp_path, _local_ra
     assert result.outcome == "complete"
     assert result.metrics["sao/actor_trained"] == 0
     assert critic_group.saved_training_checkpoint_rollouts == [0]
+
+
+@pytest.mark.unit
+def test_sao_critic_save_interval_skips_the_commits_in_between(tmp_path, _local_ray_get) -> None:
+    # A full critic checkpoint at every commit costs as much as the actor's;
+    # an interval keeps the actor's per-commit publication and saves the
+    # critic on every Nth commit only.
+    actor, actor_group, critic_group, payload = _sao_actor(
+        tmp_path, critic_save_root=str(tmp_path / "megatron-critic"), critic_save_interval=2
+    )
+
+    result = _execute_and_update_weights(actor, payload)
+
+    assert result.outcome == "complete"
+    assert actor_group.saved_model_rollouts == [0]
+    assert critic_group.saved_training_checkpoint_rollouts == []
+
+    with pytest.raises(ValueError, match="critic_save_interval"):
+        _sao_actor(tmp_path / "again", critic_save_root=str(tmp_path / "c"), critic_save_interval=0)
 
 
 @pytest.mark.unit

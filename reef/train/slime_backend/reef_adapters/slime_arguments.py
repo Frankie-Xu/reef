@@ -61,6 +61,15 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     )
     parser.add_argument("--critic-save", type=str, default=None)
     parser.add_argument(
+        "--critic-save-interval",
+        type=int,
+        default=1,
+        help=(
+            "Commits between critic checkpoints (weights and optimizer). 1 saves at every commit; "
+            "a larger value trades a warmer value head after a restart for cheaper commits."
+        ),
+    )
+    parser.add_argument(
         "--critic-lr",
         type=float,
         default=None,
@@ -86,9 +95,14 @@ def finalize_reef_slime_args(args: Any, arguments: Sequence[str]) -> None:
     explicitly_enabled_critic = any(
         argument == "--use-critic" or argument.startswith("--use-critic=") for argument in arguments
     )
+    explicitly_resident = "--no-offload-train" in arguments
     if explicitly_enabled_critic:
         args.use_critic = True
-        args.offload_train = True
+        # The critic shares the actor's GPUs, so whichever is idle is
+        # offloaded between their steps unless the launch says
+        # --no-offload-train: a pair small enough to stay resident (a frozen
+        # LoRA base twice over) trades that memory for the offload cycle.
+        args.offload_train = not explicitly_resident
 
     if args.critic_steps_per_actor is not None and args.critic_steps_per_actor <= 0:
         raise ValueError("--critic-steps-per-actor must be positive")

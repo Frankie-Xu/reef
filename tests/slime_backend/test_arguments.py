@@ -76,6 +76,18 @@ def test_finalize_arguments_chains_user_hooks_and_enables_explicit_critic() -> N
 
 
 @pytest.mark.unit
+def test_finalize_arguments_lets_an_explicit_no_offload_train_stand() -> None:
+    # --use-critic offloads the idle model by default; a launch that says
+    # --no-offload-train keeps the actor and the critic resident.
+    args = _args(offload_train=False)
+
+    finalize_reef_slime_args(args, ["--use-critic", "--no-offload-train"])
+
+    assert args.use_critic is True
+    assert args.offload_train is False
+
+
+@pytest.mark.unit
 def test_finalize_arguments_rejects_nonpositive_critic_steps() -> None:
     with pytest.raises(ValueError, match="critic-steps-per-actor"):
         finalize_reef_slime_args(_args(critic_steps_per_actor=0), [])

@@ -397,6 +397,7 @@ class TrainBridgeActorImpl:
         storage_config: RetentionConfig | None = None,
         megatron_save_root: str | None = None,
         critic_save_root: str | None = None,
+        critic_save_interval: int = 1,
         source_hf: str | None = None,
         source_megatron: str | None = None,
         colocate: bool = False,
@@ -416,6 +417,13 @@ class TrainBridgeActorImpl:
         # saves would land in the actor's Megatron tree (path collision), so
         # the bridge falls back to the historical save-actor-only behavior.
         self._critic_save_root = critic_save_root if critic_group is not None else None
+        if (
+            not isinstance(critic_save_interval, int)
+            or isinstance(critic_save_interval, bool)
+            or critic_save_interval < 1
+        ):
+            raise ValueError("critic_save_interval must be a positive integer")
+        self._critic_save_interval = critic_save_interval
         self._rollout_manager = rollout_manager
         self._manager_executor = RayExecutor.from_workers([rollout_manager])
         self._save_hf_template = save_hf_template
@@ -1048,12 +1056,13 @@ class TrainBridgeActorImpl:
                 train_metrics.update(algorithm_metrics)
                 self._phase = "checkpointing"
                 self._group.save_model(rollout_id, force_sync=True)
-                if self._critic_save_root is not None:
-                    # Every commit — critic-only warmup included — persists the
-                    # critic's weights and optimizer alongside the actor pair;
-                    # otherwise the value head cold-starts on every reboot
-                    # (SAO's stated cold-start concern). No HF export: the
-                    # critic never serves.
+                if self._critic_save_root is not None and (rollout_id + 1) % self._critic_save_interval == 0:
+                    # Persist the critic's weights and optimizer alongside the
+                    # actor pair — every commit by default, critic-only warmup
+                    # included, otherwise the value head cold-starts on every
+                    # reboot (SAO's stated cold-start concern). A larger
+                    # interval skips the full critic save on the commits in
+                    # between. No HF export: the critic never serves.
                     self._critic_group.save_model(rollout_id, force_sync=True)
                 if checkpoint.is_symlink() or not checkpoint.is_dir():
                     raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint}")
@@ -1253,6 +1262,7 @@ def start_bridge(
             storage_config=retention,
             megatron_save_root=args.save,
             critic_save_root=getattr(args, "critic_save", None),
+            critic_save_interval=int(getattr(args, "critic_save_interval", 1) or 1),
             source_hf=getattr(args, "hf_checkpoint", None),
             source_megatron=getattr(args, "load", None),
             colocate=colocate,
