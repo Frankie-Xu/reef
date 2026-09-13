@@ -1,8 +1,8 @@
 # Meta-Harness on Terminal-Bench
 
 Run the [Meta-Harness recipe](../../README.md) on the full pinned
-Terminal-Bench 2 suite. See the [retained comparison](../../RESULTS.md) for
-the recorded reproduction results.
+Terminal-Bench 2 suite. See [Results](#results) for the comparison and
+[RESULTS.md](../../RESULTS.md) for the evaluation configuration and scope.
 The seed is vanilla Terminus 2, represented by a no-op `Agent(Terminus2)`
 module. The proposer rewrites that module, retains every valid candidate, and
 selects only strict improvements over the best recorded mean score.
@@ -11,6 +11,35 @@ This example uses the current shared Reef recipe and Terminus adapter. It is
 a runnable continuation of the method reproduction, not the internal runner
 that produced the historical numbers. The differences are listed below;
 `RESULTS.md` and its selected harness remain in the package directory.
+
+## Results
+
+The Terminal-Bench comparison starts from vanilla Terminus 2 and evaluates a
+baseline plus four full-history iterations. The measurements use the fixed
+evaluation subset and protocol documented in [RESULTS.md](../../RESULTS.md).
+Scores count passing trials per measurement. A candidate replaces the current
+choice only when its mean score is strictly higher; a tie keeps that choice.
+
+| Step | Reef score | Reef selection | Upstream score | Upstream selection |
+| --- | ---: | --- | ---: | --- |
+| Baseline | 20/60 | Start with baseline | 24/60 | Start with baseline |
+| Iteration 1 | 23/60 | Select iteration 1 | 22/60 | Keep baseline |
+| Iteration 2 | 20/60 | Keep iteration 1 | 20/60 | Keep baseline |
+| Iteration 3 | 20/60 | Keep iteration 1 | 21/60 | Keep baseline |
+| Iteration 4 | 23/60 | Tie: keep iteration 1 | 21/60 | Keep baseline |
+
+Replaying the same completed score histories through Reef's selector and
+upstream's `update_frontier` produced identical choices on all eight candidate
+decisions, including Reef's tie. This checks the selection rule given the same
+observations; independent proposals and scores can differ.
+
+Remeasuring the selected harnesses with two fresh repeats on the same tasks
+gave **22/60 (36.67%) for Reef's iteration 1** and **21/60 (35.00%) for
+upstream's baseline**. These measurements did not feed back into search and
+are not a held-out task evaluation. One infrastructure loss per arm was
+replaced; Reef includes a terminal-loss zero under the shared scoring policy.
+The [selected Reef harness](../../results/reef_harness.py) and
+[full report](../../RESULTS.md) retain the implementation and scoring details.
 
 ## Setup and run
 
