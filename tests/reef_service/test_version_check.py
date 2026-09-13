@@ -175,8 +175,12 @@ console.log(JSON.stringify(events));
         assert events[3]["message"] == "Reef harness updated. Restart reef-pi to load it."
 
 
-def _notice(tmp_path: Path, releases: object, release_info: object, *, headless: bool = False) -> tuple[list, str]:
-    """The UI events and stderr of one session start of the notice against ``releases`` with ``release_info`` on disk."""
+def _notice(
+    tmp_path: Path, releases: object, release_info: object, *, headless: bool = False, **env: str
+) -> tuple[list, str]:
+    """The UI events and stderr of one session start of the notice against ``releases`` with ``release_info`` on disk.
+
+    ``env`` sets variables for the session, as a shell that exports what a release requires would."""
     module = tmp_path / "version_check.mjs"
     module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "pi-agent").mkdir(exist_ok=True)
@@ -212,16 +216,17 @@ console.log(JSON.stringify(events));
         encoding="utf-8",
     )
     (tmp_path / ".reef-harness-release").write_text(json.dumps(release_info), encoding="utf-8")
-    env = {
+    full_env = {
         **os.environ,
         "PI_CODING_AGENT_DIR": str(tmp_path / "pi-agent"),
         "REEF_SERVICE_URL": "http://reef:8900",
         "REEF_SCENARIO": "code-repair",
         "TEST_RELEASES": json.dumps({"releases": releases}),
         "TEST_HEADLESS": "1" if headless else "0",
+        **env,
     }
-    env.pop("PI_OFFLINE", None)
-    completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=env)
+    full_env.pop("PI_OFFLINE", None)
+    completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=full_env)
     return json.loads(completed.stdout), completed.stderr
 
 
@@ -267,9 +272,11 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
     )
     assert [event["kind"] for event in events] == ["select"]
     assert "Latest:  v2" in events[0]["title"]
-    # Already on the head: silence, whatever the check offs say.
+    # Already on the head: no offer, whatever the check offs say; the head requires TWILIO_SID, so a shell
+    # without it hears that once (see test_the_notice_warns_once_per_unset_variable_the_installed_release_needs).
     events, _ = _notice(tmp_path, releases, {"release_id": "v2"})
-    assert events == []
+    assert [event["type"] for event in events] == ["warning"] and "TWILIO_SID is not set" in events[0]["message"]
+    assert _notice(tmp_path, releases, {"release_id": "v2"}, TWILIO_SID="AC1") == ([], "")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -314,8 +321,11 @@ def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup
         {"release_id": "v4", "pending": False, "parent_release_id": "v3", "rollback_target_release_id": "p1"},
     ]
     events, _ = _notice(tmp_path, releases, {"release_id": "v3", "setup": [{**stale, "check": "TWILIO_SID"}]})
-    assert [event["kind"] for event in events] == ["notify"]
-    assert events[0]["message"].splitlines()[:2] == [
+    assert [event["kind"] for event in events] == ["notify", "notify"]
+    assert (
+        events[0]["message"] == "reef: TWILIO_SID is not set; the installed harness needs it (reef-pi setup lists it)"
+    )
+    assert events[1]["message"].splitlines()[:2] == [
         "Reef harness update available (v4), but it requires setup first:",
         "  notify (permission)",
     ]
@@ -355,3 +365,51 @@ def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
     events, _ = _notice(tmp_path, [{"release_id": "v1"}, None, {"release_id": "v2"}], release_info)
     assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
     assert _notice(tmp_path, promoted_then_pending, None) == ([], "")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_notice_warns_once_per_unset_variable_the_installed_release_needs(tmp_path: Path) -> None:
+    """Before the head comparison, every ``env`` item over the installed release's chain whose variable (the check,
+    else the name) this shell lacks gets one warning line; a set variable, a checked off one included, is silent,
+    and the other kinds say nothing here. The update flow follows unchanged."""
+    releases = [
+        {"release_id": "v1", "pending": False, "parent_release_id": None},
+        {
+            "release_id": "v2",
+            "pending": False,
+            "parent_release_id": "v1",
+            "metrics": {
+                "training_request": {
+                    "requires": [
+                        {"name": "twilio.sid", "kind": "env", "check": "TWILIO_SID"},
+                        {"name": "SMTP_HOST", "kind": "env"},
+                        {"name": "notify", "kind": "permission", "check": "true"},
+                    ]
+                }
+            },
+        },
+        {"release_id": "v3", "pending": False, "parent_release_id": "v2"},
+    ]
+    warning = "reef: {} is not set; the installed harness needs it (reef-pi setup lists it)"
+    # On the head with both variables unset: two warnings, in the chain's order, and nothing else.
+    events, stderr = _notice(tmp_path, releases, {"release_id": "v3", "setup": [{"name": "twilio.sid"}]})
+    assert [(event["type"], event["message"]) for event in events] == [
+        ("warning", warning.format("TWILIO_SID")),
+        ("warning", warning.format("SMTP_HOST")),
+    ]
+    assert stderr == ""
+    # One set: one warning; both set: silence. Headless, the warnings go to stderr.
+    events, _ = _notice(tmp_path, releases, {"release_id": "v3"}, TWILIO_SID="AC1")
+    assert [event["message"] for event in events] == [warning.format("SMTP_HOST")]
+    assert _notice(tmp_path, releases, {"release_id": "v3"}, TWILIO_SID="AC1", SMTP_HOST="mail") == ([], "")
+    events, stderr = _notice(tmp_path, releases, {"release_id": "v3"}, headless=True)
+    assert events == [] and stderr.splitlines() == [warning.format("TWILIO_SID"), warning.format("SMTP_HOST")]
+    # Behind the head with every item checked off, the warning still comes first (a check off records that the
+    # variable was set once, not that this shell has it) and the offer follows unchanged.
+    checked = [{"name": "twilio.sid"}, {"name": "SMTP_HOST"}, {"name": "notify"}]
+    events, _ = _notice(tmp_path, releases, {"release_id": "v2", "setup": checked}, TWILIO_SID="AC1")
+    assert [event["kind"] for event in events] == ["notify", "select"]
+    assert events[0]["message"] == warning.format("SMTP_HOST") and "Latest:  v3" in events[1]["title"]
+    # The installed release v1 requires nothing: silence about the environment, whatever v2 needs.
+    events, _ = _notice(tmp_path, releases, {"release_id": "v1", "setup": [{"name": "notify"}]})
+    assert [event["kind"] for event in events] == ["notify"] and "requires setup first" in events[0]["message"]

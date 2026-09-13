@@ -483,7 +483,11 @@ on its own. The wrapper keeps
 the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor`` prints one line per thing the install needs
 (the interpreter and its imports, the service and its token, the binary,
 the tools on PATH, the installed release against the served head) and exits
-0 when they all hold. Pinning,
+0 when they all hold; it also lists every release that waits for your
+review, in the words ``reef-pi harness --wait`` prints. ``reef-pi --help``
+(``-h``, ``help``) prints the wrapper's own subcommands (``report``,
+``harness``, ``page``, ``doctor``, ``setup``; anything else runs pi) before
+pi's help. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
@@ -505,13 +509,29 @@ from the release metadata file and the oldest pending session's id, or a fresh s
 when nothing is spooled. A request can execute without inference receipts;
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
-gate. To return to failure driven evolution alone, use the same update
-endpoint with ``{"training_mode": "auto"}``. The commands surface an error
-when the scenario is in ``auto``.
+gate: the wrapper says ``reef is running the step; add --wait to stay here,
+or check /reef-versions later``. With ``--wait`` (``--timeout SECONDS``,
+1800 by default) it polls the release catalog every 5 s for the step that
+consumed the request and prints one line with the verdict and the next
+action, quoting the request: a selected release to restart ``reef-pi`` for,
+a pending one to read with ``reef-pi page <step>`` and promote, a rejected
+step with the gate's reason, a skipped step with why; ``not covered: ...``
+follows when the step's review lists points the change left out. The exit
+status is 0 for a selected or pending release, 1 for a rejected or skipped
+step, 2 when the timeout passes first. To return to failure driven
+evolution alone, use the same update endpoint with
+``{"training_mode": "auto"}``. The commands surface an error when the
+scenario is in ``auto``.
 
 With ``evolution.requests: true``, a tree that boots from the seed also
 carries the pi ``/reef-harness <request>`` command, which uses the same manual
-training API with pi's current session id. Recovered trees keep their
+training API with pi's current session id. In the session the model first
+thinks the request through and asks what is unclear, a few options plus a
+typed answer per question, then files the request with the answers;
+``/reef-harness --direct <request>`` files it as is. A footer status shows
+the step running and one line reports the verdict when it settles, with the
+same next actions as ``--wait``; a session start says the commands exist and
+counts the releases awaiting your review. Recovered trees keep their
 existing entries, as with ``version_check``. The proposer must explicitly
 accept ``requests``. The tutorial's proposer asks the served model for a
 skill, rules entry, command, or extension, using the bundled
@@ -586,7 +606,13 @@ a rejected or skipped step, the head it ran on). For a pending release the
 command also prints the promote curl, a trial install with ``?release_id=``
 that replaces the tree at your install root, and the head's reinstall to
 return to it; ``/reef-versions <step> promote`` runs the promote from the
-TUI after you confirm it.
+TUI after you confirm it. When the step recorded the proposer's plan and its
+review, ``/reef-versions <step>`` also prints ``design:`` and ``not
+covered:``. The page needs the token and the scenario header a browser
+would not send, so ``reef-pi page <step>`` fetches it for you into
+``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html`` (``~/.cache``
+by default), prints the path and opens it with ``open`` or ``xdg-open``;
+``--print`` prints the path and opens nothing.
 
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,
