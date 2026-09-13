@@ -15,14 +15,17 @@ RUN_DIR="${RUN_DIR:-$PWD/work}"
 HOST_IP="$(hostname -I | awk '{print $1}')"
 export REEF_SERVICE_URL="${REEF_SERVICE_URL:-http://${HOST_IP}:28900}"
 export REEF_SCENARIO="${REEF_SCENARIO:-ceobench-sao}"
-# The trainer's window (serve.yaml's seq-length): turns longer than this are
-# served and recorded but not reported for training.
-export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-49152}"
+# The longest turn the trainer takes (serve.yaml explains the budget): turns
+# longer than this are served and recorded but not reported for training.
+export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-24576}"
 # The agent's shell runs as this unprivileged user inside the task container.
 export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
 # Pace the game to the trainer: the recipe's batch size (serve.yaml), so each
 # new week starts only after the reported weeks' batches have committed.
 export CEOBENCH_PACE_BATCH="${CEOBENCH_PACE_BATCH:-16}"
+# A week waits at most this long for its batch (a step takes about five
+# minutes) before the game goes on without it.
+export CEOBENCH_PACE_TIMEOUT_S="${CEOBENCH_PACE_TIMEOUT_S:-1200}"
 
 # Prerequisites
 command -v uv >/dev/null || { echo "run.sh: uv not found (pip install uv)" >&2; exit 1; }

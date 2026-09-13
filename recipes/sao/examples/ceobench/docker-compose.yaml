@@ -34,6 +34,9 @@ services:
       RAY_ADDRESS: ${RAY_ADDRESS:-}
       REEF_TOKEN: ${REEF_TOKEN}
       PYTHONPATH: /workspace/Reef:/root/Megatron-LM
+      # Two resident 27B bases beside one step's activations leave little
+      # slack; expandable segments keep the caching allocator from fragmenting.
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       WANDB_API_KEY: ${WANDB_API_KEY:-}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:28900/healthz"]

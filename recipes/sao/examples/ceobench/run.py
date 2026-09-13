@@ -36,8 +36,9 @@ SCENARIO = os.environ.get("REEF_SCENARIO", "ceobench-sao")
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")
 SEED = int(os.environ.get("CEOBENCH_SEED", "42"))
 DAYS = int(os.environ.get("CEOBENCH_DAYS", "500"))
-#: Training is quiescent once the release count holds for this long.
-TRAIN_QUIET_S = 120.0
+#: Training is quiescent once the release count holds for this long: longer than one
+#: step, or the drain would return while the episode's last batch is still training.
+TRAIN_QUIET_S = 900.0
 #: Ceiling on waiting for one episode's training steps before moving on with a warning.
 TRAIN_DRAIN_TIMEOUT_S = 7200.0
 

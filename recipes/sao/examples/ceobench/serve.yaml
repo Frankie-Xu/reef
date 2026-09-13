@@ -15,9 +15,13 @@
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
 # until the agent calls next-week, and the agent reads the benchmark's docs
 # early (40k tokens after four turns). The engine serves the model's window
-# (128k here); the trainer's is 48k because it materializes a sequence's
-# full-vocabulary logits (248k entries) in fp32 on every tensor-parallel
-# rank. The harness reports only turns that fit the trainer's window
+# (128k here). The trainer's sequences are capped at 24k tokens: it
+# materializes a sequence's full-vocabulary logits (248k entries) in fp32 on
+# every tensor-parallel rank, about 1 GB per thousand tokens with their
+# softmax and gradient, on top of the two resident bases (47 GB per GPU
+# idle). A 32k-token actor step peaked at 78 GB of the H100's 81 GB; 24k
+# leaves room, and the turns it drops are the doc-reading ones (36k to 41k
+# tokens); the rest sit under 20k. The harness reports only turns that fit
 # (CEOBENCH_TRAIN_MAX_TOKENS in run.sh); longer turns are served and
 # recorded but do not train. See the README for what this ruled out.
 #
