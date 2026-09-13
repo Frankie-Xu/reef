@@ -22,14 +22,14 @@ harbor/                one CEO-Bench episode as a Harbor task
   instruction.md         what the task is (the model never sees it: CEO-Bench owns its prompt)
   environment/
     Dockerfile           python:3.13 + uv + the pinned CEO-Bench checkout, patched and rebuilt
-    reef.patch           the three hunks the checkout needs (below)
+    reef.patch           the changes the checkout needs (below)
   tests/
     test.sh              runs the verifier inside the task container
     score.py             decrypts the run's world.nmdb: reward, final cash, survival days, bankrupt
 harness/               agent harness (imports reef_client, not reef)
   __init__.py            lazily exports HarborAgent
   agent.py               HarborAgent: sidecar on the host, the benchmark runner in the container
-  report.py              posts the verifier's score against every turn's receipt
+  report.py              values a week and posts its score against every turn's receipt
 serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic colocated
 docker-compose.yaml    the stack in the reef image, host networking, six GPUs
 run.py                 one episode, trained while it is played
@@ -158,20 +158,36 @@ The reward is online and weekly. CEO-Bench advances in weeks: the agent works
 in one conversation until it calls `next-week`, the engine steps seven days
 and returns the next dashboard, and the runner rebuilds the conversation from
 it. Every request therefore carries the dashboard of the week it belongs to
-(`=== Week N Dashboard (Day D) ===`, opening cash on the next line), and the
-sidecar's captures let the harness group turns by week without touching the
-benchmark. A reporter thread polls those captures while the episode runs;
-when week N+1's dashboard appears, week N is over and each of its turns is
-reported with
+(`=== Week N Dashboard (Day D) ===`, then the opening cash, individual
+subscribers, and enterprise seats, and further down the listed plan prices),
+and the sidecar's captures let the harness group turns by week without
+touching the benchmark. A reporter thread polls those captures while the
+episode runs; when week N+1's dashboard appears, week N is over and each of
+its turns is reported with the week's change in company value:
 
-    score = (cash at the start of week N+1 - cash at the start of week N) / $1,000,000
+    run_rate_N = subscribers_N x lowest nonzero listed price_N + seats_N x plan C price_N   (monthly)
+    V_N        = cash_N + run_rate_N x 7/30 x min(weeks left after week N, H)
+    score      = (V_{N+1} - V_N) / $1,000,000
 
 as a single-reference report, so the `sao` recipe trains on the week's turns
 while the agent is already playing week N+1 and the engine serves the
-updated adapter from then on. The last week closes with the
-verifier's final cash, posted by a watcher thread once Harbor writes
-`result.json`. The Harbor reward itself stays the benchmark's terminal metric
-(final cash over the starting balance); it is evaluation only.
+updated adapter from then on. `H` is `CEOBENCH_VALUE_HORIZON_WEEKS` (26 in
+`run.sh`, about six months of a subscription, which stands in for retention);
+the weeks left are `days // 7 - N`, so the valuation converges on cash as the
+episode ends. The estimate uses what the dashboard shows: the plan mix,
+promotions, and negotiated enterprise seat prices are not visible, so it is a
+floor on the subscription revenue, not the books. The last week closes with
+the verifier's final cash, valued as cash alone, posted by a watcher thread
+once Harbor writes `result.json`. The Harbor reward itself stays the
+benchmark's terminal metric (final cash over the starting balance); it is
+evaluation only.
+
+The first two trained episodes (results below) scored the week's cash change
+alone. Under that signal every purchase is a loss and the emptiest week is
+the safest, and both policies converged on a company with no customers. The
+run-rate term is what pays for growth inside the horizon: 671 subscribers at
+$9 a month (the untrained baseline's week 11) are worth +0.037 in score
+units, while a $500,000 R&D purchase still costs -0.5 in the week it lands.
 
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
 the recipe's batch size). The sidecar peeks at each request's dashboard;
@@ -187,10 +203,11 @@ untrained baseline runs with the pacer off.
 Turns of one week share the week's score; the critic's skip-observation GAE
 does the credit assignment inside each turn. A weekly delta is dense enough
 for SAO's one-rollout-per-step cadence and lines up with the benchmark's own
-decision period, at the cost of being myopic: R&D and advertising cost cash
-this week and pay later. Two extensions are left open: a lag of `k` weeks
-(report week N once week N+k's cash is known) and a judged turn-level signal
-of the kind single-stream PPO wants (`recipes/openclawrl/`).
+decision period. It is still myopic about anything the run-rate does not
+see: R&D raises quality and pays through retention and upgrades weeks later.
+Two extensions are left open: a lag of `k` weeks (report week N once week
+N+k's state is known) and a judged turn-level signal of the kind
+single-stream PPO wants (`recipes/openclawrl/`).
 
 ## Run
 
@@ -468,8 +485,9 @@ signal is the next experiment, not a larger run of this one.
 - The untrained baseline with the benchmark's Anthropic simulator roles and
   more seeds (issue #428, acceptance criterion 1); replicates of the trained
   episode on other seeds.
-- A less myopic reward: a lag of `k` weeks or a judged turn-level signal
-  (see reward shaping), given what both trained episodes converged to.
+- A trained episode under the valuation reward (reward shaping above): the
+  first two used the cash change alone, and both converged on a company with
+  no customers. Beyond it, a lag of `k` weeks or a judged turn-level signal.
 
 ## Open items
 

@@ -4,9 +4,10 @@
              bash agent plays the configured number of days with every model
              call served by Reef
     learn  — when a week ends, the agent reports that week's turns with the
-             week's cash change; Reef's SAO recipe trains one step per
-             accepted turn while the agent is already playing the next week,
-             and the engine serves the updated adapter
+             week's change in company value (cash plus the subscription
+             run-rate over the weeks left); Reef's SAO recipe trains on the
+             accepted turns while the agent is already playing the next
+             week, and the engine serves the updated adapter
     verify — Harbor's verifier scores the finished run from its world.nmdb
 
 This is test-time training: the policy adapts inside the episode it is

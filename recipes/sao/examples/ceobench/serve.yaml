@@ -7,7 +7,8 @@
 # (scripts/models/qwen3.5-27B.sh; sizes come from the HF config) and the
 # objective settings are the SAO example's, with the learning rates raised
 # for adapters. A rollout is one agent turn of the benchmark's bash agent; a
-# finished week's turns are reported together with that week's cash change
+# finished week's turns are reported together with that week's change in
+# company value, cash plus the subscription run-rate over the weeks left
 # (harness/report.py). batch_size 16 trains about a week of turns per step
 # (the SAO example trains one rollout per step; the paper trains 128), and
 # max_staleness admits the turns of a week that earlier steps have aged.

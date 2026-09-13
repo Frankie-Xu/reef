@@ -63,8 +63,17 @@ class _Client:
         return {"accepted": True}
 
 
-def _dashboard(week: int, day: int, cash: int) -> str:
-    return f"=== Week {week} Dashboard (Day {day}) ===\n\nCash: ${cash:,}\nIndividual Subscribers: 0\n"
+def _dashboard(week: int, day: int, cash: int, *, subscribers: int = 0, seats: int = 0, prices=(0, 0, 0)) -> str:
+    a, b, c = prices
+    return (
+        f"=== Week {week} Dashboard (Day {day}) ===\n\nCash: ${cash:,}\n"
+        f"Individual Subscribers: {subscribers}\nEnterprise Subscribed Seats: {seats}\nOpen Issues: 0\n\n"
+        f"--- Current Config ---\nPrices: A=${a}, B=${b}, C=${c}\nModel Tiers: A=1, B=1, C=1\n"
+    )
+
+
+def _start(agent_module, week: int, day: int, cash: float, *, subscribers=0, seats=0, prices=(0.0, 0.0, 0.0)):
+    return agent_module.WeekStart(week, day, cash, subscribers, seats, prices)
 
 
 def _turn(receipt: str, dashboard: str | None, prompt_tokens: int, completion_tokens: int) -> dict:
@@ -92,7 +101,7 @@ def _agent(agent_module, monkeypatch, turns: list[dict], *, service_url="http://
     agent._days = 14
     agent._client = _Client()
     agent._capture = _Capture([])
-    agent._ledger = agent_module.WeekLedger()
+    agent._ledger = agent_module.WeekLedger(total_weeks=2)
     agent._ledger_lock = threading.Lock()
     agent._max_tokens = 0
     sidecar = _Sidecar()
@@ -154,29 +163,62 @@ def test_turn_week_parses_the_latest_dashboard(monkeypatch) -> None:
     agent_module, _ = _load_harness(monkeypatch, "ceobench")
 
     fresh = _turn("r", _dashboard(0, 0, 1_000_000), 1, 1)
-    assert agent_module.turn_week(fresh) == (0, 0, 1_000_000.0)
+    assert agent_module.turn_week(fresh) == _start(agent_module, 0, 0, 1_000_000.0)
 
     # A transcript that still holds an earlier week's dashboard resolves to the latest one.
     carried = _turn("r", _dashboard(0, 0, 1_000_000), 1, 1)
-    carried["request"]["messages"].append({"role": "tool", "content": "ok\n" + _dashboard(1, 7, 982_311)})
-    assert agent_module.turn_week(carried) == (1, 7, 982_311.0)
+    carried["request"]["messages"].append(
+        {"role": "tool", "content": "ok\n" + _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99))}
+    )
+    assert agent_module.turn_week(carried) == _start(
+        agent_module, 1, 7, 982_311.0, subscribers=3, prices=(10.0, 39.0, 99.0)
+    )
 
-    broke = _turn("r", "=== Week 9 Dashboard (Day 63) ===\n\nCash: -$1,234\n", 1, 1)
-    assert agent_module.turn_week(broke) == (9, 63, -1234.0)
+    # The agent's own scripts print price lines; only the dashboard's configuration block counts.
+    scripted = _turn("r", _dashboard(0, 0, 1_000_000), 1, 1)
+    scripted["request"]["messages"].append(
+        {"role": "tool", "content": "=== Setup ===\nPrices: A=$15, B=$49, C=$149\n"}
+    )
+    assert agent_module.turn_week(scripted) == _start(agent_module, 0, 0, 1_000_000.0)
+
+    # Both spellings of a negative balance; a dashboard cut before its configuration block lists no prices.
+    for broke in ("Cash: -$1,234", "Cash: $-1,234"):
+        header = f"=== Week 9 Dashboard (Day 63) ===\n\n{broke}\nIndividual Subscribers: 0\nEnterprise Subscribed Seats: 0\n"
+        assert agent_module.turn_week(_turn("r", header, 1, 1)) == _start(agent_module, 9, 63, -1234.0)
 
     assert agent_module.turn_week({"request": {"messages": [{"role": "user", "content": "hello"}]}}) is None
 
 
 @pytest.mark.unit
+def test_week_start_run_rate_uses_the_lowest_listed_price_and_plan_c_for_seats(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+
+    assert _start(agent_module, 1, 7, 0.0, subscribers=3, seats=10, prices=(10.0, 39.0, 99.0)).run_rate == 1020.0
+    assert _start(agent_module, 1, 7, 0.0, subscribers=2, prices=(0.0, 49.0, 99.0)).run_rate == 98.0
+    assert _start(agent_module, 1, 7, 0.0, subscribers=2, seats=4).run_rate == 0.0
+
+
+@pytest.mark.unit
+def test_valuation_counts_the_run_rate_over_the_remaining_horizon(monkeypatch) -> None:
+    _, report_module = _load_harness(monkeypatch, "ceobench")
+
+    assert report_module.valuation(100_000.0, 3_000.0, 40, 26) == 118_200.0
+    assert report_module.valuation(100_000.0, 3_000.0, 5, 26) == 103_500.0
+    assert report_module.valuation(100_000.0, 3_000.0, 0, 26) == 100_000.0
+    assert report_module.valuation(100_000.0, 3_000.0, -1, 26) == 100_000.0
+    assert report_module.week_score(982_318.0, 793_047.0) == (793_047 - 982_318) / 1_000_000
+
+
+@pytest.mark.unit
 def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monkeypatch) -> None:
     agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    ledger = agent_module.WeekLedger()
+    ledger = agent_module.WeekLedger(total_weeks=2)
     ledger.observe(
         [
             _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
             {"status": 500, "receipt": None, "response": {"error": {"message": "engine restarting"}}},
             _turn("r-2", _dashboard(0, 0, 1_000_000), 20, 5),
-            _turn("r-3", _dashboard(1, 7, 982_311), 30, 7),
+            _turn("r-3", _dashboard(1, 7, 982_311, subscribers=30, prices=(10, 39, 99)), 30, 7),
             _turn("r-4", None, 40, 9),  # no dashboard of its own: still week 1
         ]
     )
@@ -188,15 +230,42 @@ def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monke
         ("r-4", 49, 1),
     ]
     assert ledger.weeks[0]["turns"] == [("r-1", 13), ("r-2", 25)]
-    assert ledger.weeks[1] == {"day": 7, "cash_start": 982_311.0, "turns": [("r-3", 37), ("r-4", 49)]}
-    # Week 0 closed when week 1's dashboard appeared; week 1 waits for the final cash.
-    assert ledger.finished_weeks() == [(0, 982_311.0)]
-    assert ledger.finished_weeks(final_cash=793_047.0) == [(0, 982_311.0), (1, 793_047.0)]
+    week_1 = _start(agent_module, 1, 7, 982_311.0, subscribers=30, prices=(10.0, 39.0, 99.0))
+    assert ledger.weeks[1] == {"start": week_1, "turns": [("r-3", 37), ("r-4", 49)]}
+    # Week 1 opens worth its cash plus the one week left of 30 subscribers at the $10 plan.
+    assert ledger.value(week_1) == 982_381.0
+    # Week 0 closed when week 1's dashboard appeared; week 1 waits for the final cash, valued as cash.
+    assert ledger.finished_weeks() == [(0, 982_311.0, 982_381.0)]
+    assert ledger.finished_weeks(final_cash=793_047.0) == [(0, 982_311.0, 982_381.0), (1, 793_047.0, 793_047.0)]
     ledger.posted.add(0)
     assert ledger.finished_weeks() == []
     assert ledger.summary(final_cash=793_047.0) == [
-        {"week": 0, "day": 0, "cash_start": 1_000_000.0, "cash_end": 982_311.0, "turns": 2, "reported": True},
-        {"week": 1, "day": 7, "cash_start": 982_311.0, "cash_end": 793_047.0, "turns": 2, "reported": False},
+        {
+            "week": 0,
+            "day": 0,
+            "cash_start": 1_000_000.0,
+            "cash_end": 982_311.0,
+            "subscribers": 0,
+            "seats": 0,
+            "run_rate": 0.0,
+            "value_start": 1_000_000.0,
+            "value_end": 982_381.0,
+            "turns": 2,
+            "reported": True,
+        },
+        {
+            "week": 1,
+            "day": 7,
+            "cash_start": 982_311.0,
+            "cash_end": 793_047.0,
+            "subscribers": 30,
+            "seats": 0,
+            "run_rate": 300.0,
+            "value_start": 982_381.0,
+            "value_end": 793_047.0,
+            "turns": 2,
+            "reported": False,
+        },
     ]
 
 
@@ -208,7 +277,7 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
         {"status": 500, "receipt": None, "response": {"error": {"message": "engine restarting"}}},
         _turn("r-2", _dashboard(0, 0, 1_000_000), 20, 5),
-        _turn("r-3", _dashboard(1, 7, 982_311), 30, 7),
+        _turn("r-3", _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99)), 30, 7),
     ]
     agent, sidecar = _agent(agent_module, monkeypatch, turns)
     environment = _Environment()
@@ -225,14 +294,17 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
     assert environment.downloads == [(agent_module.RUNS_DIR, Path("/tmp/trial/agent/ceobench"))]
 
     # Week 0 was reported (its two turns) once week 1's dashboard appeared; week 1 waits.
+    # Week 1 opens worth its cash plus one week of three $10 subscribers: the score follows the value.
     payloads = [payload for _, payload in agent._client.calls]
     assert [payload["references"] for payload in payloads] == [["r-1"], ["r-2"]]
-    assert {payload["score"] for payload in payloads} == {(982_311 - 1_000_000) / 1_000_000}
+    assert {payload["score"] for payload in payloads} == {(982_318 - 1_000_000) / 1_000_000}
     assert payloads[1]["metadata"]["ceobench"] == {
         "week": 0,
         "day": 0,
         "cash_start": 1_000_000.0,
         "cash_end": 982_311.0,
+        "value_start": 1_000_000.0,
+        "value_end": 982_318.0,
         "turn": 1,
         "turns": 2,
     }
@@ -246,11 +318,36 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
     assert context.metadata["ceobench"] == {
         "seed": 7,
         "days": 14,
+        "horizon_weeks": 26,
         "turns": 4,
         "exit_code": 0,
         "weeks": [
-            {"week": 0, "day": 0, "cash_start": 1_000_000.0, "cash_end": 982_311.0, "turns": 2, "reported": True},
-            {"week": 1, "day": 7, "cash_start": 982_311.0, "cash_end": None, "turns": 1, "reported": False},
+            {
+                "week": 0,
+                "day": 0,
+                "cash_start": 1_000_000.0,
+                "cash_end": 982_311.0,
+                "subscribers": 0,
+                "seats": 0,
+                "run_rate": 0.0,
+                "value_start": 1_000_000.0,
+                "value_end": 982_318.0,
+                "turns": 2,
+                "reported": True,
+            },
+            {
+                "week": 1,
+                "day": 7,
+                "cash_start": 982_311.0,
+                "cash_end": None,
+                "subscribers": 3,
+                "seats": 0,
+                "run_rate": 30.0,
+                "value_start": 982_318.0,
+                "value_end": None,
+                "turns": 1,
+                "reported": False,
+            },
         ],
     }
     assert context.metadata["prior"] is True
@@ -262,7 +359,7 @@ def test_last_week_closes_with_the_verifier_final_cash(monkeypatch, tmp_path) ->
     agent_module, _ = _load_harness(monkeypatch, "ceobench")
     turns = [
         _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
-        _turn("r-2", _dashboard(1, 7, 982_311), 30, 7),
+        _turn("r-2", _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99)), 30, 7),
     ]
     agent, _ = _agent(agent_module, monkeypatch, turns)
     agent.logs_dir = tmp_path / "agent"
@@ -284,8 +381,10 @@ def test_last_week_closes_with_the_verifier_final_cash(monkeypatch, tmp_path) ->
     scenario, payload = agent._client.calls[-1]
     assert scenario == "ceobench-host-test"
     assert payload["references"] == ["r-2"]
-    assert payload["score"] == (793_047 - 982_311) / 1_000_000
+    # The last week is valued as cash alone at both ends of the comparison's close.
+    assert payload["score"] == (793_047 - 982_318) / 1_000_000
     assert payload["metadata"]["ceobench"]["week"] == 1 and payload["metadata"]["ceobench"]["cash_end"] == 793_047.0
+    assert payload["metadata"]["ceobench"]["value_end"] == 793_047.0
     assert "week 1" in payload["feedback"]
     # A second look changes nothing: the week is already posted.
     agent._report_trial_result()
@@ -342,14 +441,15 @@ def test_gate_closes_the_previous_week_before_serving_the_next(monkeypatch) -> N
     agent._pacer = Pacer()
     agent._gated_week = None
 
-    # The first request of week 1 arrives: week 0 closes with week 1's opening cash and is reported.
-    agent._gate_week(1, 7, 982_311.0)
+    # The first request of week 1 arrives: week 0 closes with week 1's opening state and is reported.
+    agent._gate_week(_start(agent_module, 1, 7, 982_311.0))
 
     assert [payload["references"] for _, payload in agent._client.calls] == [["r-1"], ["r-2"]]
-    assert agent._client.calls[0][1]["metadata"]["ceobench"]["cash_end"] == 982_311.0
+    reported = agent._client.calls[0][1]["metadata"]["ceobench"]
+    assert (reported["cash_end"], reported["value_end"]) == (982_311.0, 982_311.0)
     assert waits == [(1, 2)]
     # Later requests of the same week pass without another wait.
-    agent._gate_week(1, 7, 982_311.0)
+    agent._gate_week(_start(agent_module, 1, 7, 982_311.0))
     assert waits == [(1, 2)]
 
 
@@ -365,7 +465,7 @@ def test_paced_handler_peeks_at_the_week_and_replays_the_body(monkeypatch) -> No
         def _forward(self, forward_path, routed_session):
             forwarded.append((forward_path, routed_session, self.rfile.read()))
 
-    handler_cls = agent_module.paced_handler(Base, lambda week, day, cash: seen.append((week, day, cash)))
+    handler_cls = agent_module.paced_handler(Base, seen.append)
     body = json.dumps({"messages": [{"role": "user", "content": _dashboard(4, 28, 940_968)}]}).encode()
     handler = object.__new__(handler_cls)
     handler.headers = {"Content-Length": str(len(body))}
@@ -373,7 +473,7 @@ def test_paced_handler_peeks_at_the_week_and_replays_the_body(monkeypatch) -> No
 
     handler._forward("/v1/chat/completions", None)
 
-    assert seen == [(4, 28, 940_968.0)]
+    assert seen == [_start(agent_module, 4, 28, 940_968.0)]
     assert forwarded == [("/v1/chat/completions", None, body)]
 
 
@@ -409,7 +509,9 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
         week=3,
         day=21,
         cash_start=900_000.0,
-        cash_end=910_000.0,
+        cash_end=905_000.0,
+        value_start=900_000.0,
+        value_end=910_000.0,
         turns=[("r-1", 9000), ("r-2", 50000), ("r-3", 48000)],
         max_tokens=49152,
     )
@@ -419,8 +521,10 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
     payloads = [payload for _, payload in client.calls]
     assert [payload["references"] for payload in payloads] == [["r-1"], ["r-3"]]
     assert [payload["metadata"]["ceobench"]["turn"] for payload in payloads] == [0, 2]
+    # The score follows the value, not the cash.
     assert {payload["score"] for payload in payloads} == {0.01}
-    assert "week 3" in payloads[0]["feedback"] and "900000 -> 910000" in payloads[0]["feedback"]
+    feedback = payloads[0]["feedback"]
+    assert "week 3" in feedback and "value 900000 -> 910000" in feedback and "cash 900000 -> 905000" in feedback
     # No limit reports every turn.
     client.calls.clear()
     report_module.post_week_reports(
@@ -429,7 +533,9 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
         week=3,
         day=21,
         cash_start=900_000.0,
-        cash_end=910_000.0,
+        cash_end=905_000.0,
+        value_start=900_000.0,
+        value_end=910_000.0,
         turns=[("r-1", 1), ("r-2", 2), ("r-3", 3)],
     )
     assert len(client.calls) == 3

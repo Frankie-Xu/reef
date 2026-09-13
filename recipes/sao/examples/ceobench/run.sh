@@ -18,6 +18,10 @@ export REEF_SCENARIO="${REEF_SCENARIO:-ceobench-sao}"
 # The longest turn the trainer takes (serve.yaml explains the budget): turns
 # longer than this are served and recorded but not reported for training.
 export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-24576}"
+# The reward values a week's opening state as cash plus the subscription
+# run-rate (subscribers at the lowest listed price, enterprise seats at plan
+# C's) over the weeks left in the episode, at most this many of them.
+export CEOBENCH_VALUE_HORIZON_WEEKS="${CEOBENCH_VALUE_HORIZON_WEEKS:-26}"
 # The agent's shell runs as this unprivileged user inside the task container.
 export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
 # The runner's own limits, widened for a paced game (reef.patch reads them):

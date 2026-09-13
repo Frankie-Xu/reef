@@ -10,12 +10,15 @@ settings and never pass through Reef.
 
 The reward is online and weekly. Every request the agent sends carries the
 dashboard of the simulated week it is in (``=== Week N Dashboard (Day D) ===``
-with the week's opening cash), so the sidecar's captures say which week each
-turn belongs to. While the episode runs, a reporter thread watches for the
-next week's dashboard; when it appears the previous week is over, and every
-turn of that week is reported with the week's cash change as its score
-(``harness.report``). The last week ends with the verifier's final cash,
-which a watcher thread reads from Harbor's ``result.json`` after the trial.
+with the week's opening cash, subscribers, seats, and listed prices), so the
+sidecar's captures say which week each turn belongs to and what the week
+started with. While the episode runs, a reporter thread watches for the next
+week's dashboard; when it appears the previous week is over, and every turn
+of that week is reported with the week's change in company value as its
+score: cash plus the subscription run-rate the dashboard implies, over the
+weeks left in the episode (``harness.report``). The last week ends with the
+verifier's final cash, which a watcher thread reads from Harbor's
+``result.json`` after the trial.
 When the episode ends, the run directory (``world.nmdb``, config, checkpoint,
 logs) is copied into the trial's log directory and the receipts, with their
 weeks and token counts, go into the agent context in call order.
@@ -34,6 +37,11 @@ and any provider override stay outside the repository.
 the engine serves the model's full context, but a turn whose prompt and
 completion together exceed this many tokens is recorded and never reported,
 because the trainer could not hold it.
+
+``CEOBENCH_VALUE_HORIZON_WEEKS`` (default 26) caps the weeks of run-rate a
+week's opening state is valued at, so a subscriber is worth at most about six
+months of the listed price and the valuation converges on cash as the episode
+ends.
 
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
 to the recipe's batch size, the sidecar holds the first request of each new
@@ -55,6 +63,7 @@ import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from harbor.agents.base import BaseAgent
@@ -63,7 +72,7 @@ from harbor.models.agent.context import AgentContext
 from reef_client import ReefClient
 from reef_client.serve import CaptureStore, ServeConfig, build_handler
 
-from .report import post_week_reports
+from .report import DEFAULT_VALUE_HORIZON_WEEKS, post_week_reports, valuation
 
 #: The pinned checkout and the run root inside the task container.
 CEOBENCH_DIR = "/opt/ceobench"
@@ -78,8 +87,39 @@ WEEK_POLL_S = 5.0
 #: How often the pacer re-reads the scenario's releases while it holds a week.
 PACE_POLL_S = 10.0
 #: The weekly dashboard header the benchmark's engine returns, with the
-#: week's opening cash on the line after it.
-DASHBOARD_RE = re.compile(r"=== Week (\d+) Dashboard \(Day (\d+)\) ===\s*\n\s*\nCash: (-?)\$(-?[\d,]+)")
+#: week's opening cash, individual subscribers, and enterprise seats on the
+#: lines after it.
+DASHBOARD_RE = re.compile(
+    r"=== Week (\d+) Dashboard \(Day (\d+)\) ===\s*\n\s*\n"
+    r"Cash: (-?)\$(-?[\d,]+)\n"
+    r"Individual Subscribers: (\d+)\n"
+    r"Enterprise Subscribed Seats: (\d+)"
+)
+#: The listed plan prices in the same dashboard's configuration block. The
+#: agent's own scripts print ``Prices:`` lines too, so the block anchors it.
+PRICES_RE = re.compile(r"--- Current Config ---\s*\nPrices: A=\$(\d+), B=\$(\d+), C=\$(\d+)")
+
+
+class WeekStart(NamedTuple):
+    """A week's opening state as its dashboard shows it."""
+
+    week: int
+    day: int
+    cash: float
+    subscribers: int
+    seats: int
+    prices: tuple[float, float, float]  # plans A, B, C as listed, monthly
+
+    @property
+    def run_rate(self) -> float:
+        """Monthly revenue at the listed prices.
+
+        Each individual subscriber counts at the lowest nonzero price, each
+        enterprise seat at plan C's: the dashboard shows neither the plan mix
+        nor negotiated seat prices, so this is a floor, not the books.
+        """
+        listed = [price for price in self.prices if price > 0]
+        return self.subscribers * (min(listed) if listed else 0.0) + self.seats * self.prices[2]
 
 
 def runner_command(base_url: str, model: str, seed: int, days: int) -> str:
@@ -117,25 +157,49 @@ def turn_tokens(turn: dict) -> int:
     return int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
 
 
-def turn_week(turn: dict) -> tuple[int, int, float] | None:
-    """``(week, day, opening cash)`` of the latest dashboard in the turn's request.
+def dashboards(content: str) -> list[WeekStart]:
+    """Every dashboard in ``content``, in order of appearance.
+
+    The prices are looked for between a dashboard's header and the next
+    one's; a dashboard without its configuration block (cut short, or quoted
+    without it) keeps its week and cash and lists no prices.
+    """
+    starts = []
+    matches = list(DASHBOARD_RE.finditer(content))
+    for position, match in enumerate(matches):
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(content)
+        priced = PRICES_RE.search(content, match.end(), end)
+        prices = tuple(float(price) for price in priced.groups()) if priced else (0.0, 0.0, 0.0)
+        sign = -1.0 if match.group(3) == "-" else 1.0
+        starts.append(
+            WeekStart(
+                week=int(match.group(1)),
+                day=int(match.group(2)),
+                cash=sign * float(match.group(4).replace(",", "")),
+                subscribers=int(match.group(5)),
+                seats=int(match.group(6)),
+                prices=(prices[0], prices[1], prices[2]),
+            )
+        )
+    return starts
+
+
+def turn_week(turn: dict) -> WeekStart | None:
+    """The opening state of the latest week whose dashboard the turn's request carries.
 
     The runner rebuilds the conversation from the new dashboard after every
     ``next-week``; taking the latest header also covers a transcript that
     still carries an earlier week's dashboard. ``None`` when the request has
     no dashboard at all.
     """
-    latest: tuple[int, int, float] | None = None
+    latest: WeekStart | None = None
     for message in (turn.get("request") or {}).get("messages") or []:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             continue
-        for match in DASHBOARD_RE.finditer(content):
-            week, day = int(match.group(1)), int(match.group(2))
-            sign = -1.0 if match.group(3) == "-" else 1.0
-            cash = sign * float(match.group(4).replace(",", ""))
-            if latest is None or week > latest[0]:
-                latest = (week, day, cash)
+        for start in dashboards(content):
+            if latest is None or start.week > latest.week:
+                latest = start
     return latest
 
 
@@ -151,55 +215,69 @@ class WeekLedger:
     """The episode's turns grouped by simulated week, in call order.
 
     ``observe`` reads the sidecar's captures; a served turn without a
-    dashboard of its own belongs to the week the previous turn was in.
+    dashboard of its own belongs to the week the previous turn was in. A week
+    is valued from its opening state (:func:`harness.report.valuation`) with
+    ``total_weeks - week`` weeks left, at most ``horizon_weeks`` of them.
     """
 
-    def __init__(self) -> None:
-        self.weeks: dict[int, dict] = {}
+    def __init__(self, total_weeks: int = 0, horizon_weeks: int = DEFAULT_VALUE_HORIZON_WEEKS) -> None:
+        self.total_weeks = total_weeks
+        self.horizon_weeks = horizon_weeks
+        self.weeks: dict[int, dict] = {}  # week -> {"start": WeekStart, "turns": [(receipt, tokens)]}
         self.turns: list[dict] = []  # {"receipt", "tokens", "week"} per served turn
         self.posted: set[int] = set()
         #: Weeks whose dashboard was seen on a request not yet served (the
         #: pacer's peek), so the week before can close before that request
-        #: is forwarded: week -> (day, opening cash).
-        self.announced: dict[int, tuple[int, float]] = {}
+        #: is forwarded.
+        self.announced: dict[int, WeekStart] = {}
 
-    def announce(self, week: int, day: int, cash: float) -> None:
-        self.announced.setdefault(week, (day, cash))
+    def announce(self, start: WeekStart) -> None:
+        self.announced.setdefault(start.week, start)
 
     def observe(self, captured: list[dict]) -> None:
         current: int | None = None
-        self.weeks = {
-            week: {"day": day, "cash_start": cash, "turns": []} for week, (day, cash) in self.announced.items()
-        }
+        self.weeks = {week: {"start": start, "turns": []} for week, start in self.announced.items()}
         self.turns = []
         for turn in captured:
             if turn.get("status") != 200 or not turn.get("receipt"):
                 continue
             seen = turn_week(turn)
             if seen is not None:
-                week, day, cash = seen
-                self.weeks.setdefault(week, {"day": day, "cash_start": cash, "turns": []})
-                current = week
+                self.weeks.setdefault(seen.week, {"start": seen, "turns": []})
+                current = seen.week
             record = {"receipt": turn["receipt"], "tokens": turn_tokens(turn), "week": current}
             self.turns.append(record)
             if current is not None:
                 self.weeks[current]["turns"].append((record["receipt"], record["tokens"]))
 
-    def finished_weeks(self, final_cash: float | None = None) -> list[tuple[int, float]]:
-        """Unreported weeks with a known closing cash, as ``(week, cash_end)``.
+    def value(self, start: WeekStart) -> float:
+        """What a week's opening state is worth, given the weeks left after it."""
+        return valuation(start.cash, start.run_rate, self.total_weeks - start.week, self.horizon_weeks)
 
-        A week closes with the opening cash of the next week seen; the last
-        week closes with ``final_cash`` when the caller has it.
+    def _closing(self, ordered: list[int], position: int, final_cash: float | None) -> tuple[float, float] | None:
+        """``(cash_end, value_end)`` of the week at ``position``: the next week's opening state, or the final cash."""
+        if position + 1 < len(ordered):
+            start = self.weeks[ordered[position + 1]]["start"]
+            return start.cash, self.value(start)
+        if final_cash is not None:
+            return final_cash, final_cash
+        return None
+
+    def finished_weeks(self, final_cash: float | None = None) -> list[tuple[int, float, float]]:
+        """Unreported weeks with a known closing state, as ``(week, cash_end, value_end)``.
+
+        A week closes with the opening state of the next week seen; the last
+        week closes with ``final_cash`` when the caller has it, valued as cash
+        alone since nothing of the episode is left.
         """
         ordered = sorted(self.weeks)
         finished = []
         for position, week in enumerate(ordered):
             if week in self.posted:
                 continue
-            if position + 1 < len(ordered):
-                finished.append((week, self.weeks[ordered[position + 1]]["cash_start"]))
-            elif final_cash is not None:
-                finished.append((week, final_cash))
+            closing = self._closing(ordered, position, final_cash)
+            if closing is not None:
+                finished.append((week, *closing))
         return finished
 
     def summary(self, final_cash: float | None = None) -> list[dict]:
@@ -207,16 +285,19 @@ class WeekLedger:
         rows = []
         for position, week in enumerate(ordered):
             entry = self.weeks[week]
-            if position + 1 < len(ordered):
-                cash_end: float | None = self.weeks[ordered[position + 1]]["cash_start"]
-            else:
-                cash_end = final_cash
+            start: WeekStart = entry["start"]
+            closing = self._closing(ordered, position, final_cash) or (None, None)
             rows.append(
                 {
                     "week": week,
-                    "day": entry["day"],
-                    "cash_start": entry["cash_start"],
-                    "cash_end": cash_end,
+                    "day": start.day,
+                    "cash_start": start.cash,
+                    "cash_end": closing[0],
+                    "subscribers": start.subscribers,
+                    "seats": start.seats,
+                    "run_rate": start.run_rate,
+                    "value_start": self.value(start),
+                    "value_end": closing[1],
                     "turns": len(entry["turns"]),
                     "reported": week in self.posted,
                 }
@@ -285,7 +366,7 @@ def paced_handler(base_handler, gate):
                     body = None
                 seen = turn_week({"request": body}) if isinstance(body, dict) else None
                 if seen is not None:
-                    gate(*seen)
+                    gate(seen)
             self.rfile = io.BytesIO(raw)
             return super()._forward(forward_path, routed_session)
 
@@ -318,7 +399,8 @@ class HarborAgent(BaseAgent):
 
     def _init_week_reporting(self) -> None:
         self._capture = CaptureStore()
-        self._ledger = WeekLedger()
+        horizon = int(os.environ.get("CEOBENCH_VALUE_HORIZON_WEEKS", "") or DEFAULT_VALUE_HORIZON_WEEKS)
+        self._ledger = WeekLedger(total_weeks=self._days // 7, horizon_weeks=horizon)
         self._ledger_lock = threading.Lock()
         self._max_tokens = int(os.environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
         batch = int(os.environ.get("CEOBENCH_PACE_BATCH", "0") or 0)
@@ -376,6 +458,7 @@ class HarborAgent(BaseAgent):
             "ceobench": {
                 "seed": self._seed,
                 "days": self._days,
+                "horizon_weeks": self._ledger.horizon_weeks,
                 "turns": len(turns),
                 "exit_code": result.return_code,
                 "weeks": weeks,
@@ -404,13 +487,23 @@ class HarborAgent(BaseAgent):
         threading.Thread(target=server.serve_forever, name="ceobench-sidecar", daemon=True).start()
         return server
 
-    def _gate_week(self, week: int, day: int, cash: float) -> None:
+    def _gate_week(self, start: WeekStart) -> None:
         """Before a week's first request is served, close the week before it and wait for training."""
+        week = start.week
         if self._pacer is None or (self._gated_week is not None and week <= self._gated_week):
             return
         self._gated_week = week
+        self.logger.info(
+            "week %d starts (day %d): cash %.0f, %d subscribers, %d seats, run-rate %.0f/month",
+            week,
+            start.day,
+            start.cash,
+            start.subscribers,
+            start.seats,
+            start.run_rate,
+        )
         with self._ledger_lock:
-            self._ledger.announce(week, day, cash)
+            self._ledger.announce(start)
         self._post_finished_weeks()
         with self._ledger_lock:
             posted = sum(
@@ -443,27 +536,33 @@ class HarborAgent(BaseAgent):
             self._post_finished_weeks()
 
     def _post_finished_weeks(self, final_cash: float | None = None) -> int:
-        """Post the unreported weeks whose closing cash is known; return how many."""
+        """Post the unreported weeks whose closing state is known; return how many."""
         with self._ledger_lock:
             self._ledger.observe(self._capture.snapshot())
             finished = self._ledger.finished_weeks(final_cash)
-            for week, cash_end in finished:
+            for week, cash_end, value_end in finished:
                 entry = self._ledger.weeks[week]
+                start: WeekStart = entry["start"]
+                value_start = self._ledger.value(start)
                 posted = post_week_reports(
                     self._client,
                     self._scenario,
                     week=week,
-                    day=entry["day"],
-                    cash_start=entry["cash_start"],
+                    day=start.day,
+                    cash_start=start.cash,
                     cash_end=cash_end,
+                    value_start=value_start,
+                    value_end=value_end,
                     turns=entry["turns"],
                     max_tokens=self._max_tokens,
                 )
                 self._ledger.posted.add(week)
                 self.logger.info(
-                    "reported week %d (cash %.0f -> %.0f) against %d of %d turns",
+                    "reported week %d (value %.0f -> %.0f, cash %.0f -> %.0f) against %d of %d turns",
                     week,
-                    entry["cash_start"],
+                    value_start,
+                    value_end,
+                    start.cash,
                     cash_end,
                     len(posted),
                     len(entry["turns"]),
