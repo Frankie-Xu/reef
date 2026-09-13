@@ -4,26 +4,38 @@
 // asks what is unclear (reef_ask_user) and files it (reef_file_request); with
 // --direct, or headless, the command files it as is. A filed request goes to
 // reef with this session's id and the installed release through native manual
-// training; the service proposer writes the change, and a watch here polls the
-// catalog, shows in the footer whether the request is queued or its step is
-// running and for how long, and reports the step's verdict in the session,
-// with why the proposer produced nothing when it did. /reef-versions lists
-// the release chain with each step's verdict and request, prints a step's page
-// and, for a pending release, the promote action and a trial install, and runs
-// the promote after a confirmation. Nothing here writes a mutation. Kept free
-// of annotations on purpose: plain JavaScript in a .ts file, so plain node can
-// parse it in CI and pi's TS loader accepts it unchanged. Gate episodes set
-// PI_OFFLINE and this extension then registers nothing, so the gate never sees
-// the commands or the tools.
-import { readFileSync } from "node:fs";
+// training, and every filing answers with a link to the request's page. The
+// service proposer writes the change, and a watch here polls the catalog, shows
+// in the footer whether the request is queued or its step is running and for
+// how long, and reports the step's verdict in the session as a custom message
+// the chat keeps, with why the proposer produced nothing when it did. The
+// filed requests not yet reported are kept beside the release file, so a
+// restarted pi reports their verdicts at its next session start. /reef-versions
+// lists the release chain with each step's verdict and request, prints a
+// step's page link and, for a pending release, the promote action and a trial
+// install, and runs the promote after a confirmation. Nothing here writes a
+// mutation. Kept free of annotations on purpose: plain JavaScript in a .ts
+// file, so plain node can parse it in CI and pi's TS loader accepts it
+// unchanged. Gate episodes set PI_OFFLINE and this extension then registers
+// nothing, so the gate never sees the commands or the tools.
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The release file the install script and harness_pull write at the tree root.
 const RELEASE_FILE = ".reef-harness-release";
+// The filed requests not yet reported, beside the release file: {id, text, filed_at} entries, the newest ten,
+// none older than a day.
+const REQUESTS_FILE = ".reef-harness-requests.json";
+const REQUESTS_MAX = 10;
+const REQUESTS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // The watch polls the catalog (and, until a step takes the request, its record) once per interval and gives up
 // at the cap.
 const WATCH_INTERVAL_MS = 5000;
 const WATCH_CAP_MS = 30 * 60 * 1000;
+// Every request to reef gives up after this: a hung connection must not stall a command or the watch's ticks.
+const FETCH_TIMEOUT_MS = 10000;
+// The custom message type the report is appended to the session as; pi renders plain text content itself.
+const REPORT_MESSAGE_TYPE = "reef-harness";
 // The service caps a request's text; the filed text stays within it.
 const REQUEST_MAX_CHARS = 4000;
 // The choice under every question that opens a free text answer.
@@ -88,6 +100,29 @@ function clip(text, limit) {
 function watchIntervalMs() {
   const configured = Number(process.env.REEF_HARNESS_WATCH_MS);
   return Number.isFinite(configured) && configured > 0 ? configured : WATCH_INTERVAL_MS;
+}
+
+// The fetch deadline, from the environment so a test can shorten it.
+function fetchTimeoutMs() {
+  const configured = Number(process.env.REEF_HARNESS_FETCH_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : FETCH_TIMEOUT_MS;
+}
+
+// A request to reef with a deadline. The signal covers the connect, the headers and the body, so a hung
+// service costs one timeout and no more; the body is read here, and json() parses it on demand as fetch's does.
+async function fetchWithTimeout(url, init = {}) {
+  const controller = new AbortController();
+  const timeoutMs = fetchTimeoutMs();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    const body = await response.text();
+    return { ok: response.ok, status: response.status, text: async () => body, json: async () => JSON.parse(body) };
+  } catch (error) {
+    throw controller.signal.aborted ? new Error(`no answer within ${timeoutMs} ms`) : error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // What the session model does with a request before it files it: the request rides as data in a fence.
@@ -163,6 +198,15 @@ export default function requests(pi) {
     return { "x-reef-scenario": scenario, ...(token ? { authorization: `Bearer ${token}` } : {}) };
   };
 
+  // A page a browser opens: the query carries what curl sends as headers, the scenario and the token.
+  const pageLink = (path) => {
+    const token = process.env.REEF_TOKEN;
+    const query = `scenario=${encodeURIComponent(scenario)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+    return `${serviceUrl}${path}?${query}`;
+  };
+  const requestPageLink = (recordId) => pageLink(`/reef/harness/requests/${encodeURIComponent(recordId)}/page`);
+  const stepPageLink = (step) => pageLink(`/reef/harness/releases/${step}/page`);
+
   const installedRelease = () => {
     const releaseInfo = readJson(join(destDir, RELEASE_FILE));
     return releaseInfo && typeof releaseInfo.release_id === "string" && releaseInfo.release_id ? releaseInfo.release_id : null;
@@ -181,7 +225,7 @@ export default function requests(pi) {
     let response;
     try {
       // Not under the turn's abort signal: an Esc after the body went out would report a filed request as unreachable.
-      response = await fetch(`${serviceUrl}/reef/train`, {
+      response = await fetchWithTimeout(`${serviceUrl}/reef/train`, {
         method: "POST",
         headers: { ...reefHeaders(), "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -199,7 +243,7 @@ export default function requests(pi) {
   const releases = async () => {
     let response;
     try {
-      response = await fetch(`${serviceUrl}/reef/harness/releases`, { headers: reefHeaders() });
+      response = await fetchWithTimeout(`${serviceUrl}/reef/harness/releases`, { headers: reefHeaders() });
     } catch (error) {
       throw new Error(`reef unreachable at ${serviceUrl}: ${message(error)}`);
     }
@@ -212,7 +256,7 @@ export default function requests(pi) {
   // took it, which is when the wait a person sees starts.
   const requestRecord = async (recordId) => {
     const path = `/reef/scenarios/${encodeURIComponent(scenario)}/records/${encodeURIComponent(recordId)}`;
-    const response = await fetch(`${serviceUrl}${path}`, { headers: reefHeaders() });
+    const response = await fetchWithTimeout(`${serviceUrl}${path}`, { headers: reefHeaders() });
     if (!response.ok) throw new Error(`reef refused the record read (HTTP ${response.status})`);
     return await response.json();
   };
@@ -248,8 +292,8 @@ export default function requests(pi) {
     }
     if (verdict === "pending") {
       return (
-        `reef: '${ask}' is ready as release ${release} but changes an extension, so it waits for your review: ` +
-        `/reef-versions ${step}, then /reef-versions ${step} promote.`
+        `reef: '${ask}' is ready as release ${release}. This release changes an extension, so it is not ` +
+        `installed until you promote it: /reef-versions ${step} promote. Page: ${stepPageLink(step)}`
       );
     }
     if (verdict === "rejected") {
@@ -265,6 +309,41 @@ export default function requests(pi) {
       return `reef: '${ask}' produced no change (${why}). Nothing changed.${details}`;
     }
     return `reef: '${ask}' settled as ${verdict} (release ${release}); /reef-versions ${step} shows it.`;
+  };
+
+  // The filed requests not yet reported, newest last, filed_at in seconds since the epoch as the service records
+  // its times; an entry older than a day is dropped on read, and a write keeps the newest ten.
+  const storedRequests = () => {
+    const entries = readJson(join(destDir, REQUESTS_FILE));
+    const oldest = (Date.now() - REQUESTS_MAX_AGE_MS) / 1000;
+    return (Array.isArray(entries) ? entries : []).filter(
+      (entry) =>
+        entry && typeof entry.id === "string" && typeof entry.text === "string" && Number(entry.filed_at) > oldest,
+    );
+  };
+  const writeStoredRequests = (entries) => {
+    try {
+      writeFileSync(join(destDir, REQUESTS_FILE), `${JSON.stringify(entries.slice(-REQUESTS_MAX), null, 2)}\n`);
+    } catch {
+      // An install root that cannot be written loses the restart safety only: this session's watch still reports.
+    }
+  };
+  const rememberRequest = (recordId, text) => {
+    const others = storedRequests().filter((entry) => entry.id !== recordId);
+    writeStoredRequests([...others, { id: recordId, text, filed_at: Date.now() / 1000 }]);
+  };
+  const forgetRequest = (recordId) => writeStoredRequests(storedRequests().filter((entry) => entry.id !== recordId));
+
+  // The report for a settled step: the verdict line and what the review left uncovered. It is appended to the
+  // session as a custom message, which the chat renders and the session file keeps, and shown as a notice, the
+  // one line a person sees at once but the next status line may overwrite.
+  const deliverReport = (step, rows, text, ctx) => {
+    const lines = [settledText(step, rows, clip(text.trim(), 60))];
+    const uncovered = uncoveredOf(rows[step]);
+    if (uncovered.length) lines.push(`Not covered: ${uncovered.join("; ")}`);
+    const content = lines.join("\n");
+    pi.sendMessage({ customType: REPORT_MESSAGE_TYPE, content, display: true }, { triggerTurn: false });
+    ctx.ui.notify(content, "info");
   };
 
   // The watch: one at a time, so a second filing replaces the first; session_shutdown clears it.
@@ -294,19 +373,19 @@ export default function requests(pi) {
       try {
         rows = await releases();
       } catch {
-        // A failed read is one missed poll; the next tick reads again.
+        // A failed read, a timeout included, is one missed poll; the next tick reads again.
       }
       if (watch !== mine) return; // replaced or shut down while the read was out
       const step = rows.findIndex((row) => requestIdOf(row) === recordId);
       if (step >= 0) {
         stopWatch(ctx);
-        const uncovered = uncoveredOf(rows[step]);
-        const lines = [settledText(step, rows, ask)];
-        if (uncovered.length) lines.push(`Not covered: ${uncovered.join("; ")}`);
-        ctx.ui.notify(lines.join("\n"), "info");
+        forgetRequest(recordId);
+        deliverReport(step, rows, text, ctx);
+        resumeStored(rows, ctx); // another filed request still waiting takes the watch over
         return;
       }
       if (Date.now() >= deadline) {
+        // The request stays stored: the next session start reports the verdict once the catalog has it.
         stopWatch(ctx);
         ctx.ui.notify(`reef: no verdict yet for '${ask}'; /reef-versions shows it when it settles`, "warning");
         return;
@@ -340,6 +419,28 @@ export default function requests(pi) {
     show(`reef: request ${id8} queued`);
   };
 
+  // A filing: the request is stored until its report is delivered, and the watch starts.
+  const filed = (recordId, text, ctx) => {
+    rememberRequest(recordId, text);
+    startWatch(recordId, text, ctx);
+  };
+
+  // The stored requests against the catalog, at a session start and after a settle: each with a row is reported
+  // and dropped; the newest still running takes the watch, the others wait for it to settle.
+  const resumeStored = (rows, ctx) => {
+    let running = null;
+    for (const entry of storedRequests()) {
+      const step = rows.findIndex((row) => requestIdOf(row) === entry.id);
+      if (step >= 0) {
+        forgetRequest(entry.id);
+        deliverReport(step, rows, entry.text, ctx);
+      } else {
+        running = entry;
+      }
+    }
+    if (running) startWatch(running.id, running.text, ctx);
+  };
+
   pi.on("session_shutdown", async (_event, ctx) => stopWatch(ctx));
 
   pi.registerTool({
@@ -371,14 +472,14 @@ export default function requests(pi) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const text = filedText(params.request, params.clarifications);
       const recordId = await fileRequest(text, ctx); // a failure throws: the model reads the message
-      startWatch(recordId, text, ctx);
+      filed(recordId, text, ctx);
       return {
         content: [
           {
             type: "text",
             text:
               `filed request ${recordId}; reef is running the step, which usually takes one to three minutes, ` +
-              "and will report here when it settles",
+              `and will report here when it settles. Watch it here: ${requestPageLink(recordId)}`,
           },
         ],
         details: {},
@@ -413,8 +514,12 @@ export default function requests(pi) {
         ctx.ui.notify(message(error), "error");
         return;
       }
-      ctx.ui.notify(`Training request ${recordId} accepted; the step usually takes one to three minutes.`, "info");
-      startWatch(recordId, text, ctx);
+      ctx.ui.notify(
+        `Training request ${recordId} accepted; the step usually takes one to three minutes. ` +
+          `Watch it here: ${requestPageLink(recordId)}`,
+        "info",
+      );
+      filed(recordId, text, ctx);
     },
   });
 
@@ -483,7 +588,7 @@ export default function requests(pi) {
     const lines = [
       `Harness step ${step}: ${row.release_id} (${verdict}${step === head ? ", current" : ""})`,
       ...notesLines(row),
-      `page: ${pageUrl(step)}`,
+      `page: ${stepPageLink(step)}`,
       `read it: ${curl()}'${pageUrl(step)}' > harness-step-${step}.html`,
     ];
     if (verdict === "pending") {
@@ -544,7 +649,7 @@ export default function requests(pi) {
       }
       const confirmed = await ctx.ui.confirm(
         `Promote harness step ${step}?`,
-        `Release ${row.release_id} then serves every session that installs the head. Read ${pageUrl(step)} first.`,
+        `Release ${row.release_id} then serves every session that installs the head. Read ${stepPageLink(step)} first.`,
       );
       if (!confirmed) {
         ctx.ui.notify(`step ${step} not promoted`, "info");
@@ -552,7 +657,7 @@ export default function requests(pi) {
       }
       let response;
       try {
-        response = await fetch(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote`, {
+        response = await fetchWithTimeout(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote`, {
           method: "POST",
           headers: { ...reefHeaders(), "content-type": "application/json" },
           body: JSON.stringify({ release_id: row.release_id }),
@@ -573,17 +678,26 @@ export default function requests(pi) {
     },
   });
 
-  // Said once per session start with a UI: the two commands exist, and what waits for a review.
+  // How to see and promote what waits for a review: one step names itself; several share the placeholder.
+  const reviewLine = (steps) => {
+    const promote = steps.length === 1 ? `/reef-versions ${steps[0]} promote` : "/reef-versions <step> promote";
+    return `${steps.length} release(s) await your review: /reef-versions ${steps.join(", ")} (promote with ${promote})`;
+  };
+
+  // Said once per session start with a UI: the two commands exist, what waits for a review, and the verdict of
+  // any request filed before a restart or reported while the person was away.
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     const lines = ["reef: /reef-harness <what it should do> asks for a harness change; /reef-versions lists the versions."];
+    let rows = [];
     try {
-      const rows = await releases();
+      rows = await releases();
       const waiting = rows.map((row, step) => (verdictOf(row, rows) === "pending" ? step : -1)).filter((step) => step >= 0);
-      if (waiting.length) lines.push(`${waiting.length} release(s) await your review: /reef-versions ${waiting.join(", ")}`);
+      if (waiting.length) lines.push(reviewLine(waiting));
     } catch {
-      // The catalog is a courtesy here: the first line stands without it.
+      // The catalog is a courtesy here: the first line stands without it, and a stored request gets the watch.
     }
     ctx.ui.notify(lines.join("\n"), "info");
+    resumeStored(rows, ctx);
   });
 }

@@ -1038,8 +1038,12 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     assert not reef.posts("/reef/report")
     (pending,) = captures.glob("*.pending.json")
     assert json.loads(pending.read_text())["turns"][0]["receipt"] == "ask-receipt"
-    out = capsys.readouterr().out
-    assert "reef-pi: training request q-1 accepted" in out
+    out = capsys.readouterr().out.splitlines()
+    assert out[-3] == "reef-pi: training request q-1 accepted"
+    # The link to the request's page follows, with the scenario and the shell's token as query parameters.
+    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=tok"
+    assert out[-2] == f"reef-pi: watch it here: {link}"
+    assert out[-1] == "reef-pi: reef is running the step; add --wait to stay here, or check /reef-versions later"
 
 
 @pytest.mark.unit
@@ -1246,8 +1250,8 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
             _step_row("rel-3333-pending", {"selected": True}, pending=True),
             0,
             [
-                "reef-pi: 'text me when you are blocked' is ready as release rel-3333 but changes an extension, so it "
-                "waits for your review: reef-pi page 1, then /reef-versions 1 promote."
+                "reef-pi: 'text me when you are blocked' is ready as release rel-3333. This release changes an "
+                "extension, so it is not installed until you promote it: /reef-versions 1 promote. Page: {page}"
             ],
         ),
         (
@@ -1296,11 +1300,15 @@ def test_harness_wait_prints_the_verdict_line_and_exits_by_it(tmp_path, capsys, 
 
     assert exit_status == status
     out = capsys.readouterr().out.splitlines()
-    assert out[:2] == [
+    upstream = f"http://127.0.0.1:{reef.port}"
+    assert out[:3] == [
         "reef-pi: training request q-1 accepted",
+        f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy",
         "reef-pi: reef is running the step; waiting up to 5 s for its verdict",
     ]
-    assert out[2:] == lines
+    # The pending line names the step's page link, the scenario and the token as query parameters.
+    page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&token=dummy"
+    assert out[3:] == [line.replace("{page}", page) for line in lines]
     assert [call["path"] for call in reef.seen] == ["/reef/train", "/reef/harness/releases"]
     assert reef.seen[1]["headers"]["authorization"] == "Bearer dummy"  # the catalog read carries the token too
 
@@ -1317,10 +1325,12 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     reef.close()
 
     out = capsys.readouterr().out.splitlines()
-    assert out[2] == "reef-pi: no verdict yet for 'text me' after 0.05 s; /reef-versions shows it when it settles"
+    assert out[3] == "reef-pi: no verdict yet for 'text me' after 0.05 s; /reef-versions shows it when it settles"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 2
-    assert out[-2:] == [
+    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy"
+    assert out[-3:] == [
         "reef-pi: training request q-1 accepted",
+        f"reef-pi: watch it here: {link}",
         "reef-pi: reef is running the step; add --wait to stay here, or check /reef-versions later",
     ]
 
@@ -1338,8 +1348,8 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
         assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
     reef.close()
     out = capsys.readouterr().out.splitlines()
-    assert out[2] == "reef-pi: the step started; usually one to three minutes"
-    assert out[3].startswith("reef-pi: no verdict yet for 'text me' after 0.1 s") and len(out) == 4
+    assert out[3] == "reef-pi: the step started; usually one to three minutes"
+    assert out[4].startswith("reef-pi: no verdict yet for 'text me' after 0.1 s") and len(out) == 5
     record_reads = [call for call in reef.seen if call["path"] == record_path]
     assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
@@ -1352,7 +1362,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
             assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
         reef.close()
         out = capsys.readouterr().out.splitlines()
-        assert len(out) == 3 and out[2].startswith("reef-pi: no verdict yet")
+        assert len(out) == 4 and out[3].startswith("reef-pi: no verdict yet")
         assert len([call for call in reef.seen if call["path"] == record_path]) >= 3
 
 
@@ -1853,9 +1863,10 @@ def test_doctor_lists_a_release_awaiting_review_in_the_words_the_wait_prints(tmp
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
     assert any(line.startswith("ok  release") and "rel-1 installed, the served head" in line for line in out)
+    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&token=dummy"
     assert out[-1].startswith("ok  review") and out[-1].endswith(
-        "'text me when you are blocked' is ready as release rel-2222 but changes an extension, so it waits for your "
-        "review: reef-pi page 1, then /reef-versions 1 promote."
+        "'text me when you are blocked' is ready as release rel-2222. This release changes an extension, so it is "
+        f"not installed until you promote it: /reef-versions 1 promote. Page: {page}"
     )
     reef.close()
 

@@ -509,19 +509,23 @@ from the release metadata file and the oldest pending session's id, or a fresh s
 when nothing is spooled. A request can execute without inference receipts;
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
-gate: the wrapper says ``reef is running the step; add --wait to stay here,
-or check /reef-versions later``. With ``--wait`` (``--timeout SECONDS``,
-1800 by default) it polls the release catalog every 5 s for the step that
-consumed the request, says ``the step started; usually one to three
-minutes`` once the request's record shows a step took it, and prints one
-line with the verdict and the next action, quoting the request: a selected
-release to restart ``reef-pi`` for, a pending one to read with ``reef-pi
-page <step>`` and promote, a rejected step with the gate's reason, a skipped
-step with why (the proposer's own reason when the step recorded one, such
-as a failed model call); ``not covered: ...`` follows when the step's review
-lists points the change left out. The exit
-status is 0 for a selected or pending release, 1 for a rejected or skipped
-step, 2 when the timeout passes first. To return to failure driven
+gate: the wrapper prints ``watch it here: <link>``, the request's page
+(``GET /reef/harness/requests/<id>/page`` with the scenario and the token
+as query parameters, so a browser opens it as is), and says ``reef is
+running the step; add --wait to stay here, or check /reef-versions later``.
+With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
+release catalog every 5 s for the step that consumed the request, says
+``the step started; usually one to three minutes`` once the request's
+record shows a step took it, and prints one line with the verdict and the
+next action, quoting the request: a selected release to restart ``reef-pi``
+for; a pending one with ``This release changes an extension, so it is not
+installed until you promote it: /reef-versions <step> promote. Page:
+<link>``; a rejected step with the gate's reason; a skipped step with why
+(the proposer's own reason when the step recorded one, such as a failed
+model call); ``not covered: ...`` follows when the step's review lists
+points the change left out. The exit status is 0 for a selected or pending
+release, 1 for a rejected or skipped step, 2 when the timeout passes first.
+To return to failure driven
 evolution alone, use the same update endpoint with
 ``{"training_mode": "auto"}``. The commands surface an error when the
 scenario is in ``auto``.
@@ -531,12 +535,16 @@ carries the pi ``/reef-harness <request>`` command, which uses the same manual
 training API with pi's current session id. In the session the model first
 thinks the request through and asks what is unclear, a few options plus a
 typed answer per question, then files the request with the answers;
-``/reef-harness --direct <request>`` files it as is. A footer status shows
-the request queued, then the step running and for how long, and one line
-reports the verdict when it settles, with the same next actions as
-``--wait`` and the step whose page has the details; a session start says
-the commands exist and
-counts the releases awaiting your review. Recovered trees keep their
+``/reef-harness --direct <request>`` files it as is, and either way the
+filing answers with the link to the request's page. A footer status shows
+the request queued, then the step running and for how long, and the
+verdict is reported when it settles, with the same next actions as
+``--wait`` and the step whose page has the details, as a message the chat
+keeps beside a notice; a request filed before a restart, or settled while
+you were away, is reported at the next session start. A session start also
+says the commands exist and counts the releases awaiting your review, with
+the ``/reef-versions <step> promote`` that installs one. Recovered trees
+keep their
 existing entries, as with ``version_check``. The proposer must explicitly
 accept ``requests``. The tutorial's proposer asks the served model for a
 skill, rules entry, command, or extension, using the bundled
@@ -598,8 +606,10 @@ of the release id, the verdict (``selected``, ``rejected``, ``skipped``,
 ``pending``, ``promoted at step N`` once a later promote serves a pending
 release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
 ``recovery``), ``current`` on the served head and the request text the step
-answered. ``/reef-versions <step>`` prints the URL of that step's page,
-``GET /reef/harness/releases/<step>/page``, one self contained HTML page with
+answered. ``/reef-versions <step>`` prints the link to that step's page,
+``GET /reef/harness/releases/<step>/page`` with the scenario and the token
+as query parameters so a browser opens it as is, one self contained HTML
+page with
 five sections: Why (the request, else the proposal's reason, else a failure
 in the batch), What changed (the mutations; an extension update as a line
 diff against the release it ran on), Verdict (the gate's verdict and numbers,
@@ -613,11 +623,12 @@ that replaces the tree at your install root, and the head's reinstall to
 return to it; ``/reef-versions <step> promote`` runs the promote from the
 TUI after you confirm it. When the step recorded the proposer's plan and its
 review, ``/reef-versions <step>`` also prints ``design:`` and ``not
-covered:``. The page needs the token and the scenario header a browser
-would not send, so ``reef-pi page <step>`` fetches it for you into
-``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html`` (``~/.cache``
-by default), prints the path and opens it with ``open`` or ``xdg-open``;
-``--print`` prints the path and opens nothing.
+covered:``. The command also prints a curl that fetches the page with the
+scenario header and the token into a file, for a hosted deployment where
+the link is not enough, and ``reef-pi page <step>`` fetches it the same way
+into ``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html``
+(``~/.cache`` by default), prints the path and opens it with ``open`` or
+``xdg-open``; ``--print`` prints the path and opens nothing.
 
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,
