@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import textwrap
 import urllib.error
@@ -926,9 +927,12 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
 
 
 class _FakeReef:
-    """A reef that records every POST: inference answers with a receipt, the request route with ``answer``."""
+    """A reef that records every call: inference answers with a receipt, the request route with ``answer``, and
+    ``GET /reef/harness/releases`` with ``rows``."""
 
-    def __init__(self, answer: dict, *, status: int = 200, receipt: str = "ask-receipt") -> None:
+    def __init__(
+        self, answer: dict, *, status: int = 200, receipt: str = "ask-receipt", rows: list[dict] | None = None
+    ) -> None:
         import http.server
         import threading
 
@@ -936,6 +940,23 @@ class _FakeReef:
         seen = self.seen
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            def _answer(self, code: int, payload: dict, extra: dict | None = None) -> None:
+                raw = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                for name, value in (extra or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
+                if self.path == "/reef/harness/releases":
+                    self._answer(200, {"scenario": "ask-scenario", "releases": rows or []})
+                else:
+                    self._answer(404, {})
+
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
@@ -943,20 +964,13 @@ class _FakeReef:
                     {"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body}
                 )
                 if self.path.startswith("/v1/chat/completions"):
-                    code, payload = 200, {"choices": [{"message": {"content": "ok"}}]}
-                    extra = {"x-reef-agent-record-id": receipt}
+                    self._answer(
+                        200, {"choices": [{"message": {"content": "ok"}}]}, {"x-reef-agent-record-id": receipt}
+                    )
                 elif self.path == "/reef/train":
-                    code, payload, extra = status, answer, {}
+                    self._answer(status, answer)
                 else:
-                    code, payload, extra = 200, {}, {}
-                raw = json.dumps(payload).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                for name, value in extra.items():
-                    self.send_header(name, value)
-                self.end_headers()
-                self.wfile.write(raw)
+                    self._answer(200, {})
 
             def log_message(self, *args):
                 pass
@@ -1154,23 +1168,180 @@ def test_harness_without_the_release_file_sends_nothing(tmp_path) -> None:
     assert pending.exists()
 
 
-@pytest.mark.unit
-def test_main_dispatches_harness_with_the_words_joined(tmp_path) -> None:
-    asked: list[tuple] = []
-    env = {
+def _main_env(tmp_path: Path, scenario: str = "ask-scenario") -> dict[str, str]:
+    """The five settings the install bakes into the wrapper."""
+    return {
         "REEF_HARNESS_BINARY": "fake-pi",
         "REEF_HARNESS_COMPOSE": str(tmp_path),
-        "REEF_HARNESS_SCENARIO": "ask-scenario",
+        "REEF_HARNESS_SCENARIO": scenario,
         "REEF_HARNESS_ADAPTER": "pi",
         "REEF_HARNESS_ENV_VAR": "PI_CODING_AGENT_DIR",
     }
+
+
+@pytest.mark.unit
+def test_main_dispatches_harness_with_the_words_joined_and_exits_with_its_status(tmp_path) -> None:
+    asked: list[tuple] = []
     with (
-        patch.dict(os.environ, env),
-        patch("reef.harness.client.wrapper.harness", lambda *args: asked.append(args)),
-        patch("sys.argv", ["reef-pi", "harness", "text", "me", "when", "you", "are", "blocked"]),
+        patch.dict(os.environ, _main_env(tmp_path)),
+        patch("reef.harness.client.wrapper.harness", lambda *args, **kwargs: asked.append((args, kwargs)) or 2),
     ):
-        main()
-    assert asked == [("ask-scenario", "pi", str(tmp_path), "text me when you are blocked")]
+        with (
+            patch("sys.argv", ["reef-pi", "harness", "text", "me", "when", "you", "are", "blocked"]),
+            pytest.raises(SystemExit) as exited,
+        ):
+            main()
+        assert exited.value.code == 2
+        # The flags read the same after the request as before it.
+        with (
+            patch("sys.argv", ["reef-pi", "harness", "text me", "--wait", "--timeout", "30"]),
+            pytest.raises(SystemExit),
+        ):
+            main()
+    assert asked == [
+        (("ask-scenario", "pi", str(tmp_path), "text me when you are blocked"), {"wait": False, "timeout_s": 1800.0}),
+        (("ask-scenario", "pi", str(tmp_path), "text me"), {"wait": True, "timeout_s": 30.0}),
+    ]
+
+
+CREATION_ROW = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation", "pending": False}
+
+
+def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_id: str = "q-1") -> dict:
+    """The catalog row of the step that consumed request ``request_id``, with the verdict ``metrics`` carry."""
+    return {
+        "release_id": release_id,
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "pending": pending,
+        "metrics": {"training_request": {"id": request_id, "text": "text me when you are blocked"}, **metrics},
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("row", "status", "lines"),
+    [
+        (
+            _step_row(
+                "rel-1111-selected",
+                {"selected": True, "proposal_notes": {"review": {"uncovered": ["idle detection", "two way replies"]}}},
+            ),
+            0,
+            [
+                "reef-pi: 'text me when you are blocked' is published as release rel-1111. Restart reef-pi to install "
+                "it (the update notice offers it).",
+                "reef-pi: not covered: idle detection; two way replies",
+            ],
+        ),
+        (
+            _step_row("rel-3333-pending", {"selected": True}, pending=True),
+            0,
+            [
+                "reef-pi: 'text me when you are blocked' is ready as release rel-3333 but changes an extension, so it "
+                "waits for your review: reef-pi page 1, then /reef-versions 1 promote."
+            ],
+        ),
+        (
+            _step_row(
+                "rel-0", {"selected": False, "selection": {"reason": "candidate missed the floor on 1 of 1 tasks"}}
+            ),
+            1,
+            [
+                "reef-pi: 'text me when you are blocked' did not pass the gate (candidate missed the floor on 1 of 1 "
+                "tasks). Nothing changed; rephrase or split the request."
+            ],
+        ),
+        (
+            _step_row("rel-0", {"skipped": "no proposal"}),
+            1,
+            ["reef-pi: 'text me when you are blocked' produced no change (no proposal). Nothing changed."],
+        ),
+    ],
+    ids=["selected", "pending", "rejected", "skipped"],
+)
+def test_harness_wait_prints_the_verdict_line_and_exits_by_it(tmp_path, capsys, row, status, lines) -> None:
+    reef = _FakeReef(
+        {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}, rows=[CREATION_ROW, row]
+    )
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        exit_status = harness(
+            "ask-scenario", "pi", compose, "text me when you are blocked", wait=True, timeout_s=5, poll_s=0.01
+        )
+    reef.close()
+
+    assert exit_status == status
+    out = capsys.readouterr().out.splitlines()
+    assert out[:2] == [
+        "reef-pi: training request q-1 accepted",
+        "reef-pi: reef is running the step; waiting up to 5 s for its verdict",
+    ]
+    assert out[2:] == lines
+    assert [call["path"] for call in reef.seen] == ["/reef/train", "/reef/harness/releases"]
+    assert reef.seen[1]["headers"]["authorization"] == "Bearer dummy"  # the catalog read carries the token too
+
+
+@pytest.mark.unit
+def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(tmp_path, capsys) -> None:
+    # The catalog holds another request's step only: ours is still running.
+    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}, rows=rows)
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.05, poll_s=0.01) == 2
+        assert harness("ask-scenario", "pi", compose, "text me") == 0
+    reef.close()
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[2] == "reef-pi: no verdict yet for 'text me' after 0.05 s; /reef-versions shows it when it settles"
+    assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 2
+    assert out[-2:] == [
+        "reef-pi: training request q-1 accepted",
+        "reef-pi: reef is running the step; add --wait to stay here, or check /reef-versions later",
+    ]
+
+
+@pytest.mark.unit
+def test_main_dispatches_page_with_the_step_and_the_print_flag(tmp_path) -> None:
+    fetched: list[tuple] = []
+    with (
+        patch.dict(os.environ, _main_env(tmp_path)),
+        patch("reef.harness.client.wrapper.page", lambda *args, **kwargs: fetched.append((args, kwargs)) or 0),
+    ):
+        for argv in (["reef-pi", "page", "3", "--print"], ["reef-pi", "page", "3"]):
+            with patch("sys.argv", argv), pytest.raises(SystemExit) as exited:
+                main()
+            assert exited.value.code == 0
+    assert fetched == [
+        (("ask-scenario", "pi", str(tmp_path), 3), {"open_page": False}),
+        (("ask-scenario", "pi", str(tmp_path), 3), {"open_page": True}),
+    ]
+
+
+@pytest.mark.unit
+def test_main_prints_its_own_usage_for_help_then_runs_the_agent(tmp_path, capsys) -> None:
+    ran: list[list[str]] = []
+    with (
+        patch.dict(os.environ, _main_env(tmp_path)),
+        patch("reef.harness.client.wrapper.run_agent", lambda *args: ran.append(args[-1])),
+    ):
+        for argv in (["reef-pi", "--help"], ["reef-pi", "-h"], ["reef-pi", "help"]):
+            with patch("sys.argv", argv):
+                main()
+    out = capsys.readouterr().out
+    assert out.count("reef-pi: run pi through reef's capture proxy, or one of") == 3
+    for line in (
+        "reef-pi report --score S",
+        'reef-pi harness "<what it should do>" [--wait] [--timeout SECONDS]',
+        "reef-pi page <step> [--print]",
+        "reef-pi doctor",
+        "reef-pi setup [--yes] [--mark NAME] [--release ID]",
+        "Anything else runs pi with the same arguments; --help and -h print its help after this.",
+    ):
+        assert line in out
+    # pi's own help follows the wrapper's for --help and -h; help alone hands nothing to pi.
+    assert ran == [["--help"], ["-h"]]
 
 
 def test_a_clear_from_the_agent_empties_what_the_wrapper_would_spool() -> None:
@@ -1196,9 +1367,10 @@ def test_a_clear_from_the_agent_empties_what_the_wrapper_would_spool() -> None:
 
 
 class _ReleasesReef:
-    """A reef whose GET /reef/harness/releases answers ``rows``; every request is recorded."""
+    """A reef whose GET /reef/harness/releases answers ``rows`` and whose step pages are ``pages``; every request
+    is recorded, and a step without a page answers the route's 404 text."""
 
-    def __init__(self, rows: list[dict]) -> None:
+    def __init__(self, rows: list[dict], *, pages: dict[int, str] | None = None) -> None:
         import http.server
         import threading
 
@@ -1208,10 +1380,20 @@ class _ReleasesReef:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
-                found = self.path == "/reef/harness/releases"
-                raw = json.dumps({"scenario": "setup-scenario", "releases": rows} if found else {}).encode()
-                self.send_response(200 if found else 404)
-                self.send_header("Content-Type", "application/json")
+                step = re.fullmatch(r"/reef/harness/releases/(\d+)/page", self.path)
+                if self.path == "/reef/harness/releases":
+                    code, kind = 200, "application/json"
+                    raw = json.dumps({"scenario": "setup-scenario", "releases": rows}).encode()
+                elif step is not None and int(step.group(1)) in (pages or {}):
+                    code, kind, raw = 200, "text/html", (pages or {})[int(step.group(1))].encode()
+                elif step is not None:
+                    scenario = self.headers.get("x-reef-scenario")
+                    code, kind = 404, "text/plain"
+                    raw = f"scenario {scenario!r} has no step {step.group(1)}: the catalog holds steps 0 to {len(rows) - 1}".encode()
+                else:
+                    code, kind, raw = 404, "application/json", b"{}"
+                self.send_response(code)
+                self.send_header("Content-Type", kind)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -1599,4 +1781,55 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 1
     out = capsys.readouterr().out
     assert "!!  service" in out and "401" in out
+    reef.close()
+
+
+@pytest.mark.unit
+def test_doctor_lists_a_release_awaiting_review_in_the_words_the_wait_prints(tmp_path, capsys, monkeypatch) -> None:
+    from reef.harness.client.wrapper import doctor
+
+    pending = _step_row("rel-2222-pending", {"selected": True}, pending=True)
+    reef = _ReleasesReef([_row("rel-1"), pending])
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "rel-1"})
+    binary = tmp_path / "fake-pi"
+    binary.write_text("#!/bin/sh\necho 0.84.2\n")
+    binary.chmod(0o755)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("ok  release") and "rel-1 installed, the served head" in line for line in out)
+    assert out[-1].startswith("ok  review") and out[-1].endswith(
+        "'text me when you are blocked' is ready as release rel-2222 but changes an extension, so it waits for your "
+        "review: reef-pi page 1, then /reef-versions 1 promote."
+    )
+    reef.close()
+
+
+# -- reef-<adapter> page: a step's page as a file the desktop opens ------------------------------
+
+
+@pytest.mark.unit
+def test_page_writes_the_step_page_to_the_cache_prints_its_path_and_opens_it(tmp_path, capsys, monkeypatch) -> None:
+    from reef.harness.client.wrapper import page
+
+    reef = _ReleasesReef([_row("rel-1"), _row("rel-2")], pages={1: "<html>step 1</html>"})
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "rel-1"})
+    opened: list[Path] = []
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("REEF_TOKEN", "tok")
+    monkeypatch.setattr("reef.harness.client.wrapper._open_in_browser", lambda path: opened.append(path) or True)
+    assert page("team/scenario", "pi", compose, 1) == 0
+    expected = tmp_path / "cache" / "reef-harness" / "team-scenario-step-1.html"
+    assert capsys.readouterr().out.strip() == str(expected)
+    assert expected.read_text(encoding="utf-8") == "<html>step 1</html>"
+    assert opened == [expected]
+    (request,) = [call for call in reef.seen if call["path"] == "/reef/harness/releases/1/page"]
+    assert request["headers"]["x-reef-scenario"] == "team/scenario"
+    assert request["headers"]["authorization"] == "Bearer tok"
+    # --print writes and prints the path and opens nothing; a missing step is the route's 404 text.
+    assert page("team/scenario", "pi", compose, 1, open_page=False) == 0
+    assert opened == [expected]
+    with pytest.raises(SystemExit, match=r"page read failed \(404\): scenario 'team/scenario' has no step 9"):
+        page("team/scenario", "pi", compose, 9)
     reef.close()

@@ -1,16 +1,20 @@
-"""The harness requests extension: reef-pi's /reef-harness and /reef-versions commands, run under node with stubs.
+"""The harness requests extension: reef-pi's commands and tools, run under node with stubs.
 
-The asset registers nothing under ``PI_OFFLINE`` and no tools at all; the
-ask command posts the request with the session id and the release file's release,
-leaves inference receipts available for feedback, and reports durable
-acceptance; the versions command lists the chain, prints a step's page and
-promotes a pending release after a confirmation.
+The asset registers nothing under ``PI_OFFLINE``. With a UI the ask command
+hands the request to the session model, which asks what is unclear through
+``reef_ask_user`` and files through ``reef_file_request``; with ``--direct``
+or headless it posts the request with the session id and the release file's
+release, leaves inference receipts available for feedback, and reports
+durable acceptance. A watch then reports the step's verdict in the session.
+The versions command lists the chain, prints a step's page and promotes a
+pending release after a confirmation; session start says the commands exist.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,28 +28,36 @@ SKILL = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "pi
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 ACCEPTED = {"agent_record_id": "q-1", "scenario": "code-repair", "request_type": "train"}
-# One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command
-# when TEST_STEP names it, and prints what the extension registered and every call it made.
+# One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command,
+# tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch, and prints what the
+# extension registered and every call it made. TEST_SELECT and TEST_INPUT script the dialogs, one answer per
+# call; TEST_SHUTDOWN_AFTER_MS fires session_shutdown mid run; TEST_CLOCK_SKEW_AFTER_MS moves the clock past
+# the watch's 30 minute cap.
 RUNNER = """
 import requests from "./requests.mjs";
 
 const tools = {};
 const commands = {};
+const handlers = {};
 const events = [];
 const pi = {
   registerTool(definition) { tools[definition.name] = definition; },
   registerCommand(name, definition) { commands[name] = definition; },
-  on(name) { events.push({ kind: "on", name }); },
+  on(name, handler) { handlers[name] = handler; },
   sendUserMessage(text, options) { events.push({ kind: "user_message", text, options: options ?? null }); },
   exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
 };
+const selections = JSON.parse(process.env.TEST_SELECT || "[]");
+const inputs = JSON.parse(process.env.TEST_INPUT || "[]");
 const ctx = {
-  hasUI: true,
+  hasUI: process.env.TEST_HEADLESS !== "1",
   isIdle: () => true,
   ui: {
     confirm: async (title, message) => { events.push({ kind: "confirm", title, message }); return process.env.TEST_CONFIRM === "1"; },
     notify: (message, type) => events.push({ kind: "notify", message, type }),
-    select: async () => undefined,
+    select: async (title, options) => { events.push({ kind: "select", title, options }); return selections.shift() ?? undefined; },
+    input: async (title, placeholder) => { events.push({ kind: "input", title, placeholder }); return inputs.shift() ?? undefined; },
+    setStatus: (key, text) => events.push({ kind: "status", key, text: text ?? null }),
   },
   sessionManager: { getSessionId: () => "sess-1234" },
 };
@@ -57,30 +69,68 @@ globalThis.fetch = async (url, init = {}) => {
   if (!answer) throw new Error(`connection refused: ${url}`);
   return { ok: answer.status < 400, status: answer.status, json: async () => answer.body, text: async () => JSON.stringify(answer.body) };
 };
+const realNow = Date.now;
+let skew = 0;
+Date.now = () => realNow() + skew;
+if (process.env.TEST_CLOCK_SKEW_AFTER_MS) setTimeout(() => { skew = 31 * 60 * 1000; }, Number(process.env.TEST_CLOCK_SKEW_AFTER_MS));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 requests(pi);
-const out = { tools: Object.keys(tools), commands: Object.keys(commands), events, error: null };
+const out = { tools: Object.keys(tools), commands: Object.keys(commands), handlers: Object.keys(handlers).sort(), events, result: null, error: null, fetchesAtShutdown: null };
+const params = JSON.parse(process.env.TEST_PARAMS || "{}");
+const run = async () => {
+  const step = process.env.TEST_STEP;
+  if (step === "command") return commands["reef-harness"].handler(process.env.TEST_ARGS || "", ctx);
+  if (step === "versions") return commands["reef-versions"].handler(process.env.TEST_ARGS || "", ctx);
+  if (step === "ask_user") return tools.reef_ask_user.execute("call-1", params, undefined, undefined, ctx);
+  if (step === "file_request") return tools.reef_file_request.execute("call-1", params, undefined, undefined, ctx);
+  if (step === "session_start") return handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  return null;
+};
+const shutdown = () => handlers.session_shutdown({ type: "session_shutdown" }, ctx);
 try {
-  if (process.env.TEST_STEP === "command") {
-    await commands["reef-harness"].handler(process.env.TEST_ARGS || "", ctx);
-  } else if (process.env.TEST_STEP === "versions") {
-    await commands["reef-versions"].handler(process.env.TEST_ARGS || "", ctx);
-  }
+  for (let repeat = Number(process.env.TEST_REPEAT || 1); repeat > 0; repeat--) out.result = await run();
 } catch (error) {
   out.error = error.message;
 }
+if (process.env.TEST_SHUTDOWN_AFTER_MS) {
+  setTimeout(async () => {
+    out.fetchesAtShutdown = events.filter((event) => event.kind === "fetch").length;
+    await shutdown();
+  }, Number(process.env.TEST_SHUTDOWN_AFTER_MS));
+}
+await sleep(Number(process.env.TEST_WAIT_MS || 0));
 console.log(JSON.stringify(out));
+// A live watch would keep node running: the shutdown handler clears it, as pi's does.
+if (handlers.session_shutdown) await shutdown();
 """.strip()
 
 
 def _install_root(tmp_path: Path, *, with_release_file: bool = True) -> Path:
     """A pulled pi tree: the release file at the root and the models.json that points at the proxy in pi-agent."""
     agent_dir = tmp_path / "pi-agent"
-    agent_dir.mkdir()
+    agent_dir.mkdir(parents=True)
     if with_release_file:
         (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "v1"}), encoding="utf-8")
     models = {"providers": {"reef": {"api": "openai-completions", "baseUrl": "http://127.0.0.1:4567/v1"}}}
     (agent_dir / "models.json").write_text(json.dumps(models), encoding="utf-8")
     return agent_dir
+
+
+#: The runner's knobs; each case sets the ones it needs and the rest stay unset.
+KNOBS = (
+    "TEST_STEP",
+    "TEST_ARGS",
+    "TEST_PARAMS",
+    "TEST_ANSWERS",
+    "TEST_REPEAT",
+    "TEST_CONFIRM",
+    "TEST_HEADLESS",
+    "TEST_SELECT",
+    "TEST_INPUT",
+    "TEST_WAIT_MS",
+    "TEST_SHUTDOWN_AFTER_MS",
+    "TEST_CLOCK_SKEW_AFTER_MS",
+)
 
 
 def _run(tmp_path: Path, agent_dir: Path, **env: str) -> dict[str, Any]:
@@ -95,7 +145,7 @@ def _run(tmp_path: Path, agent_dir: Path, **env: str) -> dict[str, Any]:
         "REEF_HARNESS_DEST": str(tmp_path),
         **env,
     }
-    for name in ("PI_OFFLINE", "REEF_TOKEN", "TEST_CONFIRM"):
+    for name in (*KNOBS, "PI_OFFLINE", "REEF_TOKEN", "REEF_HARNESS_WATCH_MS"):
         if name not in env:
             full_env.pop(name, None)
     completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=full_env)
@@ -111,9 +161,24 @@ def _notices(out: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _ask(
-    tmp_path: Path, agent_dir: Path, answers: dict[str, Any], text: str = "text me when you are blocked", **env: str
+    tmp_path: Path,
+    agent_dir: Path,
+    answers: dict[str, Any],
+    text: str = "text me when you are blocked",
+    *,
+    direct: bool = True,
+    **env: str,
 ) -> dict[str, Any]:
-    return _run(tmp_path, agent_dir, TEST_STEP="command", TEST_ARGS=text, TEST_ANSWERS=json.dumps(answers), **env)
+    args = f"--direct {text}" if direct else text
+    return _run(tmp_path, agent_dir, TEST_STEP="command", TEST_ARGS=args, TEST_ANSWERS=json.dumps(answers), **env)
+
+
+def _tool(tmp_path: Path, agent_dir: Path, name: str, params: dict[str, Any], **env: str) -> dict[str, Any]:
+    return _run(tmp_path, agent_dir, TEST_STEP=name, TEST_PARAMS=json.dumps(params), **env)
+
+
+def _of_kind(out: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+    return [event for event in out["events"] if event["kind"] == kind]
 
 
 def test_the_extension_parses_as_plain_javascript(tmp_path: Path) -> None:
@@ -135,10 +200,12 @@ def test_the_assets_are_ascii_and_the_skill_body_is_a_short_pi_skill() -> None:
     assert lines[2].startswith("description: ")
 
 
-def test_the_extension_carries_no_tools_and_no_confirmation() -> None:
+def test_the_extension_imports_node_only_and_confirms_only_the_promote() -> None:
+    """The tools declare plain JSON schema parameters, so the one file needs no typebox import."""
     text = ASSET.read_text(encoding="utf-8")
-    assert "registerTool" not in text
-    assert "typebox" not in text
+    imports = re.findall(r'^import .* from "([^"]+)";$', text, flags=re.MULTILINE)
+    assert imports and all(module.startswith("node:") for module in imports)
+    assert text.count("pi.registerTool(") == 2
     # Asking confirms nothing; the one confirm guards the promote inside /reef-versions, registered after it.
     asking, versions, _ = text.partition('pi.registerCommand("reef-versions"')
     assert versions and "ui.confirm" not in asking
@@ -146,7 +213,7 @@ def test_the_extension_carries_no_tools_and_no_confirmation() -> None:
 
 def test_offline_registers_nothing(tmp_path: Path) -> None:
     out = _run(tmp_path, _install_root(tmp_path), PI_OFFLINE="1")
-    assert out["tools"] == [] and out["commands"] == [] and out["events"] == []
+    assert out["tools"] == [] and out["commands"] == [] and out["handlers"] == [] and out["events"] == []
 
 
 def test_a_missing_service_url_registers_nothing(tmp_path: Path) -> None:
@@ -159,18 +226,21 @@ def test_a_missing_scenario_registers_nothing(tmp_path: Path) -> None:
     assert out["tools"] == [] and out["commands"] == []
 
 
-def test_registers_the_command_and_no_tool(tmp_path: Path) -> None:
+def test_registers_the_two_tools_the_commands_and_the_session_events(tmp_path: Path) -> None:
     out = _run(tmp_path, _install_root(tmp_path))
-    assert out["tools"] == []
+    assert out["tools"] == ["reef_ask_user", "reef_file_request"]
     assert out["commands"] == ["reef-harness", "reef-versions"]
+    assert out["handlers"] == ["session_shutdown", "session_start"]
     assert out["events"] == []
 
 
 def test_the_command_prints_usage_with_no_argument(tmp_path: Path) -> None:
-    out = _run(tmp_path, _install_root(tmp_path), TEST_STEP="command", TEST_ARGS="   ")
-    assert out["events"] == [
-        {"kind": "notify", "message": "Usage: /reef-harness <what the harness should do>", "type": "warning"}
-    ]
+    agent_dir = _install_root(tmp_path)
+    for args in ("   ", "--direct", "--direct   "):
+        out = _run(tmp_path, agent_dir, TEST_STEP="command", TEST_ARGS=args)
+        assert out["events"] == [
+            {"kind": "notify", "message": "Usage: /reef-harness <what the harness should do>", "type": "warning"}
+        ]
 
 
 def test_the_command_submits_native_training_without_touching_receipts(tmp_path: Path) -> None:
@@ -187,6 +257,9 @@ def test_the_command_submits_native_training_without_touching_receipts(tmp_path:
     }
     assert request["body"] == {"text": "text me when you are blocked", "session": "sess-1234", "release_id": "v1"}
     assert _notices(out) == [{"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}]
+    # The watch starts once the request is filed: the footer names the record until the step settles.
+    assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}]
+    assert _of_kind(out, "user_message") == []
 
 
 def test_the_command_needs_no_capture_proxy_or_models_file(tmp_path: Path) -> None:
@@ -558,3 +631,378 @@ def test_versions_takes_only_a_run_of_digits_as_the_step(tmp_path: Path) -> None
     assert (
         _notices(leading_zero)[0]["message"].splitlines()[0] == "Harness step 1: rel-1111-selected (selected, current)"
     )
+
+
+# -- the clarify path, the two tools and the watch ---------------------------------------------------------------
+
+CLARIFY_HEAD = (
+    "The user asked for this harness change:\n\n```\ntext me when you are blocked\n```\n\nBefore filing it with "
+)
+QUESTIONS = {
+    "questions": [
+        {"question": "Which channel?", "options": ["SMS", "Email"]},
+        {"question": "When?", "options": ["Always", "Nights", "Weekends"]},
+    ]
+}
+OTHER = "Other (type an answer)"
+FILED = "filed request q-1; reef is running the step and will report here when it settles"
+
+
+def test_the_command_with_a_ui_hands_the_request_to_the_session_model_and_files_nothing(tmp_path: Path) -> None:
+    out = _ask(
+        tmp_path, _install_root(tmp_path), {"POST /reef/train": {"status": 200, "body": ACCEPTED}}, direct=False
+    )
+    assert out["error"] is None
+    assert _fetches(out) == [] and _of_kind(out, "status") == []
+    (sent,) = _of_kind(out, "user_message")
+    assert sent["options"] is None
+    assert sent["text"].startswith(CLARIFY_HEAD + "reef_file_request, think through what it needs: ")
+    assert "ask with reef_ask_user: at most 3 questions, each with 2 to 4 concrete options" in sent["text"]
+    assert sent["text"].endswith("Do not write the change yourself: reef's service writes it.")
+    assert _notices(out) == [{"kind": "notify", "message": "reef: clarifying, then filing", "type": "info"}]
+    # The release file is checked before the model is engaged: without it nothing is sent or asked.
+    out = _ask(
+        tmp_path / "bare",
+        _install_root(tmp_path / "bare", with_release_file=False),
+        {"POST /reef/train": {"status": 200, "body": ACCEPTED}},
+        direct=False,
+    )
+    assert _of_kind(out, "user_message") == []
+    (notice,) = out["events"]
+    assert notice["type"] == "error" and "nothing was sent" in notice["message"]
+
+
+def test_the_command_files_as_is_with_the_flag_or_without_a_ui(tmp_path: Path) -> None:
+    answers = {"POST /reef/train": {"status": 200, "body": ACCEPTED}}
+    agent_dir = _install_root(tmp_path)
+    flagged = _ask(tmp_path, agent_dir, answers, text="  text me  ", direct=True)
+    headless = _ask(tmp_path, agent_dir, answers, text="text me", direct=False, TEST_HEADLESS="1")
+    for out in (flagged, headless):
+        assert out["error"] is None
+        (request,) = _fetches(out)
+        assert request["method"] == "POST" and request["body"]["text"] == "text me"
+        assert _of_kind(out, "user_message") == []
+        assert _notices(out) == [{"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}]
+        assert _of_kind(out, "status") == [
+            {"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}
+        ]
+
+
+def test_ask_user_returns_the_chosen_option_or_the_typed_answer(tmp_path: Path) -> None:
+    agent_dir = _install_root(tmp_path)
+    out = _tool(
+        tmp_path,
+        agent_dir,
+        "ask_user",
+        QUESTIONS,
+        TEST_SELECT=json.dumps(["SMS", OTHER]),
+        TEST_INPUT=json.dumps(["Slack"]),
+    )
+    assert out["error"] is None
+    assert json.loads(out["result"]["content"][0]["text"]) == [
+        {"question": "Which channel?", "answer": "SMS"},
+        {"question": "When?", "answer": "Slack"},
+    ]
+    assert [event["options"] for event in _of_kind(out, "select")] == [
+        ["SMS", "Email", OTHER],
+        ["Always", "Nights", "Weekends", OTHER],
+    ]
+    assert _of_kind(out, "input") == [{"kind": "input", "title": "When?", "placeholder": ""}]
+    # No choice (Esc) opens the input as Other does; no typed answer records that none was given.
+    out = _tool(
+        tmp_path,
+        agent_dir,
+        "ask_user",
+        QUESTIONS,
+        TEST_SELECT=json.dumps([None, None]),
+        TEST_INPUT=json.dumps(["typed"]),
+    )
+    assert json.loads(out["result"]["content"][0]["text"]) == [
+        {"question": "Which channel?", "answer": "typed"},
+        {"question": "When?", "answer": "no answer"},
+    ]
+    assert len(_of_kind(out, "input")) == 2
+
+
+def test_ask_user_without_a_ui_tells_the_model_to_assume_and_say_so(tmp_path: Path) -> None:
+    out = _tool(tmp_path, _install_root(tmp_path), "ask_user", QUESTIONS, TEST_HEADLESS="1")
+    assert out["error"] is None
+    assert out["result"]["content"] == [
+        {
+            "type": "text",
+            "text": "no UI in this session: proceed with your best assumptions and list them in the request",
+        }
+    ]
+    assert _of_kind(out, "select") == [] and _of_kind(out, "input") == []
+
+
+def test_file_request_composes_the_text_posts_it_and_starts_the_watch(tmp_path: Path) -> None:
+    agent_dir = _install_root(tmp_path)
+    answers = {"POST /reef/train": {"status": 200, "body": ACCEPTED}}
+    params = {
+        "request": "text me when you are blocked",
+        "clarifications": [{"question": "Which channel?", "answer": "SMS"}, {"question": "When?", "answer": "Nights"}],
+    }
+    out = _tool(tmp_path, agent_dir, "file_request", params, TEST_ANSWERS=json.dumps(answers), REEF_TOKEN="tok")
+    assert out["error"] is None
+    (request,) = _fetches(out)
+    assert request["url"] == "http://reef:8900/reef/train" and request["method"] == "POST"
+    assert request["headers"] == {
+        "x-reef-scenario": "code-repair",
+        "authorization": "Bearer tok",
+        "content-type": "application/json",
+    }
+    assert request["body"] == {
+        "text": "text me when you are blocked\n\nClarifications:\n- Q: Which channel?\n  A: SMS\n- Q: When?\n  A: Nights",
+        "session": "sess-1234",
+        "release_id": "v1",
+    }
+    assert out["result"]["content"] == [{"type": "text", "text": FILED}]
+    assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}]
+    # Without clarifications the text is the request alone; the service's cap bounds it.
+    out = _tool(tmp_path, agent_dir, "file_request", {"request": "x" * 5000}, TEST_ANSWERS=json.dumps(answers))
+    assert _fetches(out)[0]["body"]["text"] == "x" * 4000
+
+
+def test_file_request_failures_throw_the_commands_messages(tmp_path: Path) -> None:
+    agent_dir = _install_root(tmp_path)
+    params = {"request": "text me", "clarifications": []}
+    unreachable = _tool(tmp_path, agent_dir, "file_request", params)
+    assert unreachable["error"].startswith("reef unreachable at http://reef:8900: ")
+    refused = {
+        "POST /reef/train": {"status": 400, "body": {"error": "training requests require training_mode='manual'"}}
+    }
+    out = _tool(tmp_path, agent_dir, "file_request", params, TEST_ANSWERS=json.dumps(refused))
+    assert out["error"].startswith("reef refused the request (HTTP 400): ")
+    assert "training_mode='manual'" in out["error"]
+    bare = tmp_path / "bare"
+    out = _tool(bare, _install_root(bare, with_release_file=False), "file_request", params)
+    assert ".reef-harness-release" in out["error"] and "nothing was sent" in out["error"]
+    assert _fetches(out) == []
+    for failed in (unreachable, out):
+        assert failed["result"] is None and _of_kind(failed, "status") == []
+
+
+ASK = f"{LONG_TEXT[:57]}..."
+REQUEST_ROW = {"training_request": {"id": "q-1", "text": LONG_TEXT}}
+REVIEW = {
+    "design": "A tool that texts you.",
+    "review": {"verdict": "partial", "covered": ["texting"], "uncovered": []},
+}
+SELECTED_ROW = {
+    "release_id": "rel-1111-selected",
+    "parent_release_id": "rel-0000-creation",
+    "operation": "training",
+    "pending": False,
+    "metrics": {
+        "selected": True,
+        **REQUEST_ROW,
+        "proposal_notes": {
+            **REVIEW,
+            "review": {**REVIEW["review"], "uncovered": ["two way replies", "idle detection"]},
+        },
+    },
+}
+PENDING_ROW = {
+    **SELECTED_ROW,
+    "release_id": "rel-3333-pending",
+    "pending": True,
+    "metrics": {"selected": True, **REQUEST_ROW},
+}
+REJECTED_ROW = {
+    **SELECTED_ROW,
+    "release_id": "rel-0000-creation",
+    "metrics": {
+        "selected": False,
+        "selection": {"policy": "floor", "reason": "candidate missed the floor on 1 of 1 tasks"},
+        **REQUEST_ROW,
+        "proposal_notes": REVIEW,
+    },
+}
+SKIPPED_ROW = {**SELECTED_ROW, "release_id": "rel-0000-creation", "metrics": {"skipped": "no proposal", **REQUEST_ROW}}
+CREATION_ROW = RELEASES["releases"][0]
+
+
+def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "POST /reef/train": {"status": 200, "body": ACCEPTED},
+        "GET /reef/harness/releases": {
+            "status": 200,
+            "body": {"scenario": "code-repair", "releases": [CREATION_ROW, row]},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (
+            SELECTED_ROW,
+            f"reef: '{ASK}' is published as release rel-1111. Restart reef-pi to install it (the update notice offers it).\n"
+            "Not covered: two way replies; idle detection",
+        ),
+        (
+            PENDING_ROW,
+            f"reef: '{ASK}' is ready as release rel-3333 but changes an extension, so it waits for your review: "
+            "/reef-versions 1, then /reef-versions 1 promote.",
+        ),
+        (
+            REJECTED_ROW,
+            f"reef: '{ASK}' did not pass the gate (candidate missed the floor on 1 of 1 tasks). Nothing changed; "
+            "rephrase or split the request.",
+        ),
+        (SKIPPED_ROW, f"reef: '{ASK}' produced no change (no proposal). Nothing changed."),
+    ],
+    ids=["selected", "pending", "rejected", "skipped"],
+)
+def test_the_watch_reports_the_verdict_and_what_the_review_left_uncovered(
+    tmp_path: Path, row: dict[str, Any], expected: str
+) -> None:
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        _catalog_with(row),
+        text=LONG_TEXT,
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="200",
+    )
+    assert out["error"] is None
+    assert [event["kind"] for event in out["events"]] == ["fetch", "notify", "status", "fetch", "status", "notify"]
+    catalog = out["events"][3]
+    assert catalog["method"] == "GET" and catalog["url"] == "http://reef:8900/reef/harness/releases"
+    assert out["events"][2] == {"kind": "status", "key": "reef", "text": "reef: step for request q-1 running"}
+    assert out["events"][4] == {"kind": "status", "key": "reef", "text": None}
+    assert out["events"][5] == {"kind": "notify", "message": expected, "type": "info"}
+
+
+def test_the_watch_gives_up_after_its_cap_and_says_where_the_verdict_will_show(tmp_path: Path) -> None:
+    # The catalog never carries the request: the clock jumps past 30 minutes after a few polls.
+    answers = _catalog_with({**SKIPPED_ROW, "metrics": {"skipped": "no proposal"}})
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        answers,
+        text=LONG_TEXT,
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_CLOCK_SKEW_AFTER_MS="35",
+        TEST_WAIT_MS="200",
+    )
+    kinds = [event["kind"] for event in out["events"]]
+    assert kinds[:3] == ["fetch", "notify", "status"] and kinds[-2:] == ["status", "notify"]
+    assert 2 <= kinds.count("fetch") <= 8  # a handful of polls, then no more once the cap passed
+    assert out["events"][-2] == {"kind": "status", "key": "reef", "text": None}
+    assert out["events"][-1] == {
+        "kind": "notify",
+        "message": f"reef: no verdict yet for '{ASK}'; /reef-versions shows it when it settles",
+        "type": "warning",
+    }
+    # A catalog read failing is one missed poll, never a notice: the polls go on.
+    silent = _ask(
+        tmp_path,
+        _install_root(tmp_path / "silent"),
+        {"POST /reef/train": {"status": 200, "body": ACCEPTED}},
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="80",
+    )
+    assert len(_fetches(silent)) >= 3 and _notices(silent) == [
+        {"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}
+    ]
+
+
+def test_session_shutdown_clears_the_watch(tmp_path: Path) -> None:
+    answers = _catalog_with({**SKIPPED_ROW, "metrics": {"skipped": "no proposal"}})
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        answers,
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_SHUTDOWN_AFTER_MS="50",
+        TEST_WAIT_MS="200",
+    )
+    assert out["fetchesAtShutdown"] >= 2
+    assert len(_fetches(out)) == out["fetchesAtShutdown"]  # no poll after the shutdown
+    assert _of_kind(out, "status")[-1] == {"kind": "status", "key": "reef", "text": None}
+    assert _notices(out) == [{"kind": "notify", "message": "Training request q-1 accepted.", "type": "info"}]
+
+
+def test_a_second_filing_replaces_the_first_watch(tmp_path: Path) -> None:
+    out = _tool(
+        tmp_path,
+        _install_root(tmp_path),
+        "file_request",
+        {"request": LONG_TEXT},
+        TEST_ANSWERS=json.dumps(_catalog_with(SKIPPED_ROW)),
+        TEST_REPEAT="2",
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="150",
+    )
+    assert out["error"] is None
+    kinds = [event["kind"] for event in out["events"]]
+    # Two filings, one watch: the second clears the first's footer, and one poll settles one notice.
+    assert kinds == ["fetch", "status", "fetch", "status", "status", "fetch", "status", "notify"]
+    assert [event["method"] for event in _fetches(out)] == ["POST", "POST", "GET"]
+    assert [event["text"] for event in _of_kind(out, "status")] == [
+        "reef: step for request q-1 running",
+        None,
+        "reef: step for request q-1 running",
+        None,
+    ]
+
+
+def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_review(tmp_path: Path) -> None:
+    agent_dir = _install_root(tmp_path)
+    first = "reef: /reef-harness <what it should do> asks for a harness change; /reef-versions lists the versions."
+    out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(CATALOG))
+    assert out["error"] is None
+    assert _notices(out) == [
+        {"kind": "notify", "message": f"{first}\n1 release(s) await your review: /reef-versions 3", "type": "info"}
+    ]
+    # Two pending rows list both steps; a promoted pending row no longer waits.
+    two = {**RELEASES, "releases": [*RELEASES["releases"], {**PENDING_ROW, "release_id": "rel-5555-pending"}]}
+    out = _run(
+        tmp_path,
+        agent_dir,
+        TEST_STEP="session_start",
+        TEST_ANSWERS=json.dumps({"GET /reef/harness/releases": {"status": 200, "body": two}}),
+    )
+    assert _notices(out)[0]["message"].splitlines()[1] == "2 release(s) await your review: /reef-versions 3, 5"
+    promoted = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
+    out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(promoted))
+    assert _notices(out) == [{"kind": "notify", "message": first, "type": "info"}]
+    # The catalog read failing keeps the first line; without a UI nothing is said and nothing is read.
+    out = _run(tmp_path, agent_dir, TEST_STEP="session_start")
+    assert _notices(out) == [{"kind": "notify", "message": first, "type": "info"}]
+    out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(CATALOG), TEST_HEADLESS="1")
+    assert out["events"] == []
+
+
+def test_versions_with_a_step_prints_the_design_and_what_the_review_left_uncovered(tmp_path: Path) -> None:
+    notes = {
+        "design": "D" * 300,
+        "review": {"verdict": "partial", "covered": ["x"], "uncovered": ["two way replies", "idle detection"]},
+    }
+    rows = [
+        row if index != 1 else {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
+        for index, row in enumerate(RELEASES["releases"])
+    ]
+    catalog = {"GET /reef/harness/releases": {"status": 200, "body": {**RELEASES, "releases": rows}}}
+    out = _versions(tmp_path, _install_root(tmp_path), catalog, args="1")
+    lines = _notices(out)[0]["message"].splitlines()
+    assert lines[:4] == [
+        "Harness step 1: rel-1111-selected (selected, current)",
+        f"design: {'D' * 197}...",
+        "not covered: two way replies; idle detection",
+        "page: http://reef:8900/reef/harness/releases/1/page",
+    ]
+    # A design alone prints no "not covered" line, and the listing stays one line per row.
+    rows[1] = {**rows[1], "metrics": {**rows[1]["metrics"], "proposal_notes": {"design": "short"}}}
+    out = _versions(
+        tmp_path,
+        _install_root(tmp_path / "one"),
+        catalog | {"GET /reef/harness/releases": {"status": 200, "body": {**RELEASES, "releases": rows}}},
+        args="1",
+    )
+    lines = _notices(out)[0]["message"].splitlines()
+    assert lines[1] == "design: short" and not any(line.startswith("not covered") for line in lines)
+    listed = _versions(tmp_path, _install_root(tmp_path / "list"), catalog)
+    assert len(_notices(listed)[0]["message"].splitlines()) == 5

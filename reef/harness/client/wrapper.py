@@ -18,14 +18,27 @@ When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."
      (one trajectory sample), or one report per receipt with ``--per-receipt``.
   3. Clears the persisted receipts.
 
-When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are blocked"``):
+When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are blocked"``,
+``reef-pi harness "..." --wait [--timeout SECONDS]``):
 
   Sends an explicit manual training instruction to ``POST /reef/train`` with
   the installed release and the oldest pending session's id (or a fresh id
   when nothing is spooled). The scenario must use ``training_mode: manual``
   or ``hybrid``. Acceptance queues a step without inference receipts or a
   feedback report; the merged ``requires`` list rides ``training_request``
-  in the commit's metrics.
+  in the commit's metrics. With ``--wait`` the wrapper polls the release
+  catalog every 5 s for the step that consumed the request (``--timeout``
+  seconds, 1800 by default) and prints its verdict with the next action:
+  exit 0 for a selected or pending release, 1 for a rejected or skipped
+  step, 2 when the timeout passes first.
+
+When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
+
+  Fetches the step's page (``GET /reef/harness/releases/<step>/page``) with
+  the token and the scenario header a browser would not send into
+  ``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html`` (``~/.cache``
+  by default), prints the path and opens it with ``open`` (macOS) or
+  ``xdg-open``; ``--print`` prints the path and opens nothing.
 
 When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
 
@@ -56,6 +69,12 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
      item is met, 1 otherwise. This is the one place a check ever runs: the
      install script only reads the check offs, and a session start prints
      what is unmet and runs the session anyway.
+
+When invoked with ``--help``, ``-h`` or ``help``:
+
+  Prints the wrapper's own usage (the subcommands above; anything else runs
+  the agent), then, for ``--help`` and ``-h``, runs the agent with the same
+  arguments so its help follows.
 
 Env vars (baked into the wrapper at install time):
 
@@ -758,8 +777,133 @@ def _spooled_session(scenario: str) -> str | None:
     return None
 
 
-def harness(scenario: str, adapter: str, compose_dir: str, text: str) -> None:
-    """Submit a native manual training request, leaving feedback receipts available."""
+def _clip(text: str, limit: int) -> str:
+    """The first ``limit`` characters of a text, the cut marked."""
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def _metrics_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    metrics = row.get("metrics")
+    return metrics if isinstance(metrics, Mapping) else {}
+
+
+def _request_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The request a step consumed, as its row records it."""
+    request = _metrics_of(row).get("training_request")
+    return request if isinstance(request, Mapping) else {}
+
+
+def _verdict_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
+    """A row's verdict as the extension reads it.
+
+    A pending row stays pending in the catalog; a later promote row naming
+    it makes it ``promoted at step N``. A settled step is ``selected``,
+    ``rejected`` or ``skipped``; any other row reads as its operation."""
+    if row.get("pending"):
+        for step, other in enumerate(rows):
+            if other.get("operation") == "promote" and other.get("rollback_target_release_id") == row.get(
+                "release_id"
+            ):
+                return f"promoted at step {step}"
+        return "pending"
+    metrics = _metrics_of(row)
+    selected = metrics.get("selected")
+    if isinstance(selected, bool):
+        return "selected" if selected else "rejected"
+    if metrics.get("skipped"):
+        return "skipped"
+    return str(row.get("operation") or "unknown")
+
+
+def _uncovered(row: Mapping[str, Any]) -> list[str]:
+    """What the step's review left uncovered, when it recorded one."""
+    notes = _metrics_of(row).get("proposal_notes")
+    review = notes.get("review") if isinstance(notes, Mapping) else None
+    items = review.get("uncovered") if isinstance(review, Mapping) else None
+    if not isinstance(items, list):
+        return []
+    return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+
+
+def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]]) -> str:
+    """One line for a settled step: its verdict and the next action, quoting the request's first 60 characters.
+
+    The extension's watch says the same in the session; ``harness --wait``
+    and ``doctor`` say it here, with ``page`` as the review step."""
+    row = rows[step]
+    metrics = _metrics_of(row)
+    ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
+    release = str(row.get("release_id") or "")[:8]
+    verdict = _verdict_of(row, rows)
+    if verdict == "selected":
+        return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
+    if verdict == "pending":
+        return (
+            f"'{ask}' is ready as release {release} but changes an extension, so it waits for your review: "
+            f"reef-{adapter} page {step}, then /reef-versions {step} promote."
+        )
+    if verdict == "rejected":
+        selection = metrics.get("selection")
+        reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
+        return f"'{ask}' did not pass the gate ({reason}). Nothing changed; rephrase or split the request."
+    if verdict == "skipped":
+        return f"'{ask}' produced no change ({metrics.get('skipped')}). Nothing changed."
+    return f"'{ask}' settled as {verdict} (release {release}); reef-{adapter} page {step} shows it."
+
+
+def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
+    """The step whose row consumed the request ``record_id``: its position in the catalog, oldest first."""
+    return next((step for step, row in enumerate(rows) if _request_of(row).get("id") == record_id), None)
+
+
+def _await_verdict(
+    upstream: str,
+    scenario: str,
+    adapter: str,
+    token: str | None,
+    record_id: str,
+    ask: str,
+    *,
+    timeout_s: float,
+    poll_s: float,
+) -> int:
+    """Poll the catalog until the step that consumed the request settles, print its verdict line, exit by it.
+
+    0 for a release to install or review, 1 for a step that changed nothing,
+    2 when ``timeout_s`` passes first: the step is still running, and
+    ``/reef-versions`` shows it when it settles."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        rows = _catalog(upstream, scenario, adapter, token)
+        step = _step_of(rows, record_id)
+        if step is not None:
+            print(f"reef-{adapter}: {_verdict_line(adapter, step, rows)}")
+            uncovered = _uncovered(rows[step])
+            if uncovered:
+                print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
+            return 1 if _verdict_of(rows[step], rows) in ("rejected", "skipped") else 0
+        if time.monotonic() >= deadline:
+            print(
+                f"reef-{adapter}: no verdict yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
+            )
+            return 2
+        time.sleep(poll_s)
+
+
+def harness(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    text: str,
+    *,
+    wait: bool = False,
+    timeout_s: float = 1800.0,
+    poll_s: float = 5.0,
+) -> int:
+    """Submit a native manual training request, leaving feedback receipts available; with ``wait``, report its verdict.
+
+    The status is 0 once the request is accepted, or, with ``wait``, what
+    ``_await_verdict`` returns for the step that consumed it."""
     text = text.strip()
     if not text:
         sys.exit(f"reef-{adapter} harness: the request is empty")
@@ -776,10 +920,11 @@ def harness(scenario: str, adapter: str, compose_dir: str, text: str) -> None:
     session = _spooled_session(scenario) or str(uuid.uuid4())
 
     body = {"text": text, "session": session, "release_id": release}
+    token = _reef_token(adapter, compose_dir)
     req = urllib.request.Request(
         f"{upstream}/reef/train",
         data=json.dumps(body).encode(),
-        headers=_reef_headers(scenario, _reef_token(adapter, compose_dir)),
+        headers=_reef_headers(scenario, token),
         method="POST",
     )
     try:
@@ -795,6 +940,56 @@ def harness(scenario: str, adapter: str, compose_dir: str, text: str) -> None:
         # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
         sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
     print(f"reef-{adapter}: training request {record_id} accepted")
+    if not wait:
+        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /reef-versions later")
+        return 0
+    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its verdict")
+    return _await_verdict(
+        upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
+    )
+
+
+def _page_cache_dir() -> Path:
+    """Where ``page`` keeps the pages it fetched: ``$XDG_CACHE_HOME/reef-harness``, under ``~/.cache`` by default."""
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "reef-harness"
+
+
+def _open_in_browser(path: Path) -> bool:
+    """Hand the file to the desktop's opener, ``open`` on macOS and ``xdg-open`` elsewhere; False when there is none."""
+    opener = shutil.which("open" if sys.platform == "darwin" else "xdg-open")
+    if opener is None:
+        return False
+    subprocess.run([opener, str(path)], check=False)
+    return True
+
+
+def page(scenario: str, adapter: str, compose_dir: str, step: int, *, open_page: bool = True) -> int:
+    """Fetch a step's page into the cache directory, print its path and open it; 0 once it is written.
+
+    The route needs the token and the scenario header a browser would not
+    send, so the wrapper fetches the page and hands the file over. A step
+    the catalog does not hold exits with the route's 404 text."""
+    upstream = _reef_url_of(adapter, compose_dir)
+    req = urllib.request.Request(
+        f"{upstream}/reef/harness/releases/{step}/page",
+        headers=_reef_headers(scenario, _reef_token(adapter, compose_dir)),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            html = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        sys.exit(f"reef-{adapter}: page read failed ({exc.code}): {detail}")
+    except OSError as exc:
+        sys.exit(f"reef-{adapter}: reef unreachable at {upstream}: {exc}")
+    # The scenario names the file; a character no file system takes becomes a dash.
+    path = _page_cache_dir() / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', scenario)}-step-{step}.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(html)
+    print(path)
+    if open_page and not _open_in_browser(path):
+        print(f"reef-{adapter}: no open or xdg-open on PATH; open the file in a browser", file=sys.stderr)
+    return 0
 
 
 def _reef_url_of(adapter: str, compose_dir: str) -> str:
@@ -933,7 +1128,9 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
 
     Every check exists somewhere already (an install warning, a run time
     warning, a route error); this is the one place that runs them all and
-    says which failed."""
+    says which failed. A release awaiting a review gets a line of its own,
+    the one ``harness --wait`` prints, since a person who runs this is
+    usually asking what happened to their request."""
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
     try:
@@ -1003,9 +1200,30 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             )
     else:
         rows.append((True, "release", f"{installed[:8]} installed"))
+    # A release held for review is not something the install needs, but it is what the person is waiting on.
+    listed = catalog or []
+    for step, row in enumerate(listed):
+        if _verdict_of(row, listed) == "pending":
+            rows.append((True, "review", _verdict_line(adapter, step, listed)))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
     return 0 if all(ok for ok, _, _ in rows) else 1
+
+
+def _usage(adapter: str) -> str:
+    """The wrapper's own subcommands, printed before the agent's help."""
+    prog = f"reef-{adapter}"
+    return "\n".join(
+        [
+            f"{prog}: run {adapter} through reef's capture proxy, or one of",
+            f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
+            f'  {prog} harness "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
+            f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
+            f"  {prog} doctor                                                     check what the install needs",
+            f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
+            f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.",
+        ]
+    )
 
 
 def main() -> None:
@@ -1021,6 +1239,11 @@ def main() -> None:
         )
 
     args = sys.argv[1:]
+    if args and args[0] in ("--help", "-h", "help"):
+        print(_usage(adapter))
+        if args[0] == "help":
+            return
+        # --help and -h go on to the agent below, so its own help follows.
     if args and args[0] == "report":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} report")
         parser.add_argument("--score", type=float, required=True)
@@ -1034,9 +1257,20 @@ def main() -> None:
         report(scenario, adapter, ns.score, ns.feedback, per_receipt=ns.per_receipt)
     elif args and args[0] == "harness":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} harness")
-        parser.add_argument("request", nargs=argparse.REMAINDER, help="what the harness should do, in plain words")
+        parser.add_argument("request", nargs="*", help="what the harness should do, in plain words")
+        parser.add_argument("--wait", action="store_true", help="stay until the step settles and print its verdict")
+        parser.add_argument(
+            "--timeout", type=float, default=1800.0, metavar="SECONDS", help="how long --wait waits (default 1800)"
+        )
+        # Intermixed, so the flags read the same before and after the request.
+        ns = parser.parse_intermixed_args(args[1:])
+        sys.exit(harness(scenario, adapter, compose, " ".join(ns.request), wait=ns.wait, timeout_s=ns.timeout))
+    elif args and args[0] == "page":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} page")
+        parser.add_argument("step", type=int, help="the step, as /reef-versions counts it")
+        parser.add_argument("--print", dest="print_only", action="store_true", help="print the path; open nothing")
         ns = parser.parse_args(args[1:])
-        harness(scenario, adapter, compose, " ".join(ns.request))
+        sys.exit(page(scenario, adapter, compose, ns.step, open_page=not ns.print_only))
     elif args and args[0] == "doctor":
         argparse.ArgumentParser(prog=f"reef-{adapter} doctor").parse_args(args[1:])
         sys.exit(doctor(scenario, adapter, compose, binary))

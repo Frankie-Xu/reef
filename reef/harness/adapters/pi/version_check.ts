@@ -6,6 +6,7 @@
 // Headless sessions print the instructions instead. Hermetic episodes
 // set PI_OFFLINE and this extension then makes no network calls at all.
 // While the head requires setup not checked off, the setup list replaces the update: the install would refuse.
+// Before that, an env variable the installed release requires and this shell lacks gets one warning line.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -72,6 +73,16 @@ export default function versionCheck(pi) {
     if (!response.ok) return;
     const { releases } = await response.json();
     if (!Array.isArray(releases)) return;
+    // What the installed release needs from this shell, one line per unset variable: a check off records that
+    // the variable was set once, and says nothing about the shell that started this session.
+    for (const item of requiredBy(releases, pinned)) {
+      if (item.kind !== "env") continue;
+      const variable = typeof item.check === "string" && item.check ? item.check : item.name;
+      if (process.env[variable]) continue;
+      const warning = `reef: ${variable} is not set; the installed harness needs it (reef-pi setup lists it)`;
+      if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+      else console.error(warning);
+    }
     // A release held for review is served to no session, so it is never the head this offers.
     const head = [...releases].reverse().find((row) => row && !row.pending);
     if (!head || head.release_id === pinned) return;
