@@ -6,10 +6,11 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.trajectories import trajectory_reward
 from reef.train.algos.base import StepPreparer, register_step_preparer
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.signals import StepScheduling, StepSignal
-from reef.train.types import GroupedPolicyBatch, TrainingBatch
+from reef.train.types import TrainingBatch, trajectory_groups
 
 
 @register_step_preparer
@@ -86,19 +87,20 @@ class TttdPreparer(StepPreparer):
         return advantages, beta
 
     def __call__(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        if not isinstance(batch, GroupedPolicyBatch):
-            raise TypeError(f"{self.name} requires GroupedPolicyBatch, got {type(batch).__name__}")
+        comparison_sets = trajectory_groups(batch)
         advantages: list[float] = []
         betas: list[float] = []
-        for comparison_set in batch.comparison_sets:
-            group_advantages, beta = self.adaptive_entropic_advantages([sample.reward for sample in comparison_set])
+        for comparison_set in comparison_sets:
+            group_advantages, beta = self.adaptive_entropic_advantages(
+                [trajectory_reward(sample) for sample in comparison_set]
+            )
             advantages.extend(group_advantages)
             betas.append(beta)
         steps = next_steps(state)
         normalized = tuple(advantages)
         # The processor drops constant-reward groups but keeps one when every
         # group is constant; flag that batch (its advantages carry no signal).
-        constant_groups = all(len({sample.reward for sample in group}) == 1 for group in batch.comparison_sets)
+        constant_groups = all(len({trajectory_reward(sample) for sample in group}) == 1 for group in comparison_sets)
         return StepSignal(
             "train",
             self.name,

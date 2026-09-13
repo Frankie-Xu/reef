@@ -15,7 +15,7 @@ crash-replay semantics. A recipe subclasses it and writes four methods:
 * ``judge(job)`` — an async coroutine producing the recipe's judgment,
   run on the worker's thread;
 * ``make_sample(record, judgment)`` — one judged record into a
-  :class:`PolicySample`, or ``None`` for a record that cannot train;
+  :class:`TrajectoryItem`, or ``None`` for a record that cannot train;
 * ``make_batch(samples, batch_number)`` — the selected samples into the
   recipe's batch type.
 
@@ -42,7 +42,7 @@ from typing import Any, Protocol
 
 from reef.core.records_types import AgentRecord
 from reef.train.processors.base import DataProcessor, RetentionDecision
-from reef.train.types import PolicySample, ProcessorContext, TrainingBatch
+from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         # Every ingested receipt is in exactly one state.
         self._tracked: dict[str, AgentRecord] = {}
         self._in_flight: dict[str, AgentRecord] = {}
-        self._candidates: dict[str, PolicySample] = {}
+        self._candidates: dict[str, TrajectoryItem] = {}
         #: Terminal receipts: retired or trained, both releasable and never
         #: distinguished by anything that reads them.
         self._terminal: set[str] = set()
@@ -230,11 +230,11 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         """
 
     @abstractmethod
-    def make_sample(self, record: AgentRecord, judgment: Any) -> PolicySample | None:
+    def make_sample(self, record: AgentRecord, judgment: Any) -> TrajectoryItem | None:
         """One judged record into a sample; ``None`` cannot train."""
 
     @abstractmethod
-    def make_batch(self, samples: tuple[PolicySample, ...], batch_number: int) -> TrainingBatch:
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
         """Shape the selected samples into this recipe's batch type."""
 
     def expire(self, now: float) -> tuple[str, ...]:
@@ -308,8 +308,10 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
             self._candidates[judgment.receipt] = sample
             if self._pending is None:
                 newest = max(self._candidates, key=self._arrival_order.__getitem__)
-                newest_version = self._candidates[newest].runtime_load_id
-                for receipt in [r for r, s in self._candidates.items() if s.runtime_load_id != newest_version]:
+                newest_version = self._candidates[newest].training.get("runtime_load_id")
+                for receipt in [
+                    r for r, s in self._candidates.items() if s.training.get("runtime_load_id") != newest_version
+                ]:
                     self._candidates.pop(receipt)
                     self.retire(receipt)
 

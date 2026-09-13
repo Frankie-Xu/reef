@@ -15,11 +15,12 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, untrusted_text
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 Proposal = tuple[str, str, dict[str, str]]
 
@@ -100,7 +101,7 @@ API_SECTION = (
 
 def propose(
     nodes: Sequence[tuple[str, Any]],
-    samples: Sequence[TraceSample],
+    samples: Sequence[TrajectoryItem],
     models: ModelBindings,
     *,
     requests: Sequence[Mapping[str, Any]] = (),
@@ -159,7 +160,7 @@ def propose(
 def _answer_request(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
-    samples: Sequence[TraceSample],
+    samples: Sequence[TrajectoryItem],
     models: ModelBindings,
 ) -> list[Mutation] | None:
     """The mutations the served model writes for one request: any of ``REQUEST_KINDS``, reserved ids dropped.
@@ -250,10 +251,17 @@ def _max_tokens(default: int) -> int:
         return default
 
 
-def failures_text(samples: Sequence[TraceSample]) -> str:
+def failures_text(samples: Sequence[TrajectoryItem]) -> str:
     """The failing samples as the proposer reads them: one object per sample with the request as served, the
     score its report gave and the report's feedback verbatim (``null`` when the report carried none)."""
-    views = [{"request": sample.payload, "score": sample.score, "feedback": sample.feedback} for sample in samples]
+    views = [
+        {
+            "request": recorded_payload(sample),
+            "score": sample.metadata.get("reward"),
+            "feedback": sample.metadata.get("feedback"),
+        }
+        for sample in samples
+    ]
     return json.dumps(views, indent=2, default=str)
 
 

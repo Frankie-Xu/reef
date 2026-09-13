@@ -25,7 +25,7 @@ from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_weight_surface
 from reef.train import TrainStepResult
-from reef.train.types import PolicyBatch
+from reef.train.types import TrainingBatch
 
 
 class ContractInferenceBackend(InferenceBackend):
@@ -282,7 +282,7 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 def test_recipe_pipeline_has_no_update_algorithm() -> None:
     runtime = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
-    assert runtime.trainer.processor.output_schema is PolicyBatch
+    assert runtime.trainer.processor.output_schema is TrainingBatch
     assert runtime.trainer.training_backend is None
 
 

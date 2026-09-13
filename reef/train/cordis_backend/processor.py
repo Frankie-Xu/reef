@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
+from reef.core.trajectories import make_trajectory, source_record_id
 from reef.train.processors.base import DataProcessor, RetentionDecision
-from reef.train.processors.reported import BatchUnit, ReportContext, ReportedFeedbackProcessor, ReportSample
-from reef.train.types import ProcessorContext, TraceBatch, TraceSample, TrainingBatch
+from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor
+from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 
 class CordisProcessor(ReportedFeedbackProcessor):
@@ -22,36 +23,22 @@ class CordisProcessor(ReportedFeedbackProcessor):
     beside them; in ``manual`` it runs alone.
     """
 
-    output_schema = TraceBatch
+    output_schema = TrainingBatch
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)
 
     def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
         if request is not None and self.training_mode == "manual":
-            self._pending_units = ()
-            return TraceBatch(request.id, ())
+            self._pending_reports = ()
+            return TrainingBatch(request.id, ())
         # In hybrid an instruction takes the units an automatic batch would, none included; the base attaches it.
         return self._make_pending(batch_number)
 
-    def make_sample(self, context: ReportContext) -> ReportSample:
-        last = context.inferences[-1]
-        return ReportSample(
-            TraceSample(
-                source_agent_record_id=last.agent_record_id,
-                payload=last.payload,
-                score=context.require_score(),
-                feedback=context.report.payload.get("feedback"),
-                trajectory=(
-                    tuple(record.payload for record in context.inferences) if len(context.inferences) > 1 else ()
-                ),
-            )
-        )
+    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+        return make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
 
-    def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> TraceBatch:
-        return TraceBatch(
-            f"{self.scenario}:harness_evolve:{batch_number}",
-            tuple(unit.candidates[0].value for unit in units),
-        )
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", items)
 
 
 class RecordDrivenTraceProcessor(DataProcessor):
@@ -68,13 +55,13 @@ class RecordDrivenTraceProcessor(DataProcessor):
     ``batch_size``, as an automatic batch would; in ``manual`` it runs alone.
     """
 
-    output_schema = TraceBatch
+    output_schema = TrainingBatch
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)
 
     def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
         if request is not None and self.training_mode == "manual":
-            return TraceBatch(request.id, ())
+            return TrainingBatch(request.id, ())
         # In hybrid an instruction takes the records an automatic batch would, none included; the base attaches it.
         return self._make_pending(batch_number)
 
@@ -94,24 +81,17 @@ class RecordDrivenTraceProcessor(DataProcessor):
     def _ready_count(self) -> int:
         return len(self._records)
 
-    def _make_pending(self, batch_number: int) -> TraceBatch:
+    def _make_pending(self, batch_number: int) -> TrainingBatch:
         selected = self._records[: self._batch_size]
-        return TraceBatch(
+        return TrainingBatch(
             f"{self.scenario}:harness_evolve:{batch_number}",
-            tuple(
-                TraceSample(
-                    source_agent_record_id=record.agent_record_id,
-                    payload=record.payload,
-                    score=None,
-                )
-                for record in selected
-            ),
+            tuple(make_trajectory((record,)) for record in selected),
         )
 
     def _consume_pending(self) -> frozenset[str]:
-        if self._pending is None or not isinstance(self._pending, TraceBatch):
+        if self._pending is None or not isinstance(self._pending, TrainingBatch):
             raise RuntimeError("no pending trace batch to consume")
-        consumed = frozenset(sample.source_agent_record_id for sample in self._pending.samples)
+        consumed = frozenset(source_record_id(sample) for sample in trajectories(self._pending))
         self._records = [record for record in self._records if record.agent_record_id not in consumed]
         self._released |= consumed
         return consumed

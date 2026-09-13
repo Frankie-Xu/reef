@@ -12,7 +12,7 @@ import logging
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, cast
 
@@ -20,21 +20,18 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.common import (
-    make_multi_turn_policy_sample,
-    make_policy_sample,
+    make_multi_turn_policy_trajectory,
+    make_policy_trajectory,
     report_score,
     sample_assembly_config_fields,
 )
-from reef.train.types import PolicySample, ProcessorContext, TrainingBatch
+from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "BatchUnit",
-    "Candidate",
     "GroupDecision",
     "ReportContext",
-    "ReportSample",
     "ReportedFeedbackProcessor",
     "SampleAssembly",
 ]
@@ -43,17 +40,8 @@ __all__ = [
 # ---------------------------------------------------------------- value types
 
 
-@dataclass(frozen=True)
-class ReportSample:
-    """Data assembled from a valid report, with optional grouping coordinates."""
-
-    value: Any
-    group_key: Hashable | None = None
-    slot: Hashable | None = None
-
-
 class GroupDecision(Enum):
-    """The decision for a candidate group: ready, incomplete, or invalid."""
+    """The decision for a report group: ready, incomplete, or invalid."""
 
     READY = "ready"
     INCOMPLETE = "incomplete"
@@ -81,22 +69,14 @@ class ReportContext:
 
 
 @dataclass(frozen=True)
-class Candidate:
-    """One accepted report's contribution to a batch, cached at assembly time."""
+class _PendingReport:
+    """Processor-owned assembly and consumption state; never passed to recipes."""
 
     order: int
-    value: Any
-    report_agent_record_id: str
-    source_agent_record_ids: frozenset[str]
-    slot: Hashable
-
-
-@dataclass(frozen=True)
-class BatchUnit:
-    """One batch unit: a singleton candidate or one ready group."""
-
+    item: TrainDataItem
+    report: AgentRecord
     group_key: Hashable | None
-    candidates: tuple[Candidate, ...]
+    slot: Hashable
 
 
 # ------------------------------------------------- reported-feedback processor
@@ -105,8 +85,8 @@ class BatchUnit:
 class ReportedFeedbackProcessor(DataProcessor, ABC):
     """Assemble valid reports and their existing inference records into batches.
 
-    Recipes implement ``make_sample``, ``make_batch``, and optionally
-    ``decide_group``. The engine owns deduplication, group slots, reservations,
+    Recipes implement ``make_sample`` and ``make_batch``, plus ``grouping``
+    and ``decide_group`` for grouped methods. The engine owns deduplication, group slots, reservations,
     consumption, and retention. Invalid references raise immediately; training
     data failures propagate instead of silently dropping reports.
     """
@@ -133,14 +113,14 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._trained_sources: set[str] = set()  # consumed by an acknowledged batch
         self._terminal_owned_sources: set[str] = set()  # owned by terminal reports
 
-        # --- candidate cache ---
-        self._singletons: dict[str, Candidate] = {}  # report id → singleton candidate
-        self._groups: dict[Hashable, dict[Hashable, Candidate]] = {}  # group key → slot → candidate
+        # --- buffered reports ---
+        self._singletons: dict[str, _PendingReport] = {}  # report id → buffered report
+        self._groups: dict[Hashable, dict[Hashable, _PendingReport]] = {}  # group key → slot → buffered report
         self._ready_groups: set[Hashable] = set()
         self._discarded_groups: set[Hashable] = set()
 
         # --- pending batch ---
-        self._pending_units: tuple[BatchUnit, ...] | None = None
+        self._pending_reports: tuple[_PendingReport, ...] | None = None
         self._next_order = 0
         self._manual_limit_warned = False
 
@@ -156,22 +136,33 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     manual_unit_cap_batches: int = 4
 
     @abstractmethod
-    def make_sample(self, context: ReportContext) -> ReportSample:
+    def make_sample(self, context: ReportContext) -> TrainDataItem:
         """Assemble valid feedback into data; raise on a broken training contract.
 
         Runs on the trainer thread without network or model calls. Every
         valid report produces a sample; this hook does not accept/reject reports.
         """
 
-    def decide_group(self, key: Hashable, candidates: tuple[Candidate, ...]) -> GroupDecision:
-        """Decide whether an accepted candidate group is ready, incomplete, or invalid."""
-        raise NotImplementedError(
-            f"{type(self).__name__} produced a grouped candidate without a decide_group override"
-        )
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        """Return the batching group and retry slot; defaults to an independent report.
+
+        These coordinates belong to ingestion, separately from an item's
+        comparison group. For example, TTTD batches a whole step containing
+        several comparison groups. A None slot uses the report id.
+        """
+        return None, None
+
+    def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
+        """Decide whether the group's assembled items are ready, incomplete, or invalid."""
+        raise NotImplementedError(f"{type(self).__name__} produced a group without a decide_group override")
 
     @abstractmethod
-    def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> TrainingBatch:
-        """Shape the selected units into the recipe's typed batch."""
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        """Build a batch from selected items, in group and arrival order.
+
+        The processor tracks consumption independently, including any selected
+        items the recipe omits from the resulting batch.
+        """
 
     def ingest(self, item: AgentRecord) -> None:
         if item.scenario != self.scenario:
@@ -196,26 +187,28 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         # compaction delete its inputs or turn a retry into a successful no-op.
         self._reports[item.agent_record_id] = item
         sample = self.make_sample(context)
-        if not isinstance(sample, ReportSample):
-            raise TypeError(f"{type(self).__name__}.make_sample must return ReportSample")
+        if not isinstance(sample, (TrajectoryItem, TaskItem)):
+            raise TypeError(f"{type(self).__name__}.make_sample must return a TrainDataItem")
+        key, slot = self.grouping(context)
+        slot = item.agent_record_id if slot is None else slot
+        hash(key)
+        hash(slot)
         self._seen_reports.add(item.agent_record_id)
-        key = sample.group_key
-        slot = item.agent_record_id if sample.slot is None else sample.slot
         if key is not None and (key in self._discarded_groups or slot in self._groups.get(key, {})):
             self._terminate(item)
             return
         self._next_order += 1
-        candidate = Candidate(
+        pending = _PendingReport(
             order=self._next_order,
-            value=sample.value,
-            report_agent_record_id=item.agent_record_id,
-            source_agent_record_ids=frozenset(item.references),
+            item=replace(sample, source_agent_record_ids=(*item.references, item.agent_record_id)),
+            report=item,
+            group_key=key,
             slot=slot,
         )
         if key is None:
-            self._singletons[item.agent_record_id] = candidate
+            self._singletons[item.agent_record_id] = pending
         else:
-            self._groups.setdefault(key, {})[slot] = candidate
+            self._groups.setdefault(key, {})[slot] = pending
             self._refresh_group(key)
         self._cap_manual_units()
 
@@ -231,11 +224,11 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         if self.training_mode != "manual" or self._ready_count() <= limit:
             return
         # The reserved batch is handed out until acknowledged, so its units stay put.
-        reserved = {c.report_agent_record_id for unit in self._pending_units or () for c in unit.candidates}
+        reserved = {pending.report.agent_record_id for pending in self._pending_reports or ()}
         for unit in self._ordered_units():
             if self._ready_count() <= limit:
                 return
-            if unit.candidates[0].report_agent_record_id in reserved:
+            if unit[0].report.agent_record_id in reserved:
                 continue
             self._release_unit(unit)
             if not self._manual_limit_warned:
@@ -243,21 +236,23 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
                     "%s scenario %r released report %s beyond the manual limit %d (further releases are not logged)",
                     type(self).__name__,
                     self.scenario,
-                    unit.candidates[0].report_agent_record_id,
+                    unit[0].report.agent_record_id,
                     limit,
                 )
                 self._manual_limit_warned = True
 
-    def _release_unit(self, unit: BatchUnit) -> None:
-        """Drop one held unit: its reports turn terminal and own their sources, so retention frees both."""
-        if unit.group_key is not None:
-            self._discard_group(unit.group_key)
-        for candidate in unit.candidates:
-            report = self._reports.pop(candidate.report_agent_record_id, None)
-            self._singletons.pop(candidate.report_agent_record_id, None)
+    def _release_unit(self, unit: tuple[_PendingReport, ...]) -> None:
+        """Release a whole buffered group or singleton and its sources."""
+        key = unit[0].group_key
+        if key is not None:
+            self._discard_group(key)
+        for pending in unit:
+            report_id = pending.report.agent_record_id
+            report = self._reports.pop(report_id, None)
+            self._singletons.pop(report_id, None)
             if report is not None:
                 self._terminate(report)
-            self._terminal_owned_sources.update(candidate.source_agent_record_ids)
+            self._terminal_owned_sources.update(pending.report.references)
 
     def _terminate(self, report: AgentRecord) -> None:
         """Drop a report from the live set and mark it terminal.
@@ -286,17 +281,19 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     # ---------------------------------------------------------------- groups
 
-    def _group_candidates(self, key: Hashable) -> tuple[Candidate, ...]:
-        return tuple(sorted(self._groups[key].values(), key=lambda c: c.order))
+    def _group_reports(self, key: Hashable) -> tuple[_PendingReport, ...]:
+        return tuple(sorted(self._groups[key].values(), key=lambda pending: pending.order))
 
     def _refresh_group(self, key: Hashable) -> None:
-        decision = self.decide_group(key, self._group_candidates(key))
+        decision = self.decide_group(key, tuple(pending.item for pending in self._group_reports(key)))
         if decision is GroupDecision.READY:
             self._ready_groups.add(key)
         elif decision is GroupDecision.INCOMPLETE:
             self._ready_groups.discard(key)
-        else:
+        elif decision is GroupDecision.DISCARD:
             self._discard_group(key)
+        else:
+            raise TypeError("decide_group must return GroupDecision")
 
     def _discard_group(self, key: Hashable) -> None:
         self._ready_groups.discard(key)
@@ -306,70 +303,62 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         # release is not blocked by siblings of the same discarded group.
         members = [
             report
-            for candidate in group.values()
-            if (report := self._reports.pop(candidate.report_agent_record_id, None)) is not None
+            for pending in group.values()
+            if (report := self._reports.pop(pending.report.agent_record_id, None)) is not None
         ]
         for report in members:
             self._terminate(report)
 
     # ----------------------------------------------------------- batch cycle
     #
-    # A unit is one accepted singleton candidate or one ready group; the
+    # A unit is one accepted singleton report or one ready group; the
     # engine's half of the shared cycle in base.py is the three methods below.
 
     def _ready_count(self) -> int:
         return len(self._singletons) + len(self._ready_groups)
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
-        units = self._select_units()
-        self._pending_units = units
-        return self.make_batch(units, batch_number)
+        units = self._ordered_units()[: self._batch_size]
+        self._pending_reports = tuple(pending for unit in units for pending in unit)
+        return self.make_batch(tuple(pending.item for pending in self._pending_reports), batch_number)
 
-    def _select_units(self) -> tuple[BatchUnit, ...]:
-        """Select up to ``batch_size`` batch units in priority order."""
-        return tuple(self._ordered_units()[: self._batch_size])
-
-    def _ordered_units(self) -> list[BatchUnit]:
-        """Every held unit in priority order.
-
-        By default everything shares arrival order. With ``ordered_groups``,
-        singletons batch first (arrival order), then groups in key order.
-        """
-        singletons = [BatchUnit(None, (candidate,)) for candidate in self._singletons.values()]
+    def _ordered_units(self) -> list[tuple[_PendingReport, ...]]:
+        """Ready groups and singleton reports, preserving the configured priority."""
+        singletons = [(pending,) for pending in self._singletons.values()]
         if self.ordered_groups:
-            # ordered_groups requires sortable group keys (step indices, say).
+            # Ordered groups require sortable keys, such as step indices.
             ordered = sorted(cast("set[Any]", self._ready_groups))
-            groups = [BatchUnit(key, self._group_candidates(key)) for key in ordered]
-            units = singletons + groups
-        else:
-            units = singletons + [BatchUnit(key, self._group_candidates(key)) for key in self._ready_groups]
-            units.sort(key=lambda unit: unit.candidates[0].order)
+            return singletons + [self._group_reports(key) for key in ordered]
+        units = singletons + [self._group_reports(key) for key in self._ready_groups]
+        units.sort(key=lambda unit: unit[0].order)
         return units
 
     def _consume_pending(self) -> frozenset[str]:
-        if self._pending_units is None:
-            raise RuntimeError("cannot consume a batch before units are pending")
+        if self._pending_reports is None:
+            raise RuntimeError("cannot consume a batch before reports are pending")
         consumed_reports: set[str] = set()
         trained_sources: set[str] = set()
-        for unit in self._pending_units:
-            group = self._groups.get(unit.group_key) if unit.group_key is not None else None
-            for candidate in unit.candidates:
-                report_id = candidate.report_agent_record_id
-                self._consumed.add(report_id)
-                consumed_reports.add(report_id)
-                self._reports.pop(report_id, None)
-                self._singletons.pop(report_id, None)
-                trained_sources |= candidate.source_agent_record_ids
+        changed_groups: set[Hashable] = set()
+        for pending in self._pending_reports:
+            report_id = pending.report.agent_record_id
+            self._consumed.add(report_id)
+            consumed_reports.add(report_id)
+            self._reports.pop(report_id, None)
+            self._singletons.pop(report_id, None)
+            trained_sources.update(pending.report.references)
+            if pending.group_key is not None:
+                group = self._groups.get(pending.group_key)
                 if group is not None:
-                    group.pop(candidate.slot, None)
-            if unit.group_key is not None and group is not None:
-                if group:
-                    self._refresh_group(unit.group_key)
-                else:
-                    self._groups.pop(unit.group_key)
-                    self._ready_groups.discard(unit.group_key)
+                    group.pop(pending.slot, None)
+                    changed_groups.add(pending.group_key)
+        for key in changed_groups:
+            if self._groups[key]:
+                self._refresh_group(key)
+            else:
+                self._groups.pop(key)
+                self._ready_groups.discard(key)
         self._trained_sources.update(trained_sources)
-        self._pending_units = None
+        self._pending_reports = None
         return frozenset(consumed_reports | trained_sources)
 
     # -------------------------------------------------------------- retention
@@ -406,7 +395,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
         # Stored records: only inferences can be here. The trainer compacts
         # ``releasable - protected``, and every live report, every reference
-        # a live report holds, and every candidate's report are protected —
+        # a live report holds, and every buffered report are protected —
         # so a compacted id is never in _reports, _singletons, or a
         # group.
         for agent_record_id in agent_record_ids:
@@ -430,30 +419,30 @@ class SampleAssembly:
     accept_multi_turn: bool = False
     realign_threshold: int = 1024
     scaffold_tolerance: int = 0
-    make_sample: Callable[[AgentRecord, float], PolicySample] | None = None
+    make_sample: Callable[[AgentRecord, float], TrajectoryItem] | None = None
 
     @classmethod
     def from_config(
         cls,
         context: ProcessorContext,
-        make_sample: Callable[[AgentRecord, float], PolicySample] | None = None,
+        make_sample: Callable[[AgentRecord, float], TrajectoryItem] | None = None,
     ) -> SampleAssembly:
         accept_multi_turn, realign_threshold, scaffold_tolerance = sample_assembly_config_fields(context.config)
         return cls(accept_multi_turn, realign_threshold, scaffold_tolerance, make_sample)
 
-    def build(self, context: ReportContext, score: float) -> PolicySample:
+    def build(self, context: ReportContext, score: float) -> TrajectoryItem:
         """Build training data, raising if the recorded trajectory cannot be used."""
         inferences = context.inferences
         if inferences is None:
             raise RuntimeError("sample assembly requires resolved inferences")
         if len(inferences) == 1:
-            sample: PolicySample | None = (
-                make_policy_sample(inferences[0], score)
+            sample: TrajectoryItem | None = (
+                make_policy_trajectory(inferences[0], score)
                 if self.make_sample is None
                 else self.make_sample(inferences[0], score)
             )
         else:
-            sample = make_multi_turn_policy_sample(
+            sample = make_multi_turn_policy_trajectory(
                 inferences,
                 score,
                 source_agent_record_id=context.report.agent_record_id,
@@ -462,6 +451,10 @@ class SampleAssembly:
             )
         if sample is None:
             raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
-        if sample.is_multi_turn and not self.accept_multi_turn:
+        if (sample.training.get("turn_count", 1) > 1) and not self.accept_multi_turn:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
-        return sample
+        return sample.with_metadata(
+            feedback=context.report.payload.get("feedback"),
+            report_agent_record_id=context.report.agent_record_id,
+            references=list(context.references),
+        )

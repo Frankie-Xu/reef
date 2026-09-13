@@ -9,6 +9,7 @@ import pytest
 
 from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
+from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
@@ -56,12 +57,12 @@ class DurableRuntime(TrainingRuntime):
         return self.serving_version
 
     def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
-        sample = batch.samples[0]
+        sample = batch.items[0]
         payload = {
             "rollout_id": scenario_step,
             "loss": step_preparer,
-            "source": sample.source_agent_record_id,
-            "expected_runtime_load_id": sample.runtime_load_id,
+            "source": source_record_id(sample),
+            "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
         return PreparedTrainingStep(
             action="train",

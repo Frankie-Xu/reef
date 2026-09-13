@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
-from reef.train.processors.reported import (
-    BatchUnit,
-    Candidate,
-    GroupDecision,
-    ReportContext,
-    ReportedFeedbackProcessor,
-    ReportSample,
-)
-from reef.train.types import PolicyBatch, ProcessorContext
+from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor
+from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch
 
 
 def inference(record_id: str) -> AgentRecord:
@@ -35,7 +30,7 @@ def report(record_id: str, *references: str, score: float = 1.0) -> AgentRecord:
 
 
 class SampleProcessor(ReportedFeedbackProcessor):
-    output_schema = PolicyBatch
+    output_schema = TrainingBatch
     exclusive_sources = True
 
     def __init__(self, batch_size: int = 1) -> None:
@@ -43,14 +38,14 @@ class SampleProcessor(ReportedFeedbackProcessor):
         self.assembled: list[str] = []
         self.fail_assembly = False
 
-    def make_sample(self, context: ReportContext) -> ReportSample:
+    def make_sample(self, context: ReportContext) -> TrainDataItem:
         if self.fail_assembly:
             raise ValueError("broken training data")
         self.assembled.append(context.report.agent_record_id)
-        return ReportSample(context.report.agent_record_id)
+        return TaskItem(Path(context.report.agent_record_id))
 
-    def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> PolicyBatch:
-        return PolicyBatch(f"batch:{batch_number}", tuple(c.value for unit in units for c in unit.candidates))
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"batch:{batch_number}", items)
 
 
 class GroupProcessor(SampleProcessor):
@@ -58,14 +53,12 @@ class GroupProcessor(SampleProcessor):
         super().__init__(batch_size)
         self.discard = False
 
-    def make_sample(self, context: ReportContext) -> ReportSample:
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         metadata = context.report.payload.get("metadata", {})
-        return ReportSample(
-            context.report.agent_record_id, group_key=metadata.get("group", "g"), slot=metadata.get("slot")
-        )
+        return metadata.get("group", "g"), metadata.get("slot")
 
-    def decide_group(self, key: object, candidates: tuple[Candidate, ...]) -> GroupDecision:
-        if len(candidates) < 2:
+    def decide_group(self, key: object, items: tuple[TrainDataItem, ...]) -> GroupDecision:
+        if len(items) < 2:
             return GroupDecision.INCOMPLETE
         return GroupDecision.DISCARD if self.discard else GroupDecision.READY
 
@@ -84,7 +77,7 @@ def test_inferences_wait_for_reports_and_batch_counts_completed_samples() -> Non
     processor.ingest(report("r1", "i1"))
     assert not processor.ready()
     processor.ingest(report("r2", "i2"))
-    assert processor.build_batch().samples == ("r1", "r2")
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r1", "r2")
     assert "i3" in processor.retention_decision().protected_agent_record_ids
 
 
@@ -96,7 +89,7 @@ def test_report_before_inference_fails_without_queuing_it() -> None:
     assert not processor.ready()
     assert processor.assembled == []
     processor.ingest(report("r1", "i1"))
-    assert processor.build_batch().samples == ("r1",)
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r1",)
 
 
 @pytest.mark.parametrize("references", [(), ("i1", "i1"), ("i1", "missing")])
@@ -133,7 +126,7 @@ def test_valid_feedback_is_assembled_without_score_filtering(score: float) -> No
     processor = SampleProcessor()
     processor.ingest(inference("i1"))
     processor.ingest(report("r1", "i1", score=score))
-    assert processor.build_batch().samples == ("r1",)
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r1",)
 
 
 def test_assembly_failure_protects_inputs_and_does_not_acknowledge_a_retry() -> None:
@@ -147,7 +140,7 @@ def test_assembly_failure_protects_inputs_and_does_not_acknowledge_a_retry() -> 
     assert not processor.ready()
     processor.fail_assembly = False
     processor.ingest(report("r1", "i1"))
-    assert processor.build_batch().samples == ("r1",)
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r1",)
 
 
 def test_duplicate_reports_and_batch_polls_do_not_assemble_twice() -> None:
@@ -187,7 +180,7 @@ def test_group_waits_for_complete_samples() -> None:
         processor.ingest(inference(f"i{index}"))
         processor.ingest(report(f"r{index}", f"i{index}"))
         assert processor.ready() == (index == 2)
-    assert processor.build_batch().samples == ("r1", "r2")
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r1", "r2")
 
 
 def test_group_discard_releases_all_members_and_refuses_later_members() -> None:
@@ -206,7 +199,7 @@ def test_slot_retry_preserves_first_report() -> None:
         processor.ingest(inference(record_id))
         record = report(f"r-{record_id}", record_id)
         processor.ingest(replace(record, payload={**record.payload, "metadata": {"slot": slot}}))
-    assert processor.build_batch().samples == ("r-first", "r-second")
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r-first", "r-second")
     assert {"r-retry", "retry"} <= processor.retention_decision().releasable_agent_record_ids
 
 
@@ -214,15 +207,71 @@ def test_ordered_groups_can_coexist_with_singleton_samples() -> None:
     class MixedProcessor(SampleProcessor):
         ordered_groups = True
 
-        def make_sample(self, context: ReportContext) -> ReportSample:
+        def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
             record_id = context.report.agent_record_id
-            return ReportSample(record_id, group_key=record_id if record_id.startswith("g-") else None)
+            return (record_id if record_id.startswith("g-") else None), None
 
-        def decide_group(self, key: object, candidates: tuple[Candidate, ...]) -> GroupDecision:
+        def decide_group(self, key: object, items: tuple[TrainDataItem, ...]) -> GroupDecision:
             return GroupDecision.READY
 
     processor = MixedProcessor(batch_size=3)
     for record_id in ("g-z", "g-a", "single"):
         processor.ingest(inference(f"source-{record_id}"))
         processor.ingest(report(record_id, f"source-{record_id}"))
-    assert processor.build_batch().samples == ("single", "g-a", "g-z")
+    assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("single", "g-a", "g-z")
+
+
+def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
+    processor = GroupProcessor()
+    for index in (1, 2):
+        processor.ingest(inference(f"i{index}"))
+        processor.ingest(report(f"r{index}", f"i{index}"))
+    first = processor.build_batch()
+    processor.ingest(inference("i3"))
+    processor.ingest(report("r3", "i3"))
+    assert processor.build_batch() is first
+    assert processor.acknowledge(first.batch_id) == {"i1", "i2", "r1", "r2"}
+    assert processor.retention_decision().protected_agent_record_ids == {"i3", "r3"}
+    assert not processor.ready()
+    processor.ingest(inference("i4"))
+    processor.ingest(report("r4", "i4"))
+    second = processor.build_batch()
+    assert [str(item.task_path) for item in second.items] == ["r3", "r4"]
+    assert processor.acknowledge(second.batch_id) == {"i3", "i4", "r3", "r4"}
+
+
+def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> None:
+    class SelectedProcessor(GroupProcessor):
+        def decide_group(self, key, items):
+            assert all(isinstance(item, TaskItem) for item in items)
+            return super().decide_group(key, items)
+
+        def make_batch(self, items, batch_number):
+            assert [item.source_agent_record_ids for item in items] == [("i1", "r1"), ("i2", "r2")]
+            return super().make_batch(items[:1], batch_number)
+
+    processor = SelectedProcessor()
+    for index in (1, 2):
+        processor.ingest(inference(f"i{index}"))
+        processor.ingest(report(f"r{index}", f"i{index}"))
+    batch = processor.build_batch()
+    assert [str(item.task_path) for item in batch.items] == ["r1"]
+    assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
+    assert processor.retention_decision().protected_agent_record_ids == set()
+    assert not processor.ready()
+
+
+def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
+    class BrokenProcessor(SampleProcessor):
+        def make_sample(self, context):
+            return object() if self.fail_assembly else super().make_sample(context)
+
+    processor = BrokenProcessor()
+    processor.ingest(inference("i1"))
+    processor.fail_assembly = True
+    with pytest.raises(TypeError, match="TrainDataItem"):
+        processor.ingest(report("r1", "i1"))
+    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    processor.fail_assembly = False
+    processor.ingest(report("r1", "i1"))
+    assert processor.acknowledge(processor.build_batch().batch_id) == {"i1", "r1"}

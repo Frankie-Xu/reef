@@ -6,6 +6,7 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
@@ -387,18 +388,31 @@ def test_cookbook_preparers_signal_their_recipes_loss_family() -> None:
 
     from reef.train.algos.registry import resolve_preparer
     from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
+    from reef.train.types import TrainingBatch
 
-    first = PolicySample("i1", (5, 1), (1,), (-0.1,), 0.5)
-    second = replace(first, source_agent_record_id="i2", reward=1.5)
+    first = policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5)
+    second = first.with_metadata(source_agent_record_id="i2", reward=1.5)
     checked = set()
     for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
         spec = recipe_type.training_spec()
         assert spec.processor is not None
-        if spec.processor.output_schema is GroupedPolicyBatch:
-            batch = GroupedPolicyBatch("b", ((first, second),))
+        if recipe_type is TTTDRecipe:
+            batch = TrainingBatch(
+                "b",
+                tuple(
+                    replace(sample, group_id=str(index))
+                    for index, group in enumerate(((first, second),))
+                    for sample in group
+                ),
+            )
         else:
-            batch = PolicyBatch("b", (first, second))
+            batch = TrainingBatch(
+                "b",
+                (
+                    first,
+                    second,
+                ),
+            )
         signal = resolve_preparer(spec.step_preparer)(batch, {})
         assert signal.loss_family == spec.loss_family, recipe_type.__name__
         assert resolve_loss_family(signal.loss_family).loss_family == spec.loss_family

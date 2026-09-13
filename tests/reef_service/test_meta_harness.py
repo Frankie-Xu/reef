@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
 from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
@@ -16,6 +17,7 @@ from recipes.meta_harness.recipe import MetaHarnessRecipe, scenario_population_p
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -27,7 +29,6 @@ from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -47,7 +48,7 @@ SEED = ({"id": "rules", "name": "rules", "config": {"text": "Answer carefully."}
 IMPROVED = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER}"}},)
 ALTERNATE = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER} Check twice."}},)
 TASK = "Solve the supplied task."
-SAMPLE = TraceSample(
+SAMPLE = recorded_trajectory(
     "trace-1",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -150,7 +151,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
         AgentRecord.create(
             scenario=name,
             request_type=RequestType.INFERENCE,
-            payload=SAMPLE.payload,
+            payload=recorded_payload(SAMPLE),
             agent_record_id=f"i{suffix}",
         )
     )
@@ -158,7 +159,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
         AgentRecord.create(
             scenario=name,
             request_type=RequestType.REPORT,
-            payload={"score": 0.0, "feedback": SAMPLE.feedback, "references": [f"i{suffix}"]},
+            payload={"score": 0.0, "feedback": SAMPLE.metadata.get("feedback"), "references": [f"i{suffix}"]},
             agent_record_id=f"r{suffix}",
         )
     )

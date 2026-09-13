@@ -9,10 +9,12 @@ tests belong to a separate deployment suite.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 from slime.utils.misc import Box
 
 from reef.runtime.base import TrainingJobResult
@@ -23,7 +25,7 @@ from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.preparation import _build_payload
 from reef.train.slime_backend.reef_adapters.training_job.marker import read_marker, transition_marker, write_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig, _allocated_bytes
-from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
+from reef.train.types import TrainingBatch
 
 
 @pytest.fixture(autouse=True)
@@ -295,14 +297,20 @@ def test_to_slime_rollout_data_validates_non_empty_and_parallel_shapes(payload, 
 
 @pytest.mark.unit
 def test_slime_preparation_emits_stable_rollout_ids_for_comparison_sets() -> None:
-    batch = GroupedPolicyBatch(
+    batch = TrainingBatch(
         "batch",
-        (
-            (
-                PolicySample("a", (1, 2), (1, 1), (-0.1, -0.2), 0.2),
-                PolicySample("b", (3, 4), (1, 1), (-0.3, -0.4), 0.8),
-            ),
-            (PolicySample("c", (5, 6), (1, 1), (-0.5, -0.6), 0.4),),
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                (
+                    (
+                        policy_trajectory("a", (1, 2), (1, 1), (-0.1, -0.2), 0.2),
+                        policy_trajectory("b", (3, 4), (1, 1), (-0.3, -0.4), 0.8),
+                    ),
+                    (policy_trajectory("c", (5, 6), (1, 1), (-0.5, -0.6), 0.4),),
+                )
+            )
+            for sample in group
         ),
     )
 
@@ -314,13 +322,19 @@ def test_slime_preparation_emits_stable_rollout_ids_for_comparison_sets() -> Non
 
 @pytest.mark.unit
 def test_slime_preparation_honors_sample_scheduling_and_actual_batch_size() -> None:
-    batch = GroupedPolicyBatch(
+    batch = TrainingBatch(
         "batch",
-        (
-            (
-                PolicySample("a", (1, 2), (1,), (-0.1,), 0.2),
-                PolicySample("b", (3, 4), (1,), (-0.2,), 0.8),
-            ),
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                (
+                    (
+                        policy_trajectory("a", (1, 2), (1,), (-0.1,), 0.2),
+                        policy_trajectory("b", (3, 4), (1,), (-0.2,), 0.8),
+                    ),
+                )
+            )
+            for sample in group
         ),
     )
 
@@ -338,11 +352,11 @@ def test_slime_preparation_honors_sample_scheduling_and_actual_batch_size() -> N
 
 @pytest.mark.unit
 def test_slime_preparation_assigns_distinct_stable_ids_to_policy_samples() -> None:
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "batch",
         (
-            PolicySample("a", (1,), (1,), (-0.1,), 0.2),
-            PolicySample("b", (2,), (1,), (-0.2,), 0.8),
+            policy_trajectory("a", (1,), (1,), (-0.1,), 0.2),
+            policy_trajectory("b", (2,), (1,), (-0.2,), 0.8),
         ),
     )
 
@@ -353,7 +367,7 @@ def test_slime_preparation_assigns_distinct_stable_ids_to_policy_samples() -> No
 
 @pytest.mark.unit
 def test_assembled_multi_turn_sample_uses_existing_slime_payload_path() -> None:
-    sample = PolicySample(
+    sample = policy_trajectory(
         "harbor-report",
         (10, 20, 11, 21),
         (1, 0, 1),
@@ -362,8 +376,8 @@ def test_assembled_multi_turn_sample_uses_existing_slime_payload_path() -> None:
         "wv-1",
         turn_count=2,
     )
-    assert sample.is_multi_turn
-    payload = _build_payload(PolicyBatch("batch", (sample,)), "sft", None, StepScheduling())
+    assert sample.training.get("turn_count", 1) > 1
+    payload = _build_payload(TrainingBatch("batch", (sample,)), "sft", None, StepScheduling())
 
     assert payload["samples"] == [["harbor-report", [10, 20, 11, 21], [1, 0, 1], [-0.1, 0.0, -0.2], 0.75]]
     converted = to_slime_rollout_data(payload)
@@ -1858,15 +1872,21 @@ def test_driver_sao_options_strip_sao_flags_and_project_them_onto_args() -> None
     assert defaults.sao_lambda_alpha == 1.5
 
 
-def _grouped_batch(groups: int, size: int, batch_id: str = "batch") -> GroupedPolicyBatch:
-    return GroupedPolicyBatch(
+def _grouped_batch(groups: int, size: int, batch_id: str = "batch") -> TrainingBatch:
+    return TrainingBatch(
         batch_id,
         tuple(
-            tuple(
-                PolicySample(f"g{group}-s{index}", (group, index), (1,), (-0.1,), float(index))
-                for index in range(size)
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                tuple(
+                    tuple(
+                        policy_trajectory(f"g{group}-s{index}", (group, index), (1,), (-0.1,), float(index))
+                        for index in range(size)
+                    )
+                    for group in range(groups)
+                )
             )
-            for group in range(groups)
+            for sample in group
         ),
     )
 
@@ -1946,9 +1966,12 @@ def test_slime_preparation_remainder_policy() -> None:
 
 @pytest.mark.unit
 def test_slime_preparation_actual_batch_size_applies_to_policy_batches() -> None:
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "batch",
-        (PolicySample("a", (1,), (1,), (-0.1,), 0.2), PolicySample("b", (2,), (1,), (-0.2,), 0.8)),
+        (
+            policy_trajectory("a", (1,), (1,), (-0.1,), 0.2),
+            policy_trajectory("b", (2,), (1,), (-0.2,), 0.8),
+        ),
     )
 
     payload = _build_payload(batch, "sft", None, StepScheduling(batch_size="actual"))

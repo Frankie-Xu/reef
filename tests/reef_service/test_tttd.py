@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import math
 import sys
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from recipes.tttd.preparer import TttdPreparer
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
+from reef.core.trajectories import trajectory_reward
 from reef.train import ProcessorContext
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.types import TrajectoryItem, trajectory_groups
 
 
 class _ExperimentLogger:
@@ -155,8 +159,8 @@ def test_tttd_waits_for_every_rollout_in_one_policy_step() -> None:
     assert processor.ready()
     batch = processor.build_batch()
     assert batch.batch_id == "discovery:tttd:0"
-    assert len(batch.comparison_sets) == 2
-    assert [[sample.reward for sample in group] for group in batch.comparison_sets] == [
+    assert len(trajectory_groups(batch)) == 2
+    assert [[trajectory_reward(sample) for sample in group] for group in trajectory_groups(batch)] == [
         [0.0, 1.0, 2.0],
         [1.0, 2.0, 3.0],
     ]
@@ -230,14 +234,14 @@ def test_tttd_caches_policy_samples_at_ingest(monkeypatch) -> None:
     from reef.train.processors import reported as reported_module
 
     calls = 0
-    make_sample = reported_module.make_policy_sample
+    make_sample = reported_module.make_policy_trajectory
 
     def counted_make_sample(*args, **kwargs):
         nonlocal calls
         calls += 1
         return make_sample(*args, **kwargs)
 
-    monkeypatch.setattr(reported_module, "make_policy_sample", counted_make_sample)
+    monkeypatch.setattr(reported_module, "make_policy_trajectory", counted_make_sample)
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
@@ -262,7 +266,9 @@ def test_tttd_refuses_reports_before_their_inferences() -> None:
     for group in range(2):
         for rollout in range(3):
             processor.ingest(_report(0, group, rollout, float(group + rollout)))
-    assert [[sample.reward for sample in group] for group in processor.build_batch().comparison_sets] == [
+    assert [
+        [trajectory_reward(sample) for sample in group] for group in trajectory_groups(processor.build_batch())
+    ] == [
         [0.0, 1.0, 2.0],
         [1.0, 2.0, 3.0],
     ]
@@ -288,8 +294,8 @@ def test_tttd_filters_constant_groups_after_step_barrier() -> None:
 
     batch = processor.build_batch()
 
-    assert len(batch.comparison_sets) == 1
-    assert [sample.reward for sample in batch.comparison_sets[0]] == [1.0, 2.0, 3.0]
+    assert len(trajectory_groups(batch)) == 1
+    assert [trajectory_reward(sample) for sample in trajectory_groups(batch)[0]] == [1.0, 2.0, 3.0]
 
 
 @pytest.mark.unit
@@ -334,7 +340,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
     batch = processor.build_batch()
     result = prepare_slime_step(batch, "tttd", {})
 
-    assert len(batch.comparison_sets) == 1
+    assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None
     assert result.payload["advantages"] == pytest.approx([0.0, 0.0, 0.0], abs=1e-10)
     assert result.payload["loss"] == "tttd"
@@ -507,14 +513,28 @@ def test_tttd_preparer_flags_a_batch_of_constant_groups() -> None:
     # constant; the preparer reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
     from reef.train.algos.registry import resolve_preparer
-    from reef.train.types import GroupedPolicyBatch, PolicySample
+    from reef.train.types import TrainingBatch
 
-    def sample(record_id: str, reward: float) -> PolicySample:
-        return PolicySample(record_id, (5, 1), (1,), (-0.1,), reward)
+    def sample(record_id: str, reward: float) -> TrajectoryItem:
+        return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
     preparer = resolve_preparer("tttd")
-    constant = GroupedPolicyBatch("b", ((sample("a", 1.0), sample("b", 1.0)),))
-    mixed = GroupedPolicyBatch("b", ((sample("a", 1.0), sample("b", 0.0)),))
+    constant = TrainingBatch(
+        "b",
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(((sample("a", 1.0), sample("b", 1.0)),))
+            for sample in group
+        ),
+    )
+    mixed = TrainingBatch(
+        "b",
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(((sample("a", 1.0), sample("b", 0.0)),))
+            for sample in group
+        ),
+    )
 
     assert preparer(constant, {}).metrics["constant_groups_retained"] == 1
     assert preparer(mixed, {}).metrics["constant_groups_retained"] == 0

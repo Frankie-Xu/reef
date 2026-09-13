@@ -52,7 +52,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.storage.records import RecordStore
 from reef.train.cordis_backend.strategies import Proposer, resolve_proposer
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 from .archive import Archive
 from .backend import ARCHIVE_STATE_KEY, GEPABackend
@@ -77,7 +77,7 @@ class _UnboundProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: Any,
         *,
         manifest: Any = None,

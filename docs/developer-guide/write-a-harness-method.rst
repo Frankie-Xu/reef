@@ -18,9 +18,12 @@ A method fills three slots:
        def decide(self, candidate, evaluation) -> SelectionDecision: ...
 
 ``propose`` sees the tree as ``(kind, config)`` pairs, the batch of
-``TraceSample`` records (recorded request payload, score, source receipt), and
+ATIF ``TrajectoryItem`` values, and
 ``models``, its only path to a model. ``models.served`` is the model under
-test, ``models["teacher"]`` comes from ``evolution.models``. Call each binding
+test, ``models["teacher"]`` comes from ``evolution.models``. Read the trajectory
+from ``item.trajectory``, reward/feedback from ``item.metadata``, and original
+provider exchanges through ``reef.core.trajectories.recorded_payloads``.
+Call each binding
 as ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The
 ``messages`` are OpenAI-shaped regardless of the endpoint's dialect, and the
 binding returns the assistant text. ``propose`` returns one ``Mutation``

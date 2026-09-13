@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
+from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe, RecipeConfigError
 from reef.runtime.base import TrainingRuntime
@@ -23,7 +24,7 @@ from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.processors.base import DataProcessor
 from reef.train.trainer import Trainer
-from reef.train.types import ProcessorContext, TraceBatch
+from reef.train.types import ProcessorContext, TrainingBatch
 
 from .runtime_stubs import StubTrainingRuntime
 from .test_harness_proposals import _dispatcher, _recipe
@@ -121,7 +122,7 @@ def test_manual_waits_for_instruction_without_automatic_batch_gates(processor, b
     assert result is not None
     batch = backend.batches[0]
     assert batch.request.text == "request-1"
-    assert batch.samples == ()
+    assert batch.items == ()
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == frozenset({"request-1"})
     assert prepared.metrics["training_request"]["text"] == "request-1"
@@ -142,7 +143,7 @@ def test_auto_keeps_recipe_batching():
     assert trainer.run_once() is None
     records.append(inference("b"))
     assert trainer.run_once() is not None
-    assert [sample.source_agent_record_id for sample in backend.batches[0].samples] == ["a", "b"]
+    assert [source_record_id(sample) for sample in backend.batches[0].items] == ["a", "b"]
     assert backend.batches[0].request is None
     trainer.close()
     records.close()
@@ -163,7 +164,7 @@ def test_dispatched_manual_reserves_one_instruction_and_leaves_the_next_pending(
     trainer.apply_compaction(prepared.compacted_ids)
     second = trainer.reserve_training_batch()
     assert second.request.text == "two"
-    assert second.samples == ()
+    assert second.items == ()
     trainer.close()
     records.close()
 
@@ -274,7 +275,7 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
         output_schema = ExampleBatch
 
         def make_training_batch(self, batch_number, request):
-            return ExampleBatch(request.id, (request.text,))
+            return ExampleBatch(request.id, values=(request.text,))
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         InstructionProcessor(ProcessorContext("s"))
@@ -359,7 +360,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
             return self._pending is not None or (len(self.exchanges) >= 2 and super().ready())
 
         def make_training_batch(self, batch_number, request):
-            return ExampleBatch("custom-batch", tuple(record.agent_record_id for record in self.exchanges))
+            return ExampleBatch("custom-batch", values=tuple(record.agent_record_id for record in self.exchanges))
 
         def _consume_pending(self):
             consumed = frozenset(record.agent_record_id for record in self.exchanges)
@@ -422,8 +423,10 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
             "reason": "unrelated",
         },
     )
-    batch = TraceBatch(
-        "manual-request", (), request=TrainingRequest("Follow the request", "session", "r", "request-id")
+    batch = TrainingBatch(
+        "manual-request",
+        (),
+        request=TrainingRequest("Follow the request", "session", "r", "request-id"),
     )
     prepared = backend.prepare_step(batch, state, 0)
     assert prepared.outcome == "skip"
@@ -493,7 +496,7 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions()
         assert trainer.run_once() is None
         records.append(inference("b"))
         result = trainer.run_once()
-        assert [item.source_agent_record_id for item in backend.batches[-1].samples] == ["a", "b"]
+        assert [source_record_id(item) for item in backend.batches[-1].items] == ["a", "b"]
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
         trainer.apply_compaction(prepared.compacted_ids)
@@ -726,7 +729,7 @@ def test_hybrid_skips_a_failed_instruction_before_the_next_and_keeps_the_failure
 
     def propose(nodes, samples, models, *, requests=()):
         text = requests[0]["text"] if requests else None
-        calls.append((text, tuple(sample.source_agent_record_id for sample in samples)))
+        calls.append((text, tuple(source_record_id(sample) for sample in samples)))
         if text == "poison":
             if len(calls) == 1:
                 entered.set()
@@ -771,7 +774,7 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
 
     def propose(nodes, samples, models, *, requests=()):
         text = requests[0]["text"] if requests else None
-        calls.append((text, tuple(sample.source_agent_record_id for sample in samples)))
+        calls.append((text, tuple(source_record_id(sample) for sample in samples)))
         if text == "poison":
             if len(calls) == 1:
                 entered.set()
@@ -817,7 +820,7 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
     seen = []
 
     def propose_again(nodes, samples, models, *, requests=()):
-        seen.append((requests[0]["text"] if requests else None, tuple(s.source_agent_record_id for s in samples)))
+        seen.append((requests[0]["text"] if requests else None, tuple(source_record_id(s) for s in samples)))
         return
 
     restarted = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose_again), training_mode="hybrid"))
@@ -979,7 +982,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
 
         backend = trainer.training_backend
         state = {**backend.initial_state(), "steps": 5}
-        automatic = backend.prepare_step(TraceBatch("auto", ()), state, 5)
+        automatic = backend.prepare_step(TrainingBatch("auto", ()), state, 5)
         assert automatic.metrics["skipped"] == "step budget of 1 exhausted"
         assert seen == ["one", "two"]
     finally:
@@ -992,10 +995,10 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
     try:
         backend = trainer.training_backend
         state = {**backend.initial_state(), "failure_streak": 1}
-        automatic = backend.prepare_step(TraceBatch("auto", ()), state, 0)
+        automatic = backend.prepare_step(TrainingBatch("auto", ()), state, 0)
         assert automatic.metrics["skipped"] == "failure streak breaker open after 1 consecutive rejections"
         request = TrainingRequest("Follow the request", "session", "r", "request-id")
-        asked = backend.prepare_step(TraceBatch("request-id", (), request=request), state, 0)
+        asked = backend.prepare_step(TrainingBatch("request-id", (), request=request), state, 0)
         assert asked.metrics["skipped"] == "no proposal" and seen[-1] == "Follow the request"
     finally:
         trainer.close()
@@ -1024,7 +1027,7 @@ def test_manual_traffic_is_available_to_auto_without_reingestion(processor):
         assert trainer.run_once() is not None
         assert trainer.processor is original
         assert trainer.data_offset == offset
-        assert [sample.source_agent_record_id for sample in backend.batches[-1].samples] == ["a", "b"]
+        assert [source_record_id(sample) for sample in backend.batches[-1].items] == ["a", "b"]
     finally:
         trainer.close()
         records.close()
@@ -1067,7 +1070,7 @@ def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor
         batch = backend.batches[0]
         assert batch.batch_id == "s:instruction:alone"
         assert batch.request.text == "alone"
-        assert batch.samples == ()
+        assert batch.items == ()
         prepared = trainer.prepare_commit(result)
         assert prepared.consumed_ids == frozenset({"alone"})
         assert prepared.metrics["training_request"]["id"] == "alone"
@@ -1092,7 +1095,7 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
         result = trainer.run_once()
         batch = backend.batches[0]
         assert batch.request.id == "with-context"
-        assert [sample.source_agent_record_id for sample in batch.samples] == ["a"]
+        assert [source_record_id(sample) for sample in batch.items] == ["a"]
         prepared = trainer.prepare_commit(result)
         assert {"a", "with-context"} <= prepared.consumed_ids
         trainer.commit(prepared)
@@ -1101,7 +1104,7 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
         records.append(instruction("after"))
         assert trainer.run_once() is not None
         assert backend.batches[1].request.id == "after"
-        assert backend.batches[1].samples == ()
+        assert backend.batches[1].items == ()
     finally:
         trainer.close()
         records.close()
@@ -1131,7 +1134,7 @@ def test_hybrid_batches_as_auto_does_without_an_instruction():
     batch = processor.build_batch()
     assert batch.batch_id == "s:harness_evolve:1"
     assert batch.request is None
-    assert [sample.source_agent_record_id for sample in batch.samples] == ["a"]
+    assert [source_record_id(sample) for sample in batch.items] == ["a"]
     assert processor.acknowledge(batch.batch_id) == frozenset({"a", "report-a"})
     processor.close()
 
@@ -1149,7 +1152,7 @@ def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_m
         trainer.apply_compaction(prepared.compacted_ids)
         batch = backend.batches[-1]
         request = None if batch.request is None else batch.request.id
-        return request, [sample.source_agent_record_id for sample in batch.samples]
+        return request, [source_record_id(sample) for sample in batch.items]
 
     try:
         failure(records, "a")
@@ -1190,7 +1193,7 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
         failure(records, "b")
         result = trainer.run_once()
         assert backend.batches[-1].request is None
-        assert [sample.source_agent_record_id for sample in backend.batches[-1].samples] == ["a", "b"]
+        assert [source_record_id(sample) for sample in backend.batches[-1].items] == ["a", "b"]
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
         trainer.apply_compaction(prepared.compacted_ids)
@@ -1198,7 +1201,7 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
         trainer.set_training_mode("hybrid")
         result = trainer.run_once(1)
         assert backend.batches[-1].request.id == "later"
-        assert backend.batches[-1].samples == ()
+        assert backend.batches[-1].items == ()
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
         assert trainer.run_once(2) is None
@@ -1214,7 +1217,7 @@ def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_pa
         seen.append(
             (
                 tuple(request["text"] for request in requests),
-                tuple(sample.source_agent_record_id for sample in samples),
+                tuple(source_record_id(sample) for sample in samples),
             )
         )
 
@@ -1319,7 +1322,7 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     assert len(caplog.records) == 1
     manual.ingest(instruction("do-it"))
     batch = manual.build_batch()
-    assert batch.samples == ()
+    assert batch.items == ()
     assert manual.acknowledge(batch.batch_id) == frozenset({"do-it"})
     assert manual._ready_count() == 4
     manual.close()
@@ -1344,7 +1347,7 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
         calls.append(
             (
                 tuple(request["text"] for request in requests),
-                tuple(sample.source_agent_record_id for sample in samples),
+                tuple(source_record_id(sample) for sample in samples),
             )
         )
 
