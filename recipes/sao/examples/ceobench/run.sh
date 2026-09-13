@@ -20,6 +20,13 @@ export REEF_SCENARIO="${REEF_SCENARIO:-ceobench-sao}"
 export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-24576}"
 # The agent's shell runs as this unprivileged user inside the task container.
 export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
+# The runner's own limits, widened for a paced game (reef.patch reads them):
+# a bash command such as next-week may take an hour (the engine gives up at
+# 4200 s), an LLM call may wait through a pacer hold, and one simulator
+# request is bounded so a stuck call fails instead of stalling the week.
+export SAAS_BENCH_BASH_TIMEOUT="${SAAS_BENCH_BASH_TIMEOUT:-3600}"
+export SAAS_BENCH_LLM_TIMEOUT="${SAAS_BENCH_LLM_TIMEOUT:-1800}"
+export SAAS_BENCH_SIMULATOR_TIMEOUT_S="${SAAS_BENCH_SIMULATOR_TIMEOUT_S:-300}"
 # Pace the game to the trainer: the recipe's batch size (serve.yaml), so each
 # new week starts only after the reported weeks' batches have committed.
 export CEOBENCH_PACE_BATCH="${CEOBENCH_PACE_BATCH:-16}"

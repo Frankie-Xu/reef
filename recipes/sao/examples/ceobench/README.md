@@ -77,7 +77,7 @@ cash below zero, and `reward` as final cash over the starting balance
 ### The patch to CEO-Bench
 
 `reef.patch` is applied to the pinned checkout at image build time and the
-public bundle is rebuilt so the engine carries it. Five hunks:
+public bundle is rebuilt so the engine carries it. Seven changes:
 
 - `agents/bash_agent/agent.py`: `SAAS_BENCH_OPENAI_CHAT_COMPLETIONS=1` pins the
   agent to `/v1/chat/completions`. The runner otherwise prefers the OpenAI
@@ -110,6 +110,15 @@ public bundle is rebuilt so the engine carries it. Five hunks:
   and the runner hands it the workspace. The image creates the user
   (`agent`), keeps the engine's source and host-side bundle root-only, and
   `run.sh` sets the variable.
+- `agents/bash_agent/tools.py`, `agents/bash_agent/agent.py`,
+  `server_entry.py`: `SAAS_BENCH_BASH_TIMEOUT` (the runner's limit on one
+  bash command, `next-week` included; default 1200 s), `SAAS_BENCH_LLM_TIMEOUT`
+  (its hard wall clock per LLM call; default 600 s) and
+  `SAAS_BENCH_SIMULATOR_TIMEOUT_S` (one simulator request; default the
+  SDK's) override the runner's fixed limits. A paced game holds an LLM call
+  through a training step, and the first 500-day episode ended at day 385
+  as a runner "timeout" when the engine's `next-week` stalled past 1200 s.
+  `run.sh` sets 3600, 1800 and 300.
 
 Everything else is the benchmark as published: default `config.py`
 difficulty (competitor feedback range 0.2 to 0.5), the bash agent's prompt
@@ -171,8 +180,9 @@ waits until every batch the reported weeks filled has committed a training
 release. Week N is therefore always played by a policy trained on weeks 0
 to N-1, whatever the ratio of step time to play time; a wait longer than
 `CEOBENCH_PACE_TIMEOUT_S` (20 minutes, about four steps) is forgiven so a
-batch the recipe declined cannot hold the game forever. The untrained
-baseline runs with the pacer off.
+batch the recipe declined cannot hold the game forever; `run.sh` widens
+the runner's own per-call limit past it (`SAAS_BENCH_LLM_TIMEOUT`). The
+untrained baseline runs with the pacer off.
 
 Turns of one week share the week's score; the critic's skip-observation GAE
 does the credit assignment inside each turn. A weekly delta is dense enough
@@ -361,17 +371,58 @@ out. Cash was under $10,000 by week 25 and the company went bankrupt on day
 rule-based baseline at $15.8M; this run is not comparable with either
 because the simulator roles are local stand-ins.
 
+### Trained episode, seed 42, attempt 1
+
+`results/2026-09-13-ttt-qwen3.6-27b-seed42-attempt1/` holds the manifest,
+`weeks.csv` (every reported week: cash at both ends, score, turns reported
+of turns played) and `holds.csv` (the pacer's wait at each week start).
+Same seed and simulator roles as the baseline, the stack in `serve.yaml`,
+training on while the episode played.
+
+| | |
+| --- | --- |
+| Policy | `Qwen3.6-27B`, LoRA rank 32 on actor and critic, resident, 24k training window |
+| Outcome | ended at day 385 (week 55) by the runner's 1200 s limit on `next-week` (the engine stalled with no simulator request in flight); not bankrupt; final cash $252,634, `reward` 0.253 |
+| Turns | 456 in 4h49m; 423 (93%) fit the 24k window and were reported |
+| Training | 26 releases: 10 critic-only warm-up steps, then 16 actor updates, the first served from week 15 (day 105). A step took 4 to 6 minutes; the pacer held 26 week starts for 106 minutes in all, 9 minutes at most |
+| Actor step | peak 70 to 78 GB per GPU, idle 62 GB; first update: clip fraction 0.002, KL 0.0014 |
+
+| Week | Day | Cash | Subscribers |
+| ---: | ---: | ---: | ---: |
+| 1 | 7 | $814,290 | 39 |
+| 5 | 35 | $798,311 | 135 |
+| 10 | 70 | $791,183 | 192 |
+| 11 | 77 | $289,922 | 187 |
+| 15 | 105 | $287,260 | 171 |
+| 20 | 140 | $278,352 | 164 |
+| 30 | 210 | $267,377 | 10 |
+| 37 | 259 | $263,332 | 6 |
+| 45 | 315 | $258,584 | 0 |
+| 55 | 385 | $252,634 | 0 |
+
+Two decisions before any actor update set the trajectory: week 0's setup
+spend (-$185,710) and week 10's R&D start, tiers 1 and 2 for $500,000 in
+one day (-$501,261 for the week, scored -0.50). From week 15 the trained
+policy lost $600 to $2,300 a week, let the subscriber base lapse, and by
+week 45 ran a company with no customers and no revenue, calling `next-week`
+after two to five turns with "cash preservation" as its rationale. It
+outlived the untrained baseline (bankrupt on day 255) with $252k in hand,
+which is the number the weekly cash-delta reward asks for and a reading of
+what it rewards: doing nothing is a small negative every week, and growth
+is a large negative now for an uncertain positive later. One episode each
+at temperature 1.0, so the comparison is indicative, not a measurement.
+
 ### Not yet run
 
 - The untrained baseline with the benchmark's Anthropic simulator roles and
   more seeds (issue #428, acceptance criterion 1).
-- A trained 500-day episode on the same seed: the test-time-training number
-  this baseline exists for. The resident stack's step was validated on a
-  short paced episode (2026-09-13): 16 turns in about 7.5 minutes on first
-  use, compile warm-up included (critic forward 2.2 min, critic train 3.0
-  min, the second critic step 1 min, the actor step 1 min, the LoRA save
-  under a minute), peak 78 GB per GPU with turns of up to 32k tokens. The
-  episode is running with the 24k window; its result follows.
+- A trained episode that reaches day 497: attempt 2 runs with the runner's
+  limits widened (above). The resident stack's step was validated on a
+  short paced episode first (2026-09-13): 16 turns in about 7.5 minutes on
+  first use, compile warm-up included, peak 78 GB per GPU with turns of up
+  to 32k tokens.
+- A less myopic reward: a lag of `k` weeks or a judged turn-level signal
+  (see reward shaping), given what attempt 1's policy converged to.
 
 ## Open items
 

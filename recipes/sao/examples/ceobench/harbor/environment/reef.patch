@@ -1,5 +1,5 @@
 diff --git a/src/saas_bench/agents/bash_agent/agent.py b/src/saas_bench/agents/bash_agent/agent.py
-index d36de40..62a4dc2 100644
+index d36de40..8c40e7d 100644
 --- a/src/saas_bench/agents/bash_agent/agent.py
 +++ b/src/saas_bench/agents/bash_agent/agent.py
 @@ -82,6 +82,10 @@ class BashAgent(BaseAgent):
@@ -13,7 +13,17 @@ index d36de40..62a4dc2 100644
  
          # Build system prompt
          self.system_prompt = system_prompt or self._default_system_prompt()
-@@ -503,7 +507,9 @@ class BashAgent(BaseAgent):
+@@ -465,7 +469,8 @@ class BashAgent(BaseAgent):
+         import signal
+         import openai
+ 
+-        LLM_WALL_CLOCK_TIMEOUT = 600  # 10min hard wall-clock limit per LLM call
++        # SAAS_BENCH_LLM_TIMEOUT: the hard wall-clock limit per LLM call (default 10 min).
++        LLM_WALL_CLOCK_TIMEOUT = int(os.environ.get("SAAS_BENCH_LLM_TIMEOUT", "600"))
+ 
+         class LLMTimeoutError(Exception):
+             pass
+@@ -503,7 +508,9 @@ class BashAgent(BaseAgent):
                      'messages': messages,
                      'tools': tools,
                      'tool_choice': 'auto',
@@ -24,6 +34,15 @@ index d36de40..62a4dc2 100644
                      'temperature': 1.0,
                  }
                  _is_together = 'api.together.xyz' in (str(getattr(self.client, 'base_url', '') or ''))
+@@ -704,7 +711,7 @@ class BashAgent(BaseAgent):
+         import signal
+         import openai
+ 
+-        LLM_WALL_CLOCK_TIMEOUT = 600
++        LLM_WALL_CLOCK_TIMEOUT = int(os.environ.get("SAAS_BENCH_LLM_TIMEOUT", "600"))
+ 
+         class LLMTimeoutError(Exception):
+             pass
 diff --git a/src/saas_bench/agents/bash_agent/run_test.py b/src/saas_bench/agents/bash_agent/run_test.py
 index 3241bd2..e8c1adb 100644
 --- a/src/saas_bench/agents/bash_agent/run_test.py
@@ -44,10 +63,21 @@ index 3241bd2..e8c1adb 100644
              # Resuming — session already exists, find it
              checkpoint = self._load_checkpoint()
 diff --git a/src/saas_bench/agents/bash_agent/tools.py b/src/saas_bench/agents/bash_agent/tools.py
-index 9c0174e..7cfb64f 100644
+index 9c0174e..9f68b27 100644
 --- a/src/saas_bench/agents/bash_agent/tools.py
 +++ b/src/saas_bench/agents/bash_agent/tools.py
-@@ -419,8 +419,16 @@ class BashAgentToolExecutor:
+@@ -207,7 +207,9 @@ class BashAgentToolExecutor:
+         """
+         self.workspace_path = workspace_path
+         self.extra_env = env or {}
+-        self.bash_timeout = bash_timeout
++        # SAAS_BENCH_BASH_TIMEOUT: seconds a bash command (next-week included) may
++        # take before the runner ends the game as a timeout.
++        self.bash_timeout = int(os.environ.get("SAAS_BENCH_BASH_TIMEOUT", bash_timeout))
+ 
+     def execute(self, tool_name: str, args: Dict[str, Any]) -> str:
+         """Execute a tool and return the result string."""
+@@ -419,8 +421,16 @@ class BashAgentToolExecutor:
                  start_new_session=True,
              )
          else:
@@ -206,7 +236,7 @@ index e5dff0a..4a8e720 100644
 -    return text, response.usage.input_tokens, response.usage.output_tokens
 +    return text, response.usage.input_tokens or 0, response.usage.output_tokens or 0
 diff --git a/src/saas_bench/server_entry.py b/src/saas_bench/server_entry.py
-index fa76401..d8b5f1d 100644
+index fa76401..478720c 100644
 --- a/src/saas_bench/server_entry.py
 +++ b/src/saas_bench/server_entry.py
 @@ -125,12 +125,24 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
@@ -253,7 +283,19 @@ index fa76401..d8b5f1d 100644
  def _create_simulator_openai_client(config: BenchmarkConfig):
      if (
          config.social_post_llm_provider != "openai"
-@@ -203,11 +226,7 @@ def cmd_new_session(args, base: Path):
+@@ -174,7 +197,10 @@ def _create_simulator_openai_client(config: BenchmarkConfig):
+ 
+     from openai import OpenAI
+ 
+-    return OpenAI()
++    # SAAS_BENCH_SIMULATOR_TIMEOUT_S bounds one simulator request (the SDK's
++    # default is 600 s with two retries); unset keeps the SDK default.
++    timeout_s = os.environ.get("SAAS_BENCH_SIMULATOR_TIMEOUT_S")
++    return OpenAI(timeout=float(timeout_s)) if timeout_s else OpenAI()
+ 
+ 
+ # =========================================================================
+@@ -203,11 +229,7 @@ def cmd_new_session(args, base: Path):
      conn = init_database(":memory:")
  
      # Initialize simulator with customer simulator
@@ -266,7 +308,7 @@ index fa76401..d8b5f1d 100644
      simulator = Simulator(conn, config, rng, customer_simulator=customer_sim)
      simulator.initialize()
  
-@@ -289,11 +308,7 @@ def cmd_start_server(args, base: Path):
+@@ -289,11 +311,7 @@ def cmd_start_server(args, base: Path):
      _restore_simulator_llm_config(config, meta)
      meta["simulator_llm"] = _apply_simulator_llm_config(config)
  
