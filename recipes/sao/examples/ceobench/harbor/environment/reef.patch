@@ -44,10 +44,22 @@ index d36de40..8c40e7d 100644
          class LLMTimeoutError(Exception):
              pass
 diff --git a/src/saas_bench/agents/bash_agent/run_test.py b/src/saas_bench/agents/bash_agent/run_test.py
-index 3241bd2..e8c1adb 100644
+index 3241bd2..03a4380 100644
 --- a/src/saas_bench/agents/bash_agent/run_test.py
 +++ b/src/saas_bench/agents/bash_agent/run_test.py
-@@ -924,6 +924,14 @@ __pycache__/
+@@ -264,7 +264,10 @@ class BashAgentRunner:
+             client_kwargs = {"api_key": self.api_key}
+             if self.base_url:
+                 client_kwargs["base_url"] = self.base_url
+-            client_kwargs["timeout"] = httpx.Timeout(600.0)  # 10min max per LLM call; retry on timeout
++            # SAAS_BENCH_LLM_TIMEOUT also bounds the HTTP client (default 10 min per LLM
++            # call; retry on timeout), so a call held by the serving side is not retried
++            # while the original is still pending.
++            client_kwargs["timeout"] = httpx.Timeout(float(os.environ.get("SAAS_BENCH_LLM_TIMEOUT", "600")))
+             self.client = OpenAI(**client_kwargs)
+ 
+         # Components (initialized in setup)
+@@ -924,6 +927,14 @@ __pycache__/
          # ── Step 1: Copy public/ and create session via CLI ──
          if not self.continue_from:
              session_info = self._initialize_from_public_repo()

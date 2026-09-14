@@ -514,9 +514,11 @@ def test_gate_closes_the_previous_week_before_serving_the_next(monkeypatch) -> N
     reported = agent._client.calls[0][1]["metadata"]["ceobench"]
     assert (reported["cash_end"], reported["value_end"]) == (982_311.0, 982_311.0)
     assert waits == [(1, 2)]
-    # Later requests of the same week pass without another wait.
+    # Later requests of the same week report nothing new but still wait for
+    # the trainer, so no turn is generated while a step publishes.
     agent._gate_week(_start(agent_module, 1, 7, 982_311.0))
-    assert waits == [(1, 2)]
+    assert [payload["references"] for _, payload in agent._client.calls] == [["r-1"], ["r-2"]]
+    assert waits == [(1, 2), (1, 2)]
 
 
 @pytest.mark.unit

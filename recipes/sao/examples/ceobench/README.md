@@ -118,7 +118,10 @@ public bundle is rebuilt so the engine carries it. Seven changes:
   SDK's) override the runner's fixed limits. A paced game holds an LLM call
   through a training step, and the first 500-day episode ended at day 385
   as a runner "timeout" when the engine's `next-week` stalled past 1200 s.
-  `run.sh` sets 3600, 1800 and 300.
+  `SAAS_BENCH_LLM_TIMEOUT` also sets the OpenAI client's HTTP timeout
+  (`httpx.Timeout(600)` in the runner), which otherwise retried a call the
+  serving side was still holding and left the original pending. `run.sh`
+  sets 3600, 1800 and 300.
 
 Everything else is the benchmark as published: default `config.py`
 difficulty (competitor feedback range 0.2 to 0.5), the bash agent's prompt
@@ -208,13 +211,17 @@ starts from an earlier episode's critic with two warm-up commits
 
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
 the recipe's batch size). The sidecar peeks at each request's dashboard;
-the first request of a new week closes the week before it, reports it, and
-waits until every batch the reported weeks filled has committed a training
-release. Week N is therefore always played by a policy trained on weeks 0
-to N-1, whatever the ratio of step time to play time; a wait longer than
-`CEOBENCH_PACE_TIMEOUT_S` (20 minutes, about four steps) is forgiven so a
-batch the recipe declined cannot hold the game forever; `run.sh` widens
-the runner's own per-call limit past it (`SAAS_BENCH_LLM_TIMEOUT`). The
+the first request of a new week closes the weeks the credit window has
+finished and reports them, and every request waits until every batch the
+reported turns filled has committed a training release. A week is therefore
+played by a policy trained on every week reported so far, whatever the
+ratio of step time to play time, and no turn is generated while a step
+publishes its adapter: the engine cannot swap the adapter under a request
+in flight, and a publish that met one deadlocked both (2026-09-14). A wait
+longer than `CEOBENCH_PACE_TIMEOUT_S` (20 minutes, about four steps) is
+forgiven so a batch the recipe declined cannot hold the game forever;
+`run.sh` widens the runner's own per-call limits past it
+(`SAAS_BENCH_LLM_TIMEOUT`, the wall clock and the HTTP client's). The
 untrained baseline runs with the pacer off.
 
 Turns of one week share the week's score; the critic's skip-observation GAE

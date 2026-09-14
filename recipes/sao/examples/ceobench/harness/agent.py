@@ -50,12 +50,12 @@ opened after it. ``CEOBENCH_SCORE_CLIP`` (default 0.05) and
 running scale it is divided by before it is posted.
 
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
-to the recipe's batch size, the sidecar holds the first request of each new
-week until every batch the reported weeks filled has committed a training
-release, so week N is played by a policy trained on weeks 0 to N-1 rather
-than by whatever the trainer had reached. ``CEOBENCH_PACE_TIMEOUT_S``
-(default 1800) bounds one such wait; a batch the recipe declined would
-otherwise hold the game forever.
+to the recipe's batch size, the sidecar holds a request until every batch
+the reported weeks filled has committed a training release, so a week is
+played by a policy trained on every week the credit window has closed, and
+no turn is generated while a step publishes its adapter.
+``CEOBENCH_PACE_TIMEOUT_S`` (default 1800) bounds one such wait; a batch the
+recipe declined would otherwise hold the game forever.
 """
 
 import atexit
@@ -401,7 +401,7 @@ class TrainingPacer:
 
 
 def paced_handler(base_handler, gate):
-    """Wrap the sidecar's handler so a new week's first request waits for training."""
+    """Wrap the sidecar's handler so a request waits while a filled batch is still training."""
 
     class PacedHandler(base_handler):
         def _forward(self, forward_path: str, routed_session):
@@ -549,23 +549,31 @@ class HarborAgent(BaseAgent):
         return server
 
     def _gate_week(self, start: WeekStart) -> None:
-        """Before a week's first request is served, close the week before it and wait for training."""
-        week = start.week
-        if self._pacer is None or (self._gated_week is not None and week <= self._gated_week):
+        """Before a request is served, close the weeks its week finishes and wait for training.
+
+        A new week's first request closes the weeks the credit window
+        finished and reports them; every request then waits until the
+        batches the reported turns filled have committed, so no turn is
+        generated while a step publishes its adapter (the engine cannot swap
+        the adapter under a request in flight).
+        """
+        if self._pacer is None:
             return
-        self._gated_week = week
-        self.logger.info(
-            "week %d starts (day %d): cash %.0f, %d subscribers, %d seats, run-rate %.0f/month",
-            week,
-            start.day,
-            start.cash,
-            start.subscribers,
-            start.seats,
-            start.run_rate,
-        )
-        with self._ledger_lock:
-            self._ledger.announce(start)
-        self._post_finished_weeks()
+        week = start.week
+        if self._gated_week is None or week > self._gated_week:
+            self._gated_week = week
+            self.logger.info(
+                "week %d starts (day %d): cash %.0f, %d subscribers, %d seats, run-rate %.0f/month",
+                week,
+                start.day,
+                start.cash,
+                start.subscribers,
+                start.seats,
+                start.run_rate,
+            )
+            with self._ledger_lock:
+                self._ledger.announce(start)
+            self._post_finished_weeks()
         with self._ledger_lock:
             posted = sum(
                 self._reportable(entry["turns"])
