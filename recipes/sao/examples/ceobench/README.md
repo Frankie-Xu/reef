@@ -8,28 +8,33 @@ simulates an AI startup for 500 days from $1M in cash: 34 tools, a 19-table
 database, simulated social media, and a market with hidden preferences,
 competitor pressure, and delayed consequences. The primary metric is final
 cash; survival days and bankruptcy are secondary. The benchmark's own
-bash-agent baseline plays the game; here its agent role is served by Reef, so
-every model call is recorded and attributable, while the two simulator roles
-(social posts, enterprise customers) stay outside Reef, as
+bash agent plays the game: `harness/` is that agent, its loop played from
+the host with its prompt, tools, and tool executor taken from the pinned
+checkout, and its model calls served by Reef, so every call is recorded and
+attributable. The two simulator roles (social posts, enterprise customers)
+stay outside Reef, as
 [Guidance-TTT](../../../tttd/examples/guidance_ttt/README.md) keeps its frozen
 executor. This is step 1 of
 [issue #428](https://github.com/Human-Agent-Society/reef/issues/428) with one
 reward-shaping choice made for it (step 2 stays open; see below).
 
 ```text
-harbor/                one CEO-Bench episode as a Harbor task
+harbor/                one CEO-Bench episode as a Harbor task: the world and the verifier
   task.toml              48h agent window, resource limits
   instruction.md         what the task is (the model never sees it: CEO-Bench owns its prompt)
   environment/
     Dockerfile           python:3.13 + uv + the pinned CEO-Bench checkout, patched and rebuilt
-    reef.patch           the changes the checkout needs (below)
+    reef.patch           the changes the engine needs (below)
+    engine.py            starts the episode's session and engine; stops it for the verifier
   tests/
     test.sh              runs the verifier inside the task container
     score.py             decrypts the run's world.nmdb: reward, final cash, survival days, bankrupt
-harness/               agent harness (imports reef_client, not reef)
+harness/               the benchmark's bash agent (imports reef_client, not reef)
   __init__.py            lazily exports HarborAgent
-  agent.py               HarborAgent: sidecar on the host, the benchmark runner in the container
-  report.py              values a week and posts its credit against its decision turns' receipts
+  agent.py               the agent: the benchmark's loop, conversation, feedback texts, retries
+  tools.py               its six tools, run in the agent's workspace inside the task container
+  harbor_agent.py        HarborAgent: one trial, the agent served by Reef and its weeks credited
+  report.py              the reward: weeks, valuation and credit, scaled scores, posting, the pacer
 serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic colocated
 docker-compose.yaml    the stack in the reef image, host networking, six GPUs
 run.py                 one episode, trained while it is played
@@ -40,49 +45,65 @@ results/               the untrained baseline and the trained episode: weeks.csv
 
 ## The harness
 
-Harbor gives the trial a container built from `harbor/environment/Dockerfile`:
-CEO-Bench at commit `d2b7b32e` with its own `uv` environment (Python 3.13,
-SQLCipher reader included) and a rebuilt public bundle. `HarborAgent.run`
-then does three things.
+`harness/` is CEO-Bench's bash agent, the way the benchmark's own
+`bash_agent/` package is `agent.py` and `tools.py`. What the model is asked,
+what it may call, and what its tools return are the benchmark's; what the
+harness adds is where the model calls go, when a week is credited, and how
+long the game waits for the trainer.
 
-1. **A reef-client sidecar on the host.** `reef_client.serve` listens on an
-   ephemeral port, replaces the `Authorization` header with the Reef token,
-   stamps `x-reef-scenario`, forwards everything else to Reef unchanged, and
-   keeps each `/v1/chat/completions` exchange with its
-   `x-reef-agent-record-id` receipt. The benchmark's OpenAI client sees a plain
-   base URL.
-2. **The benchmark runner in the container.** One `exec` runs
-   `saas_bench.agents.bash_agent.run_test --provider openai --base-url
-   http://<host>:<port>/v1 --seed S --days D`, the paper's baseline with the
-   agent role redirected. The container reaches the host by the LAN address in
-   `REEF_SERVICE_URL`, which is why Reef listens on `0.0.0.0` and `run.sh`
-   derives the URL from `hostname -I`. `SAAS_BENCH_*`, `OPENAI_*`,
-   `ANTHROPIC_*`, and `AWS_*` variables are forwarded into that `exec` for the
-   simulator roles; nothing else from the host environment is.
-3. **The run directory and the receipts.** When the runner exits, the run
-   directory (`world.nmdb`, `config.json`, `checkpoint.json`, `logs/`,
-   `agent_workspace/`) is downloaded next to the trial's agent logs, the
-   receipts go into the agent context in call order with their week and
-   token count, and the sidecar stops.
+- **`agent.py`** is the benchmark's `BashAgent` at the pinned commit, its
+  OpenAI chat-completions path, kept step for step: the conversation starts
+  empty and is rebuilt from the system prompt (with the workspace's
+  `MEMORY.md` appended) at every week advance; one tool call per turn, the
+  rest of a response's calls answered `[Skipped - only one tool per turn
+  ...]`; the benchmark's feedback texts for a response without a tool call or
+  with arguments that are not JSON; its retry rules for API errors. The
+  prompt and the tool definitions are not copied into this repository: when
+  an episode starts the harness reads them from the pinned checkout in the
+  task image, built by the benchmark's own classes, so they are the
+  benchmark's byte for byte.
+- **`tools.py`** is the benchmark's tool executor: `bash`, `read_file`,
+  `write_file`, `edit_file`, `search_files`, and `glob_files`, confined to
+  the agent's workspace, with the same shell environment, output assembly
+  (`[stderr]`, `[exit code: N]`, the 30,000-character cut), timeout rules,
+  and file semantics. The harness uploads it into the task container and
+  runs each call through Harbor's `exec` as the unprivileged `agent` user;
+  the benchmark sandboxes the same shell with `bwrap` where it can, and here
+  the container and the user boundary are the sandbox.
+- **`harbor_agent.py`** plays one Harbor trial. It has the task start the
+  episode's engine session (`harbor/environment/engine.py`), reads the
+  engine's status, dashboard, and books over its HTTP API, and serves every
+  model call through a reef-client proxy on the host's loopback:
+  `reef_client.serve` replaces the `Authorization` header with the Reef
+  token, stamps `x-reef-scenario`, forwards the request body unchanged, and
+  keeps each exchange with its `x-reef-agent-record-id` receipt. The agent's
+  OpenAI client sees a plain base URL.
+- **`report.py`** is the reward. Every captured turn is filed under the
+  simulated week it was played in (the harness knows the engine's day at
+  every call), a finished week is credited as described under "Reward
+  shaping", and its decision turns are posted to Reef while the episode
+  runs. The last weeks close with the final cash the engine reports when
+  the episode ends.
 
-Harbor then runs `tests/test.sh` in the same container. `score.py` opens the
-run's `world.nmdb` with the checkout's own `load_session_db` and writes
-`reward.json` with the final cash as the running sum of the `ledger` table,
-survival days as the last day any daily table reached, `bankrupt` as final
-cash below zero, and `reward` as final cash over the starting balance
-(1.0 is break-even). A watcher thread in the harness reads Harbor's
-`result.json` for the final cash that closes the episode's last week
-(`harness/report.py`).
+When the episode ends the run directory (`world.nmdb`, `config.json`,
+`logs/`, `agent_workspace/`) is downloaded next to the trial's agent logs,
+`turns.jsonl` there lists every tool call with its output, and the receipts
+go into the agent context in call order with their week, token count, and
+decision. Harbor then runs `tests/test.sh` in the same container, which
+stops the engine if the harness could not and scores the run: `score.py`
+opens the run's `world.nmdb` with the checkout's own `load_session_db` and
+writes `reward.json` with the final cash as the running sum of the `ledger`
+table, survival days as the last day any daily table reached, `bankrupt` as
+final cash below zero, and `reward` as final cash over the starting balance
+(1.0 is break-even).
 
 ### The patch to CEO-Bench
 
 `reef.patch` is applied to the pinned checkout at image build time and the
-public bundle is rebuilt so the engine carries it. Seven changes:
+public bundle is rebuilt so the engine carries it. It touches the engine
+only; the agent, its tools, and its runner live in `harness/`. Four
+changes:
 
-- `agents/bash_agent/agent.py`: `SAAS_BENCH_OPENAI_CHAT_COMPLETIONS=1` pins the
-  agent to `/v1/chat/completions`. The runner otherwise prefers the OpenAI
-  Responses API for any OpenAI-compatible endpoint it does not recognize, and
-  Reef serves chat completions and Anthropic messages.
 - `server_entry.py`: `SAAS_BENCH_<FIELD>` environment variables override the
   simulator roles' provider and model (`SOCIAL_POST_LLM_PROVIDER`,
   `SOCIAL_POST_LLM_MODEL`, `ENTERPRISE_LLM_PROVIDER`, `ENTERPRISE_LLM_MODEL`)
@@ -96,36 +117,23 @@ public bundle is rebuilt so the engine carries it. Seven changes:
 - `customer_llm.py`: token counts missing from a Responses reply count as
   zero instead of failing the cost log. SGLang's Responses endpoint fills
   `prompt_tokens` but not `input_tokens`.
-- `agents/bash_agent/agent.py`: `SAAS_BENCH_MAX_COMPLETION_TOKENS` caps the
-  agent's completion request (default 16384, the benchmark's value; `run.sh`
-  leaves it unset). It exists for engines whose window cannot hold the
-  default plus the prompt.
 - `customer_llm.py`, `simulation.py`: the two social-media functions that
   only had Bedrock and Anthropic paths (judging the agent's own post from
   each customer group's view, and a customer's reply to it) get the same
   OpenAI Responses fallback as the other simulator calls. Without it the
   engine's `next-week` fails the first time the agent posts.
-- `agents/bash_agent/tools.py`, `run_test.py`: with `SAAS_BENCH_TOOL_USER`
-  set and no `bwrap`, the agent's shell runs as that user through `setpriv`
-  and the runner hands it the workspace. The image creates the user
-  (`agent`), keeps the engine's source and host-side bundle root-only, and
-  `run.sh` sets the variable.
-- `agents/bash_agent/tools.py`, `agents/bash_agent/agent.py`,
-  `server_entry.py`: `SAAS_BENCH_BASH_TIMEOUT` (the runner's limit on one
-  bash command, `next-week` included; default 1200 s), `SAAS_BENCH_LLM_TIMEOUT`
-  (its hard wall clock per LLM call; default 600 s) and
-  `SAAS_BENCH_SIMULATOR_TIMEOUT_S` (one simulator request; default the
-  SDK's) override the runner's fixed limits. A paced game holds an LLM call
-  through a training step, and a `next-week` late in a long game can run
-  past 1200 s.
-  `SAAS_BENCH_LLM_TIMEOUT` also sets the OpenAI client's HTTP timeout
-  (`httpx.Timeout(600)` in the runner), which otherwise retried a call the
-  serving side was still holding and left the original pending. `run.sh`
-  sets 3600, 1800 and 300.
+- `server_entry.py`: `SAAS_BENCH_SIMULATOR_TIMEOUT_S` bounds one simulator
+  request (default the SDK's; `run.sh` sets 300), so a stuck call fails
+  instead of stalling the week.
 
 Everything else is the benchmark as published: default `config.py`
 difficulty (competitor feedback range 0.2 to 0.5), the bash agent's prompt
-and tools, and its `temperature=1.0` sampling.
+and tools, and its `temperature=1.0` sampling. The agent's tools run as the
+unprivileged `agent` user the image creates (`CEOBENCH_TOOL_USER` in
+`run.sh`), which keeps the engine's source and host-side bundle out of its
+reach, and `CEOBENCH_BASH_TIMEOUT_S` widens the benchmark's limit on one
+bash command from 1200 s to 3600 s, since a `next-week` late in a long game
+can run past it.
 
 ### Simulator roles
 
@@ -159,14 +167,15 @@ paper must use the benchmark's defaults.
 
 The reward is online and weekly. CEO-Bench advances in weeks: the agent works
 in one conversation until it calls `next-week`, the engine steps seven days
-and returns the next dashboard, and the runner rebuilds the conversation from
-it. Every request therefore carries the dashboard of the week it belongs to
+and returns the next dashboard, and the agent rebuilds its conversation from
+it. The harness plays the agent turn by turn and reads the engine's day
+after every tool call, so each captured turn is filed under its week, and
+each week's opening state comes from the engine's dashboard
 (`=== Week N Dashboard (Day D) ===`, then the opening cash, individual
-subscribers, and enterprise seats, and further down the listed plan prices),
-and the sidecar's captures let the harness group turns by week without
-touching the benchmark. A reporter thread polls those captures while the
-episode runs; when week N+1's dashboard appears, week N is over and each of
-its decision turns is reported with the week's change in company value:
+subscribers, and enterprise seats, and further down the listed plan prices).
+When week N+1 opens, week N is over and, once the credit window below has
+closed, each of its decision turns is reported with the week's change in
+company value:
 
     run_rate_N = the engine's MRR at the week's start (live subscriptions at their effective
                  price times seats), read through the task container; when that read fails,
@@ -181,8 +190,8 @@ updated adapter from then on. `H` is `CEOBENCH_VALUE_HORIZON_WEEKS` (26 in
 `run.sh`, about six months of a subscription, which stands in for retention);
 the weeks left are `days // 7 - N`, so the valuation converges on cash as the
 episode ends. The run-rate is the engine's own MRR: at each week start the
-week gate runs one SQL query against the runner's engine (`/query`, the
-same read-only endpoint the agent's `query` tool uses) through the task
+harness runs one SQL query against the engine (`/query`, the same
+read-only endpoint the agent's `query` tool uses) through the task
 container, as root and outside the agent's shell, so the agent's
 observation and tools are untouched (`CEOBENCH_ENGINE_READS=0` turns the
 read off). The dashboard estimate remains the fallback; it sees neither the
@@ -203,9 +212,9 @@ The credit spans `K = CEOBENCH_CREDIT_WEEKS` weeks (4) discounted by
 acquisition is credited with the subscribers that arrive over the weeks after
 it; a week is reported once `K` weeks have opened after it, and the pacer
 holds week N until the batches of weeks up to N-K-1 have committed. The
-last weeks close with the verifier's final cash, valued as cash alone, posted
-by a watcher thread once Harbor writes `result.json`, and a window that
-reaches the end is cut short there. Before it is posted the credit is clipped
+last weeks close with the final cash the engine reports when the episode
+ends (the number the verifier also reads from `world.nmdb`), valued as
+cash alone, and a window that reaches the end is cut short there. Before it is posted the credit is clipped
 at `C = CEOBENCH_SCORE_CLIP` (0.05, a $50,000 swing) and divided by the
 running median magnitude of the credits so far, floored at
 `F = CEOBENCH_SCORE_FLOOR` (0.003): one six-figure R&D purchase then cannot
@@ -215,19 +224,18 @@ benchmark's terminal metric (final cash over the starting balance); it is
 evaluation only.
 
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
-the recipe's batch size). The sidecar peeks at each request's dashboard;
-the first request of a new week closes the weeks the credit window has
-finished and reports them, and every request waits until every batch the
-reported turns filled has committed a training release. A week is therefore
+the recipe's batch size). Before each model call the harness closes the
+weeks the credit window has finished and reports them, then waits until
+every batch the reported turns filled has committed a training release. A week is therefore
 played by a policy trained on every week reported so far, whatever the
 ratio of step time to play time, and no turn is generated while a step
 publishes its adapter, since the engine cannot swap the adapter under a
 request in flight. A wait
 longer than `CEOBENCH_PACE_TIMEOUT_S` (20 minutes, about four steps) is
 forgiven so a batch the recipe declined cannot hold the game forever;
-`run.sh` widens the runner's own per-call limits past it
-(`SAAS_BENCH_LLM_TIMEOUT`, the wall clock and the HTTP client's). The
-untrained baseline runs with the pacer off.
+`run.sh` sets the model call's own limit past it (`CEOBENCH_LLM_TIMEOUT_S`,
+the HTTP client's timeout; the benchmark's loop retries a timed-out call).
+The untrained baseline runs with the pacer off.
 
 Turns of one week share the week's score; the critic's skip-observation GAE
 does the credit assignment inside each turn. A weekly credit is dense enough
@@ -291,7 +299,10 @@ curl -sS -H "Authorization: Bearer $(cat work/token)" \
 Seed 42, 500 days (the benchmark rounds it down to 71 whole weeks, 497
 days), the simulator roles as above, one episode each. Neither number is
 comparable with the leaderboard: the simulator roles are local stand-ins,
-and each row is one episode at temperature 1.0.
+and each row is one episode at temperature 1.0. Both episodes were played
+by the previous form of this harness, which ran the benchmark's own runner
+inside the task container with its agent role redirected to Reef; the
+harness above plays the same agent from the host and is to be re-run.
 
 | Policy | Reward | Outcome | Final cash | `reward` |
 | --- | --- | --- | ---: | ---: |
@@ -440,7 +451,7 @@ at all (`decisions_reported` in `weeks.csv`).
 - **Sandboxing.** The benchmark sandboxes the agent's shell with `bwrap` when
   present and falls back to plain execution otherwise. Here the Harbor
   container is the outer sandbox and the agent's shell runs as an
-  unprivileged user inside it (`SAAS_BENCH_TOOL_USER`), so it cannot signal
+  unprivileged user inside it (`CEOBENCH_TOOL_USER`), so it cannot signal
   the root-owned engine or read the engine's source and host-side bundle.
   The copy of
   the `novamind-operation` zipapp in the agent's workspace still embeds the

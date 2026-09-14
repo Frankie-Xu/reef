@@ -3,64 +3,40 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import importlib
 import json
 import runpy
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
 from tests.test_example_entrypoints import EXAMPLE_DIRS, _load_harness
 
 EXAMPLE_DIR = EXAMPLE_DIRS["ceobench"]
 SCORE_PATH = EXAMPLE_DIR / "harbor" / "tests" / "score.py"
+ENGINE_PATH = EXAMPLE_DIR / "harbor" / "environment" / "engine.py"
+PACKAGE = "_reef_ceobench_example_harness"
+
+
+def _modules(monkeypatch):
+    agent, report = _load_harness(monkeypatch, "ceobench")
+    return SimpleNamespace(
+        agent=agent,
+        report=report,
+        tools=importlib.import_module(f"{PACKAGE}.tools"),
+        harbor_agent=importlib.import_module(f"{PACKAGE}.harbor_agent"),
+    )
 
 
 def _load_score_module():
-    namespace = runpy.run_path(str(SCORE_PATH), run_name="score")
-    return SimpleNamespace(**namespace)
-
-
-class _Environment:
-    def __init__(self, return_code: int = 0) -> None:
-        self.return_code = return_code
-        self.commands: list[tuple[str, dict]] = []
-        self.downloads: list[tuple[str, Path]] = []
-
-    async def exec(self, command, env=None):
-        self.commands.append((command, dict(env or {})))
-        return SimpleNamespace(return_code=self.return_code, stdout="", stderr="")
-
-    async def download_dir(self, source_dir, target_dir):
-        self.downloads.append((source_dir, Path(target_dir)))
-
-
-class _Sidecar:
-    server_address = ("0.0.0.0", 29123)
-
-    def __init__(self) -> None:
-        self.stopped = False
-
-    def shutdown(self) -> None:
-        self.stopped = True
-
-
-class _Capture:
-    def __init__(self, turns: list[dict]) -> None:
-        self._turns = turns
-
-    def snapshot(self):
-        return list(self._turns)
-
-
-class _Client:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict]] = []
-
-    def report(self, scenario, payload, *, recipe=None):
-        self.calls.append((scenario, payload))
-        return {"accepted": True}
+    return SimpleNamespace(**runpy.run_path(str(SCORE_PATH), run_name="score"))
 
 
 def _dashboard(week: int, day: int, cash: int, *, subscribers: int = 0, seats: int = 0, prices=(0, 0, 0)) -> str:
@@ -72,38 +48,27 @@ def _dashboard(week: int, day: int, cash: int, *, subscribers: int = 0, seats: i
     )
 
 
-def _start(agent_module, week: int, day: int, cash: float, *, subscribers=0, seats=0, prices=(0.0, 0.0, 0.0)):
-    return agent_module.WeekStart(week, day, cash, subscribers, seats, prices)
+def _start(report, week: int, day: int, cash: float, *, subscribers=0, seats=0, prices=(0.0, 0.0, 0.0), mrr=None):
+    return report.WeekStart(week, day, cash, subscribers, seats, prices, mrr)
 
 
-def _turn(
-    receipt: str,
-    dashboard: str | None,
-    prompt_tokens: int,
-    completion_tokens: int,
-    *,
-    command: str | None = "./novamind-operation next-week 'rationale'",
-    tool: tuple[str, dict] | None = None,
-) -> dict:
+def _turn(receipt: str, prompt_tokens: int, completion_tokens: int, *, command=None, tool=None) -> dict:
     """A captured turn; by default its response calls ``next-week``, a decision."""
-    messages = [{"role": "system", "content": "You are the CEO."}]
-    if dashboard is not None:
-        messages.append({"role": "user", "content": dashboard})
     if tool is not None:
         name, arguments = tool
-    elif command is not None:
-        name, arguments = "bash", {"command": command}
     else:
-        name = None
-    message: dict = {"role": "assistant", "content": "" if name else "Thinking out loud."}
-    if name:
-        message["tool_calls"] = [
+        name, arguments = "bash", {"command": command or "./novamind-operation next-week 'rationale'"}
+    message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
             {"id": "call-1", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
-        ]
+        ],
+    }
     return {
         "status": 200,
         "receipt": receipt,
-        "request": {"messages": messages},
+        "request": {"messages": []},
         "response": {
             "choices": [{"message": message}],
             "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
@@ -111,654 +76,949 @@ def _turn(
     }
 
 
-def _agent(agent_module, monkeypatch, turns: list[dict], *, service_url="http://10.0.0.7:28900"):
-    import threading
-
-    agent = object.__new__(agent_module.HarborAgent)
-    agent.model_name = "reef"
-    agent.logs_dir = Path("/tmp/trial/agent")
-    agent.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
-    agent._service_url = service_url
-    agent._scenario = "ceobench-host-test"
-    agent._seed = 7
-    agent._days = 14
-    agent._client = _Client()
-    agent._capture = _Capture([])
-    # One week of credit and a scale that leaves small credits as they are,
-    # so the scores below read as the value changes they come from.
-    agent._ledger = agent_module.WeekLedger(total_weeks=2, credit_weeks=1)
-    agent._scale = agent_module.ScoreScale(clip=10.0, floor=1.0)
-    agent._engine_reads = False
-    agent._reports = True
-    agent._ledger_lock = threading.Lock()
-    agent._max_tokens = 0
-    sidecar = _Sidecar()
-
-    def start_sidecar():
-        agent._capture = _Capture(turns)
-        return sidecar
-
-    monkeypatch.setattr(agent, "_start_sidecar", start_sidecar)
-    monkeypatch.setattr(agent_module, "WEEK_POLL_S", 0.01)
-    return agent, sidecar
+def _tool_call(call_id: str, name: str, arguments) -> SimpleNamespace:
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=text), model_extra={})
 
 
-@pytest.mark.unit
-def test_runner_command_points_the_benchmark_agent_at_the_sidecar(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-
-    command = agent_module.runner_command("http://10.0.0.7:29123/v1", "reef", 42, 500)
-
-    assert command.startswith(f"mkdir -p {agent_module.RUNS_DIR} && cd {agent_module.CEOBENCH_DIR} && uv run")
-    assert "saas_bench.agents.bash_agent.run_test" in command
-    for flag in (
-        "--provider openai",
-        "--base-url http://10.0.0.7:29123/v1",
-        "--model reef",
-        "--seed 42",
-        "--days 500",
-    ):
-        assert flag in command
-    assert command.endswith(f"--workspace {agent_module.RUNS_DIR} > {agent_module.RUNS_DIR}/runner.log 2>&1")
-
-
-@pytest.mark.unit
-def test_forwarded_environment_keeps_simulator_settings_out_of_the_repository(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-
-    forwarded = agent_module.forwarded_environment(
-        {
-            "SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER": "openai",
-            "OPENAI_BASE_URL": "http://sim:30100/v1",
-            "ANTHROPIC_API_KEY": "secret",
-            "AWS_REGION": "us-east-2",
-            "HOME": "/home/x",
-            "REEF_TOKEN": "reef-local",
-        }
+def _response(*calls, content: str = "", prompt_tokens: int = 10, completion_tokens: int = 3) -> SimpleNamespace:
+    """A chat-completions response as the OpenAI SDK shapes it."""
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=list(calls) or None))],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
     )
 
-    assert forwarded == {
-        "SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER": "openai",
-        "OPENAI_BASE_URL": "http://sim:30100/v1",
-        "ANTHROPIC_API_KEY": "secret",
-        "AWS_REGION": "us-east-2",
-        "SAAS_BENCH_OPENAI_CHAT_COMPLETIONS": "1",
+
+class _Model:
+    """A scripted model behind the OpenAI client interface, recording each request."""
+
+    def __init__(self, responses, capture=None) -> None:
+        self.responses = list(responses)
+        self.requests: list[dict] = []
+        self.capture = capture
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        if self.capture is not None:
+            message = response.choices[0].message
+            self.capture.turns.append(
+                {
+                    "status": 200,
+                    "receipt": f"r-{len(self.requests)}",
+                    "request": kwargs,
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": message.content,
+                                    "tool_calls": [
+                                        {
+                                            "id": c.id,
+                                            "type": "function",
+                                            "function": {"name": c.function.name, "arguments": c.function.arguments},
+                                        }
+                                        for c in (message.tool_calls or [])
+                                    ],
+                                }
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": response.usage.prompt_tokens,
+                            "completion_tokens": response.usage.completion_tokens,
+                        },
+                    },
+                }
+            )
+        return response
+
+
+class _Capture:
+    def __init__(self) -> None:
+        self.turns: list[dict] = []
+
+    def snapshot(self):
+        return list(self.turns)
+
+    def __len__(self) -> int:
+        return len(self.turns)
+
+
+class _Notes:
+    def __init__(self, text: str | None = None) -> None:
+        self.text = text
+
+    def memory(self):
+        return self.text
+
+
+class _Client:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def report(self, scenario, payload, *, recipe=None):
+        self.calls.append((scenario, payload))
+        return {"accepted": True}
+
+
+class _Releases:
+    def __init__(self, counts) -> None:
+        self.counts = list(counts)
+
+    def training_releases(self):
+        return self.counts.pop(0) if len(self.counts) > 1 else self.counts[0]
+
+
+class _Simulation:
+    """A two-week company: ``next-week`` moves the day by seven and grows the base a little."""
+
+    def __init__(self, total_days: int = 14) -> None:
+        self.day = 0
+        self.cash = 1_000_000
+        self.subscribers = 0
+        self.total_days = total_days
+
+    def dashboard(self) -> str:
+        return _dashboard(self.day // 7, self.day, self.cash, subscribers=self.subscribers, prices=(10, 39, 99))
+
+    def status(self) -> dict:
+        return {"day": self.day, "cash": self.cash, "subscribers": self.subscribers, "timed_out": False}
+
+    def advance(self) -> None:
+        self.day += 7
+        self.cash -= 10_000
+        self.subscribers += 5
+
+
+class _Task:
+    """The task container as the harness drives it, over the simulation above."""
+
+    def __init__(self, simulation: _Simulation) -> None:
+        self.simulation = simulation
+        self.session = None
+        self.queries: list[str] = []
+        self.commits: list[int] = []
+        self.stopped = False
+        self.start_kwargs = None
+
+    def start_engine(self, **kwargs):
+        self.start_kwargs = kwargs
+        self.session = SimpleNamespace(
+            run_dir="/workspace/ceobench-runs/run_test",
+            workspace="/workspace/ceobench-runs/run_test/agent_workspace",
+            session_id="s1",
+            port=4242,
+            total_days=self.simulation.total_days,
+            initial_cash=kwargs["cash"],
+        )
+        return self.session
+
+    def contract(self, days, model):
+        return SimpleNamespace(
+            system_prompt=f"PROMPT for {days} days",
+            tools=[{"name": "bash", "description": "run bash", "parameters": {"type": "object"}}],
+        )
+
+    def status(self):
+        return self.simulation.status()
+
+    def dashboard(self):
+        return self.simulation.dashboard()
+
+    def query(self, sql):
+        self.queries.append(sql)
+        return [{"mrr": self.simulation.subscribers * 10.0}]
+
+    def commit_weeks(self, sim_day):
+        self.commits.append(sim_day)
+
+    def stop_engine(self):
+        self.stopped = True
+        return {"final": self.simulation.status(), "copied": True}
+
+
+class _Tools:
+    """The agent's tools over the simulation: ``next-week`` advances it, anything else says ok."""
+
+    def __init__(self, simulation: _Simulation, memory: str | None = None) -> None:
+        self.simulation = simulation
+        self.notes = memory
+        self.calls: list[tuple[str, dict]] = []
+        self.installed = False
+
+    def install(self):
+        self.installed = True
+
+    def execute(self, name, arguments):
+        self.calls.append((name, arguments))
+        if name == "bash" and "next-week" in arguments.get("command", ""):
+            self.simulation.advance()
+            return SimpleNamespace(result=self.simulation.dashboard(), timeout=None)
+        return SimpleNamespace(result="ok", timeout=None)
+
+    def memory(self):
+        return self.notes
+
+
+def _harness(monkeypatch, modules, tmp_path, *, env=None):
+    """A Harbor agent with its service settings set, week reporting initialized from ``env``."""
+    for key, value in {"CEOBENCH_CREDIT_WEEKS": "1", **(env or {})}.items():
+        monkeypatch.setenv(key, value)
+    harness = object.__new__(modules.harbor_agent.HarborAgent)
+    harness.model_name = "reef"
+    harness.logs_dir = tmp_path / "agent"
+    harness.logs_dir.mkdir(parents=True, exist_ok=True)
+    harness.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    harness._service_url = "http://10.0.0.7:28900"
+    harness._scenario = "ceobench-host-test"
+    harness._token = "reef-local"
+    harness._seed = 7
+    harness._days = 14
+    harness._client = _Client()
+    harness._llm_timeout_s = 30.0
+    harness._reasoning_effort = "none"
+    harness._max_completion_tokens = 16384
+    harness._tool_user = "agent"
+    harness._bash_timeout_s = 60
+    harness._init_week_reporting()
+    return harness
+
+
+def _play(monkeypatch, modules, harness, task, tools, responses):
+    """Run one episode of the harness against ``task`` and ``tools`` with a scripted model; return the context."""
+    capture = _Capture()
+    model = _Model(responses, capture)
+    server = SimpleNamespace(server_address=("127.0.0.1", 29123), stopped=False)
+    server.shutdown = lambda: setattr(server, "stopped", True)
+
+    def start_proxy():
+        harness._capture = capture
+        return server
+
+    downloads = []
+
+    class Environment:
+        async def download_dir(self, source, target):
+            downloads.append((source, Path(target)))
+
+    monkeypatch.setattr(harness, "_start_proxy", start_proxy)
+    monkeypatch.setattr(modules.harbor_agent, "TaskContainer", lambda environment, loop: task)
+    monkeypatch.setattr(modules.harbor_agent, "ContainerTools", lambda environment, loop, **kwargs: tools)
+    monkeypatch.setattr(modules.harbor_agent.openai, "OpenAI", lambda **kwargs: model)
+    context = SimpleNamespace(metadata={}, n_input_tokens=0, n_output_tokens=0)
+    asyncio.run(harness.run("play", Environment(), context))
+    assert server.stopped and task.stopped and tools.installed
+    return context, model, downloads
+
+
+# ---------------------------------------------------------------------------
+# The benchmark's agent loop (harness/agent.py)
+
+
+@pytest.mark.unit
+def test_agent_starts_without_a_system_prompt_and_rebuilds_it_each_week(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    model = _Model(
+        [
+            _response(_tool_call("c1", "bash", {"command": "ls"})),
+            _response(_tool_call("c2", "bash", {"command": "./novamind-operation next-week"})),
+            _response(_tool_call("c3", "bash", {"command": "cat MEMORY.md"})),
+        ]
+    )
+    notes = _Notes()
+    agent = modules.agent.BashAgent(
+        model, "reef", "PROMPT", [{"name": "bash", "description": "d", "parameters": {}}], notes
+    )
+
+    first = agent.act(_dashboard(0, 0, 1_000_000), {"day": 0, "cash": 1_000_000})
+    assert first.tool == "bash" and first.arguments == {"command": "ls"}
+    # Week 0 is played without a system prompt: the benchmark's conversation starts empty.
+    assert [m["role"] for m in model.requests[0]["messages"]] == ["user"]
+
+    second = agent.act("docs  novamind-operation", {"day": 0, "cash": 1_000_000})
+    assert second.arguments == {"command": "./novamind-operation next-week"}
+    tool_message = model.requests[1]["messages"][-1]
+    assert tool_message == {
+        "role": "tool",
+        "content": "docs  novamind-operation",
+        "tool_call_id": "c1",
+        "name": "bash",
     }
 
-
-@pytest.mark.unit
-def test_turn_week_parses_the_latest_dashboard(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-
-    fresh = _turn("r", _dashboard(0, 0, 1_000_000), 1, 1)
-    assert agent_module.turn_week(fresh) == _start(agent_module, 0, 0, 1_000_000.0)
-
-    # A transcript that still holds an earlier week's dashboard resolves to the latest one.
-    carried = _turn("r", _dashboard(0, 0, 1_000_000), 1, 1)
-    carried["request"]["messages"].append(
-        {"role": "tool", "content": "ok\n" + _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99))}
-    )
-    assert agent_module.turn_week(carried) == _start(
-        agent_module, 1, 7, 982_311.0, subscribers=3, prices=(10.0, 39.0, 99.0)
-    )
-
-    # The agent's own scripts print price lines; only the dashboard's configuration block counts.
-    scripted = _turn("r", _dashboard(0, 0, 1_000_000), 1, 1)
-    scripted["request"]["messages"].append(
-        {"role": "tool", "content": "=== Setup ===\nPrices: A=$15, B=$49, C=$149\n"}
-    )
-    assert agent_module.turn_week(scripted) == _start(agent_module, 0, 0, 1_000_000.0)
-
-    # Both spellings of a negative balance; a dashboard cut before its configuration block lists no prices.
-    for broke in ("Cash: -$1,234", "Cash: $-1,234"):
-        header = f"=== Week 9 Dashboard (Day 63) ===\n\n{broke}\nIndividual Subscribers: 0\nEnterprise Subscribed Seats: 0\n"
-        assert agent_module.turn_week(_turn("r", header, 1, 1)) == _start(agent_module, 9, 63, -1234.0)
-
-    assert agent_module.turn_week({"request": {"messages": [{"role": "user", "content": "hello"}]}}) is None
+    notes.text = "# Notes\nkeep prices"
+    agent.act(_dashboard(1, 7, 990_000), {"day": 7, "cash": 990_000})
+    messages = model.requests[2]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert messages[0]["content"].startswith("PROMPT\n\n## Your MEMORY.md (auto-loaded)\n\n")
+    assert messages[0]["content"].endswith("at the start of every day.\n\n# Notes\nkeep prices")
+    assert messages[1]["content"].startswith("=== Week 1 Dashboard (Day 7) ===")
+    assert agent.total_turns == 3 and agent.current_day == 7 and agent.turns_today == 1
 
 
 @pytest.mark.unit
-def test_week_start_run_rate_uses_the_lowest_listed_price_and_plan_c_for_seats(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+def test_agent_request_matches_the_benchmark_runner(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    tools = [{"name": "bash", "description": "Run bash", "parameters": {"type": "object", "properties": {}}}]
+    model = _Model([_response(_tool_call("c1", "bash", {"command": "ls"}), prompt_tokens=40, completion_tokens=5)])
+    agent = modules.agent.BashAgent(model, "reef", "PROMPT", tools, _Notes())
 
-    assert _start(agent_module, 1, 7, 0.0, subscribers=3, seats=10, prices=(10.0, 39.0, 99.0)).run_rate == 1020.0
-    assert _start(agent_module, 1, 7, 0.0, subscribers=2, prices=(0.0, 49.0, 99.0)).run_rate == 98.0
-    assert _start(agent_module, 1, 7, 0.0, subscribers=2, seats=4).run_rate == 0.0
+    agent.act("dashboard", {"day": 0})
+
+    request = model.requests[0]
+    assert set(request) == {
+        "model",
+        "messages",
+        "tools",
+        "tool_choice",
+        "max_completion_tokens",
+        "temperature",
+        "reasoning_effort",
+    }
+    assert request["model"] == "reef" and request["tool_choice"] == "auto" and request["temperature"] == 1.0
+    assert request["max_completion_tokens"] == 16384 and request["reasoning_effort"] == "none"
+    assert request["tools"] == [{"type": "function", "function": tools[0]}]
+    assert (agent.total_input_tokens, agent.total_output_tokens) == (40, 5)
+
+
+@pytest.mark.unit
+def test_agent_executes_the_first_tool_call_and_skips_the_rest(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    model = _Model(
+        [
+            _response(
+                _tool_call("c1", "read_file", {"path": "README.md"}), _tool_call("c2", "glob_files", {"pattern": "*"})
+            ),
+            _response(_tool_call("c3", "bash", {"command": "ls"})),
+        ]
+    )
+    agent = modules.agent.BashAgent(model, "reef", "PROMPT", [], _Notes())
+
+    action = agent.act("dashboard", {"day": 0})
+    assert (action.tool, action.arguments) == ("read_file", {"path": "README.md"})
+
+    agent.act("# README", {"day": 0})
+    messages = model.requests[1]["messages"]
+    assert messages[1]["role"] == "assistant" and [c["id"] for c in messages[1]["tool_calls"]] == ["c1", "c2"]
+    assert messages[2] == {
+        "role": "tool",
+        "content": "[Skipped - only one tool per turn. Call glob_files again if needed.]",
+        "tool_call_id": "c2",
+        "name": "glob_files",
+    }
+    assert messages[3] == {"role": "tool", "content": "# README", "tool_call_id": "c1", "name": "read_file"}
+
+
+@pytest.mark.unit
+def test_agent_feeds_back_missing_tool_calls_and_invalid_json(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    model = _Model(
+        [
+            _response(content="Let me think."),
+            _response(_tool_call("c1", "bash", '{"command": "echo \\$HOME"}')),
+            _response(_tool_call("c2", "bash", {"command": "ls"})),
+        ]
+    )
+    agent = modules.agent.BashAgent(model, "reef", "PROMPT", [], _Notes())
+
+    action = agent.act("dashboard", {"day": 0})
+
+    assert action.arguments == {"command": "ls"} and agent.total_turns == 3
+    messages = model.requests[2]["messages"]
+    assert messages[1] == {"role": "assistant", "content": "Let me think."}
+    assert messages[2] == {"role": "user", "content": modules.agent.NO_TOOL_FEEDBACK}
+    assert messages[3]["role"] == "user" and messages[3]["content"].startswith(
+        "Your previous response contained invalid JSON in the `bash` tool_call arguments.\nJSON decode error: "
+    )
+    assert "Shell-style escapes like \\$ or \\! are NOT valid JSON." in messages[3]["content"]
+    # The response with the invalid call was never added to the conversation.
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "user"]
+
+
+@pytest.mark.unit
+def test_agent_retries_retryable_errors_and_feeds_back_the_others(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    waits = []
+    monkeypatch.setattr(modules.agent.time, "sleep", waits.append)
+    request = httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions")
+    server_error = openai.APIStatusError("upstream", response=httpx.Response(503, request=request), body=None)
+    model = _Model(
+        [
+            server_error,
+            openai.APITimeoutError(request=request),
+            ValueError("context length exceeded"),
+            _response(_tool_call("c1", "bash", {"command": "ls"})),
+        ]
+    )
+    agent = modules.agent.BashAgent(model, "reef", "PROMPT", [], _Notes())
+
+    action = agent.act("dashboard", {"day": 0})
+
+    assert action.arguments == {"command": "ls"}
+    assert waits == [10, 20, 15]  # two retryable backoffs, then the linear wait after feedback
+    fed_back = model.requests[3]["messages"][-1]
+    assert fed_back["role"] == "user" and fed_back["content"].startswith(
+        "The previous API request failed with a non-retryable error:\nValueError: context length exceeded\n\n"
+    )
+    assert agent.total_turns == 1
+
+
+@pytest.mark.unit
+def test_memory_is_appended_up_to_forty_thousand_characters(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    agent = modules.agent.BashAgent(_Model([]), "reef", "PROMPT", [], _Notes("x" * 40_010))
+    prompt = agent.system_prompt_with_memory()
+    assert prompt.endswith(
+        "--- MEMORY.md TRUNCATED ---\nShowing first 40,000 of 40,010 characters. "
+        "Use the read_file tool to see the full contents if needed."
+    )
+    assert (
+        modules.agent.BashAgent(_Model([]), "reef", "PROMPT", [], _Notes("  \n")).system_prompt_with_memory()
+        == "PROMPT"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The tools (harness/tools.py): the executor script, run here the way the container runs it
+
+
+def _run_tool(modules, workspace: Path, name: str, args: dict, *, bash_timeout: int = 20, port: int = 4242) -> dict:
+    call = {"name": name, "args": args, "workspace": str(workspace), "port": port, "bash_timeout": bash_timeout}
+    done = subprocess.run(
+        [sys.executable, "-c", modules.tools.TOOL_SCRIPT],
+        input=json.dumps(call),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.unit
+def test_tool_script_runs_bash_in_the_workspace_with_the_benchmark_output_format(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "hello.txt").write_text("hello\n")
+
+    assert _run_tool(modules, workspace, "bash", {"command": "cat hello.txt"}) == {"result": "hello\n"}
+    assert _run_tool(modules, workspace, "bash", {"command": "true"}) == {"result": "(no output)"}
+    assert _run_tool(modules, workspace, "bash", {"command": "echo out; echo err 1>&2; exit 3"}) == {
+        "result": "out\n\n[stderr]\nerr\n\n[exit code: 3]"
+    }
+    env = _run_tool(modules, workspace, "bash", {"command": 'echo "$HOME|$TMPDIR|$NOVAMIND_API_PORT|$PWD"'})["result"]
+    assert env == f"{workspace}|{workspace}|4242|{workspace}\n"
+    assert _run_tool(modules, workspace, "bash", {"command": ""}) == {"result": "Error: No command provided"}
+    long = _run_tool(modules, workspace, "bash", {"command": "yes | head -c 40000"})["result"]
+    assert len(long) < 31000 and "... (output truncated — exceeded 30,000 character limit) ..." in long
+
+
+@pytest.mark.unit
+def test_tool_script_times_out_bash_and_ends_the_run_only_for_next_week(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    slow = _run_tool(modules, workspace, "bash", {"command": "echo partial; sleep 5"}, bash_timeout=1)
+    assert slow == {"result": "partial\n\nError: Command timed out after 1 seconds"}
+    advancing = _run_tool(
+        modules, workspace, "bash", {"command": "./novamind-operation next-week; sleep 5"}, bash_timeout=1
+    )
+    assert advancing["timeout"] == "next_week timed out after 1s" and "partial_stdout" in advancing
+    # The engine's own week-step timeout comes back as an exit code and a marker in the output.
+    stalled = _run_tool(
+        modules, workspace, "bash", {"command": "./novamind-operation next-week; echo step_week_timeout; exit 1"}
+    )
+    assert stalled["timeout"] == "next_week engine-side timeout (step_week_timeout)"
+
+
+@pytest.mark.unit
+def test_tool_script_file_tools_keep_the_benchmark_semantics(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    workspace = tmp_path / "ws"
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "docs" / "cli.md").write_text("# CLI\nnext-week\nstatus\n")
+
+    assert _run_tool(modules, workspace, "write_file", {"path": "daily_scripts/w0.py", "content": "print(1)\n"}) == {
+        "result": "File written: daily_scripts/w0.py (9 bytes)"
+    }
+    assert (
+        _run_tool(modules, workspace, "read_file", {"path": "docs/cli.md"})["result"]
+        == "     1\t# CLI\n     2\tnext-week\n     3\tstatus\n     4\t"
+    )
+    assert (
+        _run_tool(modules, workspace, "read_file", {"path": "docs/cli.md", "offset": 2, "limit": 1})["result"]
+        == "     2\tnext-week"
+    )
+    assert _run_tool(modules, workspace, "read_file", {"path": "missing.md"}) == {
+        "result": "Error: File not found: missing.md"
+    }
+    assert _run_tool(modules, workspace, "read_file", {"path": "docs"}) == {"result": "Error: Not a file: docs"}
+    assert _run_tool(
+        modules, workspace, "edit_file", {"path": "daily_scripts/w0.py", "old_string": "1", "new_string": "2"}
+    ) == {"result": "File edited: daily_scripts/w0.py"}
+    assert (workspace / "daily_scripts" / "w0.py").read_text() == "print(2)\n"
+    assert _run_tool(
+        modules, workspace, "edit_file", {"path": "daily_scripts/w0.py", "old_string": "x", "new_string": "y"}
+    ) == {"result": "Error: old_string not found in daily_scripts/w0.py"}
+    assert _run_tool(
+        modules, workspace, "edit_file", {"path": "docs/cli.md", "old_string": "\n", "new_string": " "}
+    ) == {"result": "Error: old_string found 3 times in docs/cli.md (must be unique)"}
+    assert _run_tool(modules, workspace, "search_files", {"pattern": "week|status", "path": "docs"})["result"] == (
+        "docs/cli.md:2: next-week\ndocs/cli.md:3: status"
+    )
+    assert _run_tool(modules, workspace, "search_files", {"pattern": "nothing"}) == {"result": "No matches found."}
+    assert _run_tool(modules, workspace, "search_files", {"pattern": "("}) == {
+        "result": "Error: Invalid regex: missing ), unterminated subpattern at position 0"
+    }
+    assert _run_tool(modules, workspace, "glob_files", {"pattern": "**/*.md"}) == {"result": "docs/cli.md"}
+    assert _run_tool(modules, workspace, "glob_files", {"pattern": "*.nope"}) == {"result": "No matching files."}
+    assert _run_tool(modules, workspace, "read_file", {"path": "../outside"}) == {
+        "result": "Error: Path escapes workspace: ../outside"
+    }
+    assert _run_tool(modules, workspace, "novamind", {}) == {"result": "Error: Unknown tool 'novamind'"}
+    call = {"op": "memory", "workspace": str(workspace)}
+    done = subprocess.run(
+        [sys.executable, "-c", modules.tools.TOOL_SCRIPT], input=json.dumps(call), capture_output=True, text=True
+    )
+    assert json.loads(done.stdout) == {"memory": None}
+
+
+@pytest.mark.unit
+def test_container_tools_run_the_script_as_the_agent_user(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    calls = []
+
+    class Environment:
+        async def upload_file(self, source, target):
+            calls.append(("upload", Path(source).read_text()[:60], target))
+
+        async def exec(self, command, env=None, timeout_sec=None, user=None):
+            calls.append(("exec", command, user, timeout_sec))
+            if "chmod" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0)
+            encoded = command.split("printf %s ", 1)[1].split(" |", 1)[0]
+            call = json.loads(base64.b64decode(encoded))
+            if call.get("op") == "memory":
+                return SimpleNamespace(stdout='{"memory": "# notes"}\n', stderr="", return_code=0)
+            if "next-week" in call["args"].get("command", ""):
+                return SimpleNamespace(
+                    stdout='{"timeout": "next_week timed out after 60s", "partial_stdout": "x"}\n',
+                    stderr="",
+                    return_code=0,
+                )
+            return SimpleNamespace(
+                stdout=json.dumps({"result": f"ran {call['name']} in {call['workspace']} on {call['port']}"}) + "\n",
+                stderr="",
+                return_code=0,
+            )
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    try:
+        tools = modules.tools.ContainerTools(
+            Environment(), loop, workspace="/runs/run_1/agent_workspace", port=4242, user="agent", bash_timeout_s=60
+        )
+        tools.install()
+        assert tools.execute("bash", {"command": "ls"}) == ("ran bash in /runs/run_1/agent_workspace on 4242", None)
+        assert tools.execute("bash", {"command": "./novamind-operation next-week"}) == (
+            "x",
+            "next_week timed out after 60s",
+        )
+        assert tools.memory() == "# notes"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    assert calls[0][0] == "upload" and calls[0][2] == "/tmp/reef-ceobench-tools.py" and "tool executor" in calls[0][1]
+    assert calls[1] == ("exec", "chmod 644 /tmp/reef-ceobench-tools.py", None, None)
+    _kind, command, user, timeout = calls[2]
+    assert command.startswith("printf %s ") and command.endswith(
+        " | base64 -d | /opt/ceobench/.venv/bin/python /tmp/reef-ceobench-tools.py"
+    )
+    assert user == "agent" and timeout == 180
+
+
+# ---------------------------------------------------------------------------
+# The task container (harness/harbor_agent.py)
+
+
+@pytest.mark.unit
+def test_task_container_starts_the_engine_and_reads_it_over_http(monkeypatch) -> None:
+    modules = _modules(monkeypatch)
+    calls = []
+
+    class Environment:
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None):
+            calls.append((command, cwd, dict(env or {}), timeout_sec))
+            if "ceobench-engine.py start" in command:
+                return SimpleNamespace(
+                    stdout='{"run_dir": "/runs/run_1", "workspace": "/runs/run_1/agent_workspace", "session_id": "s1", "port": 4242, "total_days": 14, "initial_cash": 1000000.0}\n',
+                    stderr="",
+                    return_code=0,
+                )
+            encoded = command.split("printf %s ", 1)[1].split(" |", 1)[0]
+            request = json.loads(base64.b64decode(encoded))
+            if "days" in request:
+                return SimpleNamespace(
+                    stdout=json.dumps({"system_prompt": f"P{request['days']}", "tools": []}) + "\n",
+                    stderr="",
+                    return_code=0,
+                )
+            if request["op"] == "query":
+                return SimpleNamespace(
+                    stdout='{"success": true, "data": {"rows": [{"mrr": 42.0}]}}\n', stderr="", return_code=0
+                )
+            if request["op"] == "dashboard":
+                return SimpleNamespace(
+                    stdout='{"dashboard": "=== Week 0 Dashboard (Day 0) ==="}\n', stderr="", return_code=0
+                )
+            return SimpleNamespace(stdout='{"error": "URLError: refused"}\n', stderr="", return_code=0)
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    try:
+        environ = {"SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "local", "HOME": "/home/x"}
+        task = modules.harbor_agent.TaskContainer(Environment(), loop, environ=environ)
+        session = task.start_engine(
+            seed=7, days=14, cash=1e6, model="reef", reasoning_effort="none", tool_user="agent"
+        )
+        assert session.port == 4242 and session.total_days == 14
+        assert task.contract(14, "reef").system_prompt == "P14"
+        assert task.query("SELECT 1") == [{"mrr": 42.0}]
+        assert task.dashboard() == "=== Week 0 Dashboard (Day 0) ==="
+        assert task.status() == {"day": 0, "cash": 0, "subscribers": 0, "timed_out": False}  # the benchmark's fallback
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    command, cwd, env, timeout = calls[0]
+    assert command == (
+        "/opt/ceobench/.venv/bin/python /opt/ceobench-engine.py start --runs-dir /workspace/ceobench-runs"
+        " --seed 7 --days 14 --cash 1000000.0 --model reef --reasoning-effort none --tool-user agent"
+    )
+    assert cwd == "/opt/ceobench" and timeout == 600
+    assert env == {"SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "local"}
+    # The prompt is built in the checkout, with the request piped straight into the interpreter.
+    assert calls[1][1] == "/opt/ceobench" and calls[1][0].startswith("printf %s ")
+    assert " | base64 -d | /opt/ceobench/.venv/bin/python -c " in calls[1][0]
+    assert calls[2][0].endswith(
+        "| python3 -c " + modules.harbor_agent.shlex.quote(modules.harbor_agent.ENGINE_READ_SCRIPT)
+    )
+
+
+@pytest.mark.unit
+def test_engine_script_stop_reads_the_run_config_and_survives_a_missing_engine(tmp_path, monkeypatch, capsys) -> None:
+    run_dir = tmp_path / "run_1"
+    (run_dir / "agent_workspace").mkdir(parents=True)
+    (run_dir / "config.json").write_text(json.dumps({"api_server_port": 1, "session_id": "s1"}))
+    monkeypatch.setattr(sys, "argv", ["engine.py", "stop", "--run-dir", str(run_dir)])
+
+    runpy.run_path(str(ENGINE_PATH), run_name="__main__")
+
+    answer = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert answer["final"] == {"day": 0, "cash": 0, "subscribers": 0, "timed_out": False} and answer["copied"] is False
+
+
+# ---------------------------------------------------------------------------
+# Weeks, decisions, and the reward (harness/report.py)
+
+
+@pytest.mark.unit
+def test_dashboards_parse_the_week_cash_subscribers_seats_and_prices(monkeypatch) -> None:
+    report = _modules(monkeypatch).report
+    (start,) = report.dashboards(_dashboard(3, 21, 804_817, subscribers=110, seats=2, prices=(18, 39, 99)))
+    assert start == report.WeekStart(3, 21, 804_817.0, 110, 2, (18.0, 39.0, 99.0))
+    negative = "=== Week 37 Dashboard (Day 259) ===\n\nCash: -$66\nIndividual Subscribers: 1\nEnterprise Subscribed Seats: 0\n"
+    assert report.dashboards(negative)[0].cash == -66.0 and report.dashboards(negative)[0].prices == (0.0, 0.0, 0.0)
+    assert report.dashboards("no dashboard here") == []
+
+
+@pytest.mark.unit
+def test_week_start_run_rate_uses_the_engine_mrr_else_the_listed_price_estimate(monkeypatch) -> None:
+    report = _modules(monkeypatch).report
+    assert _start(report, 1, 7, 1.0, subscribers=30, seats=4, prices=(10.0, 39.0, 99.0)).run_rate == 30 * 10 + 4 * 99
+    assert _start(report, 1, 7, 1.0, subscribers=30, prices=(0.0, 39.0, 99.0)).run_rate == 30 * 39
+    assert _start(report, 1, 7, 1.0, subscribers=30).run_rate == 0.0
+    assert _start(report, 1, 7, 1.0, subscribers=30, prices=(10.0, 39.0, 99.0), mrr=207.0).run_rate == 207.0
 
 
 @pytest.mark.unit
 def test_valuation_counts_the_run_rate_over_the_remaining_horizon(monkeypatch) -> None:
-    _, report_module = _load_harness(monkeypatch, "ceobench")
-
-    assert report_module.valuation(100_000.0, 3_000.0, 40, 26) == 118_200.0
-    assert report_module.valuation(100_000.0, 3_000.0, 5, 26) == 103_500.0
-    assert report_module.valuation(100_000.0, 3_000.0, 0, 26) == 100_000.0
-    assert report_module.valuation(100_000.0, 3_000.0, -1, 26) == 100_000.0
-    assert report_module.week_credit([-10_000.0, 5_000.0, 2_500.0], 0.5) == (-10_000 + 2_500 + 625) / 1_000_000
-    assert report_module.week_credit([], 0.5) == 0.0
+    report = _modules(monkeypatch).report
+    assert report.valuation(100_000, 3_000, 40, 26) == 100_000 + 3_000 * 7 * 26 / 30
+    assert report.valuation(100_000, 3_000, 5, 26) == 100_000 + 3_000 * 7 * 5 / 30
+    assert report.valuation(100_000, 3_000, 0, 26) == 100_000 and report.valuation(100_000, 3_000, -1, 26) == 100_000
 
 
 @pytest.mark.unit
 def test_score_scale_clips_outliers_and_divides_by_the_running_median(monkeypatch) -> None:
-    _, report_module = _load_harness(monkeypatch, "ceobench")
-    scale = report_module.ScoreScale(clip=0.05, floor=0.003)
-
-    assert scale.scale(-0.34) == -1.0  # a six-figure purchase clips to the limit and sets the first scale
-    assert scale.scale(0.02) == 0.02 / ((0.02 + 0.05) / 2)
-    assert scale.scale(-0.001) == -0.001 / 0.02  # the median of 0.001, 0.02, 0.05
-
-    quiet = report_module.ScoreScale(clip=0.05, floor=0.003)
-    assert quiet.scale(0.0001) == 0.0001 / 0.003  # the floor keeps a quiet start from amplifying noise
-    quiet.scale(0.0001)
-    assert quiet.scale(0.5) == 3.0  # clipped to 0.05, then capped against the tiny running scale
-
-    with pytest.raises(ValueError, match="positive"):
-        report_module.ScoreScale(clip=0.0)
+    report = _modules(monkeypatch).report
+    scale = report.ScoreScale(clip=0.05, floor=0.003)
+    assert scale.scale(-0.17) == -1.0  # clipped to -0.05, the only magnitude so far
+    assert scale.scale(0.005) == pytest.approx(0.005 / 0.0275)  # median of 0.05 and 0.005
+    assert scale.scale(-0.001) == pytest.approx(-0.001 / 0.005)
+    tiny = report.ScoreScale(clip=0.05, floor=0.003)
+    assert tiny.scale(0.0006) == pytest.approx(0.2)  # the floor keeps noise from blowing up to the cap
+    with pytest.raises(ValueError):
+        report.ScoreScale(clip=0)
 
 
 @pytest.mark.unit
 def test_week_credit_spans_the_following_weeks_and_is_cut_short_at_the_end(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    ledger = agent_module.WeekLedger(total_weeks=4, credit_weeks=2, discount=0.5)
-    turns = [_turn("r-1", _dashboard(0, 0, 1_000_000), 1, 1), _turn("r-2", _dashboard(1, 7, 990_000), 1, 1)]
-    ledger.observe(turns)
-    # Week 0 waits until two weeks have opened after it.
-    assert ledger.finished_weeks() == []
-
-    turns.append(_turn("r-3", _dashboard(2, 14, 985_000), 1, 1))
-    ledger.observe(turns)
-    # Week 0 closes on week 1's opening state and is credited with its own
-    # change and half of week 1's.
-    assert ledger.finished_weeks() == [(0, 990_000.0, 990_000.0, (-10_000 - 2_500) / 1_000_000)]
-    # The episode ends: week 1's window is cut short at the final cash, and
-    # week 2 closes on the final cash alone.
-    assert ledger.finished_weeks(final_cash=980_000.0) == [
-        (0, 990_000.0, 990_000.0, (-10_000 - 2_500) / 1_000_000),
-        (1, 985_000.0, 985_000.0, (-5_000 - 2_500) / 1_000_000),
-        (2, 980_000.0, 980_000.0, -5_000 / 1_000_000),
-    ]
-    with pytest.raises(ValueError, match="credit_weeks"):
-        agent_module.WeekLedger(total_weeks=4, credit_weeks=0)
-
-
-@pytest.mark.unit
-def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    ledger = agent_module.WeekLedger(total_weeks=2, credit_weeks=1)
-    ledger.observe(
-        [
-            _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
-            {"status": 500, "receipt": None, "response": {"error": {"message": "engine restarting"}}},
-            _turn("r-2", _dashboard(0, 0, 1_000_000), 20, 5),
-            _turn("r-3", _dashboard(1, 7, 982_311, subscribers=30, prices=(10, 39, 99)), 30, 7),
-            _turn("r-4", None, 40, 9),  # no dashboard of its own: still week 1
-        ]
+    report = _modules(monkeypatch).report
+    assert report.week_credit([-20_000, 5_000, 5_000, 5_000], 0.8) == pytest.approx(
+        (-20_000 + 4_000 + 3_200 + 2_560) / 1e6
     )
-
-    assert [(turn["receipt"], turn["tokens"], turn["week"]) for turn in ledger.turns] == [
-        ("r-1", 13, 0),
-        ("r-2", 25, 0),
-        ("r-3", 37, 1),
-        ("r-4", 49, 1),
-    ]
-    assert ledger.weeks[0]["turns"] == [("r-1", 13, "next_week"), ("r-2", 25, "next_week")]
-    week_1 = _start(agent_module, 1, 7, 982_311.0, subscribers=30, prices=(10.0, 39.0, 99.0))
-    assert ledger.weeks[1] == {"start": week_1, "turns": [("r-3", 37, "next_week"), ("r-4", 49, "next_week")]}
-    # Week 1 opens worth its cash plus the one week left of 30 subscribers at the $10 plan.
-    assert ledger.value(week_1) == 982_381.0
-    # Week 0 closed when week 1's dashboard appeared; week 1 waits for the final cash, valued as cash.
-    credit_0, credit_1 = (982_381 - 1_000_000) / 1_000_000, (793_047 - 982_381) / 1_000_000
-    assert ledger.finished_weeks() == [(0, 982_311.0, 982_381.0, credit_0)]
-    assert ledger.finished_weeks(final_cash=793_047.0) == [
-        (0, 982_311.0, 982_381.0, credit_0),
-        (1, 793_047.0, 793_047.0, credit_1),
-    ]
-    ledger.posted.add(0)
-    ledger.scores[0] = -1.0
-    assert ledger.finished_weeks() == []
-    assert ledger.summary(final_cash=793_047.0) == [
-        {
-            "week": 0,
-            "day": 0,
-            "cash_start": 1_000_000.0,
-            "cash_end": 982_311.0,
-            "subscribers": 0,
-            "seats": 0,
-            "run_rate": 0.0,
-            "value_start": 1_000_000.0,
-            "value_end": 982_381.0,
-            "credit": credit_0,
-            "score": -1.0,
-            "turns": 2,
-            "reported": True,
-        },
-        {
-            "week": 1,
-            "day": 7,
-            "cash_start": 982_311.0,
-            "cash_end": 793_047.0,
-            "subscribers": 30,
-            "seats": 0,
-            "run_rate": 300.0,
-            "value_start": 982_381.0,
-            "value_end": 793_047.0,
-            "credit": credit_1,
-            "score": None,
-            "turns": 2,
-            "reported": False,
-        },
-    ]
+    assert report.week_credit([-20_000, 5_000], 0.8) == pytest.approx((-20_000 + 4_000) / 1e6)
 
 
 @pytest.mark.unit
-def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    monkeypatch.setenv("SAAS_BENCH_ENTERPRISE_LLM_PROVIDER", "openai")
-    turns = [
-        _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
-        {"status": 500, "receipt": None, "response": {"error": {"message": "engine restarting"}}},
-        _turn("r-2", _dashboard(0, 0, 1_000_000), 20, 5),
-        _turn("r-3", _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99)), 30, 7),
-    ]
-    agent, sidecar = _agent(agent_module, monkeypatch, turns)
-    environment = _Environment()
-    context = SimpleNamespace(metadata={"prior": True}, n_input_tokens=0, n_output_tokens=0)
+def test_week_records_close_weeks_over_the_credit_window(monkeypatch) -> None:
+    report = _modules(monkeypatch).report
+    records = report.WeekRecords(total_weeks=4, credit_weeks=2, discount=0.5)
+    records.open_week(_start(report, 0, 0, 1_000_000.0))
+    records.add_turns(0, [_turn("r-1", 10, 3, command="cat docs/cli.md"), _turn("r-2", 20, 5)])
+    records.open_week(_start(report, 1, 7, 980_000.0, subscribers=30, prices=(10.0, 39.0, 99.0)))
+    records.add_turns(1, [_turn("r-3", 30, 7)])
+    assert records.finished_weeks() == []  # week 0 needs week 2's opening state too
+    records.open_week(_start(report, 2, 14, 975_000.0, subscribers=40, prices=(10.0, 39.0, 99.0)))
 
-    asyncio.run(agent.run("play", environment, context))
-
-    (command, env), *rest = environment.commands
-    assert not rest
-    assert "--base-url http://10.0.0.7:29123/v1" in command and "--seed 7 --days 14" in command
-    assert env["SAAS_BENCH_OPENAI_CHAT_COMPLETIONS"] == "1"
-    assert env["SAAS_BENCH_ENTERPRISE_LLM_PROVIDER"] == "openai"
-    assert sidecar.stopped
-    assert environment.downloads == [(agent_module.RUNS_DIR, Path("/tmp/trial/agent/ceobench"))]
-
-    # Week 0 was reported (its two turns) once week 1's dashboard appeared; week 1 waits.
-    # Week 1 opens worth its cash plus one week of three $10 subscribers: the score follows the value.
-    payloads = [payload for _, payload in agent._client.calls]
-    assert [payload["references"] for payload in payloads] == [["r-1"], ["r-2"]]
-    credit = (982_318 - 1_000_000) / 1_000_000
-    assert {payload["score"] for payload in payloads} == {credit}
-    assert payloads[1]["metadata"]["ceobench"] == {
-        "week": 0,
-        "day": 0,
-        "cash_start": 1_000_000.0,
-        "cash_end": 982_311.0,
-        "value_start": 1_000_000.0,
-        "value_end": 982_318.0,
-        "credit": credit,
-        "decision": "next_week",
-        "turn": 1,
-        "turns": 2,
-        "decisions": 2,
-    }
-    assert len({payload["agent_record_id"] for payload in payloads}) == 2
-
-    assert context.metadata["reef"] == {
-        "agent_record_ids": ["r-1", "r-2", "r-3"],
-        "agent_record_tokens": [13, 25, 37],
-        "agent_record_weeks": [0, 0, 1],
-        "agent_record_decisions": ["next_week", "next_week", "next_week"],
-    }
-    assert context.metadata["ceobench"] == {
-        "seed": 7,
-        "days": 14,
-        "horizon_weeks": 26,
-        "credit_weeks": 1,
-        "discount": 0.8,
-        "score_clip": 10.0,
-        "score_floor": 1.0,
-        "engine_reads": False,
-        "reports": True,
-        "turns": 4,
-        "exit_code": 0,
-        "weeks": [
-            {
-                "week": 0,
-                "day": 0,
-                "cash_start": 1_000_000.0,
-                "cash_end": 982_311.0,
-                "subscribers": 0,
-                "seats": 0,
-                "run_rate": 0.0,
-                "value_start": 1_000_000.0,
-                "value_end": 982_318.0,
-                "credit": credit,
-                "score": credit,
-                "turns": 2,
-                "reported": True,
-            },
-            {
-                "week": 1,
-                "day": 7,
-                "cash_start": 982_311.0,
-                "cash_end": None,
-                "subscribers": 3,
-                "seats": 0,
-                "run_rate": 30.0,
-                "value_start": 982_318.0,
-                "value_end": None,
-                "credit": None,
-                "score": None,
-                "turns": 1,
-                "reported": False,
-            },
-        ],
-    }
-    assert context.metadata["prior"] is True
-    assert (context.n_input_tokens, context.n_output_tokens) == (60, 15)
-
-
-@pytest.mark.unit
-def test_reports_off_records_the_weeks_without_posting(monkeypatch) -> None:
-    # The untrained baseline: the same stack and harness, but no report leaves
-    # it, so nothing trains and the trial metadata still carries the weeks.
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    turns = [
-        _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
-        _turn("r-2", _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99)), 30, 7),
-    ]
-    agent, _sidecar = _agent(agent_module, monkeypatch, turns)
-    agent._reports = False
-    context = SimpleNamespace(metadata={}, n_input_tokens=0, n_output_tokens=0)
-
-    asyncio.run(agent.run("play", _Environment(), context))
-
-    assert agent._client.calls == []
-    ceobench = context.metadata["ceobench"]
-    assert ceobench["reports"] is False
-    assert [(week["week"], week["cash_end"], week["reported"]) for week in ceobench["weeks"]] == [
-        (0, 982_311.0, True),
-        (1, None, False),
-    ]
-
-
-def test_reports_off_turns_the_pacer_off(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    monkeypatch.setenv("CEOBENCH_REPORTS", "0")
-    monkeypatch.setenv("CEOBENCH_PACE_BATCH", "8")
-    agent = object.__new__(agent_module.HarborAgent)
-    agent.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
-    agent._days = 14
-
-    agent._init_week_reporting()
-
-    assert agent._reports is False and agent._pacer is None
-
-
-def test_last_week_closes_with_the_verifier_final_cash(monkeypatch, tmp_path) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    turns = [
-        _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
-        _turn("r-2", _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99)), 30, 7),
-    ]
-    agent, _ = _agent(agent_module, monkeypatch, turns)
-    agent.logs_dir = tmp_path / "agent"
-    agent._report_watch_from = 0.0
-    asyncio.run(agent.run("play", _Environment(), SimpleNamespace(metadata=None, n_input_tokens=0, n_output_tokens=0)))
-    assert [payload["references"] for _, payload in agent._client.calls] == [["r-1"]]
-
-    (tmp_path / "result.json").write_text(
-        json.dumps(
-            {
-                "id": "trial-9",
-                "verifier_result": {"rewards": {"reward": 0.793, "final_cash": 793_047.0, "survival_days": 14}},
-            }
-        ),
-        encoding="utf-8",
+    value_1 = 980_000 + 300 * 7 * 3 / 30
+    value_2 = 975_000 + 400 * 7 * 2 / 30
+    (finished,) = records.finished_weeks()
+    assert finished == (
+        0,
+        980_000.0,
+        pytest.approx(value_1),
+        pytest.approx(((value_1 - 1e6) + 0.5 * (value_2 - value_1)) / 1e6),
     )
-    agent._report_trial_result()
-
-    scenario, payload = agent._client.calls[-1]
-    assert scenario == "ceobench-host-test"
-    assert payload["references"] == ["r-2"]
-    # The last week is valued as cash alone at both ends of the comparison's close.
-    assert payload["score"] == payload["metadata"]["ceobench"]["credit"] == (793_047 - 982_318) / 1_000_000
-    assert payload["metadata"]["ceobench"]["week"] == 1 and payload["metadata"]["ceobench"]["cash_end"] == 793_047.0
-    assert payload["metadata"]["ceobench"]["value_end"] == 793_047.0
-    assert "week 1" in payload["feedback"]
-    # A second look changes nothing: the week is already posted.
-    agent._report_trial_result()
-    assert len(agent._client.calls) == 2
-
-
-@pytest.mark.unit
-def test_training_pacer_waits_for_the_batches_the_reported_turns_filled(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    monkeypatch.setattr(agent_module, "PACE_POLL_S", 0.0)
-    releases = iter([3, 3, 4, 5])  # 3 at episode start, then the trainer catches up
-    logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
-    pacer = agent_module.TrainingPacer(16, timeout_s=60, count_releases=lambda: next(releases), logger=logger)
-
-    # 35 reported turns fill two batches of 16; the third release beyond the
-    # baseline is not required until a third batch fills.
-    assert pacer.expected_releases(35) == 2
-    pacer.wait(2, 35)
-    assert pacer._base == 3
-
-
-@pytest.mark.unit
-def test_training_pacer_forgives_a_batch_the_trainer_never_commits(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    monkeypatch.setattr(agent_module, "PACE_POLL_S", 0.0)
-    warnings = []
-    logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: warnings.append(a))
-    pacer = agent_module.TrainingPacer(16, timeout_s=0.0, count_releases=lambda: 0, logger=logger)
-
-    pacer.wait(3, 32)  # two batches expected, none committed: times out at once
-
-    assert len(warnings) == 1
-    # The shortfall is forgiven: the next week only waits for new batches.
-    assert pacer.expected_releases(32) == 0
-    assert pacer.expected_releases(48) == 1
-
-
-@pytest.mark.unit
-def test_gate_closes_the_previous_week_before_serving_the_next(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    turns = [
-        _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
-        _turn("r-2", _dashboard(0, 0, 1_000_000), 20, 5),
+    assert records.turns == [
+        {"receipt": "r-1", "tokens": 13, "week": 0, "decision": None},
+        {"receipt": "r-2", "tokens": 25, "week": 0, "decision": "next_week"},
+        {"receipt": "r-3", "tokens": 37, "week": 1, "decision": "next_week"},
     ]
-    agent, _sidecar = _agent(agent_module, monkeypatch, turns)
-    agent._capture = _Capture(turns)  # the sidecar is already serving
-    waits = []
-
-    class Pacer:
-        def wait(self, week, posted_turns):
-            waits.append((week, posted_turns))
-            return 0.0
-
-    agent._pacer = Pacer()
-    agent._gated_week = None
-
-    # The first request of week 1 arrives: week 0 closes with week 1's opening state and is reported.
-    agent._gate_week(_start(agent_module, 1, 7, 982_311.0))
-
-    assert [payload["references"] for _, payload in agent._client.calls] == [["r-1"], ["r-2"]]
-    reported = agent._client.calls[0][1]["metadata"]["ceobench"]
-    assert (reported["cash_end"], reported["value_end"]) == (982_311.0, 982_311.0)
-    assert waits == [(1, 2)]
-    # Later requests of the same week report nothing new but still wait for
-    # the trainer, so no turn is generated while a step publishes.
-    agent._gate_week(_start(agent_module, 1, 7, 982_311.0))
-    assert [payload["references"] for _, payload in agent._client.calls] == [["r-1"], ["r-2"]]
-    assert waits == [(1, 2), (1, 2)]
-
-
-@pytest.mark.unit
-def test_paced_handler_peeks_at_the_week_and_replays_the_body(monkeypatch) -> None:
-    import io
-
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    seen = []
-    forwarded = []
-
-    class Base:
-        def _forward(self, forward_path, routed_session):
-            forwarded.append((forward_path, routed_session, self.rfile.read()))
-
-    handler_cls = agent_module.paced_handler(Base, seen.append)
-    body = json.dumps({"messages": [{"role": "user", "content": _dashboard(4, 28, 940_968)}]}).encode()
-    handler = object.__new__(handler_cls)
-    handler.headers = {"Content-Length": str(len(body))}
-    handler.rfile = io.BytesIO(body)
-
-    handler._forward("/v1/chat/completions", None)
-
-    assert seen == [_start(agent_module, 4, 28, 940_968.0)]
-    assert forwarded == [("/v1/chat/completions", None, body)]
-
-
-@pytest.mark.unit
-def test_harness_fails_the_trial_when_the_runner_exits_nonzero(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    agent, sidecar = _agent(agent_module, monkeypatch, [{"status": 200, "receipt": "r-1", "response": {}}])
-    environment = _Environment(return_code=3)
-    context = SimpleNamespace(metadata=None, n_input_tokens=0, n_output_tokens=0)
-
-    with pytest.raises(RuntimeError, match="exited 3"):
-        asyncio.run(agent.run("play", environment, context))
-
-    # The receipts and the run directory are kept even for a failed episode.
-    assert sidecar.stopped
-    assert context.metadata["reef"] == {
-        "agent_record_ids": ["r-1"],
-        "agent_record_tokens": [0],
-        "agent_record_weeks": [None],
-        "agent_record_decisions": [None],
-    }
-    assert context.metadata["ceobench"]["weeks"] == []
-    assert environment.downloads
-
-
-@pytest.mark.unit
-def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> None:
-    _, report_module = _load_harness(monkeypatch, "ceobench")
-    client = _Client()
-
-    posted = report_module.post_week_reports(
-        client,
-        "ceobench-host-test",
-        week=3,
-        day=21,
-        cash_start=900_000.0,
-        cash_end=905_000.0,
-        value_start=900_000.0,
-        value_end=910_000.0,
-        credit=0.0125,
-        score=1.25,
-        turns=[
-            ("r-1", 9000, "set_prices"),
-            ("r-2", 50000, "next_week"),
-            ("r-3", 48000, "next_week"),
-            ("r-4", 100, None),
-        ],
-        max_tokens=49152,
-    )
-
-    # The 50k-token turn was served and recorded but cannot be trained on;
-    # the read-only turn is recorded and not trained on either.
-    assert posted == [{"accepted": True}] * 2
-    payloads = [payload for _, payload in client.calls]
-    assert [payload["references"] for payload in payloads] == [["r-1"], ["r-3"]]
-    assert [payload["metadata"]["ceobench"]["turn"] for payload in payloads] == [0, 2]
-    assert [payload["metadata"]["ceobench"]["decision"] for payload in payloads] == ["set_prices", "next_week"]
-    assert payloads[0]["metadata"]["ceobench"]["decisions"] == 3 and payloads[0]["metadata"]["ceobench"]["turns"] == 4
-    # The scaled credit is the score; the credit and the values travel along.
-    assert {payload["score"] for payload in payloads} == {1.25}
-    assert {payload["metadata"]["ceobench"]["credit"] for payload in payloads} == {0.0125}
-    feedback = payloads[0]["feedback"]
-    assert "week 3" in feedback and "credit 0.0125, score 1.25" in feedback and "3 decision turns of 4" in feedback
-    assert "value 900000 -> 910000" in feedback and "cash 900000 -> 905000" in feedback
-    # No limit reports every decision turn.
-    client.calls.clear()
-    report_module.post_week_reports(
-        client,
-        "ceobench-host-test",
-        week=3,
-        day=21,
-        cash_start=900_000.0,
-        cash_end=905_000.0,
-        value_start=900_000.0,
-        value_end=910_000.0,
-        credit=0.0125,
-        score=1.25,
-        turns=[("r-1", 1, "set_prices"), ("r-2", 2, "next_week"), ("r-3", 3, "next_week")],
-    )
-    assert len(client.calls) == 3
+    # The last weeks close with the episode's final cash, valued as cash alone.
+    closed = {week: (cash_end, value_end) for week, cash_end, value_end, _credit in records.finished_weeks(970_000.0)}
+    assert closed[2] == (970_000.0, 970_000.0)
+    rows = records.summary(970_000.0)
+    assert [(row["week"], row["turns"], row["decisions"]) for row in rows] == [(0, 2, 1), (1, 1, 1), (2, 0, 0)]
 
 
 @pytest.mark.unit
 def test_turn_decision_tells_company_changing_calls_from_reads(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    report = _modules(monkeypatch).report
     scripts: dict[str, str] = {}
-
-    def decision(**fields):
-        return agent_module.turn_decision(_turn("r", None, 1, 1, **fields), scripts)
-
-    assert decision() == "next_week"
+    assert report.turn_decision(_turn("r", 1, 1, command="./novamind-operation status"), scripts) is None
+    assert report.turn_decision(_turn("r", 1, 1, command="./novamind-operation next-week 'x'"), scripts) == "next_week"
     assert (
-        decision(command='./novamind-operation python-c "import novamind_api as nm; nm.pricing.set_prices(A=12)"')
+        report.turn_decision(
+            _turn("r", 1, 1, command='./novamind-operation python-c "nm.pricing.set_prices(A=18)"'), scripts
+        )
         == "set_prices"
     )
-    assert decision(command='./novamind-operation query "SELECT * FROM ledger ORDER BY day DESC LIMIT 5"') is None
-    assert (
-        decision(command='./novamind-operation python-c "import novamind_api as nm; print(nm.get_cost_info())"')
-        is None
+    assert report.turn_decision(_turn("r", 1, 1, tool=("read_file", {"path": "docs/cli.md"})), scripts) is None
+    written = _turn(
+        "r",
+        1,
+        1,
+        tool=(
+            "write_file",
+            {"path": "daily_scripts/week2.py", "content": "nm.marketing.set_daily_spend(operations=300)"},
+        ),
     )
-    assert decision(command=None) is None  # a reply without a tool call
-    # Workspace files are reads; a script the agent wrote is judged by its content when run.
+    assert report.turn_decision(written, scripts) is None and "daily_scripts/week2.py" in scripts
     assert (
-        decision(
-            tool=(
-                "write_file",
-                {"path": "daily_scripts/setup.py", "content": "nm.marketing.set_targeted_ad_spend({})"},
-            )
-        )
-        is None
+        report.turn_decision(_turn("r", 1, 1, command="./novamind-operation python week2.py"), scripts)
+        == "set_daily_spend"
     )
-    assert decision(tool=("read_file", {"path": "docs/cli-reference.md"})) is None
-    assert decision(command="cd /workspace && python daily_scripts/setup.py") == "set_targeted_ad_spend"
-    assert (
-        decision(tool=("edit_file", {"path": "daily_scripts/setup.py", "old_string": "x", "new_string": "print(1)"}))
-        is None
-    )
-    assert decision(command="python analysis.py") == "script"  # not written this episode: taken to act
-    assert (
-        decision(command="cat << EOF > run.py\nnm.research.start_research_project(1)\nEOF\npython run.py")
-        == "start_research_project"
-    )
+    assert report.turn_decision(_turn("r", 1, 1, command="python3 analysis.py"), scripts) == "script"
+    assert report.turn_decision(_turn("r", 1, 1, command="python3 -c 'print(1)'"), scripts) is None
 
 
 @pytest.mark.unit
-def test_week_start_prefers_the_engine_mrr_over_the_listed_price_estimate(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    estimate = _start(agent_module, 3, 21, 0.0, subscribers=100, prices=(10.0, 39.0, 99.0))
-    assert estimate.run_rate == 1000.0
-    assert estimate._replace(mrr=1830.5).run_rate == 1830.5
+def test_training_pacer_waits_for_the_batches_the_reported_turns_filled(monkeypatch) -> None:
+    report = _modules(monkeypatch).report
+    monkeypatch.setattr(report.time, "sleep", lambda _s: None)
+    pacer = report.TrainingPacer(8, 60.0, _Releases([3, 3, 4, 4]), SimpleNamespace(warning=lambda *a, **k: None))
+    assert pacer.wait(1, 7) < 1.0  # no full batch yet: nothing to wait for
+    pacer.wait(2, 8)  # one batch: waits until the release count moves from 3 to 4
+    assert pacer.expected_releases(16) == 2
 
 
 @pytest.mark.unit
-def test_gate_reads_the_engine_books_for_a_new_week(monkeypatch) -> None:
-    agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    turns = [_turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3)]
-    agent, _sidecar = _agent(agent_module, monkeypatch, turns)
-    agent._capture = _Capture(turns)
-    agent._engine_reads = True
-    reads = iter([{"mrr": 1500.0, "basis": "engine"}, None])
-    monkeypatch.setattr(agent, "_read_engine", lambda: next(reads))
-    agent._pacer = SimpleNamespace(wait=lambda week, posted: 0.0)
-    agent._gated_week = None
+def test_training_pacer_forgives_a_batch_the_trainer_never_commits(monkeypatch) -> None:
+    report = _modules(monkeypatch).report
+    monkeypatch.setattr(report.time, "sleep", lambda _s: None)
+    clock = iter(range(0, 10_000, 20))
+    monkeypatch.setattr(report.time, "time", lambda: next(clock))
+    warnings = []
+    pacer = report.TrainingPacer(
+        8, 30.0, _Releases([0]), SimpleNamespace(warning=lambda msg, *a: warnings.append(msg % a))
+    )
+    pacer.wait(3, 16)
+    assert warnings == ["week 3: trainer committed 0 of 2 expected releases after 30s; going on"]
+    assert pacer.expected_releases(16) == 0  # the forgiven batches are not waited for again
 
-    # Week 1 opens with 30 subscribers at a $10 floor but $1,500 of MRR on the books.
-    agent._gate_week(_start(agent_module, 1, 7, 982_311.0, subscribers=30, prices=(10.0, 39.0, 99.0)))
-    assert agent._ledger.announced[1].mrr == 1500.0
-    assert agent._ledger.value(agent._ledger.announced[1]) == 982_311.0 + 1500 * 7 * 1 / 30
-    # A failed read falls back to the estimate.
-    agent._gate_week(_start(agent_module, 2, 14, 980_000.0, subscribers=30, prices=(10.0, 39.0, 99.0)))
-    assert agent._ledger.announced[2].mrr is None and agent._ledger.announced[2].run_rate == 300.0
+
+# ---------------------------------------------------------------------------
+# One episode through the Harbor agent (harness/harbor_agent.py)
+
+
+@pytest.mark.unit
+def test_harness_plays_the_episode_and_reports_each_week_to_reef(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    harness = _harness(monkeypatch, modules, tmp_path)
+    simulation = _Simulation()
+    task, tools = _Task(simulation), _Tools(simulation)
+    responses = [
+        _response(_tool_call("c1", "bash", {"command": "ls docs"}), prompt_tokens=100, completion_tokens=10),
+        _response(_tool_call("c2", "bash", {"command": "./novamind-operation next-week 'grow' 990000 980000 970000"})),
+        _response(_tool_call("c3", "bash", {"command": "./novamind-operation next-week 'hold' 980000 970000 960000"})),
+    ]
+
+    context, model, downloads = _play(monkeypatch, modules, harness, task, tools, responses)
+
+    assert task.start_kwargs == {
+        "seed": 7,
+        "days": 14,
+        "cash": 1e6,
+        "model": "reef",
+        "reasoning_effort": "none",
+        "tool_user": "agent",
+    }
+    assert [name for name, _args in tools.calls] == ["bash", "bash", "bash"]
+    assert [[m["role"] for m in request["messages"]] for request in model.requests] == [
+        ["user"],
+        ["user", "assistant", "tool"],
+        ["system", "user"],  # week 1: the conversation restarts from the benchmark's prompt
+    ]
+    assert model.requests[2]["messages"][0]["content"] == "PROMPT for 14 days"
+
+    # Week 0 was reported when week 1 opened, week 1 with the engine's final cash; only the decision turns.
+    payloads = [payload for _scenario, payload in harness._client.calls]
+    assert [payload["references"] for payload in payloads] == [["r-2"], ["r-3"]]
+    value_1 = 990_000 + 50.0 * 7 * 1 / 30  # 5 subscribers at the engine's $10 MRR each, one week left
+    assert payloads[0]["metadata"]["ceobench"]["credit"] == pytest.approx((value_1 - 1e6) / 1e6)
+    assert payloads[0]["score"] == pytest.approx(-1.0)
+    assert payloads[1]["metadata"]["ceobench"]["cash_end"] == 980_000.0
+    assert task.queries and task.queries[0].startswith(
+        "SELECT COALESCE(SUM(effective_price * COALESCE(seat_count, 1)), 0)"
+    )
+    assert task.commits == [7, 14]  # the workspace is snapshotted at week 1 and at the end
+
+    ceobench = context.metadata["ceobench"]
+    assert (ceobench["outcome"], ceobench["final_cash"], ceobench["sim_day"], ceobench["turns"]) == (
+        "completed",
+        980_000.0,
+        14,
+        3,
+    )
+    assert [(row["week"], row["cash_start"], row["run_rate"], row["decisions"]) for row in ceobench["weeks"]] == [
+        (0, 1_000_000.0, 0.0, 1),
+        (1, 990_000.0, 50.0, 1),
+    ]
+    assert context.metadata["reef"] == {
+        "agent_record_ids": ["r-1", "r-2", "r-3"],
+        "agent_record_tokens": [110, 13, 13],
+        "agent_record_weeks": [0, 0, 1],
+        "agent_record_decisions": [None, "next_week", "next_week"],
+    }
+    assert (context.n_input_tokens, context.n_output_tokens) == (120, 16)
+    assert downloads == [("/workspace/ceobench-runs", tmp_path / "agent" / "ceobench")]
+    logged = [json.loads(line) for line in (tmp_path / "agent" / "turns.jsonl").read_text().splitlines()]
+    assert [(entry["day"], entry["tool"]) for entry in logged] == [
+        (0, "_dashboard"),
+        (0, "bash"),
+        (0, "bash"),
+        (7, "bash"),
+    ]
+
+
+@pytest.mark.unit
+def test_reports_off_records_the_weeks_without_posting(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    harness = _harness(monkeypatch, modules, tmp_path, env={"CEOBENCH_REPORTS": "0", "CEOBENCH_PACE_BATCH": "8"})
+    assert harness._pacer is None
+    simulation = _Simulation()
+    responses = [
+        _response(_tool_call("c1", "bash", {"command": "./novamind-operation next-week 'a'"})),
+        _response(_tool_call("c2", "bash", {"command": "./novamind-operation next-week 'b'"})),
+    ]
+
+    context, _model, _downloads = _play(
+        monkeypatch, modules, harness, _Task(simulation), _Tools(simulation), responses
+    )
+
+    assert harness._client.calls == []
+    assert context.metadata["ceobench"]["reports"] is False
+    assert [(row["week"], row["reported"], row["cash_end"]) for row in context.metadata["ceobench"]["weeks"]] == [
+        (0, True, 990_000.0),
+        (1, True, 980_000.0),
+    ]
+
+
+@pytest.mark.unit
+def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    harness = _harness(monkeypatch, modules, tmp_path, env={"CEOBENCH_TRAIN_MAX_TOKENS": "50"})
+    simulation = _Simulation()
+    responses = [
+        _response(_tool_call("c1", "bash", {"command": "./novamind-operation next-week 'a'"}), prompt_tokens=60),
+        _response(_tool_call("c2", "bash", {"command": "./novamind-operation next-week 'b'"}), prompt_tokens=20),
+    ]
+
+    _play(monkeypatch, modules, harness, _Task(simulation), _Tools(simulation), responses)
+
+    assert [payload["references"] for _s, payload in harness._client.calls] == [["r-2"]]
+
+
+@pytest.mark.unit
+def test_harness_ends_the_episode_when_the_engine_times_out(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    harness = _harness(monkeypatch, modules, tmp_path)
+    simulation = _Simulation()
+    tools = _Tools(simulation)
+    tools.execute = lambda name, arguments: SimpleNamespace(result="", timeout="next_week timed out after 3600s")
+    responses = [_response(_tool_call("c1", "bash", {"command": "./novamind-operation next-week 'a'"}))]
+
+    context, _model, _downloads = _play(monkeypatch, modules, harness, _Task(simulation), tools, responses)
+
+    assert context.metadata["ceobench"]["outcome"] == "timeout"
+
+
+@pytest.mark.unit
+def test_gate_reads_the_engine_books_for_a_new_week_and_holds_for_training(monkeypatch, tmp_path) -> None:
+    modules = _modules(monkeypatch)
+    harness = _harness(
+        monkeypatch, modules, tmp_path, env={"CEOBENCH_PACE_BATCH": "1", "CEOBENCH_PACE_TIMEOUT_S": "1"}
+    )
+    monkeypatch.setattr(modules.report.time, "sleep", lambda _s: None)
+    harness._pacer = modules.report.TrainingPacer(1, 1.0, _Releases([0, 0, 1]), harness.logger)
+    simulation = _Simulation()
+    simulation.subscribers = 3
+    task = _Task(simulation)
+
+    harness._enter_week(task, 0, 0)
+    start = harness._records.weeks[0]["start"]
+    assert start.mrr == 30.0 and start.run_rate == 30.0
+    task.query = lambda sql: (_ for _ in ()).throw(RuntimeError("no books"))
+    harness._records.add_turns(0, [_turn("r-1", 10, 3)])
+    harness._enter_week(task, 1, 7)  # week 0 is reported; the pacer then waits for its batch
+    assert harness._records.weeks[1]["start"].mrr is None
+    assert [payload["references"] for _s, payload in harness._client.calls] == [["r-1"]]
+    assert harness._pacer.expected_releases(1) == 1
+
+
+# ---------------------------------------------------------------------------
+# The task and the entry point
 
 
 @pytest.mark.unit
@@ -813,7 +1073,7 @@ def test_entrypoint_runs_one_episode_and_drains_training(monkeypatch, capsys) ->
     assert not rest
     assert str(task.relative_to(EXAMPLE_DIR)) == "harbor"
     assert agent == {"name": "harness:HarborAgent", "model_name": "reef", "kwargs": {"seed": 43, "days": 14}}
-    assert tags == {"seed": 43, "days": 14}
+    assert tags == {"seed": 43, "days": 14, "scenario": "ceobench-host-test"}
     assert lab == EXAMPLE_DIR / "work" / "lab"
     out = capsys.readouterr().out
     assert "reward" in out and "not reachable" in out
@@ -841,12 +1101,13 @@ def test_entrypoint_fails_when_harbor_reports_an_error(monkeypatch) -> None:
 def test_task_pins_the_upstream_commit_and_ships_no_credentials() -> None:
     dockerfile = (EXAMPLE_DIR / "harbor" / "environment" / "Dockerfile").read_text(encoding="utf-8")
     assert "ARG CEOBENCH_COMMIT=d2b7b32e5301a571b77f5f68bd1032adbcd5b464" in dockerfile
+    assert "COPY engine.py /opt/ceobench-engine.py" in dockerfile
     patch = (EXAMPLE_DIR / "harbor" / "environment" / "reef.patch").read_text(encoding="utf-8")
-    assert "SAAS_BENCH_OPENAI_CHAT_COMPLETIONS" in patch and "SAAS_BENCH_" in patch
+    # The patch touches the engine only: the agent, its tools, and its runner live in harness/.
+    assert "SAAS_BENCH_SIMULATOR_TIMEOUT_S" in patch and "agents/bash_agent" not in patch
     for path in EXAMPLE_DIR.rglob("*"):
         if path.is_file() and path.suffix in {".py", ".sh", ".yaml", ".toml", ".md", ".patch"}:
             text = path.read_text(encoding="utf-8", errors="replace")
             assert "sk-ant-" not in text and "AKIA" not in text, path
     serve = (EXAMPLE_DIR / "serve.yaml").read_text(encoding="utf-8")
     assert "batch-size: 8" in serve and "recipes.sao.recipe:SAORecipe" in serve
-    assert json.loads(json.dumps({"ok": True}))  # keeps json imported for the reward fixture above

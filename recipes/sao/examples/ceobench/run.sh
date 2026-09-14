@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The SAO training stack for CEO-Bench, then one episode through reef-eval,
+# The SAO training stack for CEO-Bench, then one episode through reef-eval:
+# the benchmark's bash agent, played by this harness against the stack and
 # trained while it is played. Setup (once): see README. State goes to $RUN_DIR.
 #
 # The stack is left running and a healthy one is reused; `docker compose down`
@@ -32,14 +33,15 @@ export CEOBENCH_CREDIT_DISCOUNT="${CEOBENCH_CREDIT_DISCOUNT:-0.8}"
 # of the credits so far, floored so a quiet stretch does not amplify noise.
 export CEOBENCH_SCORE_CLIP="${CEOBENCH_SCORE_CLIP:-0.05}"
 export CEOBENCH_SCORE_FLOOR="${CEOBENCH_SCORE_FLOOR:-0.003}"
-# The agent's shell runs as this unprivileged user inside the task container.
-export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
-# The runner's own limits, widened for a paced game (reef.patch reads them):
-# a bash command such as next-week may take an hour (the engine gives up at
-# 4200 s), an LLM call may wait through a pacer hold, and one simulator
-# request is bounded so a stuck call fails instead of stalling the week.
-export SAAS_BENCH_BASH_TIMEOUT="${SAAS_BENCH_BASH_TIMEOUT:-3600}"
-export SAAS_BENCH_LLM_TIMEOUT="${SAAS_BENCH_LLM_TIMEOUT:-1800}"
+# The agent's tools run as this unprivileged user inside the task container.
+export CEOBENCH_TOOL_USER="${CEOBENCH_TOOL_USER:-agent}"
+# Limits widened for a paced game: a bash command such as next-week may take
+# an hour (the benchmark's limit is 1200 s; the engine gives up at 4200 s), a
+# model call may wait through a pacer hold, and one simulator request is
+# bounded (reef.patch reads it) so a stuck call fails instead of stalling
+# the week.
+export CEOBENCH_BASH_TIMEOUT_S="${CEOBENCH_BASH_TIMEOUT_S:-3600}"
+export CEOBENCH_LLM_TIMEOUT_S="${CEOBENCH_LLM_TIMEOUT_S:-1800}"
 export SAAS_BENCH_SIMULATOR_TIMEOUT_S="${SAAS_BENCH_SIMULATOR_TIMEOUT_S:-300}"
 # The untrained baseline: 0 records the episode without posting a report, so
 # the stack serves the base model throughout and trains nothing.

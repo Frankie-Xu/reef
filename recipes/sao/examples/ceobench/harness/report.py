@@ -1,16 +1,19 @@
-"""Post one week of a CEO-Bench episode to Reef, one report per turn.
+"""The reward: each finished week of a CEO-Bench episode, credited and posted to Reef.
 
-The agent (``harness.agent``) routes every model call of an episode through
-Reef and knows, from the dashboard each request carries, which simulated week
-a call belongs to and the state the week started in. When enough later weeks
-have opened the week is scored, and :func:`post_week_reports` turns it into
-one Reef report per turn: the week's credit as the score, that turn's receipt
-as the only reference. One reference per report is what the ``sao`` recipe
-trains on.
+The harness (``harness.harbor_agent``) plays the benchmark's agent turn by
+turn and knows the engine's day at every model call, so :class:`WeekRecords`
+files each captured turn under its simulated week with the state the week
+started in (:class:`WeekStart`, read from the engine's dashboard and books).
+When enough later weeks have opened the week is scored, and
+:func:`post_week_reports` turns it into one Reef report per decision turn:
+the week's credit as the score, that turn's receipt as the only reference.
+One reference per report is what the ``sao`` recipe trains on.
+:class:`TrainingPacer` holds the game until the trainer has consumed the
+turns reported so far.
 
-A week's opening state is valued as its cash plus the subscription run-rate
-the dashboard implies (each individual subscriber at the lowest listed price,
-each enterprise seat at plan C's), counted over the weeks left in the episode
+A week's opening state is valued as its cash plus its subscription run-rate
+(the engine's own monthly recurring revenue, or the dashboard's estimate
+when the books cannot be read), counted over the weeks left in the episode
 and at most ``horizon_weeks`` of them (:func:`valuation`). Cash alone made
 every purchase a loss and inaction the safest week; the run-rate term is what
 pays for growth inside the horizon.
@@ -18,8 +21,8 @@ pays for growth inside the horizon.
 A week's credit is the discounted sum of the value changes of the next
 ``credit_weeks`` weeks (:func:`week_credit`): the week that spends on
 acquisition is credited with the subscribers that arrive over the weeks
-after it. The last weeks of an episode end with the verifier's final cash,
-valued as cash alone, and their sums are cut short there.
+after it. The last weeks of an episode end with the final cash the engine
+reports, valued as cash alone, and their sums are cut short there.
 
 Credits are posted through :class:`ScoreScale`, which clips one week's
 outliers (the benchmark's six-figure R&D purchases) and divides by the
@@ -34,9 +37,18 @@ engine served it and Reef recorded it, but the trainer could not hold it,
 so it stays evaluation-only.
 """
 
+import json
+import logging
+import re
 import statistics
+import threading
+import time
+import urllib.error
+import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import NamedTuple
 
 from reef_client import ReefClient
 
@@ -153,3 +165,353 @@ def post_week_reports(
         }
         posted.append(client.report(scenario, payload))
     return posted
+
+
+#: How often the pacer re-reads the scenario's releases while it holds the game.
+PACE_POLL_S = 10.0
+#: The weekly dashboard the engine returns: the header, then the week's
+#: opening cash, individual subscribers, and enterprise seats.
+DASHBOARD_RE = re.compile(
+    r"=== Week (\d+) Dashboard \(Day (\d+)\) ===\s*\n\s*\n"
+    r"Cash: (-?)\$(-?[\d,]+)\n"
+    r"Individual Subscribers: (\d+)\n"
+    r"Enterprise Subscribed Seats: (\d+)"
+)
+#: The listed plan prices in the same dashboard's configuration block.
+PRICES_RE = re.compile(r"--- Current Config ---\s*\nPrices: A=\$(\d+), B=\$(\d+), C=\$(\d+)")
+#: The engine's own monthly recurring revenue: every live subscription at its
+#: effective price times its seats (an individual subscription has one).
+MRR_SQL = (
+    "SELECT COALESCE(SUM(effective_price * COALESCE(seat_count, 1)), 0) AS mrr"
+    " FROM subscriptions WHERE status = 'subscribed' AND end_day IS NULL"
+)
+MRR_FALLBACK_SQL = (
+    "SELECT COALESCE(SUM(effective_price), 0) AS mrr FROM subscriptions"
+    " WHERE status = 'subscribed' AND end_day IS NULL"
+)
+#: SDK calls and CLI commands that change the company: money spent, prices,
+#: targeting, research, deals, posts, and the week advanced. Everything else
+#: the agent can do (queries, status, reading docs, files in its workspace)
+#: only reads, and such turns are recorded but not trained on: a week's
+#: outcome is credited to the decisions in it, not to looking at the books.
+DECISION_CALLS = (
+    "next-week",
+    "next_week",
+    "set_prices",
+    "set_promotion",
+    "set_lead_promotion",
+    "set_model_tiers",
+    "set_usage_quotas",
+    "set_capacity_tier",
+    "set_daily_spend",
+    "set_targeted_ad_spend",
+    "set_targeted_dev_spend",
+    "set_targeted_ops_spend",
+    "set_ads_strength",
+    "start_research_project",
+    "research_market",
+    "research_group",
+    "send_enterprise_deal",
+    "reject_enterprise_deal",
+    "post_social_media",
+)
+DECISION_RE = re.compile(r"\b(" + "|".join(re.escape(call) for call in DECISION_CALLS) + r")\b")
+#: A bash command that runs a Python script file (not inline ``python -c`` code).
+SCRIPT_RUN_RE = re.compile(r"\bpython3?\s+(?!-c\b)(\S+\.py)\b")
+
+
+class WeekStart(NamedTuple):
+    """A week's opening state as its dashboard shows it, plus the engine's own MRR when read."""
+
+    week: int
+    day: int
+    cash: float
+    subscribers: int
+    seats: int
+    prices: tuple[float, float, float]  # plans A, B, C as listed, monthly
+    mrr: float | None = None
+
+    @property
+    def run_rate(self) -> float:
+        """Monthly subscription revenue: the engine's MRR when read, else an estimate from the dashboard.
+
+        The estimate counts each individual subscriber at the lowest nonzero
+        listed price and each enterprise seat at plan C's; the dashboard shows
+        neither the plan mix nor negotiated seat prices, so it is a floor.
+        """
+        if self.mrr is not None:
+            return self.mrr
+        listed = [price for price in self.prices if price > 0]
+        return self.subscribers * (min(listed) if listed else 0.0) + self.seats * self.prices[2]
+
+
+def dashboards(content: str) -> list[WeekStart]:
+    """Every dashboard in ``content``, in order of appearance.
+
+    The prices are looked for between a dashboard's header and the next
+    one's; a dashboard without its configuration block keeps its week and
+    cash and lists no prices.
+    """
+    starts = []
+    matches = list(DASHBOARD_RE.finditer(content))
+    for position, match in enumerate(matches):
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(content)
+        priced = PRICES_RE.search(content, match.end(), end)
+        prices = tuple(float(price) for price in priced.groups()) if priced else (0.0, 0.0, 0.0)
+        sign = -1.0 if match.group(3) == "-" else 1.0
+        starts.append(
+            WeekStart(
+                week=int(match.group(1)),
+                day=int(match.group(2)),
+                cash=sign * float(match.group(4).replace(",", "")),
+                subscribers=int(match.group(5)),
+                seats=int(match.group(6)),
+                prices=(prices[0], prices[1], prices[2]),
+            )
+        )
+    return starts
+
+
+def tool_calls(turn: dict) -> list[tuple[str, dict]]:
+    """``(tool name, arguments)`` of every tool call in a captured turn's response."""
+    calls = []
+    for choice in (turn.get("response") or {}).get("choices") or []:
+        message = choice.get("message") if isinstance(choice, dict) else None
+        for call in (message or {}).get("tool_calls") or []:
+            function = call.get("function") or {}
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {"raw": arguments}
+            calls.append((str(function.get("name") or ""), arguments if isinstance(arguments, dict) else {}))
+    return calls
+
+
+def turn_decision(turn: dict, scripts: dict[str, str]) -> str | None:
+    """The company-changing call a turn made, or ``None`` for a turn that only read.
+
+    ``scripts`` holds the files the agent has written so far (path to
+    content), updated here as ``write_file``/``edit_file`` calls pass, so a
+    bash command that runs one of them is judged by what it contains; a
+    script this episode did not write is taken to act.
+    """
+    for name, arguments in tool_calls(turn):
+        if name in ("write_file", "edit_file"):
+            path = str(arguments.get("path") or "")
+            content = str(arguments.get("content") or arguments.get("new_string") or "")
+            if path:
+                scripts[path] = content if name == "write_file" else scripts.get(path, "") + "\n" + content
+            continue
+        if name != "bash":
+            continue
+        command = str(arguments.get("command") or "")
+        found = DECISION_RE.search(command)
+        if found:
+            return found.group(1).replace("-", "_")
+        for match in SCRIPT_RUN_RE.finditer(command):
+            script = match.group(1)
+            basename = script.rsplit("/", 1)[-1]
+            content = next((body for path, body in scripts.items() if path.rsplit("/", 1)[-1] == basename), None)
+            if content is None:
+                return "script"
+            found = DECISION_RE.search(content)
+            if found:
+                return found.group(1).replace("-", "_")
+    return None
+
+
+def turn_tokens(turn: dict) -> int:
+    """Prompt plus completion tokens of one captured turn (0 when unreported)."""
+    usage = (turn.get("response") or {}).get("usage") or {}
+    return int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+
+
+class WeekRecords:
+    """The episode's weeks: each one's opening state and its turns, in call order."""
+
+    def __init__(
+        self,
+        total_weeks: int = 0,
+        horizon_weeks: int = DEFAULT_VALUE_HORIZON_WEEKS,
+        credit_weeks: int = DEFAULT_CREDIT_WEEKS,
+        discount: float = DEFAULT_CREDIT_DISCOUNT,
+    ) -> None:
+        if credit_weeks < 1:
+            raise ValueError("credit_weeks must be at least 1")
+        self.total_weeks = total_weeks
+        self.horizon_weeks = horizon_weeks
+        self.credit_weeks = credit_weeks
+        self.discount = discount
+        self.weeks: dict[int, dict] = {}  # week -> {"start": WeekStart, "turns": [(receipt, tokens, decision)]}
+        self.turns: list[dict] = []  # {"receipt", "tokens", "week", "decision"} per captured turn
+        self.posted: set[int] = set()
+        self.scores: dict[int, float] = {}  # week -> the scaled score it was posted with
+        self._scripts: dict[str, str] = {}
+
+    def open_week(self, start: WeekStart) -> None:
+        self.weeks.setdefault(start.week, {"start": start, "turns": []})
+
+    def add_turns(self, week: int, captured: list[dict]) -> list[dict]:
+        """File captured turns under ``week``; return the records of the ones Reef served."""
+        records = []
+        for turn in captured:
+            if turn.get("status") != 200 or not turn.get("receipt"):
+                continue
+            record = {
+                "receipt": turn["receipt"],
+                "tokens": turn_tokens(turn),
+                "week": week,
+                "decision": turn_decision(turn, self._scripts),
+            }
+            self.turns.append(record)
+            self.weeks[week]["turns"].append((record["receipt"], record["tokens"], record["decision"]))
+            records.append(record)
+        return records
+
+    def value(self, start: WeekStart) -> float:
+        """What a week's opening state is worth, given the weeks left after it."""
+        return valuation(start.cash, start.run_rate, self.total_weeks - start.week, self.horizon_weeks)
+
+    def _closing(
+        self, ordered: list[int], position: int, final_cash: float | None
+    ) -> tuple[float, float, float] | None:
+        """``(cash_end, value_end, credit)`` of the week at ``position``, or ``None`` while it is open.
+
+        The week closes with the opening state of the next week seen and is
+        credited with the value changes of the ``credit_weeks`` weeks from it
+        on, so it stays open until that many later weeks have opened. With
+        ``final_cash`` the episode is over: the last week seen ends there,
+        valued as cash alone, and a window that reaches the end is cut short.
+        """
+        deltas: list[float] = []
+        closing: tuple[float, float] | None = None
+        for offset in range(self.credit_weeks):
+            index = position + offset
+            value = self.value(self.weeks[ordered[index]]["start"])
+            if index + 1 < len(ordered):
+                start = self.weeks[ordered[index + 1]]["start"]
+                cash_end, value_end = start.cash, self.value(start)
+            elif final_cash is not None:
+                cash_end, value_end = final_cash, final_cash
+            else:
+                return None
+            deltas.append(value_end - value)
+            closing = closing or (cash_end, value_end)
+            if index + 1 >= len(ordered):
+                break  # the episode ended inside the window
+        if closing is None:
+            return None
+        return (*closing, week_credit(deltas, self.discount))
+
+    def finished_weeks(self, final_cash: float | None = None) -> list[tuple[int, float, float, float]]:
+        """Unreported weeks whose credit is known, as ``(week, cash_end, value_end, credit)``."""
+        ordered = sorted(self.weeks)
+        finished = []
+        for position, week in enumerate(ordered):
+            if week in self.posted:
+                continue
+            closing = self._closing(ordered, position, final_cash)
+            if closing is not None:
+                finished.append((week, *closing))
+        return finished
+
+    def summary(self, final_cash: float | None = None) -> list[dict]:
+        ordered = sorted(self.weeks)
+        rows = []
+        for position, week in enumerate(ordered):
+            entry = self.weeks[week]
+            start: WeekStart = entry["start"]
+            closing = self._closing(ordered, position, final_cash) or (None, None, None)
+            rows.append(
+                {
+                    "week": week,
+                    "day": start.day,
+                    "cash_start": start.cash,
+                    "cash_end": closing[0],
+                    "subscribers": start.subscribers,
+                    "seats": start.seats,
+                    "run_rate": start.run_rate,
+                    "value_start": self.value(start),
+                    "value_end": closing[1],
+                    "credit": closing[2],
+                    "score": self.scores.get(week),
+                    "turns": len(entry["turns"]),
+                    "decisions": sum(1 for _receipt, _tokens, decision in entry["turns"] if decision is not None),
+                    "reported": week in self.posted,
+                }
+            )
+        return rows
+
+
+class ReleaseCount(ABC):
+    """Where the pacer reads how many training releases the scenario has committed."""
+
+    @abstractmethod
+    def training_releases(self) -> int | None:
+        """The count so far, or ``None`` when the service could not answer just now."""
+
+
+class ScenarioReleases(ReleaseCount):
+    """The scenario's release list on the Reef service."""
+
+    def __init__(self, service_url: str, scenario: str, token: str) -> None:
+        self._url = f"{service_url}/reef/scenarios/{scenario}/releases"
+        self._token = token
+
+    def training_releases(self) -> int | None:
+        request = urllib.request.Request(self._url, headers={"Authorization": f"Bearer {self._token}"})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read())
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            return None
+        return sum(1 for row in payload.get("releases", []) if row.get("operation") == "training")
+
+
+class TrainingPacer:
+    """Hold the game until the trainer has consumed the turns reported so far.
+
+    The reported turns fill batches of ``batch_size``; each full batch must
+    have produced one training release. ``wait`` blocks until the scenario
+    has that many releases beyond the count at episode start, or the timeout
+    passes, in which case the shortfall is forgiven so later weeks do not
+    wait for a batch the recipe declined.
+    """
+
+    def __init__(self, batch_size: int, timeout_s: float, releases: ReleaseCount, logger: logging.Logger) -> None:
+        self.batch_size = int(batch_size)
+        self.timeout_s = float(timeout_s)
+        self._releases = releases
+        self._logger = logger
+        self._base: int | None = None
+        self._forgiven = 0
+        self._lock = threading.Lock()
+
+    def expected_releases(self, posted_turns: int) -> int:
+        return posted_turns // self.batch_size - self._forgiven
+
+    def wait(self, week: int, posted_turns: int) -> float:
+        """Block until the trainer caught up; return the seconds spent waiting."""
+        started = time.time()
+        with self._lock:
+            if self._base is None:
+                self._base = self._releases.training_releases() or 0
+            expected = self.expected_releases(posted_turns)
+            while True:
+                observed = (self._releases.training_releases() or 0) - self._base
+                if observed >= expected:
+                    break
+                if time.time() - started >= self.timeout_s:
+                    self._forgiven += expected - observed
+                    self._logger.warning(
+                        "week %d: trainer committed %d of %d expected releases after %.0fs; going on",
+                        week,
+                        observed,
+                        expected,
+                        self.timeout_s,
+                    )
+                    break
+                time.sleep(PACE_POLL_S)
+        return time.time() - started

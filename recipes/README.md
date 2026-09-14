@@ -59,13 +59,14 @@ verifiable binary reward, and every scored rollout is one training step.
 
 [SAO on CEO-Bench](sao/examples/ceobench/README.md) runs
 [CEO-Bench](https://ceobench.com), a 500-day simulated startup, as one Harbor
-task with the benchmark's own bash agent served by Reef. The harness routes
-the agent role through a reef-client sidecar, keeps the two simulator roles
-outside Reef, scores the run from its `world.nmdb`, and reports each
-finished week's change in company value against the week's decision turns
-while the episode runs. It demonstrates how to bring a third-party agent
-loop to Reef by base URL alone and how to shape an online, per-period
-reward for one long episode.
+task. The harness is the benchmark's own bash agent, played from the host
+with its prompt, tools, and tool executor taken from the pinned checkout in
+the task image and its model calls served by Reef; the two simulator roles
+stay outside Reef, the verifier scores the run from its `world.nmdb`, and
+each finished week's change in company value is reported against the
+week's decision turns while the episode runs. It demonstrates how to adopt
+a benchmark's agent as a Reef harness and how to shape an online,
+per-period reward for one long episode.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto

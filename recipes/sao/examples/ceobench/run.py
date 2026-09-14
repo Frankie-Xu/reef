@@ -94,7 +94,9 @@ def wait_for_training() -> int:
 async def main():
     lab = Lab(HERE / "work" / "lab")
     agent = {"name": "harness:HarborAgent", "model_name": MODEL, "kwargs": {"seed": SEED, "days": DAYS}}
-    row = await lab.run(str(HERE / "harbor"), agent, tags={"seed": SEED, "days": DAYS})
+    # The scenario is part of the episode's identity: the untrained baseline and a trained
+    # episode on the same seed are two rows, not one recorded twice.
+    row = await lab.run(str(HERE / "harbor"), agent, tags={"seed": SEED, "days": DAYS, "scenario": SCENARIO})
     print(f"seed {SEED}: reward {row.rewards}")
     if row.tags.get("error"):
         raise RuntimeError(f"Harbor trial failed: {row.tags['error']}")
