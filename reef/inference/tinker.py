@@ -76,6 +76,8 @@ class TinkerSDKSampler(TinkerSampler):
     """The SDK boundary for sampling; every request binds an immutable sampler path."""
 
     _sdk: Any
+    _model: str
+    _timeout_s: float
     _service: Any
     _base_sampler: Any
     _tokenizer: Any

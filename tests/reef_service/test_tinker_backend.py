@@ -519,7 +519,10 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
             )
         )
         deadline = time.monotonic() + 5
-        while scenario.scenario_step < 1 and time.monotonic() < deadline:
+        # The commit advances the step first; the trainer thread reopens admission right after.
+        while (
+            scenario.scenario_step < 1 or not runtime.inference.inference_admission_status["open"]
+        ) and time.monotonic() < deadline:
             time.sleep(0.01)
         assert scenario.scenario_step == 1, first.build_training_status()
         published = scenario.current_artifact_ref()
