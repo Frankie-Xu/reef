@@ -332,7 +332,11 @@ def _apply_critic_checkpoint_roots(critic_args: Any) -> None:
     elif critic_init and _has_megatron_checkpoint(critic_init):
         # A value model trained on earlier episodes: its weights and optimizer
         # come from --critic-init once, and every later start resumes from
-        # what this run has saved since.
+        # what this run has saved since. The learning-rate schedule is this
+        # run's, not the checkpoint's: the earlier run may have used another
+        # batch size, and Megatron otherwise refuses a schedule whose total
+        # iteration count differs.
+        critic_args.override_opt_param_scheduler = True
         load, reason = critic_init, "starts from the checkpoint in --critic-init"
     else:
         logger.info(

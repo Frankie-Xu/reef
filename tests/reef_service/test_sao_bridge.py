@@ -567,6 +567,8 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     critic_args = prepare_critic_args(args)
     assert (critic_args.load, critic_args.save) == (str(critic_init), str(critic_save))
     assert (critic_args.no_load_optim, critic_args.finetune) == (False, False)
+    # The schedule is this run's: the earlier run's batch size sets a different iteration total.
+    assert critic_args.override_opt_param_scheduler is True
 
     # Once the critic has saved, its own checkpoint wins over the init.
     critic_save.mkdir()
