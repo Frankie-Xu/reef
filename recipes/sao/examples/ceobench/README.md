@@ -225,6 +225,7 @@ purchases of the warm-up (-0.17 and -0.34) set the critic's scale for the
 rest of the episode. The credit window, the scaling, and a value model that
 starts from an earlier episode's critic with two warm-up commits
 (`--critic-init`, `num-critic-only-steps`) answer those three findings.
+The fifth episode ran this full scheme (results below).
 
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
 the recipe's batch size). The sidecar peeks at each request's dashboard;
@@ -556,6 +557,88 @@ spending the growth weeks, the scale set by two outliers, and acquisition
 never credited with what it brought, are what the credit window, the score
 scaling, and the critic warm-start address (reward shaping above).
 
+### Trained episode, seed 42, attempt 5 (decision-turn credit, engine MRR)
+
+`results/2026-09-14-ttt-qwen3.6-27b-seed42-attempt5-decision-credit/` holds
+the same files; `weeks.csv` adds `credit` (the discounted four-week valuation
+change), `score` (as posted, clipped and scaled), `decisions` (the week's
+decision turns), and `decisions_reported` (those inside the 24k training
+window). This is the full scheme of "Reward shaping": the engine's MRR in
+the valuation, credit on decision turns only over a four-week window, the
+clip and median scaling, batch 8, the critic started from attempt 4's after
+its seventh commit with two critic-only steps, and the pacer holding every
+request while a filled batch trains. Same seed, simulator roles, and
+policy. Attempt 4 (`results/2026-09-14-...-attempt4-credit-window-partial/`,
+trial log only) had run the window, the scaling, and the warm-start without
+the decision-turn and MRR changes and was stopped at day 119 to add them:
+cash $402,330 with 122 subscribers, every week's credit negative, and the
+same drift into cost-cutting from week 13.
+
+| | |
+| --- | --- |
+| Outcome | completed, day 497 (week 71); not bankrupt; final cash $257,682, `reward` 0.258; no engine stall (the stack-dump watch never fired) |
+| Turns | 493 in 3h52m; 144 decision turns, 125 of them (87%) inside the 24k window and reported; 349 read-only turns recorded, not trained on |
+| Training | 15 releases: 2 critic-only steps, then 13 actor updates, the first served from week 9 (day 63). The pacer held 15 week starts for 51 minutes in all, 370 s at most (week 4); no publish met a request in flight |
+| Rewards | one positive week (6, +0.006); every other week negative, weeks 12 to 16 at the clip (-0.05 to -0.41 before it) |
+
+| Week | Day | Cash | Subscribers | Engine MRR / month |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 7 | $821,930 | 23 | $207 |
+| 3 | 21 | $804,817 | 110 | $1,450 |
+| 5 | 35 | $789,541 | 198 | $2,692 |
+| 7 | 49 | $752,089 | 314 | $4,896 |
+| 10 | 70 | $725,410 | 586 | $10,089 |
+| 12 | 84 | $698,655 | 647 | $11,626 |
+| 15 | 105 | $649,008 | 639 | $11,858 |
+| 17 | 119 | $295,903 | 327 | $5,422 |
+| 20 | 140 | $289,548 | 183 | $776 |
+| 22 | 154 | $286,912 | 38 | $0 |
+| 30 | 210 | $282,077 | 0 | $0 |
+| 50 | 350 | $270,177 | 0 | $0 |
+| 70 | 490 | $258,277 | 0 | $0 |
+
+The decision turns of a week are what the scheme credits, and the record
+shows what those decisions were. Week 0 bought R&D as in every run
+(-$178,070). Weeks 1 to 9 then grew the base from 0 to 499 subscribers at
+$6,000 to $10,000 of cash a week, about $80 to $170 per subscriber; the
+engine's MRR reached $8,367 a month. Those weeks were credited between
+-0.002 and -0.023, with week 6 the only positive one: under a 26-week horizon a
+$14 subscriber is worth about $85, less than it cost, so the valuation
+read the growth as a small loss even with the exact MRR in it. The actor's
+first update was served at week 9. From week 10 the base plateaued between
+580 and 710: usage passed the tier-1 capacity cap and an outage cost the
+week (-0.031), open issues climbed from 37 to 92, and conversion fell from
+22% to 17% and then to 5% as competitor launches hit. The policy answered
+with more spending, ops to $1,200 a day, ads to $800, higher model tiers, a
+25% lead promotion, and in week 15 a $333,000 R&D Tier 2 purchase in the
+same week as 76 cancellations (-$347,005). Weeks 16 to 22 unwound the base
+at 60 to 170 subscribers a week while the promotions the policy set to
+recover conversion (a $50 lead promotion against an $18 plan, corrected the
+next turn) took the effective price to zero; the MRR was $0 by week 22.
+From week 23 the policy held the empty company at $595 a week to the end,
+the attractor of every trained episode, and the second R&D purchase left it
+$108,000 below attempt 3's final cash.
+
+What the scheme changed is visible and what it did not is the finding.
+Crediting decisions only removed the penalty on analysis (the read-only
+turns went from most of each batch to none of it), the engine's MRR
+removed the price-cut artifact (week 5's price rise and week 13's promotion
+cut were valued at their real effect), the scaling kept every score inside
++-3 with the clip absorbing the two purchases, and the warm-started critic
+let the actor update from week 9 rather than week 14. But the credit itself
+was negative in 70 of 71 weeks: with acquisition at $80 to $170 a
+subscriber against $85 of horizon value, no week of growth at this
+simulator's prices scores positive, and a policy whose every action is
+punished has no direction to move but toward fewer actions. The horizon
+(`CEOBENCH_VALUE_HORIZON_WEEKS`) is the lever that decides whether growth
+can ever be credited: at 26 weeks the benchmark's own growth strategy
+loses, and a horizon matching the weeks left (up to 71) or a per-lever
+attribution of what each spend line brought are the two candidates before
+another full run. The 24k window is a second limit: the two long turns of
+week 11 in which the policy diagnosed its settings and one week (19) whose
+context a 12k-token query result pushed past the window contributed no
+decision turns at all (`decisions_reported` in `weeks.csv`).
+
 Seed 42, same simulator roles, one episode each:
 
 | Policy | Reward | Outcome | Final cash |
@@ -564,6 +647,7 @@ Seed 42, same simulator roles, one episode each:
 | trained in the episode, attempt 1 | weekly cash change | runner timeout at day 385 | $252,634 |
 | trained in the episode, attempt 2 | weekly cash change | completed, day 497 | $358,251 |
 | trained in the episode, attempt 3 | weekly valuation change | engine stall at day 454 | $365,613 |
+| trained in the episode, attempt 5 | decision turns, four-week valuation credit, engine MRR | completed, day 497 | $257,682 |
 
 The trained episodes end with cash and the untrained one does not, which
 is what the benchmark scores and what the weekly cash-delta reward asks
@@ -571,23 +655,23 @@ for. What the policy learned to reach it is worth as much as the number:
 under a reward that scores each week's cash change, the safest week is one
 where nothing is bought and nothing is built, and the untrained agent's
 growth strategy (671 subscribers by week 11 in the baseline, then a cash
-collapse) is exactly what the critic learns to discount. A less myopic
-signal is the next experiment, not a larger run of this one.
+collapse) is exactly what the critic learns to discount. Attempt 5 scored
+the decisions on a four-week valuation credit with the engine's MRR and
+still credited 70 of 71 weeks negative: at this simulator's acquisition
+cost a 26-week horizon never pays for growth, so the horizon, not another
+run of this one, is the next change.
 
 ### Not yet run
 
 - The untrained baseline with the benchmark's Anthropic simulator roles and
   more seeds (issue #428, acceptance criterion 1); replicates of the trained
   episode on other seeds.
-- A trained episode under the full scheme above: decision-turn credit
-  over a four-week window, scaled, the engine's MRR in the valuation, and
-  the critic warm-started. Attempt 4 (`results/2026-09-14-...-attempt4-credit-window-partial/`,
-  trial log only) ran the credit window, the scaling, and the warm-start
-  without the decision-turn and MRR changes and was stopped at day 119 to
-  add them: cash $402,330 with 122 subscribers, every week's credit negative,
-  the actor updated from release 3 (day 49) on, and the same drift into
-  cost-cutting from week 13. Beyond those, a judged turn-level signal.
-- The engine stall: twice in attempt 1 and 3 (never in attempt 2) a
+- A trained episode with a valuation horizon that covers the weeks left
+  (`CEOBENCH_VALUE_HORIZON_WEEKS=71`), or a per-lever attribution of each
+  spend line's return, so that a week of growth at the simulator's
+  acquisition cost can score positive (attempt 5 above). Beyond those, a
+  judged turn-level signal.
+- The engine stall: twice in attempts 1 and 3 (never in attempts 2 and 5) a
   `next-week` hung inside the engine's `step_week` after the last simulator
   call of the week returned, late in the game with no subscribers left. The
   runner's timeouts do not recover it cleanly (the second call advanced the
