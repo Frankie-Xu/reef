@@ -14,7 +14,7 @@ from reef.runtime.deployment import (
 )
 from reef.runtime.executor.placement import ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.runtime.interfaces import TrainingBackend
-from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
+from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 
 
@@ -65,9 +65,20 @@ class TinkerTrainingService(TrainingService):
 
     weight_transfer_protocol = ADAPTER_FILES_PROTOCOL
 
-    def __init__(self, base_model: str, config: TinkerConfig, api_key: str, *, client: TinkerClient | None = None):
+    def __init__(
+        self,
+        base_model: str,
+        config: TinkerConfig,
+        api_key: str,
+        *,
+        loss_family: str | None = None,
+        loss_reference: str | None = None,
+        client: TinkerClient | None = None,
+    ) -> None:
         self._model = base_model
         self._config = config
+        self._loss_family = loss_family
+        self._loss_reference = loss_reference
         self._api_key = api_key
         self._client = client
         self._session_id: str | None = None
@@ -79,8 +90,6 @@ class TinkerTrainingService(TrainingService):
         if self._started or self._closed:
             raise RuntimeError("training service can only be started once")
         self._started = True
-        if self._client is None:
-            self._client = TinkerSDKClient(self._model, self._config, self._api_key)
 
     def attach_weight_transport(self, session: WeightTransferSession) -> None:
         if not self._started or self._closed:
@@ -92,12 +101,20 @@ class TinkerTrainingService(TrainingService):
         self._session_id = session.session_id
 
     def backend(self) -> TrainingBackend:
-        if self._client is None or self._session_id is None or self._closed:
+        """The backend the coordinator starts in its own process; the SDK session opens there."""
+        if not self._started or self._session_id is None or self._closed:
             raise RuntimeError("training backend requires a started service with attached engines")
         if self._backend is None:
             from reef.train.tinker_backend.backend import TinkerTrainingBackend
 
-            self._backend = TinkerTrainingBackend(self._model, self._config, self._client)
+            self._backend = TinkerTrainingBackend(
+                self._model,
+                self._config,
+                loss_family=self._loss_family,
+                loss_reference=self._loss_reference,
+                api_key=self._api_key,
+                client=self._client,
+            )
         return self._backend
 
     def check_health(self) -> None:
@@ -111,8 +128,6 @@ class TinkerTrainingService(TrainingService):
         if self._closed:
             return
         self._closed = True
-        if self._client is not None and self._backend is None:
-            self._client.close()
 
 
 def sglang_inference_config(reef: Mapping[str, Any], config: TinkerConfig) -> dict[str, Any]:

@@ -30,10 +30,11 @@ from reef.runtime.interfaces import (
     TrainingMetrics,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, read_json, write_json
+from reef.train.algos.registry import register_loss_family_ref
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.losses import TinkerLoss, TokenRow, resolve_tinker_loss, row_from_payload
+from reef.train.tinker_backend.losses import BACKEND, TinkerLoss, TokenRow, resolve_tinker_loss, row_from_payload
 from reef.train.tinker_backend.preparation import prepare_tinker_step
 
 #: Where a checkpoint directory keeps the PEFT adapter the engines load.
@@ -49,11 +50,25 @@ class TinkerTrainingBackend(TrainingBackend):
     """
 
     def __init__(
-        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, start_rollout_id: int = 0
+        self,
+        base_model: str,
+        config: TinkerConfig,
+        *,
+        loss_family: str | None = None,
+        loss_reference: str | None = None,
+        api_key: str | None = None,
+        client: TinkerClient | None = None,
+        start_rollout_id: int = 0,
     ) -> None:
+        if client is None and not api_key:
+            raise ValueError("Tinker needs an API key or an injected client")
         self._model = base_model
         self._config = config
-        self._client = client
+        self._loss_family = loss_family
+        self._loss_reference = loss_reference
+        self._api_key = api_key
+        self._client: TinkerClient | None = client
+        self._base: TinkerCheckpoint | None = None
         self._root = Path(config.state_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._template = str(self._root / "checkpoints" / "rollout_{rollout_id}")
@@ -64,13 +79,6 @@ class TinkerTrainingBackend(TrainingBackend):
             next_rollout_id=start_rollout_id, history=ScenarioHistory(history_path(self._template))
         )
         self._active_scenario: str | None = None
-        base = self._root / "base"
-        if (base / MANIFEST).exists():
-            self._base = TinkerCheckpoint.read(base)
-        else:
-            self._base = client.initialize()
-            self._base.write(base)
-        self._base.validate_model(base_model, config.lora_rank)
 
     # -- Coordinator contract
 
@@ -83,10 +91,43 @@ class TinkerTrainingBackend(TrainingBackend):
         return self._context
 
     def start(self) -> None:
-        return
+        """Open the SDK session here, in the coordinator's process, and seed the base checkpoint once.
+
+        The recipe registered its loss family in the driver's process; this
+        process learns the same dotted reference, and resolving it imports the
+        recipe package here, which registers the step preparer the coordinator
+        will be asked for. An unknown family fails now, before any job.
+        """
+        if self._loss_family:
+            if self._loss_reference:
+                register_loss_family_ref(self._loss_family, self._loss_reference, backend=BACKEND)
+            resolve_tinker_loss(self._loss_family)
+        if self._client is None:
+            from reef.train.tinker_backend.client import TinkerSDKClient
+
+            self._client = TinkerSDKClient(self._model, self._config, self._api_key or "")
+        base = self._root / "base"
+        if (base / MANIFEST).exists():
+            self._base = TinkerCheckpoint.read(base)
+        else:
+            self._base = self._client.initialize()
+            self._base.write(base)
+        self._base.validate_model(self._model, self._config.lora_rank)
 
     def check_health(self) -> None:
         return
+
+    @property
+    def client(self) -> TinkerClient:
+        if self._client is None:
+            raise RuntimeError("the Tinker backend opens its SDK session in start()")
+        return self._client
+
+    @property
+    def base(self) -> TinkerCheckpoint:
+        if self._base is None:
+            raise RuntimeError("the Tinker backend seeds its base checkpoint in start()")
+        return self._base
 
     def prepare_training_step(
         self, batch: Any, step_preparer: str, algorithm_state: Mapping[str, Any]
@@ -125,7 +166,7 @@ class TinkerTrainingBackend(TrainingBackend):
         )
 
     def train_job(self, job: _TinkerPreparedJob) -> TrainingMetrics:
-        checkpoint, metrics = self._client.train(job.incumbent, job.batches, job.loss)
+        checkpoint, metrics = self.client.train(job.incumbent, job.batches, job.loss)
         checkpoint.validate_model(self._model, self._config.lora_rank)
         job.result = checkpoint
         return TrainingMetrics(training=dict(metrics))
@@ -135,7 +176,7 @@ class TinkerTrainingBackend(TrainingBackend):
         if job.result is None:
             raise RuntimeError("Tinker job has no trained checkpoint to save")
         directory = job.checkpoint.path
-        self._client.download(job.result, directory / ADAPTER_DIR)
+        self.client.download(job.result, directory / ADAPTER_DIR)
         job.result.write(directory)
         self._require_history().record_checkpoint(job.checkpoint.scenario or "", job.checkpoint.rollout_id)
 
@@ -175,7 +216,8 @@ class TinkerTrainingBackend(TrainingBackend):
         raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")
 
     def close(self) -> None:
-        self._client.close()
+        if self._client is not None:
+            self._client.close()
 
     # -- Checkpoint bookkeeping
 
@@ -192,7 +234,7 @@ class TinkerTrainingBackend(TrainingBackend):
         """The checkpoint a scenario's next job branches from: its last publication, else the seeded base."""
         value = read_json(self._incumbent_path(scenario))
         if value is None:
-            return self._base, None, None
+            return self.base, None, None
         checkpoint = TinkerCheckpoint(**value["checkpoint"])
         checkpoint.validate_model(self._model, self._config.lora_rank)
         return checkpoint, int(value["rollout_id"]), str(value["runtime_load_id"])

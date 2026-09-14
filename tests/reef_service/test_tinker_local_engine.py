@@ -163,7 +163,7 @@ class Stack:
         self.client = client or RemoteClient()
         self.engines = engines or Engines()
         self.backend = TinkerTrainingBackend(
-            "Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "tinker")), self.client
+            "Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "tinker")), client=self.client
         )
         self.coordinator = TrainingCoordinator(self.backend, self.engines)
 

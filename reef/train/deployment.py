@@ -110,7 +110,8 @@ def prepare_inference_config(
     if any(name.startswith("sglang-") for name in options):
         raise DeployConfigError("inference.options uses native SGLang names without the sglang- prefix")
     config["reef"].update(
-        inference_backend="sglang",
+        # A selected dotted factory keeps its name; it receives the same SGLang-shaped input.
+        inference_backend=settings["inference_backend"] or "sglang",
         inference_num_gpus=num_gpus,
         tensor_parallel_size=parallel_size,
         inference_options=options,

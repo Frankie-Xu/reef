@@ -20,6 +20,7 @@ from reef.runtime.executor.arguments import normalize_native_options
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.placement import ModelGpuLayout
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.train.algos.registry import loss_family_refs
 from reef.train.deployment import (
     InProcessTrainingDeployment,
     TrainingDeploymentPlan,
@@ -29,6 +30,10 @@ from reef.train.deployment import (
     require_ray_roles,
 )
 from reef.train.tinker_backend.config import TinkerConfig
+
+#: Mirrors reef.train.tinker_backend.losses without importing it at discovery time.
+TINKER_LOSS_BACKEND = "tinker"
+BUILTIN_TINKER_LOSSES = frozenset({"importance_sampling"})
 
 
 def _local_engine_selected(settings: Mapping[str, Any]) -> bool:
@@ -53,7 +58,9 @@ class TinkerDeployment(InProcessTrainingDeployment):
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         if not _local_engine_selected(settings):
             return super().prepare(config, settings)
-        if settings["inference_backend"] not in (None, "sglang"):
+        backend = settings["inference_backend"]
+        if backend not in (None, "sglang") and ":" not in str(backend):
+            # A dotted factory receives the same SGLang-shaped inference input and interprets it itself.
             raise DeployConfigError("Tinker serves through a local engine only with inference.backend: sglang")
         if settings["inference_url"] or config.get("reef", {}).get("runtime"):
             raise DeployConfigError("a managed local engine discovers its inference connection from the driver")
@@ -97,13 +104,25 @@ class TinkerDeployment(InProcessTrainingDeployment):
         key = os.environ.get(tinker.api_key_env, "").strip()
         if not key:
             raise RuntimeError(f"Tinker requires the environment variable {tinker.api_key_env}")
+        # The recipe is imported in this process; hand the coordinator's process the same reference.
+        reference = loss_family_refs(TINKER_LOSS_BACKEND).get(loss_family)
+        if reference is None and loss_family not in BUILTIN_TINKER_LOSSES:
+            raise RuntimeError(f"recipe loss family {loss_family!r} has no Tinker implementation registered")
         return TrainingDeploymentPlan(
             resources=TinkerDeploymentResources(
                 ModelGpuLayout(0, int(reef["inference_num_gpus"])), ray_address=ray_address, namespace=namespace
             ),
-            training=TinkerTrainingService(model, tinker, key),
+            training=TinkerTrainingService(model, tinker, key, loss_family=loss_family, loss_reference=reference),
             inference_config=sglang_inference_config({**reef, "model_path": model}, tinker),
-            coordinator=CoordinatorConfig(options={"name": actor_name, "namespace": namespace, "max_concurrency": 64}),
+            coordinator=CoordinatorConfig(
+                options={
+                    "name": actor_name,
+                    "namespace": namespace,
+                    "max_concurrency": 64,
+                    # The coordinator's worker imports the trainer and the recipe's loss from this driver's path.
+                    "runtime_env": {"env_vars": {"PYTHONPATH": os.environ.get("PYTHONPATH", "")}},
+                }
+            ),
         )
 
     def runtime_config(

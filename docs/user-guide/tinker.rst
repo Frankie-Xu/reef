@@ -163,7 +163,19 @@ The trajectories then come from the local engine while Tinker computes the
 loss, so the base model and tokenizer on both sides must match, and the
 importance-sampling ratio carries the numerical difference between the two
 engines' log probabilities. ``training.colocate`` does not apply: there are
-no training GPUs to share.
+no training GPUs to share. Tinker's adapters also carry a LoRA on ``lm_head``,
+which the Slime configuration never targets; whether the installed SGLang
+accepts that module is checked only when the engine loads the adapter.
+
+The SDK session opens inside Reef's coordinator process, where the trainer
+runs, and the coordinator learns the recipe's Tinker loss reference from the
+driver, so the same recipe package is imported on both sides.
+
+``tests/reef_service/test_tinker_local_engine_ray.py`` runs this topology on a
+CPU: a local Ray cluster with pretend GPUs, the real model driver, a stub
+engine that accepts Reef's adapter-file transfer in place of SGLang, and the
+Tinker SDK faked on the driver's path. With ``REEF_TEST_TINKER_REAL=1`` and
+``TINKER_API_KEY`` set it trains, downloads and converts a real checkpoint.
 
 Verification scope
 -------------------
