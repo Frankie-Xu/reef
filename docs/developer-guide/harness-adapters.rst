@@ -540,9 +540,21 @@ installed release requires (over its chain, as ``reef-pi setup`` reads it)
 whose variable, the ``check`` else the ``name``, is unset in the session's
 shell gets one warning line, ``reef: <VAR> is not set; the installed harness
 needs it (reef-pi setup lists it)``; a check off records that the variable
-was set once, not that this shell has it. An ``opencode`` recipe that sets it
-refuses to boot. An evolved tree is adapter-specific: ``config`` node
-contents follow each adapter's schema.
+was set once, not that this shell has it. When the head requires an item
+not checked off, an interactive session with the ``reef-pi`` wrapper on
+disk (``REEF_HARNESS_WRAPPER``, which ``run_agent`` exports, else
+``reef-pi`` beside the release file) asks ``Set up release <id8> now?``
+with the list and runs the setup loop described under ``reef-requests``
+below before the offer; without a wrapper, or headless, it prints the list
+and ``Run reef-pi setup, then start reef-pi again.`` instead of the offer,
+and an item the loop leaves unmet is named by the loop, the offer waiting
+for the next session start. The update itself runs ``reef-pi update``
+through the wrapper when one is on disk (the option says so) and the
+install pipeline otherwise, and ends with ``Installed release <id8>. Type
+/reload to load it now.``: pi's ``/reload`` re-runs ``session_start`` on
+the installed tree, and only the person can type it. An ``opencode`` recipe
+that sets it refuses to boot. An evolved tree is adapter-specific:
+``config`` node contents follow each adapter's schema.
 
 ``evolution.requests: true`` seeds two more reef owned entries for ``pi``
 after the notice: the ``code_extension`` ``reef-requests``
@@ -609,6 +621,40 @@ two commands, two tools and two event handlers:
   renders and the session file keeps, and as a notice, which the next
   status line may overwrite. Past the cap the watch says ``/reef-versions``
   shows the verdict when it settles.
+- The next step, after the report of a settle the watch saw, with a UI: for
+  a selected release ``Install release <id8> now?`` with the verdict line;
+  yes runs the install below, no notifies ``reef: install it later with
+  reef-pi update, then reef-pi setup``. For a pending release ``Promote
+  release <id8> now?`` with ``It changes an extension. Read it first: <step
+  page link>``; yes posts the promote, notifies the promoted line and offers
+  the install of the head the promote made; no notifies ``/reef-versions
+  <step> promote when you have read it``. Headless nothing is asked, and a
+  report delivered at ``session_start`` offers nothing either: the update
+  notice offers the install there.
+- The install, through the ``reef-pi`` wrapper (``REEF_HARNESS_WRAPPER``,
+  which ``run_agent`` exports, else ``reef-pi`` beside the release file;
+  with neither on disk the notice is ``reef: no reef-pi wrapper found;
+  install it with reef-pi update, then reef-pi setup``): ``reef-pi update
+  --release <id>``, then the setup loop, then ``Installed release <id8>.
+  Type /reload to load it now.`` (pi's ``/reload`` re-runs
+  ``session_start`` on the installed tree; only the person can type it). An
+  update the wrapper refuses for unmet items (exit 3) runs the setup loop
+  first and then the update again; any other failure stops with ``reef:
+  reef-pi update failed (exit N): <stderr>``.
+- The setup loop: ``reef-pi setup --json --release <id>`` lists the
+  release's items with ``met``; each unmet item is asked once, an ``env``
+  item through ``ctx.ui.input`` titled with its ``prompt`` (else ``Value
+  for <NAME>``) and handed over as one argument, ``reef-pi setup --set
+  NAME=<value>``, a ``permission`` or ``service`` item through
+  ``ctx.ui.confirm`` titled with its ``prompt`` (else ``Run this check?``)
+  and the check as the message, then ``reef-pi setup --run NAME``. One
+  line per item: ``reef: NAME set``, ``reef: NAME met``, ``reef: NAME not
+  met (exit N)``, or ``reef: NAME skipped`` for a declined check or an
+  empty value; at the end, when items stay unmet, ``reef: still to set up:
+  A, B (reef-pi setup)``. A listing that fails notifies its stderr and
+  stops the loop. The value goes to the wrapper's env file, never into the
+  tree or to reef, and an evolved extension reads it from ``process.env``
+  at run time.
 - The filed requests not yet reported are kept in
   ``.reef-harness-requests.json`` beside the release file, as ``{id, text,
   filed_at}`` entries (the newest ten, none older than a day), and dropped
@@ -629,7 +675,8 @@ two commands, two tools and two event handlers:
   query parameters) and a curl that fetches the page with the headers into
   a file, and, for a pending release, the promote action and a trial
   install command; ``/reef-versions <step> promote`` runs the promote after
-  a confirmation.
+  a confirmation, then offers the install of the head the promote made, the
+  way a settle does.
 
 The writing happens on the service, where the evolve step hands the request
 to the recipe's ``propose`` and the commit records it under

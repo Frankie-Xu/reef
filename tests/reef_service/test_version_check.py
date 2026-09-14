@@ -3,7 +3,9 @@
 The notice is composition: ``evolution.version_check: true`` appends the
 adapter's shipped ``code_extension`` entry to the seed, the same load and
 render paths as every other node carry it, and adapters without a shipped
-extension refuse boot with a config error naming them.
+extension refuse boot with a config error naming them. With the ``reef-pi``
+wrapper on disk the notice offers to set up an unmet head through it before
+the update, and runs the update through it too, ending with the reload line.
 """
 
 from __future__ import annotations
@@ -79,8 +81,9 @@ def test_the_notice_registers_a_startup_prompt_and_matches_the_install_route() -
     text = ASSET.read_text(encoding="utf-8")
     assert 'pi.on("session_start"' in text
     assert "checked || process.env.PI_OFFLINE" in text
-    assert "const updateOption = `Update with ${instruction}`" in text
+    assert 'const updateOption = `Update with ${wrapper ? "reef-pi update" : instruction}`' in text
     assert '[updateOption, "Skip"]' in text
+    assert 'pi.exec(wrapper, ["update"])' in text
     assert 'pi.exec("bash"' in text
     assert "if (!ctx.hasUI)" in text
     assert "/reef/harness/install?adapter=pi" in text
@@ -153,7 +156,8 @@ console.log(JSON.stringify(events));
         "REEF_SCENARIO": "code-repair",
         "TEST_CHOOSE_UPDATE": "1" if choose_update else "0",
     }
-    env.pop("PI_OFFLINE", None)
+    for name in ("PI_OFFLINE", "REEF_HARNESS_WRAPPER"):
+        env.pop(name, None)
 
     completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=env)
 
@@ -172,7 +176,7 @@ console.log(JSON.stringify(events));
         # scenario, serviceUrl, token, destDir: destDir defaults to agentDir/..
         assert execution["args"][-4:-1] == ["code-repair", "http://reef:8900", ""]
         assert execution["args"][-1].endswith("pi-agent/..") or "/" in execution["args"][-1]
-        assert events[3]["message"] == "Reef harness updated. Restart reef-pi to load it."
+        assert events[3]["message"] == "Installed release v2. Type /reload to load it now."
 
 
 def _notice(
@@ -180,7 +184,11 @@ def _notice(
 ) -> tuple[list, str]:
     """The UI events and stderr of one session start of the notice against ``releases`` with ``release_info`` on disk.
 
-    ``env`` sets variables for the session, as a shell that exports what a release requires would."""
+    ``env`` sets variables for the session, as a shell that exports what a release requires would, and the runner's
+    knobs: TEST_CHOOSE_UPDATE picks the update in the select (else Skip); TEST_CONFIRM and TEST_INPUT answer the
+    confirms and the inputs from JSON lists, in order, the last confirm repeating; TEST_EXEC maps a joined argv of
+    a pi.exec call, or a prefix of it, to the {stdout, stderr, code} the stub answers (no key: exit 0, nothing
+    printed); REEF_HARNESS_WRAPPER names a wrapper on disk, as run_agent exports it."""
     module = tmp_path / "version_check.mjs"
     module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "pi-agent").mkdir(exist_ok=True)
@@ -191,12 +199,24 @@ import versionCheck from "./version_check.mjs";
 
 let sessionStart;
 const events = [];
+const execAnswers = JSON.parse(process.env.TEST_EXEC || "{}");
+const execAnswerFor = (args) => {
+  const joined = args.join(" ");
+  const keys = Object.keys(execAnswers).filter((key) => joined === key || joined.startsWith(`${key} `));
+  const key = keys.sort((a, b) => b.length - a.length)[0];
+  return { stdout: "", stderr: "", code: 0, killed: false, ...(key === undefined ? {} : execAnswers[key]) };
+};
 versionCheck({
   on(name, handler) {
     if (name === "session_start") sessionStart = handler;
   },
-  exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+  exec: async (command, args) => {
+    events.push({ kind: "exec", command, args });
+    return execAnswerFor(args);
+  },
 });
+const confirms = JSON.parse(process.env.TEST_CONFIRM || "[]");
+const inputs = JSON.parse(process.env.TEST_INPUT || "[]");
 globalThis.fetch = async () => ({ ok: true, json: async () => JSON.parse(process.env.TEST_RELEASES) });
 await sessionStart(
   { type: "session_start", reason: "startup" },
@@ -205,7 +225,15 @@ await sessionStart(
     ui: {
       select: async (title, options) => {
         events.push({ kind: "select", title, options });
-        return options[1];
+        return process.env.TEST_CHOOSE_UPDATE === "1" ? options[0] : options[1];
+      },
+      confirm: async (title, message) => {
+        events.push({ kind: "confirm", title, message });
+        return (confirms.length > 1 ? confirms.shift() : confirms[0]) === true;
+      },
+      input: async (title, placeholder) => {
+        events.push({ kind: "input", title, placeholder });
+        return inputs.shift() ?? undefined;
       },
       notify: (message, type) => events.push({ kind: "notify", message, type }),
     },
@@ -225,7 +253,16 @@ console.log(JSON.stringify(events));
         "TEST_HEADLESS": "1" if headless else "0",
         **env,
     }
-    full_env.pop("PI_OFFLINE", None)
+    for name in (
+        "PI_OFFLINE",
+        "REEF_HARNESS_WRAPPER",
+        "TEST_CHOOSE_UPDATE",
+        "TEST_CONFIRM",
+        "TEST_INPUT",
+        "TEST_EXEC",
+    ):
+        if name not in env:
+            full_env.pop(name, None)
     completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=full_env)
     return json.loads(completed.stdout), completed.stderr
 
@@ -413,3 +450,165 @@ def test_the_notice_warns_once_per_unset_variable_the_installed_release_needs(tm
     # The installed release v1 requires nothing: silence about the environment, whatever v2 needs.
     events, _ = _notice(tmp_path, releases, {"release_id": "v1", "setup": [{"name": "notify"}]})
     assert [event["kind"] for event in events] == ["notify"] and "requires setup first" in events[0]["message"]
+
+
+# -- the setup through the wrapper, then the update through it -------------------------------------------------
+
+SETUP_REQUIRES = [
+    {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID", "prompt": "Your Twilio account SID"},
+    {"name": "notify", "kind": "permission", "check": "true"},
+]
+SETUP_RELEASES = [
+    {"release_id": "v1", "pending": False},
+    {"release_id": "v2", "pending": False, "metrics": {"training_request": {"requires": SETUP_REQUIRES}}},
+]
+# What the wrapper lists for v2 while nothing is checked off: every item unmet, the prompt beside it.
+SETUP_LISTING = {"release_id": "v2", "items": [{"prompt": None, **item, "met": False} for item in SETUP_REQUIRES]}
+SETUP_LIST = "  TWILIO_SID (env): TWILIO_SID\n  notify (permission): true"
+SETUP_MESSAGE = (
+    f"Reef harness update available (v2), but it requires setup first:\n{SETUP_LIST}\n"
+    "Run reef-pi setup, then start reef-pi again."
+)
+UPDATE_TITLE = "Reef harness update available\n\nCurrent: v1\nLatest:  v2"
+LISTED = {"setup --json --release v2": {"stdout": json.dumps(SETUP_LISTING)}}
+
+
+def _wrapper(path: Path) -> str:
+    """A wrapper script at ``path``, as the install script writes it; the runner stubs what it answers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_notice_offers_the_setup_through_the_wrapper_then_the_update_through_it(tmp_path: Path) -> None:
+    """With a wrapper on disk and a UI, an unmet head is offered as a setup first: each unmet item is asked once,
+    an env value through the input (the prompt as its title) and handed over as one argument, a check through a
+    confirm and run by name, one line per item. Then the update is offered, names the wrapper's update, runs it,
+    and ends with the reload line. The wrapper is the exported path, else the one beside the release file."""
+    wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
+    answers = {**LISTED, "update": {"stdout": "installed v2\n"}}
+    events, stderr = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1"},
+        TEST_CONFIRM=json.dumps([True, True]),
+        TEST_INPUT=json.dumps(["AC1"]),
+        TEST_CHOOSE_UPDATE="1",
+        TEST_EXEC=json.dumps(answers),
+        REEF_HARNESS_WRAPPER=wrapper,
+    )
+    assert stderr == ""
+    assert events == [
+        {"kind": "confirm", "title": "Set up release v2 now?", "message": SETUP_LIST},
+        {"kind": "exec", "command": wrapper, "args": ["setup", "--json", "--release", "v2"]},
+        {"kind": "input", "title": "Your Twilio account SID", "placeholder": ""},
+        {"kind": "exec", "command": wrapper, "args": ["setup", "--set", "TWILIO_SID=AC1"]},
+        {"kind": "notify", "message": "reef: TWILIO_SID set", "type": "info"},
+        {"kind": "confirm", "title": "Run this check?", "message": "true"},
+        {"kind": "exec", "command": wrapper, "args": ["setup", "--run", "notify"]},
+        {"kind": "notify", "message": "reef: notify met", "type": "info"},
+        {"kind": "select", "title": UPDATE_TITLE, "options": ["Update with reef-pi update", "Skip"]},
+        {"kind": "notify", "message": "Updating Reef harness...", "type": "info"},
+        {"kind": "exec", "command": wrapper, "args": ["update"]},
+        {"kind": "notify", "message": "Installed release v2. Type /reload to load it now.", "type": "info"},
+    ]
+    # Without the exported path the wrapper beside the release file serves; Skip at the offer runs no update.
+    beside = _wrapper(tmp_path / "reef-pi")
+    events, _ = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1"},
+        TEST_CONFIRM=json.dumps([True]),
+        TEST_INPUT=json.dumps(["AC1"]),
+        TEST_EXEC=json.dumps(answers),
+    )
+    assert [event["command"] for event in events if event["kind"] == "exec"] == [beside] * 3
+    assert [event["kind"] for event in events][-2:] == ["notify", "select"]
+    (tmp_path / "reef-pi").unlink()
+    # Nothing unmet with a wrapper: the offer alone, naming the wrapper's update; its failure is said as before.
+    checked = [{"name": "TWILIO_SID", "check": "TWILIO_SID"}, {"name": "notify", "check": "true"}]
+    events, _ = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1", "setup": checked},
+        TEST_CHOOSE_UPDATE="1",
+        TEST_EXEC=json.dumps({"update": {"code": 1, "stderr": "curl: (7) Failed to connect"}}),
+        REEF_HARNESS_WRAPPER=wrapper,
+    )
+    assert events == [
+        {"kind": "select", "title": UPDATE_TITLE, "options": ["Update with reef-pi update", "Skip"]},
+        {"kind": "notify", "message": "Updating Reef harness...", "type": "info"},
+        {"kind": "exec", "command": wrapper, "args": ["update"]},
+        {"kind": "notify", "message": "Reef harness update failed:\ncurl: (7) Failed to connect", "type": "error"},
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_declined_setup_prints_the_list_and_offers_no_update(tmp_path: Path) -> None:
+    """No at the setup's confirm prints the list, as before, and offers no update; an item the loop left unmet is
+    named and the update is not offered either, since the install would refuse; a listing that fails is said and
+    stops the loop. Headless, a wrapper changes nothing: the list on stderr, nothing asked, nothing run."""
+    wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
+    events, stderr = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1"},
+        TEST_CONFIRM=json.dumps([False]),
+        TEST_EXEC=json.dumps(LISTED),
+        REEF_HARNESS_WRAPPER=wrapper,
+    )
+    assert stderr == ""
+    assert events == [
+        {"kind": "confirm", "title": "Set up release v2 now?", "message": SETUP_LIST},
+        {"kind": "notify", "message": SETUP_MESSAGE, "type": "warning"},
+    ]
+    events, _ = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1"},
+        TEST_CONFIRM=json.dumps([True, False]),
+        TEST_INPUT=json.dumps(["AC1"]),
+        TEST_CHOOSE_UPDATE="1",
+        TEST_EXEC=json.dumps(LISTED),
+        REEF_HARNESS_WRAPPER=wrapper,
+    )
+    assert [event["kind"] for event in events] == [
+        "confirm",
+        "exec",
+        "input",
+        "exec",
+        "notify",
+        "confirm",
+        "notify",
+        "notify",
+    ]
+    assert [event["message"] for event in events if event["kind"] == "notify"] == [
+        "reef: TWILIO_SID set",
+        "reef: notify skipped",
+        "reef: still to set up: notify (reef-pi setup)",
+    ]
+    failed = {"setup --json": {"code": 2, "stderr": "reef-pi setup: no release v2 in the catalog"}}
+    events, _ = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1"},
+        TEST_CONFIRM=json.dumps([True]),
+        TEST_CHOOSE_UPDATE="1",
+        TEST_EXEC=json.dumps(failed),
+        REEF_HARNESS_WRAPPER=wrapper,
+    )
+    assert events[1:] == [
+        {"kind": "exec", "command": wrapper, "args": ["setup", "--json", "--release", "v2"]},
+        {"kind": "notify", "message": "reef-pi setup: no release v2 in the catalog", "type": "error"},
+    ]
+    events, stderr = _notice(
+        tmp_path,
+        SETUP_RELEASES,
+        {"release_id": "v1"},
+        headless=True,
+        TEST_CONFIRM=json.dumps([True]),
+        TEST_EXEC=json.dumps(LISTED),
+        REEF_HARNESS_WRAPPER=wrapper,
+    )
+    assert events == [] and stderr.strip() == SETUP_MESSAGE
