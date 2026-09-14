@@ -26,6 +26,7 @@ harness/              agent harness (PUCT search + Reef adapter)
   run_controller.py     training barrier + paired PUCT resume state
   harbor_agent.py       Harbor BaseAgent (imports harbor package)
 serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config
+serve-tinker.yaml     the same method on Tinker's hosted LoRA training, no local GPU
 run.py                one reef-eval episode owning the complete TTT trajectory
 run.sh                starts the reef training stack, then runs run.py
 pyproject.toml        makes the harness importable
@@ -184,8 +185,20 @@ coordinates the harness never sends: `GROUPS_PER_STEP` and
 `ROLLOUTS_PER_GROUP` in `harness/harbor_agent.py`, and `groups_per_step`,
 `rollouts_per_group`, and `--global-batch-size` (their product) in
 `serve.yaml`. A one-step plumbing smoke sets both sides to 2 x 2 and
-`enable_thinking = False`, so a short completion is not spent entirely in the
-reasoning channel before it emits a program.
+`enable_thinking: false` in the stack's `training.config`, so a short completion
+is not spent entirely in the reasoning channel before it emits a program. Two
+rollouts per group are enough to exercise the path but not to train: TTTD's
+leave-one-out entropic advantages degenerate with one rewarded and one
+unrewarded rollout, so a step that should mean something needs several per group.
+
+`serve-tinker.yaml` runs the same method with Tinker training and sampling
+the model remotely (see the [Tinker guide](../../../../docs/user-guide/tinker.rst)):
+no GPU, Ray, or model download on this machine, the paper's LoRA, Adam, KL and
+sampling settings, and the reduced 2 x 2 grid for one step. Point the harness at
+it with `TTTD_STACK=serve-tinker.yaml`, export `TINKER_API_KEY` and
+`TTTD_STATE_DIR`, start `python -m reef serve -c serve-tinker.yaml` and run
+`run.py` as `run.sh` does. Raise `rollouts-per-group` (and `batch-size`, which
+must equal `groups-per-step`) before reading anything into the update.
 
 `work/erdos_min_overlap/` holds this problem's checkpoints, artifacts,
 scenario records, and PUCT state; a second problem needs its own directory so
