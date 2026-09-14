@@ -486,13 +486,60 @@ from the first actor update on the policy spent between $587 and $1,426 a
 week (median $595), let the subscriber base run off, and finished as a
 company with no customers.
 
+### Trained episode, seed 42, attempt 3 (valuation reward)
+
+`results/2026-09-13-ttt-qwen3.6-27b-seed42-attempt3-valuation/` holds the
+same files, with `subscribers`, `run_rate`, `value_start`, `value_end`, and
+`score` columns in `weeks.csv`. Same seed, simulator roles, and stack; the
+reward was the valuation change of one week at a time, unscaled (the credit
+window, the scaling, and the critic warm-start came after this run).
+
+| | |
+| --- | --- |
+| Outcome | ended at day 454 (week 65) by the engine: a `next-week` hung inside `step_week` past the engine's 4200 s limit with no simulator request in flight, the run's second such stall (the first, at day 343, the runner survived through the CLI's 1800 s timeout); not bankrupt; final cash $365,613, `reward` 0.366 |
+| Turns | 442 in 5h45m, two stalls included; 432 (98%) fit the 24k window and were reported |
+| Training | 26 releases: 10 critic-only warm-up steps, then the actor's updates, the first served from week 14 (day 98). The pacer held 26 week starts for 106 minutes in all, 10.7 minutes at most (week 1, behind the first step's warm-up) |
+| Rewards | six positive weeks (3 and 5 to 9, +0.001 to +0.021), the first of any run; every other week negative |
+
+| Week | Day | Cash | Subscribers | Run-rate / month |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 7 | $829,548 | 0 | $0 |
+| 3 | 21 | $481,751 | 71 | $852 |
+| 5 | 35 | $472,300 | 137 | $2,466 |
+| 7 | 49 | $462,365 | 381 | $7,620 |
+| 10 | 70 | $444,415 | 978 | $19,560 |
+| 15 | 105 | $423,292 | 952 | $14,280 |
+| 20 | 140 | $412,584 | 905 | $13,575 |
+| 30 | 210 | $395,280 | 777 | $11,655 |
+| 37 | 259 | $384,733 | 538 | $8,070 |
+| 45 | 315 | $377,456 | 95 | $1,425 |
+| 55 | 384 | $371,563 | 0 | $0 |
+| 64 | 447 | $366,208 | 0 | $0 |
+
+The transient changed, the attractor did not. Weeks 0 and 1 bought R&D
+(-$170,452 and -$340,728) as before. Weeks 2 to 9 then grew the base from
+16 to 978 subscribers at about $5,000 of cash a week, and the run-rate term
+turned those weeks positive; but they were played by the untrained policy,
+since the actor's first update came at week 14, and the two purchases had
+already set the critic's scale (-0.17 and -0.34 against weeks of +-0.005).
+From week 10 the base plateaued, a price cut at week 11 cost -0.036 in one
+week (the estimate values the whole base at the lowest listed price), and
+once the actor's updates began the policy drifted back to short weeks with no
+acquisition spend: the base ran off at 7 to 70 subscribers a week and was gone
+by week 47, at $600 to $3,000 of cash a week. The end state matches attempt 2
+(no customers, $366k against $358k). Those three findings, the warm-up
+spending the growth weeks, the scale set by two outliers, and acquisition
+never credited with what it brought, are what the credit window, the score
+scaling, and the critic warm-start address (reward shaping above).
+
 Seed 42, same simulator roles, one episode each:
 
-| Policy | Outcome | Final cash |
-| --- | --- | ---: |
-| `Qwen3.6-27B`, untrained | bankrupt on day 255 | -$66 |
-| trained in the episode, attempt 1 | runner timeout at day 385 | $252,634 |
-| trained in the episode, attempt 2 | completed, day 497 | $358,251 |
+| Policy | Reward | Outcome | Final cash |
+| --- | --- | --- | ---: |
+| `Qwen3.6-27B`, untrained | none | bankrupt on day 255 | -$66 |
+| trained in the episode, attempt 1 | weekly cash change | runner timeout at day 385 | $252,634 |
+| trained in the episode, attempt 2 | weekly cash change | completed, day 497 | $358,251 |
+| trained in the episode, attempt 3 | weekly valuation change | engine stall at day 454 | $365,613 |
 
 The trained episodes end with cash and the untrained one does not, which
 is what the benchmark scores and what the weekly cash-delta reward asks
@@ -508,9 +555,15 @@ signal is the next experiment, not a larger run of this one.
 - The untrained baseline with the benchmark's Anthropic simulator roles and
   more seeds (issue #428, acceptance criterion 1); replicates of the trained
   episode on other seeds.
-- A trained episode under the valuation reward (reward shaping above): the
-  first two used the cash change alone, and both converged on a company with
-  no customers. Beyond it, a lag of `k` weeks or a judged turn-level signal.
+- A trained episode under the credit window, the score scaling, and the
+  critic warm-start (reward shaping above); attempt 3 tried the valuation
+  alone. Beyond those, a judged turn-level signal.
+- The engine stall: twice in attempt 1 and 3 (never in attempt 2) a
+  `next-week` hung inside the engine's `step_week` after the last simulator
+  call of the week returned, late in the game with no subscribers left. The
+  runner's timeouts do not recover it cleanly (the second call advanced the
+  day while the first was still running). Its cause is not known; a stack
+  dump of the engine at the next stall is the next step.
 
 ## Open items
 
