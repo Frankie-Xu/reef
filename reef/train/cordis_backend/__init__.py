@@ -29,6 +29,7 @@ from reef.train.cordis_backend.backend import (
     HarnessCandidate,
     ScoreComparisonMixin,
     ScoreComparisonPlugin,
+    ScoreComparisonPluginFactory,
 )
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation, FailureRecord
 from reef.train.cordis_backend.processor import CordisProcessor
@@ -48,5 +49,6 @@ __all__ = [
     "Proposer",
     "ScoreComparisonMixin",
     "ScoreComparisonPlugin",
+    "ScoreComparisonPluginFactory",
     "untrusted_text",
 ]

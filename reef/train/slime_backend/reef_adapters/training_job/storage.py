@@ -16,12 +16,12 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, LATEST_JOB_MARKER_FILENAME, SCENARIO_HISTORY_FILENAME
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import fsync_dir as _fsync_dir
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import mkdir_durable as _mkdir_durable
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json as _read_json
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import write_json as _write_json
-from reef.train.slime_backend.reef_adapters.training_job.marker import marker_path as _marker_path
+from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, SCENARIO_HISTORY_FILENAME
+from reef.runtime.recovery import fsync_dir as _fsync_dir
+from reef.runtime.recovery import marker_path as _marker_path
+from reef.runtime.recovery import mkdir_durable as _mkdir_durable
+from reef.runtime.recovery import read_json as _read_json
+from reef.runtime.recovery import write_json as _write_json
 
 POLICIES = {"latest", "best_reward"}
 Inventory = tuple[list[dict[str, Any]], list[str]]
@@ -29,6 +29,10 @@ Inventory = tuple[list[dict[str, Any]], list[str]]
 
 class CheckpointStorageError(RuntimeError):
     pass
+
+
+#: Rank-local adapter snapshots live beside the Megatron checkpoint.
+ADAPTER_SLOTS_DIRNAME = "reef_adapter_slots"
 
 
 @dataclass(frozen=True)

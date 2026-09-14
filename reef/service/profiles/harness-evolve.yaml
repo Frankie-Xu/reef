@@ -46,7 +46,6 @@ recipe:
               from failing tasks. '
 
     batch-size: 1
-    max-score: 0.0
     # Failure reports and asks both start steps.
     training-mode: hybrid
 

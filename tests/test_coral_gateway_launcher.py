@@ -12,6 +12,11 @@ from recipes.beta.coral.gateway_launcher import (
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
 
 
+async def downstream_app(scope, receive, send):
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
 class FakeCoralMiddleware:
     """Shape-compatible stand-in: has .app and a register_agent contract."""
 
@@ -29,7 +34,7 @@ class FakeManager:
         self.started = False
 
     def start(self):
-        self._middleware = FakeCoralMiddleware(app=object())
+        self._middleware = FakeCoralMiddleware(app=downstream_app)
         self.started = True
 
     def register_agent(self, agent_id, worktree_path):
@@ -59,7 +64,7 @@ def test_insert_is_idempotent(tmp_path):
     from recipes.beta.coral.journal import CallJournal
 
     journal = CallJournal(tmp_path / "j.jsonl")
-    middleware = FakeCoralMiddleware(app=object())
+    middleware = FakeCoralMiddleware(app=downstream_app)
     insert_reef_layer(middleware, scenario="s", journal=journal)
     first = middleware.app
     insert_reef_layer(middleware, scenario="s", journal=journal)

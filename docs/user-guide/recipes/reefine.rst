@@ -3,8 +3,8 @@ Reefine
 
 Reefine is the built-in recipe for refining a pi coding harness from plain
 language instructions. Its implementation is
-``reef.recipe.reefine:ReefineRecipe``; its proposer and evaluator ship in the
-Reef wheel, so the service needs no tutorial checkout or training GPUs.
+``reef.recipe.reefine:ReefineRecipe``, and its proposer and evaluator ship in
+the Reef wheel, so the service needs no tutorial checkout or training GPUs.
 
 Start the bundled profile with an OpenAI-compatible endpoint:
 
@@ -37,14 +37,17 @@ Behavior and configuration
 The bundled evaluator recognizes only the profile's sieve, Fibonacci, and CSV
 tasks. These measure arithmetic regressions, not whether a requested workflow
 works. Set both ``evolution.tasks`` and ``evolution.evaluate`` for a different
-workload; use ``evolution.selection: score_comparison`` to require improvement.
+workload, and use ``evolution.selection: score_comparison`` to require
+improvement.
 All ``CordisRecipe`` evolution settings remain available, including custom
 proposers, seeds, execution settings, and publication policies.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
-call budgets. Defaults are 120 seconds and 4096 reply tokens for instructions,
-60 seconds and 2048 tokens for failure-driven proposals. The tutorial's
-``run.sh`` raises these to 900 seconds and 16384 tokens for its local model.
+call budgets. Defaults are 600 seconds and 65536 reply tokens for the call that
+answers an instruction (a thinking model reasons for tens of thousands of tokens
+before it writes an extension), 60 seconds and 4096 tokens for the short plan
+call before it, and 60 seconds and 2048 tokens for failure-driven proposals.
+The tutorial's ``run.sh`` sets 900 seconds and 16384 tokens for its local model.
 
 Migration
 ---------

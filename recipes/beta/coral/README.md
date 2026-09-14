@@ -119,8 +119,8 @@ From a report to a gradient:
    rejected: its rollout log probs belong to two policies and cannot support
    one importance ratio. A group whose members trained on different
    revisions is discarded whole, because relative rewards only compare
-   fairly within one policy version. Both outcomes are visible in the
-   processor's `status()` (`never_reasons`, `discarded_groups`).
+   fairly within one policy version. A malformed attempt raises an explicit training data error; discarded
+   groups are visible in the processor's `status()` (`discarded_groups`).
 4. **The step.** A released group becomes one training unit. The recipe
    reuses the `tttd` step preparer (grouped leave-one-out advantages) and
    the `tttd` Slime loss family, CORAL sibling groups have the same shape

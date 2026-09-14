@@ -6,6 +6,12 @@ from reef.core.errors import ReefError
 from reef.recipe.base import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
+    AdapterWeightRuntime,
+    ArtifactActivator,
+    ArtifactLoader,
+    InferenceHooks,
+    LeasingInferenceHooks,
+    RequestSkillLayer,
     RuntimeLoadMismatch,
     SkillLayer,
     Surface,
@@ -20,7 +26,7 @@ from reef.surface.base import AcceptAnyArtifact
 from reef.surface.skills import SkillValidator
 
 
-class _InjectingModule(SkillLayer):
+class _InjectingModule(RequestSkillLayer):
     """Test stand-in for a method-owned injecting layer module.
 
     Mirrors the shape of skillclaw's catalog module: reads its layer's
@@ -55,6 +61,28 @@ def test_surface_factories_return_composed_surface_instances() -> None:
     assert type(create_weight_surface()) is Surface
     assert type(create_harness_surface()) is Surface
     assert type(create_skill_surface([_PullOnlyModule()])) is Surface
+
+
+def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations() -> None:
+    loader = WeightLoader()
+    hooks = WeightInferenceHooks()
+    assert isinstance(loader, ArtifactLoader)
+    # Weight surfaces activate: a runtime serving remote snapshots binds the published head there.
+    assert isinstance(loader, ArtifactActivator)
+    assert isinstance(hooks, InferenceHooks)
+    assert not isinstance(hooks, LeasingInferenceHooks)
+    assert isinstance(_InjectingModule(), RequestSkillLayer)
+    assert not isinstance(_PullOnlyModule(), RequestSkillLayer)
+
+
+def test_request_injection_requires_declaring_the_optional_layer_capability() -> None:
+    class UndeclaredLayer(SkillLayer):
+        layer = "skills"
+
+        def prepare_request(self, files, path, request):
+            raise AssertionError("undeclared request hook must not run")
+
+    assert create_skill_surface([UndeclaredLayer()]).inference is None
 
 
 def test_default_validate_accepts_anything() -> None:
@@ -375,14 +403,14 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.dispatcher import Dispatcher
-    from reef.runtime.inference import InferenceBackend
+    from reef.runtime.interfaces import InferenceHandler
     from reef.service.app import RequestService
 
     class SkillRecipe(Recipe):
         def build_surface(self, scenario):
             return create_skill_surface([_InjectingModule()])
 
-    class RecordingBackend(InferenceBackend):
+    class RecordingBackend(InferenceHandler):
         def __init__(self) -> None:
             self.seen = None
 
@@ -424,7 +452,7 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
     assert scenario.surface is scenario.surface
 
 
-class _StubTrainingRuntime:
+class _StubTrainingRuntime(WeightRuntime):
     """Satisfies WeightRuntime; only the version probe does anything."""
 
     def __init__(self, served: str | None):
@@ -439,6 +467,9 @@ class _StubTrainingRuntime:
 
     def restore_checkpoint(self, artifact) -> str:
         raise AssertionError("recover must not restore a checkpoint")
+
+    def activate_checkpoint(self, artifact) -> str:
+        return artifact.ref.release_id
 
 
 def _checkpoint_ref(version: str = "checkpoint:step-7"):
@@ -502,7 +533,7 @@ def test_weight_hooks_refuse_both_a_shared_and_a_scenario_adapter() -> None:
 
 
 def test_weight_loader_recovers_against_the_scenarios_own_adapter_version(tmp_path) -> None:
-    class Runtime(_StubTrainingRuntime):
+    class Runtime(_StubTrainingRuntime, AdapterWeightRuntime):
         def __init__(self):
             super().__init__("engine:9")  # some other scenario published last
 

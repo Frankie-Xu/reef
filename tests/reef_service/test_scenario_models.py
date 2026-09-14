@@ -11,19 +11,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.inference.http import InferenceProxyRuntime
+from reef.inference.model_config import ModelConfig
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
-from reef.runtime.model_config import ModelConfig
 from reef.storage.model_config import read_model_config, write_model_config
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.types import TraceBatch, TraceSample
+from reef.train.types import TrainingBatch
 
 
 @pytest.fixture
@@ -143,16 +144,18 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
         artifact = Artifact(scenario.repository.require_current_artifact(), scenario.repository)
         path = "/v1/messages" if api == "anthropic" else "/v1/chat/completions"
-        asyncio.run(scenario.inference_backend.inference(artifact, path, {"model": "custom-alpha", "messages": []}))
+        asyncio.run(scenario.inference_handler.inference(artifact, path, {"model": "custom-alpha", "messages": []}))
         if api == "anthropic":
             asyncio.run(
-                scenario.inference_backend.inference(
+                scenario.inference_handler.inference(
                     artifact, "/v1/messages/count_tokens", {"model": "custom-alpha", "messages": []}
                 )
             )
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         prepared = backend.prepare_step(
-            TraceBatch("batch", (TraceSample("record", {"messages": []}, 0.0),)), backend.initial_state(), 0
+            TrainingBatch("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
+            backend.initial_state(),
+            0,
         )
         assert prepared.candidate is not None
         # Updates between proposal and evaluation must not mix providers within the step.
@@ -179,7 +182,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         assert "scoped-alpha" not in json.dumps(result.state)
         result.publication.artifact.discard()
         asyncio.run(
-            scenario.inference_backend.inference(
+            scenario.inference_handler.inference(
                 artifact,
                 "/v1/messages" if api == "anthropic" else "/v1/chat/completions",
                 {"model": "custom-alpha", "messages": []},
@@ -363,7 +366,7 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     try:
         scenario = recovered.get_or_create_scenario("alpha")
         assert scenario.runtime.api_key == "scoped-alpha-1"
-        assert scenario.trainer.training_backend._models["judge"].api_key == "scoped-alpha-1"
+        assert scenario.trainer.candidate_backend._models["judge"].api_key == "scoped-alpha-1"
         config = scenario.model_config
         previous_runtime = config.runtime
         reloaded = recovered._registry.reload("alpha")

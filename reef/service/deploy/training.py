@@ -14,7 +14,10 @@ from reef.train.deployment import TrainingDeployment
 
 
 # Built-ins are references, so discovery does not import execution dependencies.
-_BUILTINS = {"slime": "reef.train.slime_backend.launch:SlimeDeployment"}
+_BUILTINS = {
+    "slime": "reef.train.slime_backend.launch:SlimeDeployment",
+    "tinker": "reef.train.tinker_backend.launch:TinkerDeployment",
+}
 
 
 def training_deployment_for(name: str | None) -> TrainingDeployment:
@@ -39,6 +42,19 @@ def training_deployment_for(name: str | None) -> TrainingDeployment:
     return definition()
 
 
+def local_model_required(config: dict[str, Any]) -> bool:
+    """Whether the selected training backend executes the model on this host.
+
+    Provider deployments and local backends need the resolved snapshot on disk;
+    a hosted backend keeps the remote model identifier as written.
+    """
+    reef = config.get("reef", {})
+    backend = reef.get("training_backend")
+    if not backend or reef.get("inference_backend"):
+        return True
+    return training_deployment_for(backend).requires_local_model
+
+
 def assemble_training_services(config: dict[str, Any]) -> None:
     """Validate common inputs; integrations own process topology and connections."""
     settings = service_config_from_mapping(config)
@@ -59,7 +75,7 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         or settings.upstream_api != "openai"
     ):
         raise DeployConfigError(
-            "automatic weight training uses training-owned inference; remove upstream provider settings"
+            "automatic weight training requires managed inference; remove upstream provider settings"
         )
     if config.get("reef", {}).get("runtime"):
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")

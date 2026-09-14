@@ -54,6 +54,35 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
     assert native_arguments(settings.training_backend_options) == ["--lr=2e-6", "--optimizer=adam"]
 
 
+def test_request_handler_configuration_is_independent_of_native_backend_selection():
+    config = translate_layout(
+        {
+            "schema-version": 2,
+            "inference": {
+                "backend": "sglang",
+                "handler-factory": "example.handlers.InitialHandler",
+                "handler-config": {"tool_call_parser": "qwen25"},
+                "options": {"mem-fraction-static": 0.8},
+            },
+        }
+    )
+    overrides = _parse_overrides(
+        [
+            "--inference.handler-factory",
+            "example.handlers.SelectedHandler",
+            "--inference.handler-config",
+            '{"capture_topk": 5}',
+        ]
+    )
+    normalized = normalize_service_config(_apply_overrides(config, overrides))
+    settings = service_config_from_mapping(yaml.safe_load(yaml.safe_dump(normalized)))
+
+    assert settings.inference_backend == "sglang"
+    assert settings.inference_options == {"mem-fraction-static": 0.8}
+    assert settings.inference_handler_factory == "example.handlers.SelectedHandler"
+    assert settings.inference_handler_config == {"capture_topk": 5}
+
+
 @pytest.mark.parametrize(
     "value, message",
     [
@@ -63,6 +92,8 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
         ({"schema-version": 2, "services": []}, "does not accept service/services"),
         ({"schema-version": 2, "infernce": {}}, "unknown config sections"),
         ({"schema-version": 2, "inference": {"model-pth": {}}}, "unknown config fields"),
+        ({"schema-version": 2, "inference": {"backend-factory": "example.Factory"}}, "unknown config fields"),
+        ({"schema-version": 2, "inference": {"backend-config": {}}}, "unknown config fields"),
         ({"schema-version": 2, "reef": "oops"}, "must be an object"),
         ({"schema-version": 2, "inference": {"model-path": "a", "model_path": "b"}}, "duplicate"),
     ],
@@ -152,6 +183,46 @@ def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, mon
     assert yaml.safe_load(path.read_text()) == raw
 
 
+def test_versioned_files_reject_repeated_yaml_keys_with_their_lines(tmp_path):
+    text = "reef:\n  port: 8000\n  port: 9000\ninference:\n  options:\n    lr: 1\n    lr: 2\n"
+    versioned = tmp_path / "config.yaml"
+    versioned.write_text("schema-version: 2\n" + text)
+    with pytest.raises(
+        DeployConfigError, match=r"reef\.port \(lines 3 and 4\); inference\.options\.lr \(lines 7 and 8\)"
+    ):
+        load_config(versioned)
+    legacy = tmp_path / "legacy.yaml"
+    legacy.write_text(text)
+    assert load_config(legacy)["reef"]["port"] == 9000
+
+
+@pytest.mark.parametrize(
+    "section, field",
+    [("reef", "port"), ("reef", "host"), ("inference", "timeout-s"), ("training", "ready-timeout")],
+)
+def test_versioned_null_is_rejected_where_the_field_is_not_optional(tmp_path, section, field):
+    raw = {"schema-version": 2, section: {field: None}}
+    with pytest.raises(DeployConfigError, match=rf"{section}\.{field} does not accept null"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
+
+
+def test_versioned_null_is_kept_for_optional_fields_and_legacy_null_still_defaults(tmp_path):
+    raw = {
+        "schema-version": 2,
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001", "upstream-api-key": None},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": None}},
+    }
+    with pytest.raises(DeployConfigError, match=r"recipe\.config\.batch-size does not accept null"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
+    raw["recipe"]["config"] = {"checkpoint-every-n-versions": None}
+    raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
+    config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
+    assert config["reef"]["checkpoint_every_n_versions"] is None
+    legacy = {"reef": {"recipe": "recipe", "port": None}, "services": []}
+    config, _ = orchestrator.resolve_deployment_config(legacy, None, tmp_path / "legacy.yaml")
+    assert service_config_from_mapping(config).port == 8900
+
+
 def test_automatic_stack_rejects_unused_training_options(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({"schema-version": 2, "training": {"options": {"lr": 1e-6}}}))
@@ -208,3 +279,36 @@ def test_declared_recipe_sections_support_leaf_overrides():
     assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_workers": 4}
     assert result["reef"]["data"]["training_mode"] == "manual"
     assert config["reef"]["evolution"]["episode_workers"] == 2
+
+
+@pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])
+def test_standalone_inference_capacity_is_one_engine(tmp_path, num_gpus, tp, valid):
+    raw = {
+        "schema-version": 2,
+        "inference": {
+            "model-path": "/models/demo",
+            "num-gpus": num_gpus,
+            "tensor-parallel-size": tp,
+        },
+    }
+    if not valid:
+        with pytest.raises(DeployConfigError, match="must equal"):
+            orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")
+        return
+    config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")
+    command = config["services"][0]["command"]
+    assert command[command.index("--tp") + 1] == str(tp)
+    assert config["reef"]["inference_num_gpus"] == num_gpus
+
+
+def test_provider_without_local_model_rejects_gpu_request(tmp_path):
+    raw = {
+        "schema-version": 2,
+        "inference": {
+            "upstream-url": "http://localhost:8000",
+            "upstream-model": "demo",
+            "num-gpus": 1,
+        },
+    }
+    with pytest.raises(DeployConfigError, match=r"require --inference\.model-path"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")

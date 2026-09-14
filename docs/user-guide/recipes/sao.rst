@@ -41,7 +41,7 @@ How Reef implements it
 ----------------------
 
 The processor turns every eligible ``ScoredRolloutReport`` into one
-``PolicySample``. With the default ``batch_size`` of 1, each sample is its
+``TrajectoryItem``. With the default ``batch_size`` of 1, each sample is its
 own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
 SAO's per-token primitive and a critic colocated on the actor GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
@@ -104,12 +104,12 @@ startup played through the benchmark's own bash agent. The agent role reaches
 Reef by base URL through a reef-client sidecar, the two simulator roles stay
 outside Reef, and the verifier reads final cash, survival days, and bankruptcy
 from the run's ``world.nmdb``. The reward is weekly and online: when the
-next week's dashboard appears, every turn of the finished week is reported
-with the week's credit (its change in company value, cash plus the
-subscription run-rate the dashboard implies, and the discounted changes of
-the weeks after it, scaled against the weeks before), so the recipe trains
-while the episode runs;
-the example's README records the reward-shaping choice and its smoke run.
+next week's dashboard appears, the finished week's decision turns (the tool
+calls that changed the company) are reported with the week's credit, its
+change in company value (cash plus the engine's subscription run-rate over
+the weeks left) and the discounted changes of the weeks after it, scaled
+against the weeks before, so the recipe trains while the episode runs. The
+example's README records the reward-shaping choices and the recorded episodes.
 
 .. code:: bash
 

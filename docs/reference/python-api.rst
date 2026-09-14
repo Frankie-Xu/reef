@@ -43,6 +43,76 @@ Start with Recipe and add only what the method actually needs.
 Method code should depend only on what this page documents. Anything else under
 ``reef.`` is an implementation detail and may change.
 
+Backend and runtime contracts
+-----------------------------
+
+Native backends implement model operations; Reef runtimes expose the scheduling
+interface used by recipes and serving. The two sides are independent:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 35 40
+
+   * - Layer
+     - Training
+     - Inference
+   * - Native backend
+     - ``TrainingBackend``
+     - ``InferenceBackend``
+   * - Reef scheduling
+     - ``TrainingRuntime``
+     - ``InferenceRuntime``
+
+.. code:: python
+
+   from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
+
+The native contracts are abstract base classes in ``reef/runtime/interfaces.py``.
+The engine supervision hooks an inference integration also implements
+(``InferenceEngines``, ``InferenceMonitor``, ``WeightUpdateConnection``,
+``EngineHealthChecks``, ``EngineHealthTarget``) live in
+``reef/runtime/recovery.py``, next to the objects that drive them.
+Implementations inherit the corresponding interface and provide every abstract
+operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
+SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
+coordinator owns publication and recovery ordering across them. Component
+allocation and service shutdown belong to ``TrainingService`` and
+``InferenceService`` in ``reef/runtime/deployment.py``. Those service interfaces
+also require explicit inheritance; inference factory discovery rejects objects
+that only happen to expose similarly named methods.
+
+Two other extension points have separate names and purposes:
+
+- ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
+  including harness edits. ``RuntimeCandidateBackend`` connects weight updates
+  to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
+- ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
+  request. Runtime and recipe objects expose it as ``inference_handler``;
+  ``create_app`` accepts the same keyword for an injected handler.
+
+Native backend selectors remain ``training.backend`` and ``inference.backend``.
+Custom request adapters use ``inference.handler-factory`` and
+``inference.handler-config``. The factory path names an ``InferenceHandler``
+subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
+**config)`` class method; arbitrary functions are not accepted. Handlers injected
+directly into ``create_app`` need only implement the inference methods.
+These configuration names replace the previous request-adapter
+``backend-factory`` and ``backend-config`` names. Python extensions migrate the
+old recipe-facing ``TrainingBackend`` to ``CandidateBackend`` and the old
+request-facing ``InferenceBackend`` to ``InferenceHandler``; the names now
+reserved for native interfaces must not be used as replacement import aliases
+for those different contracts.
+
+Python extension contracts use abstract base classes and explicit inheritance.
+This also applies to repository factories, candidate evaluation plugins, harness
+plugins, and surface capabilities. Implement optional capabilities only when
+supported: adapter weight residency, artifact activation, and request leases
+remain separate interfaces. CI rejects ``typing.Protocol``,
+``typing_extensions.Protocol``, and ``runtime_checkable`` in all first-party
+Python files, including scripts and tutorials; these findings cannot be baselined.
+Third-party, generated result and golden fixture exclusions follow the
+contribution policy.
+
 Recipe
 ------
 
@@ -58,7 +128,7 @@ for every scenario in a deployment.
 .. code:: text
 
    Recipe                       record-only by default   reef.recipe
-   ├── WeightTrainingRecipe     step preparer, loss family, TrainingRuntime
+   ├── WeightTrainingRecipe     step preparer, loss family, separate runtimes
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
@@ -95,9 +165,11 @@ Common members
 | ``name``                                          | ``str``                     | instance field; the default    |
 |                                                   |                             | registry key                   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``runtime``                                       | ``InferenceRuntime | None`` | narrowed to a required         |
-|                                                   |                             | ``TrainingRuntime`` by         |
-|                                                   |                             | ``WeightTrainingRecipe``       |
+| ``runtime``                                       | ``InferenceRuntime`` or     | required inference component   |
+|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
++---------------------------------------------------+-----------------------------+--------------------------------+
+| ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
+|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
 |                                                   |                             | ``EveryNVersions(1)``          |
@@ -259,7 +331,7 @@ local directory for scenario model settings. Configure it to retain those
 settings across restarts even when records and commits use a remote adapter.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
-``reef.runtime.model_config``. ``ModelConfig.from_value(value)`` validates the
+``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
 model override; its ``runtime`` field holds an ``InferenceProxyRuntime``, or
 ``None`` for the recipe default. ``view()`` returns the credential-redacted
 API representation. The type holds no file path and performs no file I/O.
@@ -530,22 +602,10 @@ retention, deduplication, pending batches, and exactly-once consumption; the
 method implements only the hooks below. They run synchronously on the trainer
 thread, so they must not block on network or model latency.
 
-+-------------------+-------------------------------+-------------------------------+
-|                   | ``ReportedFeedbackProcessor`` | ``ComputedFeedbackProcessor`` |
-+===================+===============================+===============================+
-| signal arrives as | a report referencing          | information reconstructed     |
-|                   | inference records             | from recorded traffic         |
-+-------------------+-------------------------------+-------------------------------+
-| judgment          | synchronous, on available     | ``async`` model or service    |
-|                   | data                          | call                          |
-+-------------------+-------------------------------+-------------------------------+
-| method owns       | eligibility, optional         | correlation, slow judgment,   |
-|                   | grouping, batch shaping       | sample and batch shaping      |
-+-------------------+-------------------------------+-------------------------------+
-| Reef owns         | waiting index, retry dedup,   | worker lifecycle, queues,     |
-|                   | grouping state, retention,    | retention, replay             |
-|                   | replay                        |                               |
-+-------------------+-------------------------------+-------------------------------+
+Reported feedback supplies a ``make_sample`` hook that assembles valid reports;
+computed feedback supplies an asynchronous ``judge`` that derives new feedback.
+Both engines own their buffering, reservations, retention, and replay. Reports
+must reference existing inference records in the same scenario.
 
 ``DataProcessor.training_mode`` selects automatic, instruction-triggered or
 combined batching on the same processor. Declare ``supported_training_modes`` and
@@ -563,58 +623,43 @@ tracking is off.
 Reported feedback
 ~~~~~~~~~~~~~~~~~
 
-.. code:: mermaid
+``ReportedFeedbackProcessor`` exposes these recipe hooks:
 
-   sequenceDiagram
-       accTitle: How reported feedback becomes a typed batch
-       participant Reef as Reported-feedback processor
-       participant Method as Method processor
-       Reef->>Method: judge(ReportContext)
-       alt referenced inference is missing
-           Method-->>Reef: WAIT: park this report
-       else report can never train
-           Method-->>Reef: NEVER: release this report
-       else report is accepted
-           Method-->>Reef: ReportDecision.train(value, ...)
-           opt group_key supplied
-               Reef->>Method: decide_group(key, candidates)
-               Method-->>Reef: GroupDecision<br/>INCOMPLETE / READY / DISCARD
-           end
-           Reef->>Method: make_batch(ready units, batch_number)
-       end
+.. list-table::
+   :header-rows: 1
 
-+------------------------------------------------------+----------------------------------+
-| Hook                                                 | Contract                         |
-+======================================================+==================================+
-| ``judge(context) -> ReportDecision``                 | return ``TRAIN``, ``WAIT``, or   |
-|                                                      | ``NEVER``                        |
-+------------------------------------------------------+----------------------------------+
-| ``make_batch(units, batch_number) -> TrainingBatch`` | shape accepted candidates        |
-+------------------------------------------------------+----------------------------------+
-| ``decide_group(key, candidates) -> GroupDecision``   | required only when ``judge()``   |
-|                                                      | supplies a ``group_key``         |
-+------------------------------------------------------+----------------------------------+
-| ``output_schema``                                    | the exact batch class returned   |
-+------------------------------------------------------+----------------------------------+
-| ``exclusive_sources``                                | when true, a terminal report     |
-|                                                      | owns and releases its sources    |
-+------------------------------------------------------+----------------------------------+
-| ``ordered_groups``                                   | when true, ready groups batch by |
-|                                                      | sortable group key               |
-+------------------------------------------------------+----------------------------------+
+   * - Hook
+     - Contract
+   * - ``make_sample(context) -> TrainDataItem``
+     - Assemble one valid report and its resolved inferences; raise on data errors.
+   * - ``make_batch(items, batch_number) -> TrainingBatch``
+     - Shape the flat tuple of selected training items into a batch.
+   * - ``grouping(context) -> (group_key, slot)``
+     - Optional collection group and retry slot; defaults to an independent report.
+   * - ``decide_group(key, items) -> GroupDecision``
+     - Required when grouping supplies a group key; return READY, INCOMPLETE, or DISCARD.
 
-Begin a score-based ``judge()`` with ``context.eligibility()``: it returns
-``WAIT`` while a referenced inference is missing, ``NEVER`` for permanently
-ineligible input, and ``None`` when the method should decide. Use
-``ReportDecision.never(reason)`` for a rejection an operator should be able to
-diagnose. The processor logs each new reason and counts repeats.
+``ReportContext`` carries ``report``, ordered ``inferences``, optional ``score``,
+and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or
+raises if the training method cannot use the supplied feedback.
 
-``ReportDecision.train(value)`` creates a singleton candidate. Supply
-``group_key`` and an idempotent ``slot`` when the training unit is a complete
-comparison group; ``decide_group()`` then returns ``READY``, ``INCOMPLETE``, or
-``DISCARD``. Report-level ``WAIT`` and ``GroupDecision.INCOMPLETE`` differ: the
-first waits for a report's missing references, the second holds accepted
-candidates until their group fills.
+``make_sample`` returns a trajectory or task directly. The processor adds the
+report id and ordered references to ``source_agent_record_ids``. Grouping and
+consumption state stay private; recipes never receive buffered report objects.
+``grouping`` returns ``(None, None)`` by default. A group key collects reports,
+and a slot deduplicates retries within that group (None uses the report id).
+This collection group differs from ``TrajectoryItem.group_id``: TTTD waits for
+a complete step, then trains several comparison groups within it.
+``make_batch`` receives items in group/arrival order. Acknowledgement consumes
+all selected reports, even when the recipe omits constant-reward groups from
+its output. Reports arriving after reservation remain for a later batch.
+``output_schema`` declares the batch type, ``exclusive_sources`` controls source
+release for terminal group/duplicate reports, and ``ordered_groups`` orders ready
+groups by their keys.
+
+There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
+Reference validation runs at admission; incomplete groups wait for more valid
+samples. Training input violations raise instead of silently filtering reports.
 
 Computed feedback
 ~~~~~~~~~~~~~~~~~
@@ -630,7 +675,7 @@ calls a model or another slow service.
 | ``async judge(job)``                  | slow judgment, on the processor's |
 |                                       | own worker                        |
 +---------------------------------------+-----------------------------------+
-| ``make_sample(record, judgment)``     | a ``PolicySample``, or ``None``   |
+| ``make_sample(record, judgment)``     | a ``TrajectoryItem``, or ``None`` |
 |                                       | to retire the record              |
 +---------------------------------------+-----------------------------------+
 | ``make_batch(samples, batch_number)`` | the declared batch type           |
@@ -653,47 +698,89 @@ Batch
 
 .. code:: python
 
+   from pathlib import Path
    from reef.train.types import (
-       GroupedPolicyBatch, PolicyBatch, PolicySample,
-       TraceBatch, TraceSample, TrainingBatch,
+       TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem,
+       trajectories, trajectory_groups,
    )
 
-A batch is a frozen dataclass with a stable ``batch_id``. A processor returns
-the same pending batch until that id is acknowledged, so batch content must not
-depend on mutable external state.
+``TrainDataItem = TrajectoryItem | TaskItem``. Every processor returns a frozen
+``TrainingBatch(batch_id, items, request=None)`` with an ordered tuple of items.
+The same batch may contain both kinds. ``request`` is keyword-only and carries
+an optional explicit training instruction; a request-only batch may be empty.
+A processor returns the same pending batch until its id is acknowledged.
 
-.. code:: text
+.. code:: python
 
-   TrainingBatch
-   ├── PolicyBatch          samples: tuple[PolicySample, ...]
-   ├── GroupedPolicyBatch   comparison_sets: tuple[tuple[PolicySample, ...], ...]
-   └── TraceBatch           samples: tuple[TraceSample, ...]
+   batch = TrainingBatch(
+       "scenario:batch:1",
+       (
+           TrajectoryItem(atif_document, source_agent_record_ids=("inference-1", "report-1")),
+           TaskItem(Path("tasks/example"), source_agent_record_ids=("record-2",)),
+       ),
+   )
 
-+------------------------+-------------------------------------------------+
-| Type                   | Typical use                                     |
-+========================+=================================================+
-| ``PolicyBatch``        | singleton rollout and session-derived weight    |
-|                        | updates                                         |
-+------------------------+-------------------------------------------------+
-| ``GroupedPolicyBatch`` | group-relative objectives                       |
-+------------------------+-------------------------------------------------+
-| ``TraceBatch``         | local harness-artifact evolution                |
-+------------------------+-------------------------------------------------+
+A ``TrajectoryItem.trajectory`` is an
+`ATIF document <https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__
+as a JSON-compatible mapping. All shipped processors and recipes use this
+representation. The item checks the envelope; consumers validate the fields
+their algorithms require. Standard steps describe messages, tool calls and
+observations. Captured records use ATIF-v1.7, matching the pinned Harbor version.
 
-A ``PolicySample`` carries ``source_agent_record_id``, ``tokens``,
-``loss_mask``, ``rollout_log_probs``, and ``reward``. When available, it also carries
-``runtime_load_id``, ``action_mask``, ``rollout_created_at``, ``turn_count``,
-``topk_indices`` / ``topk_log_probs``, ``runtime_load_spans``, and ``extras``,
-the field a processor uses for its own loss family. Use the shared assembly
-helpers in ``reef.train.processors.reported`` and
-``reef.train.processors.common`` rather than re-parsing provider responses.
+Reef-specific fields live inside ``trajectory.extra.reef``:
 
-A ``TraceSample`` is not tokenized: it carries ``source_agent_record_id``, the
-recorded ``payload`` unchanged, and the resolved ``score``.
+- ``reward`` and ``feedback`` hold the supplied or computed training signal;
+- ``source_agent_record_id`` identifies the primary source;
+- ``records`` preserves ordered source ids, timestamps and original provider
+  payloads, including provider-specific fields;
+- ``training`` holds exact captured ``tokens``, ``loss_mask``,
+  ``rollout_log_probs``, ``runtime_load_id`` and ``runtime_load_spans``.
+  Recipes may also supply ``action_mask``, ``rollout_created_at``, ``turn_count``,
+  ``topk_indices``, ``topk_log_probs`` and method-specific ``extras``.
 
-Subclass ``TrainingBatch`` only when the processor and backend genuinely share a
-different data contract; set ``output_schema`` to the new class and keep the
-batch serializable, with no handles to services, files, threads, or models.
+``item.metadata`` and ``item.training`` read these extension objects.
+``with_metadata`` and ``with_training`` return updated documents while preserving
+other extensions. Training arrays are JSON lists, and runtime load spans are
+objects with ``start``, ``end`` and ``runtime_load_id``.
+
+``TrajectoryItem.group_id`` is an optional string, scoped to the batch.
+None means an independent trajectory. Group-relative policy algorithms require
+an explicit id on every trajectory and contiguous items for each group, so
+advantages and rows stay aligned. TTTD and CORAL preserve their existing group
+barriers and ordering. SAO and OpenClaw-RL explicitly schedule each trajectory
+independently, even when group metadata is present. ``trajectory_groups(batch)`` reads these comparison groups;
+``trajectories(batch)`` reads ATIF items in flat item order.
+
+A ``TaskItem`` names a `Harbor task directory <https://www.harborframework.com/docs/tasks>`__
+with ``task_path: Path``: the directory contains the instruction, environment
+and verifier configuration/files. The path is interpreted in the consuming
+algorithm's execution environment. The value also accepts optional ``metadata``.
+It performs no file I/O or rollout. Algorithms supporting tasks own validation,
+environment execution and conversion to trajectories. Current built-in policy
+and harness backends explicitly reject task items; accepting the container
+contract does not imply that every algorithm supports every item kind.
+
+Both item kinds may carry ``source_agent_record_ids``. These record derivation
+inputs; processor acknowledgement remains authoritative for consumption,
+including inputs removed by a recipe's existing group rules.
+
+The ``reef.core.trajectories`` helpers construct and consume ATIF:
+``make_trajectory(records, reward, feedback)`` retains original exchanges;
+``recorded_payload`` / ``recorded_payloads`` project exchanges for harness
+methods, including external ATIF without captured records; and
+``trajectory_reward`` reads a finite policy reward. Policy assembly uses
+``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from
+``reef.train.processors.common`` to add exact captured tensors. Missing required
+tensors fail at the training boundary; these helpers do not invent tokens or
+log probabilities from text. Both batch readers reject unsupported item kinds
+instead of silently filtering mixed batches.
+
+Migration: the former policy/trace sample types and their batch subclasses are
+removed. Construct ATIF items directly and return ``TrainingBatch(id, items)``.
+Use ``group_id`` on each member for grouped batches. Read captured tensors from
+``item.training`` and rewards through ``trajectory_reward(item)``.
+``output_schema`` defaults to ``TrainingBatch``. Keep batches serializable, with
+no handles to services, files, threads or models.
 
 Step preparer
 -------------
@@ -701,6 +788,7 @@ Step preparer
 .. code:: python
 
    from reef.train.algos import StepSignal
+   from reef.core.trajectories import trajectory_reward
 
 A preparer turns a reserved batch into a pure, backend-neutral signal. Normally
 it is a plain function named by the recipe as ``package.module:callable``, and
@@ -709,13 +797,12 @@ its module must be importable in both the service and the training process.
 .. code:: python
 
    def prepare_step(batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-       if not isinstance(batch, PolicyBatch):
-           raise TypeError(f"my_method requires PolicyBatch, got {type(batch).__name__}")
+       samples = trajectories(batch)
        steps = next_steps(state)
        return StepSignal(
            action="train",
            loss_family="my_method",
-           advantages=tuple(sample.reward for sample in batch.samples),
+           advantages=tuple(trajectory_reward(sample) for sample in samples),
            next_algorithm_state={"steps": steps},
            metrics={"steps": steps},
        )
@@ -768,7 +855,7 @@ snapshot, apply, run the paired episodes, record, publish or revert.
 +========================+==========================================================+
 | ``nodes``              | the tree as ``(kind, config)`` pairs                     |
 +------------------------+----------------------------------------------------------+
-| ``samples``            | the batch of ``TraceSample`` records                     |
+| ``samples``            | the batch of ATIF ``TrajectoryItem`` values              |
 +------------------------+----------------------------------------------------------+
 | ``models``             | the method's only path to a model: ``models.served`` is  |
 |                        | the model under test, ``models["teacher"]`` comes from   |
@@ -799,7 +886,10 @@ Candidate evaluation
 
    from reef import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision
 
-A plugin measures a produced candidate before it is published, and decides. Reef
+A plugin explicitly inherits ``CandidateEvaluationPlugin``, measures a produced
+candidate before it is published, and decides. ``CandidateEvaluator`` and
+``CandidateSelector`` remain separate abstract capabilities; implementing only
+one does not make an object a plugin. Reef
 enforces the fixed evaluate-then-decide order and verifies the decision kept the
 exact result it was given.
 
@@ -820,6 +910,19 @@ idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
 result was not durably committed. The deployment names the factory in its
 ``evaluation`` section (`Configuration
 <configuration.rst#the-evaluation-section>`__).
+
+``CandidateEvaluationPluginFactory`` is an abstract base class whose
+``build(config, *, runtime, training_runtime, scenario, environ)`` returns one
+scenario-local plugin. ``evaluation.module`` names its subclass or instance;
+factory subclasses must construct without arguments and without allocating
+model resources. Plain callable factories and objects that merely expose
+matching methods are rejected.
+
+Harness recipes instead use ``reef.train.evaluation.CandidatePluginFactory``:
+its ``build(candidate_backend)`` binds a plugin to an existing candidate
+backend. ``AlwaysSelectPluginFactory`` and ``ScoreComparisonPluginFactory``
+provide the built-in policies; custom factory classes explicitly inherit the
+same interface.
 
 Surface
 -------
@@ -862,3 +965,93 @@ training job, admit an artifact, or mutate the release chain. Artifact admission
 is separate, through ``Recipe.build_artifact_validator()``. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.
+
+Runtime responsibilities
+------------------------
+
+``TrainingRuntime`` and ``InferenceRuntime`` are independent interfaces. Neither
+inherits from the other, and there is no aggregate runtime.
+
+* ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
+  candidates and restores training weights/optimizer state. It receives serving
+  versions as values; it does not own an inference endpoint or request backend.
+* ``InferenceRuntime`` executes requests, manages admission and reconnection,
+  loads selected weights or adapters, and reports serving versions. It restores
+  serving weights without restoring optimizer state.
+* The existing ``RuntimeCandidateBackend`` coordinates both: prepare/train,
+  evaluate, activate or reject, delegating scheduling and durable publication
+  acknowledgement to ``RuntimeScheduler``. ``ScenarioCommitter`` coordinates rollback across both runtimes and
+  commits the restored artifact before reopening inference.
+
+Weight recipes hold ``training_runtime: TrainingRuntime`` and
+``runtime: InferenceRuntime`` separately. Construction is explicit:
+
+.. code:: python
+
+   recipe = SAORecipe(training_runtime=training, runtime=inference)
+
+Training deployment factories return ``(training_runtime, inference_runtime)``;
+inference-only factories return an ``InferenceRuntime``. ``connect_ray_runtime``
+and ``connect_executor_runtimes`` in ``reef.service.runtime`` return the same pair.
+``ExecutorTrainingRuntime`` in ``reef.train.runtime`` and
+``ExecutorInferenceRuntime`` in ``reef.inference.runtime`` use the existing
+``CoordinatorClient`` control connection for their respective operations. That
+legacy RPC connection still exposes both training and publication operations;
+it is not a public runtime or a new backend-neutral weight transport.
+
+Migration: split implementations of the former combined training runtime into
+these two interfaces and inject both into the recipe. The aggregate runtime
+classes and the ``RayRuntime`` alias are removed. The ``executor_training`` and
+``ray_training`` config kinds, control RPCs and stored artifact formats remain
+unchanged. Adding another backend combination still requires compatible native
+weight transport and recovery behavior.
+
+``reef.runtime`` is a namespace package without an import facade. Its five modules
+are ``interfaces``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
+``executor/`` contains worker transports. Import the ABCs and shared values from
+``reef.runtime.interfaces`` and the factory registry from
+``reef.runtime.deployment``. Concrete scheduling connections live in their owning
+integration: ``SlimeTrainingRuntime`` in ``reef.train.slime_backend.runtime`` and
+``SGLangInferenceRuntime`` in ``reef.inference.sglang.runtime``. These remain
+distinct from the native ``TrainingBackend``/``InferenceBackend`` pair consumed by
+Reef's coordinator.
+
+Tinker integration
+------------------
+
+``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
+``tinker`` backend. Its ``runtime_factory`` builds, from ``TinkerConfig`` and only
+after deployment selection, a ``TinkerTrainingRuntime`` and, through the
+``tinker`` inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``.
+The two hold no shared object: the training runtime branches every candidate
+from the incumbent it remembers on disk, learning commits through
+``TrainingRuntime.commit_candidate`` and rollbacks through
+``restore_checkpoint``; the inference runtime reads each candidate's or
+artifact's ``tinker-checkpoint.json`` manifest, samples from the immutable
+sampler it names, activates selected candidates and binds the head Reef
+publishes through ``activate_checkpoint``. With a local inference engine the
+same deployment instead returns a model-driver plan: ``TinkerTrainingService``
+supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
+that delivers each published adapter as a PEFT directory through
+``adapter_files``; Reef's publisher then calls the receiver's
+``InferenceBackend.load_adapter_files`` (the ``reef-adapter-files-v1``
+transfer any engine that loads adapter directories can declare), so the
+trainer never holds an engine handle. The HTTP service connects through the
+``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
+defaults ``requires_local_model`` to true; hosted integrations set it to false
+to preserve remote model identifiers during deployment resolution.
+
+Methods implement ``TinkerLoss`` from ``reef.train.tinker_backend.losses``
+and register it with ``register_loss_family_ref(name, "package.module:CLASS",
+backend="tinker")`` from ``reef.train.algos.registry``, the same table that
+holds their Slime reference. ``loss_fn`` names the Tinker built-in loss the
+family trains with; ``inputs(rows, base_logprobs, kl_coef=...)`` returns that
+function's token-aligned ``loss_fn_inputs``, one dictionary per row; and
+``needs_base_logprobs`` requests frozen-base scores for a nonzero KL
+coefficient. For ``importance_sampling``, ``TokenRow.inputs`` builds the
+dictionary from response-token advantages, shifting prediction targets by one
+token and padding prompt positions with zeros. A ``TinkerCustomLoss`` adds
+``loss(data, logprobs)``, which the SDK boundary passes to
+``forward_backward_custom`` so the family computes its loss tensor on the
+Reef host. ``Datum`` objects are constructed only after this shaping. See
+`Train with Tinker <../user-guide/tinker.rst>`__ for supported contracts.

@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from reef.runtime.adapter_residency import (
+from reef.runtime.interfaces import AdapterEngine
+from reef.runtime.publication import (
     AdapterCapacityExhausted,
     AdapterEvictionFailed,
     AdapterNotActive,
@@ -16,7 +17,7 @@ from reef.runtime.adapter_residency import (
 from reef.surface import adapter_name
 
 
-class FakeEngine:
+class FakeEngine(AdapterEngine):
     """Records loads/unloads and can be told to fail either."""
 
     def __init__(self) -> None:

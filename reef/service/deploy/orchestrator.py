@@ -28,11 +28,11 @@ import yaml
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
+from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
-from reef.runtime.registry import RuntimeConfigError
 from reef.service.deploy.cli import (
     InvalidOverrideError,
     _apply_overrides,
@@ -54,9 +54,11 @@ from reef.service.deploy.deployment_config import (
     component_config_arguments,
     normalize_component_config,
     normalize_component_layout,
+    reject_null_settings,
     translate_layout,
     translate_references,
 )
+from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
 from reef.service.deploy.service_config import (
@@ -65,7 +67,7 @@ from reef.service.deploy.service_config import (
     service_config_from_mapping,
     service_override,
 )
-from reef.service.deploy.training import assemble_training_services
+from reef.service.deploy.training import assemble_training_services, local_model_required
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
@@ -425,6 +427,8 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        if versioned or standard:
+            reject_null_settings(config, arguments)
         if standard:
             if "services" in config.get("execution", {}):
                 raise DeployConfigError("execution.services belongs to legacy process stacks")
@@ -443,20 +447,48 @@ def resolve_deployment_config(
     return normalized_config, source_root
 
 
-def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None = None) -> int:
+def _config_source(config_path: Path | None, versioned: bool) -> str:
+    """Name the selected file, profile or command line and its layout for the startup log."""
+    if config_path is None:
+        return "config: command line"
+    layout = "schema-version 2" if versioned else "unversioned layout"
+    if config_path.parent == PROFILES_DIR.resolve():
+        return f"config: profile {config_path.stem} at {config_path} ({layout})"
+    return f"config: {config_path} ({layout})"
+
+
+def _run_orchestrator(
+    config_path: str | None, overrides: dict[str, str] | None = None, *, print_config: bool = False
+) -> int:
     resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
     config = (
         load_config(resolved_config_path, interpolate_env=False) if config_path else command_line_config(os.environ)
     )
     versioned = config.get("schema-version") == 2
-    _log(f"config: {resolved_config_path}" if config_path else "config: command line")
+    source = _config_source(resolved_config_path if config_path else None, versioned)
+    _log(source)
     normalized_config, source_root = resolve_deployment_config(
         config, overrides, resolved_config_path, standard=config_path is None
     )
+    report = startup_report(
+        config,
+        normalized_config,
+        overrides or {},
+        environ=os.environ,
+        from_file=config_path is not None,
+        include_defaults=print_config,
+    )
+    if print_config:
+        # Settings are final here; a model path is shown as written, since
+        # downloads and hardware checks happen only at a real start.
+        print("\n".join([source, *report]))
+        return 0
+    for line in report:
+        _log(line)
     settings_changed = normalized_config != config
     config = normalized_config
     services = validate_services(config, resolved_config_path)
-    paths_changed = resolve_model_paths(config)
+    paths_changed = local_model_required(config) and resolve_model_paths(config)
     temp_config_path: Path | None = None
     try:
         if versioned or config_path is None or overrides or paths_changed or settings_changed:
@@ -617,7 +649,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         config_path = _resolve_config(args.config, args.recipe)
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ, overrides)
-        exit_code = _run_orchestrator(config_path, overrides)
+        exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
     sys.exit(exit_code)

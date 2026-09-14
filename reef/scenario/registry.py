@@ -20,10 +20,9 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
 )
 from reef.core.errors import ReefError, UnknownScenario
+from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.runtime.base import TrainingRuntime
-from reef.runtime.model_config import ModelConfig
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.model_config import archive_model_config, read_model_config, write_model_config
@@ -95,7 +94,7 @@ class ScenarioRegistry:
         local = tuple(
             scenario.name
             for scenario in scenarios
-            if scenario.name not in dispatched and scenario.trainer.training_backend is not None
+            if scenario.name not in dispatched and scenario.trainer.candidate_backend is not None
         )
         return (*dispatched, *local)
 
@@ -292,8 +291,7 @@ class ScenarioRegistry:
         current = self._scenario_factory.load_or_create(
             scenario, release_id, model_config=self._model_config(scenario)
         )
-        runtime = current.runtime
-        training_runtime = runtime if isinstance(runtime, TrainingRuntime) else None
+        training_runtime = current.training_runtime
         with self._lock:
             shared_runtime = training_runtime is not None and training_runtime.concurrent_training_scenarios
             if training_runtime is not None and not shared_runtime and self._training_scenario not in (None, scenario):

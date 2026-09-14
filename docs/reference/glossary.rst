@@ -112,11 +112,10 @@ hooks, and an optional client-pulled file tree, composed as fields on one
 Processor
 ---------
 
-The method's data-side component. It judges each resolved unit, consisting of
-one record plus the reports referencing it, as ``TRAIN``, ``WAIT``, or
-``NEVER``, and assembles
-the accepted units into one typed batch. Reported and computed feedback pick
-different engines.
+The method's data-side component. It assembles records and feedback into a
+typed training batch. Reported feedback uses valid reports with existing
+inference references; computed feedback derives its signal from traffic.
+The engines share batching, consumption, and retention contracts.
 
 Preparer
 --------
@@ -160,14 +159,11 @@ the rest of the tree. Updating one needs no GPU.
 Runtime
 -------
 
-Two meanings.
-
-1. **The request-plane contract:** ``InferenceRuntime`` and
-   ``TrainingRuntime``: the external service that executes model work.
-   ``InferenceRuntime`` is always required while ``TrainingRuntime`` is only
-   required for weight recipes.
-2. **A training backend integration:** a concrete implementation of that
-   contract, such as Reef's Slime runtime.
+``InferenceRuntime`` executes inference requests and owns admission;
+``TrainingRuntime`` prepares training jobs and exports checkpoints. They are
+independent components. The existing ``RuntimeCandidateBackend`` coordinates
+candidate activation, publication and recovery for weight recipes. Concrete
+backend integrations implement the component operations.
 
 SAO
 ---

@@ -12,6 +12,8 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
   imported by the training driver and workers only; this package's public
   surface never loads it, so the service process stays free of the Slime
   stack.
+- ``tinker`` — the same objective on Tinker's built-in importance-sampling
+  loss, imported only when that backend resolves the family.
 """
 
 from recipes.tttd.preparer import TttdPreparer
@@ -21,5 +23,6 @@ from recipes.tttd.report import TTTDGroupedRolloutReport
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("tttd", "recipes.tttd.slime:TttdAlgorithm")
+register_loss_family_ref("tttd", "recipes.tttd.tinker:TttdTinkerLoss", backend="tinker")
 
 __all__ = ["TTTDGroupedRolloutReport", "TTTDProcessor", "TTTDRecipe", "TttdPreparer"]

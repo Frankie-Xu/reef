@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from threading import RLock
-from typing import Protocol
 
 
 @dataclass(frozen=True)
 class ExecutorFailure:
+    """One terminal failure of an executor, attributed to a rank when known."""
+
     backend: str
     reason: str
     rank: int | None = None
 
 
 class ExecutorFailedError(RuntimeError):
+    """Raised by every pending or later RPC once an executor has failed."""
+
     def __init__(self, failure: ExecutorFailure):
         self.failure = failure
         super().__init__(f"{failure.backend} executor failed (rank={failure.rank}): {failure.reason}")
@@ -26,12 +30,20 @@ class ExecutorFailedError(RuntimeError):
         return type(self), (self.failure,)
 
 
-class ExecutorFailureListener(Protocol):
+class ExecutorFailureListener(ABC):
+    @abstractmethod
     def on_executor_failure(self, failure: ExecutorFailure) -> None:
         """Observe terminal failure once; do not block the monitor thread."""
 
 
 class FailureState:
+    """Terminal failure and shutdown state shared by an executor and its futures.
+
+    ``track`` mirrors a transport future so that a failure recorded from any
+    thread fails every outstanding wait at once, instead of leaving callers
+    blocked on a worker that will never answer.
+    """
+
     def __init__(self) -> None:
         self._lock = RLock()
         self._failure: ExecutorFailure | None = None
@@ -55,6 +67,7 @@ class FailureState:
             return self._failure
 
     def check(self) -> None:
+        """Raise if the executor has failed or been shut down."""
         with self._lock:
             if self._failure is not None:
                 raise ExecutorFailedError(self._failure)
@@ -78,6 +91,7 @@ class FailureState:
             logging.getLogger(__name__).exception("executor failure listener raised")
 
     def fail(self, failure: ExecutorFailure) -> bool:
+        """Record the first failure and fail pending futures; later calls are ignored."""
         with self._lock:
             if self._failure is not None or self._closed:
                 return False
@@ -103,6 +117,7 @@ class FailureState:
             future.set_exception(error)
 
     def track(self, source: Future) -> Future:
+        """Return a future that completes with ``source`` or fails with the executor."""
         target: Future = Future()
         with self._lock:
             self.check()

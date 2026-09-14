@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from contextlib import suppress
 from time import monotonic
-from typing import Any, Literal, overload
+from typing import Any
 
-from reef.runtime.executor.base import Executor, ExecutorConfig, ExecutorFuture, resolve_class
+from reef.runtime.executor.base import ExecutorConfig, ExecutorFuture, SubmittingExecutor, check_rank, resolve_class
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener, FailureState
 from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
+
+#: How often a waiting future re-checks the executor for a terminal failure.
+FAILURE_POLL_S = 0.1
 
 
 def _require_ray() -> Any:
@@ -20,6 +23,8 @@ def _require_ray() -> Any:
 
 
 class RayExecutorFuture(ExecutorFuture):
+    """One or more Ray object references, resolved under a deadline and failure watch."""
+
     def __init__(
         self,
         references: Any,
@@ -38,14 +43,13 @@ class RayExecutorFuture(ExecutorFuture):
         budget = self._timeout if timeout is None else timeout
         deadline = None if budget is None else monotonic() + budget
         while True:
+            remaining = None if deadline is None else max(0.0, deadline - monotonic())
             if self._failure_state is not None:
+                # Wake up regularly so a failure elsewhere in the group ends the wait.
                 self._failure_state.check()
-            remaining = None if deadline is None else max(0, deadline - monotonic())
-            wait_time = (
-                remaining if self._failure_state is None else min(0.1, remaining if remaining is not None else 0.1)
-            )
+                remaining = FAILURE_POLL_S if remaining is None else min(FAILURE_POLL_S, remaining)
             try:
-                return ray.get(self._references, timeout=wait_time)
+                return ray.get(self._references, timeout=remaining)
             except ray.exceptions.GetTimeoutError as exc:
                 if deadline is not None and monotonic() >= deadline:
                     raise TimeoutError("executor RPC timed out; worker work may still be running") from exc
@@ -57,7 +61,7 @@ class RayExecutorFuture(ExecutorFuture):
                 raise ExecutorFailedError(self._failure_state.failure or failure) from exc
 
 
-class RayExecutor(Executor):
+class RayExecutor(SubmittingExecutor):
     """Launch Ray actors, or attach an existing group without taking ownership.
 
     Attached executors retain only configuration, actor handles, and lifecycle
@@ -68,7 +72,6 @@ class RayExecutor(Executor):
         self._runtime_lease: RayRuntimeLease | None = None
         self._workers: tuple[Any, ...] = ()
         self._owned = True
-        self._closed = False
         self._init_monitor_state()
         if not self.config.workers:
             return
@@ -102,12 +105,20 @@ class RayExecutor(Executor):
         executor._owned = owned
         return executor
 
+    @property
+    def workers(self) -> tuple[Any, ...]:
+        """Actor handles for integrations that must pass them to a Ray library."""
+        return self._workers
+
+    # -- Serialization -----------------------------------------------------
+
     def _init_monitor_state(self) -> None:
         self._monitor_stop = threading.Event()
         self._monitor_lock = threading.Lock()
         self._monitor_thread: threading.Thread | None = None
 
     def __getstate__(self):
+        # Threads and the runtime lease belong to the process that created them.
         return {
             key: value
             for key, value in self.__dict__.items()
@@ -118,6 +129,8 @@ class RayExecutor(Executor):
         self.__dict__.update(state)
         self._runtime_lease = None
         self._init_monitor_state()
+
+    # -- Failure monitoring ------------------------------------------------
 
     def register_failure_listener(self, listener: ExecutorFailureListener) -> None:
         super().register_failure_listener(listener)
@@ -156,80 +169,21 @@ class RayExecutor(Executor):
                 self._fail(f"Ray monitor unavailable: {type(exc).__name__}")
                 self.shutdown()
 
-    @property
-    def workers(self) -> tuple[Any, ...]:
-        """Actor handles for integrations that must pass them to a Ray library."""
-        return self._workers
+    # -- RPC ----------------------------------------------------------------
 
-    def _ensure_open(self) -> None:
-        self._failure_state.check()
-        if self._closed:
-            raise RuntimeError("executor is shut down")
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: Literal[False] = False,
-    ) -> list[Any]: ...
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: Literal[True],
-    ) -> ExecutorFuture: ...
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool,
-    ) -> list[Any] | ExecutorFuture: ...
-
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool = False,
-    ) -> list[Any] | ExecutorFuture:
-        self._ensure_open()
+    def _submit(
+        self, rank: int, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        check_rank(rank, len(self._workers))
         # Ray's actor-method protocol is dynamic; keep .remote() at this edge.
-        references = [getattr(worker, method).remote(*args, **dict(kwargs or {})) for worker in self._workers]
-        future = RayExecutorFuture(references, timeout=timeout, failure_state=self._failure_state)
-        return future if non_block else future.result()
+        reference = getattr(self._workers[rank], method).remote(*args, **kwargs)
+        return RayExecutorFuture(reference, timeout=timeout, failure_state=self._failure_state, rank=rank)
 
-    def rpc(
-        self,
-        rank: int,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool = False,
-    ) -> Any:
-        self._ensure_open()
-        if not isinstance(rank, int) or isinstance(rank, bool) or rank < 0 or rank >= len(self._workers):
-            raise IndexError(f"worker rank {rank!r} is outside the executor group")
-        reference = getattr(self._workers[rank], method).remote(*args, **dict(kwargs or {}))
-        future = RayExecutorFuture(reference, timeout=timeout, failure_state=self._failure_state, rank=rank)
-        return future if non_block else future.result()
+    def _submit_all(
+        self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        references = [getattr(worker, method).remote(*args, **kwargs) for worker in self._workers]
+        return RayExecutorFuture(references, timeout=timeout, failure_state=self._failure_state)
 
     def check_health(self, timeout: float | None = None) -> None:
         self.collective_rpc("__ray_ready__", timeout=timeout)
@@ -245,20 +199,21 @@ class RayExecutor(Executor):
             self._monitor_thread.join(timeout=2)
         try:
             if self._owned and self._workers:
-                ray = _require_ray()
-                errors = [
-                    error for worker in self._workers if (error := self._try_kill_worker(ray, worker)) is not None
-                ]
-                if errors:
-                    raise errors[0]
+                self._kill_workers()
         finally:
             if self._runtime_lease is not None:
                 self._runtime_lease.close()
 
-    @staticmethod
-    def _try_kill_worker(ray: Any, worker: Any) -> Exception | None:
-        try:
-            ray.kill(worker, no_restart=True)
-        except Exception as exc:
-            return exc
-        return None
+    def _kill_workers(self) -> None:
+        ray = _require_ray()
+        errors = [error for worker in self._workers if (error := _kill_error(ray, worker)) is not None]
+        if errors:
+            raise errors[0]
+
+
+def _kill_error(ray: Any, worker: Any) -> Exception | None:
+    try:
+        ray.kill(worker, no_restart=True)
+    except Exception as exc:
+        return exc
+    return None

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import import_module
 from time import monotonic
 from typing import Any, Literal, overload
 
 from reef.runtime.executor.failure import ExecutorFailure, ExecutorFailureListener, FailureState
+
+#: Import paths of the bundled executors, keyed by their short config names.
+BUILTIN_BACKENDS = {
+    "uni": "reef.runtime.executor.uniproc:UniProcExecutor",
+    "mp": "reef.runtime.executor.multiproc:MultiprocExecutor",
+    "ray": "reef.runtime.executor.ray:RayExecutor",
+}
 
 
 @dataclass(frozen=True)
@@ -84,12 +91,23 @@ def resolve(value: Any, *, timeout: float | None = None) -> Any:
 
 def _resolve(value: Any, deadline: float | None) -> Any:
     if isinstance(value, ExecutorFuture):
-        return value.result(timeout=None if deadline is None else max(0.0, deadline - monotonic()))
+        return value.result(timeout=remaining_time(deadline))
     if isinstance(value, list):
         return [_resolve(item, deadline) for item in value]
     if isinstance(value, tuple):
         return tuple(_resolve(item, deadline) for item in value)
     return value
+
+
+def remaining_time(deadline: float | None) -> float | None:
+    """Seconds left until a ``monotonic()`` deadline, clamped at zero; ``None`` never expires."""
+    return None if deadline is None else max(0.0, deadline - monotonic())
+
+
+def check_rank(rank: Any, count: int) -> None:
+    """Reject a rank that does not address one of ``count`` workers."""
+    if isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank < count:
+        raise IndexError(f"worker rank {rank!r} is outside the executor group")
 
 
 def resolve_class(value: type | str) -> type:
@@ -122,6 +140,7 @@ class Executor(ABC):
     def __init__(self, config: ExecutorConfig) -> None:
         self.config = config
         self._failure_state = FailureState()
+        self._closed = False
         self._init_executor()
 
     @property
@@ -135,21 +154,15 @@ class Executor(ABC):
     def _fail(self, reason: str, *, rank: int | None = None) -> bool:
         return self._failure_state.fail(ExecutorFailure(type(self).__name__, reason, rank))
 
+    def _ensure_open(self) -> None:
+        """Reject work after a terminal failure or shutdown."""
+        self._failure_state.check()
+        if self._closed:
+            raise RuntimeError("executor is shut down")
+
     @staticmethod
     def get_class(backend: str | type[Executor]) -> type[Executor]:
-        if backend == "uni":
-            from reef.runtime.executor.uniproc import UniProcExecutor
-
-            return UniProcExecutor
-        if backend == "mp":
-            from reef.runtime.executor.multiproc import MultiprocExecutor
-
-            return MultiprocExecutor
-        if backend == "ray":
-            from reef.runtime.executor.ray import RayExecutor
-
-            return RayExecutor
-        candidate = resolve_class(backend)
+        candidate = resolve_class(BUILTIN_BACKENDS.get(backend, backend) if isinstance(backend, str) else backend)
         if not issubclass(candidate, Executor):
             raise TypeError("executor backend must be an Executor subclass")
         return candidate
@@ -157,8 +170,7 @@ class Executor(ABC):
     @classmethod
     def create(cls, config: ExecutorConfig) -> Executor:
         if config.backend == "auto":
-            from dataclasses import replace
-
+            # Selection policy imports this module; resolve it lazily.
             from reef.runtime.executor.config import ExecutorSettings, select_worker_executor
             from reef.runtime.executor.requirements import ExecutionRequirements
 
@@ -242,3 +254,85 @@ class Executor(ABC):
     def reinitialize_distributed(self, topology: Mapping[str, Any]) -> None:
         """Optional capability: ordinary executors do not imply elastic training."""
         raise NotImplementedError(f"{type(self).__name__} does not support distributed reinitialization")
+
+
+class SubmittingExecutor(Executor):
+    """An executor whose transport submits one RPC and hands back a future.
+
+    The bundled executors differ only in how a call reaches a worker. They
+    implement :meth:`_submit` and :meth:`_submit_all`; the blocking and
+    non-blocking public forms and the open check are shared here so each
+    transport states only its own mechanics.
+    """
+
+    @abstractmethod
+    def _submit(
+        self, rank: int, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        """Dispatch ``method`` to one rank; the future waits at most ``timeout`` by default."""
+
+    @abstractmethod
+    def _submit_all(
+        self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        """Dispatch ``method`` to every rank; results keep rank order."""
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str,
+        *,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        non_block: Literal[False] = False,
+    ) -> list[Any]: ...
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str,
+        *,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        non_block: Literal[True],
+    ) -> ExecutorFuture: ...
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str,
+        *,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        non_block: bool,
+    ) -> list[Any] | ExecutorFuture: ...
+
+    def collective_rpc(
+        self,
+        method: str,
+        *,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        non_block: bool = False,
+    ) -> list[Any] | ExecutorFuture:
+        self._ensure_open()
+        future = self._submit_all(method, tuple(args), dict(kwargs or {}), timeout)
+        return future if non_block else future.result()
+
+    def rpc(
+        self,
+        rank: int,
+        method: str,
+        *,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        non_block: bool = False,
+    ) -> Any:
+        self._ensure_open()
+        future = self._submit(rank, method, tuple(args), dict(kwargs or {}), timeout)
+        return future if non_block else future.result()

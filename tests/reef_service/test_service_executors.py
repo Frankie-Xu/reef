@@ -107,6 +107,12 @@ def test_startup_failure_rolls_back_healthy_dependencies(tmp_path):
         ({"executor": "ray", "env": {"CUDA_VISIBLE_DEVICES": "0"}}, "num_gpus"),
         ({"executor": "uni", "resources": {"num_gpus": 1}}, "reservations require"),
         ({"ready_timeout": 0}, "positive"),
+        ({"ready_timeout": float("nan")}, "finite"),
+        ({"ready_timeout": float("inf")}, "finite"),
+        ({"ready_timeout": float("-inf")}, "finite"),
+        ({"ready_timeout": "nan"}, "finite"),
+        ({"ready_timeout": "inf"}, "finite"),
+        ({"ready_timeout": "-inf"}, "finite"),
         ({"executor": {"backend": "ray", "options": {"max_restarts": -1}}}, "replay"),
     ],
 )
@@ -151,7 +157,7 @@ def test_named_role_selectors_share_one_configuration_contract():
 @pytest.mark.parametrize("cli", [False, True])
 def test_slime_driver_honors_yaml_roles_and_explicit_flag_precedence(cli):
     pytest.importorskip("ray")
-    from reef.service.slime_driver import _configure_executors
+    from reef.train.slime_backend.driver import _configure_executors
 
     config = {
         "executors": {"special": {"backend": "custom:Training", "options": {"queue": "gpu"}}},

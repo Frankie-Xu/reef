@@ -12,14 +12,14 @@ import inspect
 import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 
 class Proposer(ABC):
@@ -59,7 +59,7 @@ class Proposer(ABC):
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
     in ``hybrid`` it is what an automatic batch would take next, up to
-    ``batch_size`` and possibly none (failing traces in the score window, or
+    ``batch_size`` and possibly none (scored traces, or
     records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
     instructions. It generates mutations against the current tree, then the
     same gate and publication policy used by automatic evolution apply.
@@ -86,7 +86,7 @@ class Proposer(ABC):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -178,7 +178,7 @@ class _CallableProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -276,43 +276,16 @@ class Promoter(ABC):
     @abstractmethod
     def __call__(
         self,
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:
         """Return the prompts this step should promote into the gate."""
 
 
-class PromotePolicy(Protocol):
-    """A plain promote callable, ``(samples, *, manifest=None) -> Sequence[str]``, the keyword optional."""
-
-    def __call__(self, samples: tuple[TraceSample, ...], /, **kwargs: Any) -> Sequence[str]: ...
-
-
-class _CallablePromoter(Promoter):
-    """Adapter wrapping a plain callable as a :class:`Promoter` instance."""
-
-    def __init__(self, policy: PromotePolicy) -> None:
-        self._policy = policy
-        self._forward_manifest = accepts_manifest(policy)
-
-    def __call__(
-        self,
-        samples: tuple[TraceSample, ...],
-        *,
-        manifest: FailureManifest | None = None,
-    ) -> Sequence[str]:
-        if self._forward_manifest:
-            return self._policy(samples, manifest=manifest)
-        return self._policy(samples)
-
-
 def resolve_promoter(value: object) -> Promoter:
-    """Resolve a callable or dotted reference into a :class:`Promoter` instance."""
-    if isinstance(value, Promoter):
-        return value
-    if callable(value):
-        return _CallablePromoter(value)
+    """Resolve a Promoter instance, subclass, or dotted reference to either."""
+    resolved = value
     if isinstance(value, str) and ":" in value:
         import importlib
 
@@ -321,8 +294,8 @@ def resolve_promoter(value: object) -> Promoter:
             resolved = getattr(importlib.import_module(module_name), attribute)
         except (ImportError, AttributeError) as exc:
             raise ValueError(f"cannot import promoter {value!r}: {exc}") from exc
-        if isinstance(resolved, Promoter):
-            return resolved
-        if callable(resolved):
-            return _CallablePromoter(resolved)
-    raise ValueError("promote must be a Promoter instance, a callable, or a dotted 'module:attribute' reference")
+    if isinstance(resolved, type) and issubclass(resolved, Promoter):
+        resolved = resolved()
+    if isinstance(resolved, Promoter):
+        return resolved
+    raise ValueError("promote must be a Promoter instance, subclass, or dotted 'module:attribute' reference")

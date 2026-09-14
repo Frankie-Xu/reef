@@ -1,4 +1,4 @@
-"""Adapt any TrainingRuntime to the shared training lifecycle."""
+"""Adapt recipe candidates to Reef's training and inference runtime scheduler."""
 
 from __future__ import annotations
 
@@ -6,33 +6,48 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.runtime.base import RuntimeContractError, TrainingRuntime
-from reef.runtime.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    CandidateTrainingDeferred,
+    InferenceRuntime,
+    ModelCandidate,
+    PreparedTrainingStep,
+    RuntimeContractError,
+    StaleCandidate,
+    TrainingJobResult,
+    TrainingRuntime,
+)
+from reef.runtime.scheduler import RuntimeScheduler
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
-class RuntimeTrainingBackend(TrainingBackend):
-    """Turn the training runtime protocol into Reef's common backend lifecycle."""
+class RuntimeCandidateBackend(CandidateBackend):
+    """Map candidate evaluation and selection onto the runtime scheduler."""
 
     def __init__(
         self,
-        runtime: TrainingRuntime,
+        training_runtime: TrainingRuntime,
         step_preparer: str,
         *,
+        inference_runtime: InferenceRuntime,
         loss_family: str | None = None,
         scenario: str | None = None,
     ) -> None:
         if not step_preparer:
             raise ValueError("step_preparer must be non-empty")
-        self._runtime = runtime
+        self.scheduler = RuntimeScheduler(training_runtime, inference_runtime)
         self._step_preparer = step_preparer
         self._loss_family = loss_family
         self._scenario = scenario
 
     @property
-    def runtime(self) -> TrainingRuntime:
-        return self._runtime
+    def training_runtime(self) -> TrainingRuntime:
+        return self.scheduler.training_runtime
+
+    @property
+    def inference_runtime(self) -> InferenceRuntime:
+        return self.scheduler.inference_runtime
 
     @property
     def step_preparer(self) -> str:
@@ -44,7 +59,7 @@ class RuntimeTrainingBackend(TrainingBackend):
 
     def experiment_config(self) -> Mapping[str, Any]:
         return {
-            "runtime": type(self._runtime).__name__,
+            "runtime": type(self.training_runtime).__name__,
             "step_preparer": self._step_preparer,
             **({"loss_family": self._loss_family} if self._loss_family is not None else {}),
         }
@@ -59,42 +74,15 @@ class RuntimeTrainingBackend(TrainingBackend):
         committed_training_job_id: str | None = None,
         committed_training_without_job_id: bool = False,
     ) -> None:
-        scenario = self._runtime_scenario()
-        if scenario is None:
-            self._runtime.reconcile_training_job(
-                scenario_step,
-                committed_training_job_id=committed_training_job_id,
-                committed_training_without_job_id=committed_training_without_job_id,
-            )
-            return
-        self._runtime.reconcile_training_job(
+        self.scheduler.recover_pending_step(
             scenario_step,
+            scenario=self._scenario,
             committed_training_job_id=committed_training_job_id,
             committed_training_without_job_id=committed_training_without_job_id,
-            scenario=scenario,
         )
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str) -> None:
-        """Tell the runtime that Reef durably committed the selected training job."""
-        scenario = self._runtime_scenario()
-        if scenario is None:
-            self._runtime.reconcile_training_job(scenario_step, committed_training_job_id=training_job_id)
-            return
-        self._runtime.reconcile_training_job(
-            scenario_step,
-            committed_training_job_id=training_job_id,
-            scenario=scenario,
-        )
-
-    def _runtime_scenario(self) -> str | None:
-        """Name the scenario only to a runtime that trains several at once.
-
-        Single-scenario runtimes (including user-written ones) keep the
-        original ``reconcile_training_job`` signature.
-        """
-        if self._scenario is not None and self._runtime.concurrent_training_scenarios:
-            return self._scenario
-        return None
+        self.scheduler.acknowledge_commit(scenario_step, training_job_id, scenario=self._scenario)
 
     def prepare_step(
         self,
@@ -102,7 +90,7 @@ class RuntimeTrainingBackend(TrainingBackend):
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
-        prepared = self._runtime.prepare_training_step(
+        prepared = self.prepare_training_step(
             batch,
             self._step_preparer,
             state,
@@ -114,14 +102,14 @@ class RuntimeTrainingBackend(TrainingBackend):
             return PreparedStep.skipped(state=next_state, metrics=metrics)
         if prepared.payload is None:
             raise RuntimeContractError("training runtime prepared a train step without a payload")
-        runtime = self._runtime
+        runtime = self.training_runtime
         payload = dict(prepared.payload)
         if self._scenario is not None and runtime.concurrent_training_scenarios:
             # A runtime that trains several scenarios' adapters needs to know
             # whose slot this job fills; the job identity then includes it.
             payload["scenario"] = self._scenario
         try:
-            candidate = runtime.train_candidate(payload)
+            candidate = self.train_candidate(payload)
         except CandidateTrainingDeferred as blocked:
             return PreparedStep.retrying(state=state, metrics=metrics, storage=blocked.storage)
         except StaleCandidate as stale:
@@ -149,13 +137,13 @@ class RuntimeTrainingBackend(TrainingBackend):
             "selection": {"candidate_id": candidate.candidate_id, **decision.to_dict()},
         }
         if not decision.selected:
-            self._runtime.reject_candidate(candidate, decision)
+            self.reject_candidate(candidate, decision)
             return TrainStepResult(
                 state=prepared.state,
                 metrics=metrics,
                 source_runtime_load_id=candidate.current_runtime_load_id,
             )
-        activated = self._runtime.activate_candidate(candidate)
+        activated = self.activate_candidate(candidate)
         if activated.candidate_id != candidate.candidate_id:
             raise RuntimeContractError("training runtime activated a different candidate")
         return TrainStepResult(
@@ -170,7 +158,7 @@ class RuntimeTrainingBackend(TrainingBackend):
     def abort_step(self, prepared: PreparedStep) -> None:
         candidate = self._prepared_candidate(prepared)
         evaluation = EvaluationResult("reef_abort", "1", {})
-        self._runtime.reject_candidate(
+        self.reject_candidate(
             candidate,
             SelectionDecision(
                 "reject",
@@ -180,6 +168,27 @@ class RuntimeTrainingBackend(TrainingBackend):
                 evaluation,
             ),
         )
+
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        step_preparer: str,
+        algorithm_state: Mapping[str, Any],
+        scenario_step: int,
+    ) -> PreparedTrainingStep:
+        return self.scheduler.prepare_training_step(batch, step_preparer, algorithm_state, scenario_step)
+
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        return self.scheduler.execute_training_job(payload)
+
+    def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
+        return self.scheduler.train_candidate(payload)
+
+    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
+        return self.scheduler.activate_candidate(candidate)
+
+    def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
+        self.scheduler.reject_candidate(candidate, decision)
 
     @staticmethod
     def _model_candidate(candidate: UpdateCandidate) -> ModelCandidate:
@@ -195,4 +204,4 @@ class RuntimeTrainingBackend(TrainingBackend):
         return cls._model_candidate(candidate)
 
 
-__all__ = ["RuntimeTrainingBackend"]
+__all__ = ["RuntimeCandidateBackend"]

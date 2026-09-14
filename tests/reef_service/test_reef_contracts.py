@@ -18,17 +18,18 @@ from reef.artifact import (
 )
 from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.inference.http import HttpInferenceHandler, content_identity_headers
 from reef.recipe import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime.inference import HttpInferenceBackend, InferenceBackend, default_artifact_request_headers
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_weight_surface
 from reef.train import TrainStepResult
-from reef.train.types import PolicyBatch
+from reef.train.types import TrainingBatch
 
 
-class ContractInferenceBackend(InferenceBackend):
+class ContractInferenceHandler(InferenceHandler):
     def __init__(self, handler) -> None:
         self._handler = handler
 
@@ -98,7 +99,7 @@ def test_live_artifact_headers_use_version_without_a_checkpoint_path() -> None:
     ref = LiveWeightArtifactRef("artifact-1", "live:weight-v1", "checkpoint", "weight-v1")
     artifact = Artifact(ref, None)
 
-    assert default_artifact_request_headers(artifact) == {
+    assert content_identity_headers(artifact) == {
         "x-reef-release-id": "live:weight-v1",
     }
 
@@ -282,8 +283,8 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 def test_recipe_pipeline_has_no_update_algorithm() -> None:
     runtime = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
-    assert runtime.trainer.processor.output_schema is PolicyBatch
-    assert runtime.trainer.training_backend is None
+    assert runtime.trainer.processor.output_schema is TrainingBatch
+    assert runtime.trainer.candidate_backend is None
 
 
 @pytest.mark.unit
@@ -302,7 +303,7 @@ def test_inference_payload_is_recorded_without_reef_body_fields() -> None:
             {"x-reef-scenario": "chat"},
             payload,
             "/v1/chat/completions",
-            ContractInferenceBackend(backend),
+            ContractInferenceHandler(backend),
         )
 
         record = dispatcher.get_or_create_scenario("chat").records.replay("chat")[0]
@@ -329,7 +330,7 @@ def test_http_app_records_inference_and_returns_backend_response() -> None:
             return {"choices": [{"message": {"content": payload["messages"][0]["content"]}}]}
 
         dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
         try:
             response = await client.post(
@@ -372,14 +373,14 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged() -> None:
         server = TestServer(upstream_app)
         await server.start_server()
         try:
-            inference_backend = HttpInferenceBackend(str(server.make_url("")).rstrip("/"))
+            inference_handler = HttpInferenceHandler(str(server.make_url("")).rstrip("/"))
             payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
             initial = tmp_path / "initial"
             initial.mkdir()
             repository_backend = InMemoryRepositoryBackend("chat", initial, root=tmp_path / "repository")
             materialized = repository_backend.materialize(repository_backend.fork())
             artifact = materialized
-            assert await inference_backend.inference(artifact, "/v1/chat/completions", payload) == {"provider": "ok"}
+            assert await inference_handler.inference(artifact, "/v1/chat/completions", payload) == {"provider": "ok"}
             assert received == {
                 "path": "/v1/chat/completions",
                 "payload": payload,
@@ -435,8 +436,8 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
         dispatcher = build_default_dispatcher(
             local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
         )
-        backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
+        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
         await client.start_server()
         try:
             payload = {
@@ -515,8 +516,8 @@ def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path)
         dispatcher = build_default_dispatcher(
             local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
         )
-        backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
+        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
         await client.start_server()
         try:
             response = await client.post(
@@ -567,8 +568,8 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
         dispatcher = build_default_dispatcher(
             local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
         )
-        backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
+        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
         await client.start_server()
         try:
             response = await client.post(
@@ -615,7 +616,7 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
         dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
         new_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
         try:
             response = await client.post(
@@ -712,7 +713,7 @@ def test_non_checkpointed_version_is_used_by_next_inference(tmp_path) -> None:
         assert runtime.repository.checkpoint_artifact == checkpoint
         assert runtime.scenario_step == 1
 
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
         try:
             response = await client.post(
@@ -758,7 +759,7 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         assert isinstance(head, LiveWeightArtifactRef)
         assert head.runtime_load_id == "sglang-v1"
 
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
         try:
             response = await client.post(
@@ -806,7 +807,7 @@ def test_completed_inference_with_mismatched_runtime_load_id_fails_loudly(tmp_pa
             TestServer(
                 create_app(
                     dispatcher,
-                    inference_backend=ContractInferenceBackend(backend),
+                    inference_handler=ContractInferenceHandler(backend),
                     inference_retry_policy=InferenceRetryPolicy(initial_s=0.001, max_s=0.002, timeout_s=0.01),
                 )
             )
@@ -843,7 +844,7 @@ def test_interrupted_inference_stops_at_the_configured_retry_deadline() -> None:
             TestServer(
                 create_app(
                     dispatcher,
-                    inference_backend=ContractInferenceBackend(backend),
+                    inference_handler=ContractInferenceHandler(backend),
                     inference_retry_policy=InferenceRetryPolicy(initial_s=0.001, max_s=0.002, timeout_s=0.01),
                 )
             )
@@ -886,7 +887,7 @@ def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> 
         dispatcher.get_or_create_scenario("chat")
         dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
 
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
         try:
             response = await client.post(

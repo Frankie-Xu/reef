@@ -1,26 +1,22 @@
-"""Slime-owned process topology and runtime connection, without GPU imports."""
+"""Slime component definitions and runtime connection, without GPU imports."""
 
 from __future__ import annotations
 
-import importlib
 import os
-import sys
 from collections.abc import Mapping
 from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
-from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.inference import InferenceBackendFactory
-from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
-from reef.train.deployment import TrainingDeployment
-
-_NATIVE_INFERENCE = "reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend"
-_READY_PROBE = (
-    "import os, pathlib, sys; "
-    "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "
-    "sys.exit(0 if p.is_file() and p.read_text().strip() == 'reef-slime-bridge-ready' else 1)"
+from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.train.deployment import (
+    TrainingDeployment,
+    TrainingDeploymentPlan,
+    driver_service,
+    inference_handler_factory_for,
+    prepare_inference_config,
+    require_ray_roles,
 )
 
 
@@ -32,27 +28,41 @@ def driver_environment(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _configured_inference_backend_factory(path: str | None) -> InferenceBackendFactory | None:
-    """Load an optional backend factory selected by deployment config."""
+def driver_arguments(config: Mapping[str, Any]) -> list[str]:
+    """Adapt resolved component config to the pinned Slime parser at launch.
 
-    if path is None:
-        return None
-    if not isinstance(path, str) or not path.strip():
-        raise ValueError("reef.inference_backend_factory must be a non-empty dotted path")
-    module_path, separator, attribute = path.strip().rpartition(".")
-    if not separator or not module_path or not attribute:
-        raise ValueError("reef.inference_backend_factory must be a dotted path")
-    try:
-        factory = getattr(importlib.import_module(module_path), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot load reef.inference_backend_factory {path!r}") from exc
-    if not callable(factory):
-        raise ValueError(f"reef.inference_backend_factory {path!r} is not callable")
-    return factory
+    Keep generated inference flags out of training.options. Legacy explicit
+    process stacks without inference_num_gpus retain their native argument path.
+    """
+    reef = config.get("reef", {})
+    training_options = reef.get("training_backend_options", {})
+    arguments = native_arguments(training_options)
+    if reef.get("inference_num_gpus") is None:
+        return arguments
+    options = {
+        "rollout-num-gpus": reef["inference_num_gpus"],
+        "rollout-num-gpus-per-engine": reef["tensor_parallel_size"],
+    }
+    if reef.get("colocate"):
+        # Slime's workers still read these flags; Reef derives them from one decision.
+        options["colocate"] = True
+        options["offload-rollout"] = True
+        if "offload-train" not in training_options:
+            options["offload-train"] = True
+    for name, value in reef.get("inference_options", {}).items():
+        # Slime has dedicated router bind flags and passes other router flags
+        # directly to RouterArgs. Engine flags are all prefixed by Slime.
+        flag = (
+            name
+            if name.startswith("router-") and name not in {"router-ip", "router-port", "router-request-timeout-secs"}
+            else "sglang-" + name
+        )
+        options[flag] = value
+    return [*arguments, *native_arguments(options)]
 
 
 class SlimeDeployment(TrainingDeployment):
-    """Launch the Slime controller and connect HTTP to its shared Ray bridge."""
+    """Describe Slime components for the Reef driver and connect HTTP to their bridge."""
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         model = config_value(config, "reef", "model_path")
@@ -60,19 +70,13 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError(
                 "automatic weight training discovers its runtime and inference connection from the bridge"
             )
-        if settings["inference_options"] or settings["tensor_parallel_size"] is not None:
-            raise DeployConfigError("Slime owns inference workers; configure their native flags in training.options")
         if settings["inference_backend"] not in (None, "sglang"):
-            raise DeployConfigError("Slime-managed inference currently requires inference.backend: sglang")
+            raise DeployConfigError("Slime weight transfer currently requires inference.backend: sglang")
 
-        execution = config.setdefault("execution", {})
-        for role in ("training", "rollout"):
-            execution.setdefault(role, "ray")
-            if select_executor(role_executor_settings(config, role), role=role).settings.backend != "ray":
-                raise DeployConfigError(f"automatic Slime training requires execution.{role}.backend: ray")
-
+        require_ray_roles(config, "training", "rollout", backend="Slime")
         options = normalize_native_options(settings["training_backend_options"])
         native_arguments(options, reserved={"ready-file"})
+        prepare_inference_config(config, settings, options)
         checkpoint = options.get("hf-checkpoint")
         if checkpoint is not None and (
             not isinstance(checkpoint, str)
@@ -86,24 +90,15 @@ class SlimeDeployment(TrainingDeployment):
             training_backend_options=options,
             ray_namespace=settings["ray_namespace"] or DEFAULT_NAMESPACE,
             ray_actor_name=settings["ray_actor_name"] or DEFAULT_ACTOR_NAME,
-            inference_backend_factory=settings["inference_backend_factory"] or _NATIVE_INFERENCE,
+            inference_handler_factory=settings["inference_handler_factory"],
         )
-        python = os.environ.get("REEF_PYTHON", sys.executable)
-        driver = {
-            "name": "slime-driver",
-            "executor": "uni",
-            "command": [python, "-m", "reef.service.slime_driver"],
-            "ready": [python, "-c", _READY_PROBE],
-            "ready_timeout": settings["training_ready_timeout"],
-            "env": {
-                **driver_environment(os.environ),
-                "REEF_RAY_NAMESPACE": "${reef.ray_namespace}",
-                "REEF_RAY_ACTOR_NAME": "${reef.ray_actor_name}",
-                # Managed launches take native options from the resolved config.
-                "SLIME_ARGS_FILE": "",
-            },
-        }
-        return (driver,)
+        # Managed launches take native options from the resolved config.
+        return (driver_service("slime-driver", settings, {**driver_environment(os.environ), "SLIME_ARGS_FILE": ""}),)
+
+    def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
+        from reef.train.slime_backend.driver import create_training_plan
+
+        return create_training_plan(config, loss_family=loss_family)
 
     def runtime_config(
         self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None
@@ -117,7 +112,8 @@ class SlimeDeployment(TrainingDeployment):
         if settings["train_timeout_s"] is not None and settings["train_timeout_s"] <= 0:
             raise ValueError("reef.train_timeout_s must be positive when set")
         runtime_config: dict[str, Any] = {
-            "type": "ray_training",
+            "type": "slime_training",
+            "inference_runtime": settings["inference_backend"] or "sglang",
             "inference_url": inference_url or None,
             "actor_name": settings["ray_actor_name"],
             "namespace": settings["ray_namespace"],
@@ -127,15 +123,13 @@ class SlimeDeployment(TrainingDeployment):
         }
         if max_staleness:
             runtime_config["max_staleness"] = max_staleness
-        inference_backend_factory = _configured_inference_backend_factory(settings["inference_backend_factory"])
-        if inference_backend_factory is not None:
-            runtime_config["inference_backend_factory"] = inference_backend_factory
-        if not isinstance(settings["inference_backend_config"], Mapping):
-            raise ValueError("reef.inference_backend_config must be an object")
-        if settings["inference_backend_config"]:
-            if inference_backend_factory is None:
-                raise ValueError("reef.inference_backend_config requires reef.inference_backend_factory")
-            runtime_config["inference_backend_config"] = dict(settings["inference_backend_config"])
+        inference_handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
+        if inference_handler_factory is not None:
+            runtime_config["inference_handler_factory"] = inference_handler_factory
+        if not isinstance(settings["inference_handler_config"], Mapping):
+            raise ValueError("reef.inference_handler_config must be an object")
+        if settings["inference_handler_config"]:
+            runtime_config["inference_handler_config"] = dict(settings["inference_handler_config"])
         if connector is not None:
             runtime_config["connect"] = connector
         return runtime_config

@@ -263,4 +263,9 @@ def build_serve_parser(
         metavar="[PROVIDER/]MODEL",
         help="The upstream model; a known provider prefix (ollama, openai) fills the URL and the key.",
     )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print every resolved setting with its source and exit without downloading models or starting services.",
+    )
     return parser

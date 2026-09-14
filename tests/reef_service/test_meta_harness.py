@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
 from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
@@ -16,18 +17,18 @@ from recipes.meta_harness.recipe import MetaHarnessRecipe, scenario_population_p
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -47,7 +48,7 @@ SEED = ({"id": "rules", "name": "rules", "config": {"text": "Answer carefully."}
 IMPROVED = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER}"}},)
 ALTERNATE = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER} Check twice."}},)
 TASK = "Solve the supplied task."
-SAMPLE = TraceSample(
+SAMPLE = recorded_trajectory(
     "trace-1",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -150,7 +151,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
         AgentRecord.create(
             scenario=name,
             request_type=RequestType.INFERENCE,
-            payload=SAMPLE.payload,
+            payload=recorded_payload(SAMPLE),
             agent_record_id=f"i{suffix}",
         )
     )
@@ -158,7 +159,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
         AgentRecord.create(
             scenario=name,
             request_type=RequestType.REPORT,
-            payload={"score": 0.0, "feedback": SAMPLE.feedback, "references": [f"i{suffix}"]},
+            payload={"score": 0.0, "feedback": SAMPLE.metadata.get("feedback"), "references": [f"i{suffix}"]},
             agent_record_id=f"r{suffix}",
         )
     )
@@ -481,7 +482,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         _report_once(scenario, scenario_name, "1")
         result = scenario.prepare_training_step()
         assert result is not None and result.state is not None
-        backend = scenario.trainer._training_backend
+        backend = scenario.trainer._candidate_backend
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
@@ -647,7 +648,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
         _report_once(scenario, "commit-failure", "2")
         second = scenario.prepare_training_step()
         assert second is not None and second.artifact is None
-        backend = scenario.trainer._training_backend
+        backend = scenario.trainer._candidate_backend
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
@@ -695,7 +696,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         _report_once(scenario, "publish-failure", "1")
         result = scenario.prepare_training_step()
         assert result.artifact is not None
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         assert tuple(backend._entries()) == SEED
         head = scenario.current_artifact_ref()
         checkpoint = scenario.repository.require_checkpoint_artifact()

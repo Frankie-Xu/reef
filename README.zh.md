@@ -23,16 +23,16 @@ harness，包括提示词、规则和技能。
 
 </div>
 
-**[快速上手](https://reefinfra.ai/docs/getting-started/quickstart/) |
-[路线图](https://github.com/Human-Agent-Society/reef/issues/25) |
-[发布文章](https://x.com/ao_qu18465/status/2094867930081337730) |
-[加入 Discord](https://discord.gg/5y8e5f937k) |
-[加入微信群](docs/community/wechat.md)**
+**🚀 [快速上手](https://reefinfra.ai/docs/getting-started/quickstart/) |
+🗺️ [路线图](https://github.com/Human-Agent-Society/reef/issues/25) |
+📣 [发布文章](https://x.com/ao_qu18465/status/2094867930081337730) |
+💬 [加入 Discord](https://discord.gg/5y8e5f937k) |
+📱 [加入微信群](docs/community/wechat.md)**
 
 </div>
 
 
-## 何时使用 Reef
+## 🎯 何时使用 Reef
 
 如果你希望 Agent 通过与你的日常交互不断学习、持续进化，就适合使用 Reef。
 
@@ -43,7 +43,7 @@ harness，包括提示词、规则和技能。
 | 进行科学发现 | 测试时训练 | 执行环境、正确性检查器和可度量的目标 |
 
 
-## Reef 在技术栈中的位置
+## 🧩 Reef 在技术栈中的位置
 
 | 能力 | 推理引擎（vLLM、SGLang…） | RL 训练框架（Slime、veRL、AReaL…） | **Reef** |
 |---|:---:|:---:|:---:|
@@ -54,7 +54,7 @@ harness，包括提示词、规则和技能。
 | 可进化权重以外的部分（技能、harness） | ❌ | ❌ | ✅ |
 
 
-## 工作原理
+## 🔄 工作原理
 
 <div align="center">
 <picture>
@@ -73,7 +73,7 @@ Reef 的每个学习周期分为四步，下表同时列出各步骤对应的模
 | **4&nbsp;·&nbsp;Commit** | 应用配置的选择策略并发布通过的更新。 | [`train/evaluation/`](reef/train/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史<br>[`surface/`](reef/surface) — artifact 分发 |
 
 
-## 安装
+## 📦 安装
 
 > 💡 **注意**
 >
@@ -104,7 +104,7 @@ python3 -c "import reef; print(reef.__version__)"
 开发或运行下文的训练示例时，请使用源码安装。
 
 
-## 使用 Reef
+## 🔧 使用 Reef
 
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
@@ -229,27 +229,26 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --model ollama/gemma4:26b` 即可启动。
 
 
-## Recipes 与示例
+## 📚 Recipes 与示例
 
-请根据工作负载可提供的反馈和需要更新的 artifact 选择 recipe。Reefine 为内置实现；其他实现位于本仓库的
+根据工作负载的**任务类型**和希望**进化的对象**（模型权重或 Agent 的 harness）来选择
+recipe。进化权重的 recipe 需要 GPU 训练栈，而 harness recipe 只需要一个模型端点。下表中每个
+recipe 链接到其指南，每个已测 benchmark 链接到其结果页，[Recipe 目录](https://reefinfra.ai/docs/user-guide/recipes/)
+还列出了每个 recipe 的代码和示例。Reefine 随 `reef-infra` 内置提供，其他实现位于本仓库的
 `recipes/` cookbook 中，通过带点号的类路径指定，不随 Reef wheel 发布。
 
-| 工作负载 | Recipe 指南 | 更新的 artifact | 示例与结果 |
-|---|---|---|---|
-| 用自然语言提出编程 Agent 的改进需求 | [Reefine](docs/user-guide/recipes/reefine.rst) | Harness；无需训练 GPU | [教程](tutorials/reefine/README.md) |
-| 由测试或校验器打分的任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | 模型权重 | [示例](recipes/sao/examples/sao/README.md) · [结果](recipes/sao/examples/sao/README.md#results) |
-| 具备可用的下一状态信号、但无显式上报的 Agent 流量 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | 模型权重 | [示例](recipes/openclawrl/examples/openclawrl/README.md) |
-| 对同一问题的多次带分尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 模型权重 | [示例](recipes/tttd/examples/tttd/README.md) · [结果](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |
-| 带分数的代码搜索：引导模型可训练，执行器冻结 | [Guidance-TTT / TTTD](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 引导模型权重 | [示例](recipes/tttd/examples/guidance_ttt/README.md) · [结果](recipes/tttd/examples/guidance_ttt/results/README.md) |
-| 使用 Agent 反馈进化其技能池 | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Harness 技能；无需训练 GPU | [示例](recipes/skillclaw/README.md) |
-| 使用分数和交互记录改进提示词与指令 | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness；模型权重不变 | [示例与结果](recipes/gepa/examples/aime/README.md) |
+| 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
+|---|---|---|---|---|
+| 科学发现 | 对一个有可度量目标的难题反复尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
+| 任务流上的持续学习 | 由校验器逐个打分的独立任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、[CEO-Bench](recipes/sao/examples/ceobench/README.md#results)、Terminal-Bench（[示例](recipes/meta_harness/examples/terminal_bench/README.md)、[结果](recipes/meta_harness/RESULTS.md)）。 |
+| 从使用中学习 | 没有人上报分数或反馈延迟到达的真实交互 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[GSM8K 任务流上的模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
 
-如果想快速了解反馈、候选修改和发布流程，可以从[编程 harness
-教程](tutorials/evolve-your-harness/README.md)开始。每个结果页面都会说明任务、评估设置、
-测量结果和局限性。
+[`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解
+反馈、候选修改和发布流程，可以从[编程 harness 教程](tutorials/evolve-your-harness/README.md)开始。
+每个结果页面都会说明任务、评估设置、测量结果和局限性。
 
 
-## 架构
+## 📐 架构
 
 <div align="center">
 <picture>
@@ -258,7 +257,7 @@ Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --mo
 </picture>
 </div>
 
-## 进一步了解
+## 📖 进一步了解
 
 [文档](https://reefinfra.ai/docs/)按以下顺序组织：
 
@@ -267,11 +266,11 @@ Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --mo
 - [编写 recipe](https://reefinfra.ai/docs/developer-guide/write-a-recipe/)：配置 Reef 如何处理数据、产出更新
 - [进化你的 harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)：不训练权重，改进 harness
 - [进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)：配置并运维训练部署
-- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：本仓库 cookbook 实现的进一步说明
+- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：按任务类型整理的 cookbook recipe 目录，含各自的代码、文档、示例和结果
 - [核心循环](https://reefinfra.ai/docs/getting-started/core-loop/)：Reef 的核心循环
 - [术语表](https://reefinfra.ai/docs/reference/glossary/)：文档所用术语的解释
 
-## 社区与贡献
+## 🤝 社区与贡献
 
 你是否也在研究持续自我进化的 Agent？
 
@@ -285,7 +284,7 @@ Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --mo
 如果 Reef 对你有帮助，欢迎点个 Star ⭐，让更多人发现并参与进来。
 
 
-## 团队
+## 👥 团队
 
 Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人。以下成员共同将这一想法
 变成可用的基础设施。
@@ -319,7 +318,7 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 [Dingyi Zhuang](https://github.com/ZhuangDingyi).
 
 
-## Star History
+## ⭐ Star History
 
 <a href="https://star-history.com/#Human-Agent-Society/reef&Date">
   <picture>
@@ -330,7 +329,7 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 </a>
 
 
-## 致谢
+## 🙏 致谢
 
 以下项目支撑了 Reef 的关键部分，在此感谢：
 

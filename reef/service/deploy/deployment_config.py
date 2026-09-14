@@ -17,8 +17,8 @@ from reef.core.config import ConfigArgument, config_arguments, config_metadata, 
 from reef.core.errors import DeployConfigError
 from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
+from reef.runtime.deployment import runtime_factory_for
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings
-from reef.runtime.registry import runtime_factory_for
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
 from reef.service.deploy.service_config import service_config_arguments, service_owned_keys
 
@@ -135,6 +135,26 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
             paths = _unknown({section: content}) or [f"{section}.{key}" for key in content]
             raise DeployConfigError(f"unknown config fields: {', '.join(paths)}")
     return resolved
+
+
+def public_name(argument: ConfigArgument) -> str:
+    """The hyphenated public spelling a diagnostic or error uses for one declared field."""
+    return ".".join(argument.public_path or argument.path).replace("_", "-")
+
+
+def reject_null_settings(config: Mapping[str, Any], arguments: tuple[ConfigArgument, ...]) -> None:
+    """Treat an explicit ``null`` as a value: only an optional declaration accepts it.
+
+    Omitting a field selects its default; writing ``null`` where the field is
+    not optional is an error rather than a silent fallback to that default.
+    """
+    for argument in (*service_config_arguments(), *arguments):
+        node: Any = config
+        for key in argument.path[:-1]:
+            node = node.get(key) if isinstance(node, Mapping) else None
+        explicit_null = isinstance(node, Mapping) and argument.path[-1] in node and node[argument.path[-1]] is None
+        if explicit_null and not argument.nullable:
+            raise DeployConfigError(f"{public_name(argument)} does not accept null; omit the field to use its default")
 
 
 def translate_recipe_fields(config: dict[str, Any], arguments: tuple[ConfigArgument, ...]) -> dict[str, Any]:

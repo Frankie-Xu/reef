@@ -19,9 +19,10 @@ import json
 import re
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, NoReturn, Protocol
+from typing import Any, NoReturn
 
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native.seed import SEED_GRAPH
@@ -114,23 +115,29 @@ class Graph:
         }
 
 
-class Host(Protocol):
+class Host(ABC):
     """What the interpreter reads at each use; ``reef.harness.runners.native.host.NativeHost`` is the one implementation."""
 
     @property
+    @abstractmethod
     def tools(self) -> Mapping[str, Any]: ...
 
     @property
+    @abstractmethod
     def hooks(self) -> Mapping[str, list]: ...
 
     @property
+    @abstractmethod
     def agents(self) -> Mapping[str, Mapping[str, Any]]: ...
 
     @property
+    @abstractmethod
     def context_window(self) -> int: ...
 
+    @abstractmethod
     def graph(self, name: str = "main") -> Graph: ...
 
+    @abstractmethod
     def system_prompt(self, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str: ...
 
 
@@ -633,15 +640,18 @@ def run_graph(run: Run, graph: Graph) -> int:
 # -- the loop as code: a native_loop node's run_turn over the context API ------------------------------------
 
 
-class TurnLoop(Protocol):
+class TurnLoop(ABC):
     """What the interpreter reads of a mounted ``native_loop``: its name, its step budget and its ``run_turn``."""
 
     @property
+    @abstractmethod
     def name(self) -> str: ...
 
     @property
+    @abstractmethod
     def max_steps(self) -> int: ...
 
+    @abstractmethod
     def run_turn(self, ctx: Any) -> Any: ...
 
 

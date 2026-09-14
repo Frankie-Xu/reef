@@ -14,10 +14,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import ray
+from reef_service.slime_coordinator import build_slime_coordinator
 
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters import bridge
 
 
 def _sao_row(
@@ -238,7 +239,7 @@ SERVING_VERSION = "inc:5"
 class _FakeRolloutManager:
     def __init__(self, packed):
         self.packed = packed
-        self.prepare_external_train_data = _RemoteMethod(lambda data: "packed-ref")
+        self.prepare_external_train_data = lambda data: "packed-ref"
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
         self.get_runtime_load_ids = _RemoteMethod(lambda: [SERVING_VERSION])
         self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
@@ -281,6 +282,24 @@ class _RecordingGroup:
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         del force_full, manage_generation
 
+    def register_failure_listener(self, listener):
+        pass
+
+    def initialize_runtime_load_id(self, runtime_load_id):
+        self._actor_handlers[0].version = runtime_load_id
+
+    def next_runtime_load_id(self):
+        return self._actor_handlers[0].version
+
+    def prepare_weight_update(self, runtime_load_id, *, force_full):
+        self.set_runtime_load_id_for_update(runtime_load_id)
+
+    def send_prepared_weights(self, runtime_load_id, *, force_full):
+        self.update_weights(manage_generation=False, force_full=force_full)
+
+    def set_runtime_load_id_for_update(self, runtime_load_id):
+        self.restore_runtime_load_id_for_republication(runtime_load_id)
+
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         pass
 
@@ -306,9 +325,10 @@ def _sao_actor(
     template = str(tmp_path / "checkpoint-{rollout_id}")
     actor_group = _RecordingGroup(template, worker_metrics=worker_metrics)
     critic_group = _RecordingGroup(template, critic=True)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         actor_group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         critic_group=critic_group,
         critic_save_root=critic_save_root,
@@ -329,7 +349,7 @@ def _sao_actor(
 
 @pytest.fixture
 def _local_ray_get(monkeypatch):
-    monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
+    monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
 
 
 @pytest.mark.unit
@@ -456,9 +476,10 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
     template = str(tmp_path / "checkpoint-{rollout_id}")
     actor_group = _RecordingGroup(template)
     critic_group = _RecordingGroup(template)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         actor_group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         critic_group=critic_group,
         loss_family="sao",
@@ -817,9 +838,10 @@ def test_storage_flags_unknown_assets_in_the_critic_root(tmp_path) -> None:
 def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _RecordingGroup(template)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         loss_family="sao",
     )

@@ -50,10 +50,9 @@ from reef.dispatcher import Dispatcher
 from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
@@ -107,8 +106,8 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
     if evolution.get("evaluate") == "harness.aime:evaluate":
         evolution["evaluate"] = scorer.evaluate
-    if evolution.get("feedback") == "harness.aime:feedback":
-        evolution["feedback"] = scorer.feedback
+    if evolution.get("feedback") == "harness.aime:AIMEFeedback":
+        evolution["feedback"] = scorer
     # One --seed drives both random draws: the proposer's parent sampling
     # (evolution.gepa.seed) and the driver's minibatch order.
     evolution["gepa"] = {**evolution["gepa"], "seed": seed}
@@ -191,7 +190,7 @@ class RunService:
         upstream_url: str,
         upstream_key: str,
         port: int,
-        inference_backend: Any | None = None,
+        inference_handler: Any | None = None,
     ) -> None:
         self.scenario = scenario
         self.recipe_name = recipe_name
@@ -206,8 +205,8 @@ class RunService:
         )
         self._app = create_app(
             self.dispatcher,
-            inference_backend=inference_backend
-            or HttpInferenceBackend(
+            inference_handler=inference_handler
+            or HttpInferenceHandler(
                 upstream_url,
                 request_headers=provider_request_headers(upstream_key),
                 timeout_s=EPISODE_TIMEOUT_S,
