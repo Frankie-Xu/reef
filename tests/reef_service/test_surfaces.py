@@ -67,7 +67,8 @@ def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations(
     loader = WeightLoader()
     hooks = WeightInferenceHooks()
     assert isinstance(loader, ArtifactLoader)
-    assert not isinstance(loader, ArtifactActivator)
+    # Weight surfaces activate: a runtime serving remote snapshots binds the published head there.
+    assert isinstance(loader, ArtifactActivator)
     assert isinstance(hooks, InferenceHooks)
     assert not isinstance(hooks, LeasingInferenceHooks)
     assert isinstance(_InjectingModule(), RequestSkillLayer)
@@ -466,6 +467,9 @@ class _StubTrainingRuntime(WeightRuntime):
 
     def restore_checkpoint(self, artifact) -> str:
         raise AssertionError("recover must not restore a checkpoint")
+
+    def activate_checkpoint(self, artifact) -> str:
+        return artifact.ref.release_id
 
 
 def _checkpoint_ref(version: str = "checkpoint:step-7"):

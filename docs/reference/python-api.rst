@@ -1015,3 +1015,33 @@ integration: ``SlimeTrainingRuntime`` in ``reef.train.slime_backend.runtime`` an
 ``SGLangInferenceRuntime`` in ``reef.inference.sglang.runtime``. These remain
 distinct from the native ``TrainingBackend``/``InferenceBackend`` pair consumed by
 Reef's coordinator.
+
+Tinker integration
+------------------
+
+``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
+``tinker`` backend. Its ``runtime_factory`` builds, from ``TinkerConfig`` and only
+after deployment selection, a ``TinkerTrainingRuntime`` and a
+``TinkerInferenceRuntime`` that share one ``TinkerCheckpointStore``: the local
+manifests under ``state-dir`` and the remote snapshots they reference. The
+training runtime branches candidates from the store's active checkpoint; the
+inference runtime samples from the snapshot a frozen artifact resolves to,
+activates selected candidates and binds the head Reef publishes through
+``activate_checkpoint``. Neither runtime holds the other. ``TrainingDeployment``
+defaults ``requires_local_model`` to true; hosted integrations set it to false
+to preserve remote model identifiers during deployment resolution.
+
+Methods implement ``TinkerLoss`` from ``reef.train.tinker_backend.losses``
+and register it with ``register_loss_family_ref(name, "package.module:CLASS",
+backend="tinker")`` from ``reef.train.algos.registry``, the same table that
+holds their Slime reference. ``loss_fn`` names the Tinker built-in loss the
+family trains with; ``inputs(rows, base_logprobs, kl_coef=...)`` returns that
+function's token-aligned ``loss_fn_inputs``, one dictionary per row; and
+``needs_base_logprobs`` requests frozen-base scores for a nonzero KL
+coefficient. For ``importance_sampling``, ``TokenRow.inputs`` builds the
+dictionary from response-token advantages, shifting prediction targets by one
+token and padding prompt positions with zeros. A ``TinkerCustomLoss`` adds
+``loss(data, logprobs)``, which the SDK boundary passes to
+``forward_backward_custom`` so the family computes its loss tensor on the
+Reef host. ``Datum`` objects are constructed only after this shaping. See
+`Train with Tinker <../user-guide/tinker.rst>`__ for supported contracts.

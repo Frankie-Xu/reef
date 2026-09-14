@@ -151,3 +151,16 @@ capability protocol only when no existing call site can express the consumer
 interaction. The package depends only on ``artifact/`` and ``core/``; it sees
 runtimes structurally, through the ``ServingRuntime`` and ``WeightRuntime``
 protocols, and never imports a concrete one.
+
+Remote weight snapshots
+------------------------
+
+``WeightLoader.activate`` calls the inference runtime's
+``activate_checkpoint(artifact)`` when a materializable head becomes
+available, including startup recovery and rollback. ``WeightRuntime`` binds
+nothing by default, since a local engine already serves what the artifact
+names. An inference runtime that serves immutable remote snapshots overrides
+it to validate the checkpoint and bind its remote sampler and training state.
+Tinker's inference runtime uses this to restore the authoritative artifact
+before the scenario serves requests, and its training runtime then branches
+from that same checkpoint; the surface layer never imports the concrete SDK.

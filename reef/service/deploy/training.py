@@ -14,7 +14,10 @@ from reef.train.deployment import TrainingDeployment
 
 
 # Built-ins are references, so discovery does not import execution dependencies.
-_BUILTINS = {"slime": "reef.train.slime_backend.launch:SlimeDeployment"}
+_BUILTINS = {
+    "slime": "reef.train.slime_backend.launch:SlimeDeployment",
+    "tinker": "reef.train.tinker_backend.launch:TinkerDeployment",
+}
 
 
 def training_deployment_for(name: str | None) -> TrainingDeployment:
@@ -37,6 +40,18 @@ def training_deployment_for(name: str | None) -> TrainingDeployment:
     if not isinstance(definition, type) or not issubclass(definition, TrainingDeployment):
         raise DeployConfigError("training backend must name a TrainingDeployment class")
     return definition()
+
+
+def local_model_required(config: dict[str, Any]) -> bool:
+    """Whether the selected training backend executes the model on this host.
+
+    Provider deployments and local backends need the resolved snapshot on disk;
+    a hosted backend keeps the remote model identifier as written.
+    """
+    backend = config.get("reef", {}).get("training_backend")
+    if not backend:
+        return True
+    return training_deployment_for(backend).requires_local_model
 
 
 def assemble_training_services(config: dict[str, Any]) -> None:

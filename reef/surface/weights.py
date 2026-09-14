@@ -10,7 +10,7 @@ from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
 from reef.surface.base import (
     AdapterWeightRuntime,
-    ArtifactLoader,
+    ArtifactActivator,
     InferenceHooks,
     ServingRuntime,
     Surface,
@@ -41,7 +41,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader(ArtifactLoader):
+class WeightLoader(ArtifactActivator):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
@@ -52,6 +52,12 @@ class WeightLoader(ArtifactLoader):
 
     def __init__(self, scenario: str | None = None) -> None:
         self._scenario = scenario
+
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
+        """Let the runtime bind the final release before traffic reaches it, including at startup."""
+        if isinstance(runtime, WeightRuntime):
+            return runtime.activate_checkpoint(artifact)
+        return artifact.ref.release_id
 
     def recover(
         self,
