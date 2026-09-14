@@ -10,7 +10,13 @@ import ray
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import CONTROL_TIMEOUT_S, SGLangConfig
 from reef.inference.sglang.launch import engine_environment
-from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceResources, InferenceService
+from reef.runtime.deployment import (
+    ADAPTER_FILES_PROTOCOL,
+    DeploymentResources,
+    InferenceConnection,
+    InferenceResources,
+    InferenceService,
+)
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 
@@ -40,6 +46,8 @@ class SGLangInferenceService(InferenceService):
     """Own engines and the control actor; borrow the deployment allocation."""
 
     connection_protocol = INFERENCE_PROTOCOL
+    #: Engines also load PEFT adapter directories, so file-delivering trainers pair with them.
+    supported_transfer_protocols = (INFERENCE_PROTOCOL, ADAPTER_FILES_PROTOCOL)
 
     def __init__(self, config: SGLangConfig) -> None:
         self.config = config

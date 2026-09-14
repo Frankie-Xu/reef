@@ -3,9 +3,10 @@
 This is the shape a hosted trainer takes when a local engine serves the
 model: Reef's coordinator owns the job marker, staleness admission, the
 publication barrier and adapter residency; this backend trains one
-optimizer step on Tinker per job, materializes the result as a PEFT adapter
-directory under its checkpoint, and publishes by asking the engines to load
-that directory. It never pauses or resumes inference itself.
+optimizer step on Tinker per job and materializes the result as a PEFT
+adapter directory under its checkpoint. It delivers adapters as files
+through ``adapter_files``; Reef's receiver contract loads them, so the
+trainer never holds an engine handle and never sends tensors.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.executor import Executor
 from reef.runtime.interfaces import (
     PreparedTrainingJob,
     PreparedTrainingStep,
@@ -30,7 +30,6 @@ from reef.runtime.interfaces import (
     TrainingMetrics,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, read_json, write_json
-from reef.surface.adapter import adapter_name, parse_adapter_name
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
@@ -39,8 +38,6 @@ from reef.train.tinker_backend.preparation import prepare_tinker_step
 
 #: Where a checkpoint directory keeps the PEFT adapter the engines load.
 ADAPTER_DIR = "adapter"
-#: How long one engine-side adapter load may take.
-LOAD_TIMEOUT_S = 3600.0
 
 
 class TinkerTrainingBackend(TrainingBackend):
@@ -52,18 +49,11 @@ class TinkerTrainingBackend(TrainingBackend):
     """
 
     def __init__(
-        self,
-        base_model: str,
-        config: TinkerConfig,
-        client: TinkerClient,
-        receiver: Executor,
-        *,
-        start_rollout_id: int = 0,
+        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, start_rollout_id: int = 0
     ) -> None:
         self._model = base_model
         self._config = config
         self._client = client
-        self._receiver = receiver
         self._root = Path(config.state_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._template = str(self._root / "checkpoints" / "rollout_{rollout_id}")
@@ -149,12 +139,8 @@ class TinkerTrainingBackend(TrainingBackend):
         job.result.write(directory)
         self._require_history().record_checkpoint(job.checkpoint.scenario or "", job.checkpoint.rollout_id)
 
-    def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
-        return
-
-    def send_weights(self, runtime_load_id: str, *, force_full: bool) -> str:
-        """Load the scenario's newest checkpoint, or republish its incumbent, as ``runtime_load_id``."""
-        scenario = self._require_active_scenario()
+    def adapter_files(self, scenario: str, runtime_load_id: str) -> Path:
+        """The adapter to serve as ``runtime_load_id``: the scenario's newest checkpoint, or its incumbent again."""
         _, rollout_id, version = self._incumbent(scenario)
         if version != runtime_load_id:
             entry = self._require_history().entry(scenario)
@@ -165,10 +151,19 @@ class TinkerTrainingBackend(TrainingBackend):
         if rollout_id is None:
             raise RuntimeError(f"scenario {scenario!r} has no published Tinker checkpoint to republish")
         directory = Path(self._template.format(rollout_id=rollout_id))
-        checkpoint = TinkerCheckpoint.read(directory)
-        self._load(adapter_name(scenario, runtime_load_id), directory / ADAPTER_DIR, runtime_load_id)
-        self._remember_incumbent(scenario, checkpoint, rollout_id, runtime_load_id)
-        return runtime_load_id
+        adapter = directory / ADAPTER_DIR
+        if not (adapter / "adapter_config.json").is_file():
+            raise RuntimeError(f"Tinker adapter is missing or incomplete: {adapter}")
+        if version != runtime_load_id:
+            # Reef publishes what it asked for; the marker retries the same checkpoint on failure.
+            self._remember_incumbent(scenario, TinkerCheckpoint.read(directory), rollout_id, runtime_load_id)
+        return adapter
+
+    def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
+        raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")
+
+    def send_weights(self, runtime_load_id: str, *, force_full: bool) -> str:
+        raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")
 
     def initialize_version(self, runtime_load_id: str) -> None:
         return
@@ -177,12 +172,7 @@ class TinkerTrainingBackend(TrainingBackend):
         self._active_scenario = scenario
 
     def send_adapter(self, scenario: str, name: str) -> None:
-        """Reload a scenario's published adapter under the name Reef's residency recorded."""
-        _, version = parse_adapter_name(name)
-        _, rollout_id, published = self._incumbent(scenario)
-        if rollout_id is None or published != version:
-            raise RuntimeError(f"adapter {name!r} is not scenario {scenario!r}'s published Tinker checkpoint")
-        self._load(name, Path(self._template.format(rollout_id=rollout_id)) / ADAPTER_DIR, None)
+        raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")
 
     def close(self) -> None:
         self._client.close()
@@ -194,11 +184,6 @@ class TinkerTrainingBackend(TrainingBackend):
         if not isinstance(history, ScenarioHistory):
             raise RuntimeError("Tinker's coordinator backend keeps a scenario history")
         return history
-
-    def _require_active_scenario(self) -> str:
-        if self._active_scenario is None:
-            raise RuntimeError("a publication must activate its scenario before sending weights")
-        return self._active_scenario
 
     def _incumbent_path(self, scenario: str) -> Path:
         return self._root / "scenarios" / urllib.parse.quote(scenario, safe="") / "incumbent.json"
@@ -218,13 +203,6 @@ class TinkerTrainingBackend(TrainingBackend):
         write_json(
             self._incumbent_path(scenario),
             {"checkpoint": asdict(checkpoint), "rollout_id": rollout_id, "runtime_load_id": runtime_load_id},
-        )
-
-    def _load(self, name: str, adapter: Path, runtime_load_id: str | None) -> None:
-        if not (adapter / "adapter_config.json").is_file():
-            raise RuntimeError(f"Tinker adapter is missing or incomplete: {adapter}")
-        self._receiver.rpc(
-            0, "load_adapter_from_disk", args=(name, str(adapter), runtime_load_id), timeout=LOAD_TIMEOUT_S
         )
 
 

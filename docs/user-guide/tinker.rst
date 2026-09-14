@@ -150,9 +150,9 @@ runs Reef's training coordinator with Tinker as its training backend. The
 trainer reserves no GPU. Each scenario trains its own adapter: a training job
 runs one optimizer step on Tinker from the scenario's published checkpoint,
 downloads the result and converts it with ``tinker-cookbook`` into a PEFT
-adapter directory under the job's checkpoint, and publication asks every
-engine to load that directory under the adapter name Reef records for the
-scenario. Requests are addressed to that adapter by the weight surface, and
+adapter directory under the job's checkpoint, and publication has Reef ask
+every engine to load that directory under the adapter name it records for
+the scenario; the trainer itself never talks to the engines. Requests are addressed to that adapter by the weight surface, and
 the engines capture the sampled tokens and log probabilities exactly as they
 do for Slime. Rejected candidates load nothing; a restart reloads each
 scenario's committed adapter from disk before serving. Install the converter

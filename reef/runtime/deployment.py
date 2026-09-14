@@ -116,6 +116,10 @@ class WeightTransferSession:
             raise ValueError("weight transfer sessions require a protocol and identity")
 
 
+#: The transfer a trainer declares when it delivers adapters as PEFT directories Reef loads itself.
+ADAPTER_FILES_PROTOCOL = "reef-adapter-files-v1"
+
+
 class InferenceService(DeploymentHealth):
     """An inference component that owns its engines but borrows reservations."""
 
@@ -123,6 +127,11 @@ class InferenceService(DeploymentHealth):
     @abstractmethod
     def connection_protocol(self) -> str:
         """Control protocol provided by the selected engine integration."""
+
+    @property
+    def supported_transfer_protocols(self) -> tuple[str, ...]:
+        """Weight transfers this receiver accepts: its native one, plus Reef-owned file delivery if it loads files."""
+        return (self.connection_protocol,)
 
     @abstractmethod
     def start(self, resources: DeploymentResources) -> InferenceConnection:
@@ -212,8 +221,12 @@ class ModelDeploymentPlan:
         if self.coordinator is not None and self.inference is None:
             raise ValueError("a Reef coordinator requires separate training and inference components")
         required = self.training.weight_transfer_protocol
-        provided = self.inference.connection_protocol if self.inference is not None else None
-        if required != provided or (self.inference is not None and not provided):
+        if self.inference is None:
+            if required is not None:
+                raise ValueError(f"training requires {required!r} but no inference component is configured")
+            return
+        provided = self.inference.supported_transfer_protocols
+        if not self.inference.connection_protocol or required not in provided:
             raise ValueError(
                 f"incompatible inference control protocol: training requires {required!r}, got {provided!r}"
             )
@@ -265,13 +278,17 @@ class ModelDeployment:
             return None
         self._inference_started = True
         connection = inference.start(self.plan.resources)
-        if connection.protocol != self.plan.training.weight_transfer_protocol:
+        required = self.plan.training.weight_transfer_protocol
+        if (
+            connection.protocol != inference.connection_protocol
+            or required not in inference.supported_transfer_protocols
+        ):
             raise ValueError("inference returned a connection with an incompatible protocol")
         inference.check_health()
         # Colocated trainers cannot initialize until inference has
         # acknowledged releasing its initial device allocations.
         inference.prepare_weight_transfer(connection)
-        self.weight_transfer_session = WeightTransferSession(connection.protocol, connection.control, uuid4().hex)
+        self.weight_transfer_session = WeightTransferSession(required, connection.control, uuid4().hex)
         return connection
 
     def _start_training(self) -> None:

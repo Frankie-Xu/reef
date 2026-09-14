@@ -5,15 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.deployment import DeploymentResources, InferenceResources, TrainingService, WeightTransferSession
-from reef.runtime.executor import Executor
+from reef.runtime.deployment import (
+    ADAPTER_FILES_PROTOCOL,
+    DeploymentResources,
+    InferenceResources,
+    TrainingService,
+    WeightTransferSession,
+)
 from reef.runtime.executor.placement import ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.runtime.interfaces import TrainingBackend
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
-
-#: The SGLang control protocol the local engines speak; the trainer only loads adapters through it.
-SGLANG_CONTROL_PROTOCOL = "slime-sglang-control-v2"
 
 
 class TinkerDeploymentResources(InferenceResources):
@@ -59,16 +61,16 @@ class TinkerDeploymentResources(InferenceResources):
 
 
 class TinkerTrainingService(TrainingService):
-    """Own the SDK client and hand the coordinator a backend once the engines are attached."""
+    """Own the SDK client; the trainer delivers adapter files, so it needs no engine handle."""
 
-    weight_transfer_protocol = SGLANG_CONTROL_PROTOCOL
+    weight_transfer_protocol = ADAPTER_FILES_PROTOCOL
 
     def __init__(self, base_model: str, config: TinkerConfig, api_key: str, *, client: TinkerClient | None = None):
         self._model = base_model
         self._config = config
         self._api_key = api_key
         self._client = client
-        self._receiver: Executor | None = None
+        self._session_id: str | None = None
         self._backend: TrainingBackend | None = None
         self._started = False
         self._closed = False
@@ -84,16 +86,18 @@ class TinkerTrainingService(TrainingService):
         if not self._started or self._closed:
             raise RuntimeError("start the training service before attaching its weight transport")
         if session.protocol != self.weight_transfer_protocol:
-            raise ValueError("Tinker serving through a local engine requires the SGLang control protocol")
-        self._receiver = session.receiver
+            raise ValueError(
+                "Tinker delivers adapter files; the deployment must pair it with a receiver that loads them"
+            )
+        self._session_id = session.session_id
 
     def backend(self) -> TrainingBackend:
-        if self._client is None or self._receiver is None or self._closed:
+        if self._client is None or self._session_id is None or self._closed:
             raise RuntimeError("training backend requires a started service with attached engines")
         if self._backend is None:
             from reef.train.tinker_backend.backend import TinkerTrainingBackend
 
-            self._backend = TinkerTrainingBackend(self._model, self._config, self._client, self._receiver)
+            self._backend = TinkerTrainingBackend(self._model, self._config, self._client)
         return self._backend
 
     def check_health(self) -> None:

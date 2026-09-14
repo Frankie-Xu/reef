@@ -930,7 +930,11 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     # -- Adapter engine
 
     def load_adapter(self, name: str, payload: Any) -> None:
-        scenario, _ = parse_adapter_name(name)
+        scenario, version = parse_adapter_name(name)
+        files = self.training.adapter_files(scenario, version)
+        if files is not None:
+            self.inference.load_adapter_files(name, files, None)
+            return
         self.training.send_adapter(scenario, name)
 
     def unload_adapter(self, name: str) -> None:
@@ -1033,7 +1037,7 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
             target = runtime_load_id or self.next_runtime_load_id()
             if residency is not None and scenario is not None:
                 residency.make_room(scenario, self, supersede=True)
-            version = self._transfer(target, force_full=force_full)
+            version = self._transfer(target, force_full=force_full, scenario=scenario)
             if residency is not None and scenario is not None:
                 residency.register(scenario, version)
         except AdapterEvictionFailed:
@@ -1049,8 +1053,15 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         self.runtime_load_id = version
         return version
 
-    def _transfer(self, target: str, *, force_full: bool) -> str:
+    def _transfer(self, target: str, *, force_full: bool, scenario: str | None = None) -> str:
         """Send the trainer's weights as ``target`` and verify every engine received them."""
+        if scenario is not None:
+            files = self.training.adapter_files(scenario, target)
+            if files is not None:
+                # A trainer that delivers files never sends: Reef's receiver loads the adapter.
+                self.inference.load_adapter_files(adapter_name(scenario, target), files, target)
+                self._verify_engines_serve(target, "after update")
+                return target
         if self.config.colocate:
             # Repeatable release also covers retry after a partial receive:
             # a released sender may need to reconstruct GPU workers.

@@ -761,12 +761,30 @@ class TrainingBackend(ABC):
     @abstractmethod
     def send_adapter(self, scenario: str, name: str) -> None: ...
 
+    def adapter_files(self, scenario: str, runtime_load_id: str) -> Path | None:
+        """The adapter directory to serve as ``runtime_load_id`` when this trainer delivers files.
+
+        A trainer that produces adapters as PEFT directories instead of
+        sending tensors returns the directory; Reef then asks the receiver to
+        load it and never calls the sender methods. The default, None,
+        selects the native sender path.
+        """
+        return None
+
     @abstractmethod
     def close(self) -> None: ...
 
 
 class InferenceBackend(ABC):
     """Receiver operations with acknowledged completion and no commit policy."""
+
+    def load_adapter_files(self, name: str, path: Path, runtime_load_id: str | None) -> None:
+        """Load a PEFT adapter directory under ``name``, serving it as ``runtime_load_id`` when given.
+
+        Reef calls this for trainers that deliver adapter files; a receiver
+        that can only accept native tensor transfers keeps the default.
+        """
+        raise ReefError(f"{type(self).__name__} does not load adapter files")
 
     @abstractmethod
     def initialize_version(self, runtime_load_id: str) -> None: ...

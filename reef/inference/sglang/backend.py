@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from reef.inference.sglang.config import CONTROL_TIMEOUT_S
@@ -64,6 +65,9 @@ class SGLangInferenceBackend(InferenceBackend):
 
     def onload_kv(self) -> None:
         self._call("onload_kv")
+
+    def load_adapter_files(self, name: str, path: Path, runtime_load_id: str | None) -> None:
+        self._call("load_adapter_from_disk", name, str(path), runtime_load_id)
 
     def unload_adapter(self, name: str) -> None:
         results = self._engines().collective_rpc(

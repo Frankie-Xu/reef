@@ -1032,9 +1032,12 @@ sampler it names, activates selected candidates and binds the head Reef
 publishes through ``activate_checkpoint``. With a local inference engine the
 same deployment instead returns a model-driver plan: ``TinkerTrainingService``
 supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
-whose weight transfer loads the downloaded PEFT adapter into the engines
-through the SGLang control connection, and the HTTP service connects through
-the ``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
+that delivers each published adapter as a PEFT directory through
+``adapter_files``; Reef's publisher then calls the receiver's
+``InferenceBackend.load_adapter_files`` (the ``reef-adapter-files-v1``
+transfer any engine that loads adapter directories can declare), so the
+trainer never holds an engine handle. The HTTP service connects through the
+``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.
 

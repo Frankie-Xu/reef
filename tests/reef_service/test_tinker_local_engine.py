@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+from reef.runtime.deployment import ADAPTER_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.runtime.interfaces import InferenceBackend
 from reef.runtime.recovery import marker_path, read_marker
@@ -69,20 +69,18 @@ class RemoteClient:
 
 
 class Engines(InferenceBackend):
-    """The SGLang control surface the coordinator and the trainer both reach."""
+    """A receiver that loads adapter files, as Reef's coordinator drives it."""
 
     def __init__(self):
         self.loads = []
         self.versions = ["engine:0"]
         self.events = []
 
-    # Reached by the trainer through the weight transfer session.
-    def load_adapter_from_disk(self, lora_name, lora_path, runtime_load_id=None):
-        self.loads.append((lora_name, lora_path, runtime_load_id))
+    def load_adapter_files(self, name, path, runtime_load_id):
+        self.loads.append((name, str(path), runtime_load_id))
         if runtime_load_id is not None:
             self.versions = [runtime_load_id]
 
-    # Reached by the coordinator as its inference backend.
     def initialize_version(self, runtime_load_id):
         self.versions = [runtime_load_id]
 
@@ -164,9 +162,8 @@ class Stack:
     def __init__(self, tmp_path, client=None, engines=None):
         self.client = client or RemoteClient()
         self.engines = engines or Engines()
-        receiver = UniProcExecutor.from_workers([self.engines])
         self.backend = TinkerTrainingBackend(
-            "Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "tinker")), self.client, receiver
+            "Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "tinker")), self.client
         )
         self.coordinator = TrainingCoordinator(self.backend, self.engines)
 
@@ -235,18 +232,22 @@ def test_restart_republishes_the_incumbent_from_disk_and_branches_from_it(tmp_pa
     assert Path(result.checkpoint_path).name == "rollout_1"
 
 
-def test_send_adapter_reloads_only_the_published_revision(tmp_path, preparer):
+def test_the_trainer_delivers_files_and_never_sends(tmp_path, preparer):
     stack = Stack(tmp_path)
     with pytest.raises(RuntimeError, match="no Tinker checkpoint"):
-        stack.backend.activate_scenario("math")
-        stack.backend.send_weights("other:1", force_full=False)
+        stack.backend.adapter_files("math", "other:1")
     first = stack.coordinator.execute_training_job(stack.payload(preparer, step=0))
     published = stack.coordinator.update_serving_weights(first.training_job_id)
-    name = adapter_name("math", published.runtime_load_id)
-    stack.backend.send_adapter("math", name)
-    assert stack.engines.loads[-1] == (name, str(Path(first.checkpoint_path) / ADAPTER_DIR), None)
-    with pytest.raises(RuntimeError, match="not scenario"):
-        stack.backend.send_adapter("math", adapter_name("math", "other:9"))
+    adapter = Path(first.checkpoint_path) / ADAPTER_DIR
+    # Reef's residency re-activation asks for the published revision by version, not for a send.
+    assert stack.backend.adapter_files("math", published.runtime_load_id) == adapter
+    for send in (
+        lambda: stack.backend.send_weights("x:1", force_full=False),
+        lambda: stack.backend.prepare_weights("x:1", force_full=False),
+        lambda: stack.backend.send_adapter("math", adapter_name("math", "x:1")),
+    ):
+        with pytest.raises(RuntimeError, match="delivers adapter files"):
+            send()
     stack.coordinator.acknowledge_training_commit(first.training_job_id)
     with pytest.raises(ValueError, match="name their scenario"):
         stack.coordinator.execute_training_job({**stack.payload(preparer, step=1), "scenario": ""})
@@ -335,19 +336,17 @@ def test_training_service_hands_the_coordinator_a_backend_only_after_engines_att
     from reef.runtime.deployment import WeightTransferSession
 
     client = RemoteClient()
+    control = UniProcExecutor.from_workers([Engines()])
     service = TinkerTrainingService("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path)), "key", client=client)
+    assert service.weight_transfer_protocol == ADAPTER_FILES_PROTOCOL
     with pytest.raises(RuntimeError, match="before attaching"):
-        service.attach_weight_transport(
-            WeightTransferSession("slime-sglang-control-v2", UniProcExecutor.from_workers([Engines()]), "s")
-        )
+        service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, control, "s"))
     service.start(None)
-    with pytest.raises(ValueError, match="SGLang control protocol"):
-        service.attach_weight_transport(WeightTransferSession("other", UniProcExecutor.from_workers([Engines()]), "s"))
+    with pytest.raises(ValueError, match="delivers adapter files"):
+        service.attach_weight_transport(WeightTransferSession("slime-sglang-control-v2", control, "s"))
     with pytest.raises(RuntimeError, match="attached engines"):
         service.backend()
-    service.attach_weight_transport(
-        WeightTransferSession("slime-sglang-control-v2", UniProcExecutor.from_workers([Engines()]), "s")
-    )
+    service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, control, "s"))
     assert isinstance(service.backend(), TinkerTrainingBackend)
     service.close()
     assert not client.closed  # the coordinator owns the backend, and closes the client with it
