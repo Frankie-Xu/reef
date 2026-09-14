@@ -810,5 +810,5 @@ def test_task_pins_the_upstream_commit_and_ships_no_credentials() -> None:
             text = path.read_text(encoding="utf-8", errors="replace")
             assert "sk-ant-" not in text and "AKIA" not in text, path
     serve = (EXAMPLE_DIR / "serve.yaml").read_text(encoding="utf-8")
-    assert "batch-size: 1" in serve and "recipes.sao.recipe:SAORecipe" in serve
+    assert "batch-size: 8" in serve and "recipes.sao.recipe:SAORecipe" in serve
     assert json.loads(json.dumps({"ok": True}))  # keeps json imported for the reward fixture above
