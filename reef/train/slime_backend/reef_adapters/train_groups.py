@@ -317,24 +317,35 @@ def prepare_critic_args(args: Any) -> Any:
     return critic_args
 
 
+def _has_megatron_checkpoint(root: str) -> bool:
+    return (Path(root).expanduser() / "latest_checkpointed_iteration.txt").is_file()
+
+
 def _apply_critic_checkpoint_roots(critic_args: Any) -> None:
     critic_save = getattr(critic_args, "critic_save", None)
     if not critic_save:
         return
     critic_args.save = critic_save
-    tracker = Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt"
-    if tracker.is_file():
-        critic_args.load = critic_save
-        critic_args.no_load_optim = False
-        critic_args.no_load_rng = False
-        critic_args.finetune = False
-        critic_args.ckpt_step = None
-        logger.info("critic resumes from its own checkpoint root %s", critic_save)
+    critic_init = getattr(critic_args, "critic_init", None)
+    if _has_megatron_checkpoint(critic_save):
+        load, reason = critic_save, "resumes from its own checkpoint root"
+    elif critic_init and _has_megatron_checkpoint(critic_init):
+        # A value model trained on earlier episodes: its weights and optimizer
+        # come from --critic-init once, and every later start resumes from
+        # what this run has saved since.
+        load, reason = critic_init, "starts from the checkpoint in --critic-init"
     else:
         logger.info(
             "critic checkpoint root %s has no checkpoint yet; using the inherited load fallback",
             critic_save,
         )
+        return
+    critic_args.load = load
+    critic_args.no_load_optim = False
+    critic_args.no_load_rng = False
+    critic_args.finetune = False
+    critic_args.ckpt_step = None
+    logger.info("critic %s %s", reason, load)
 
 
 def create_train_groups(

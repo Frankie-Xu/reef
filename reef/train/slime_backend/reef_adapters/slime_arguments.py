@@ -61,6 +61,16 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     )
     parser.add_argument("--critic-save", type=str, default=None)
     parser.add_argument(
+        "--critic-init",
+        type=str,
+        default=None,
+        help=(
+            "Megatron checkpoint directory the critic starts from when its own save root holds no "
+            "checkpoint yet: a value model trained on earlier episodes instead of a cold value head. "
+            "Ignored once the critic has saved, and when the directory holds no checkpoint."
+        ),
+    )
+    parser.add_argument(
         "--critic-save-interval",
         type=int,
         default=1,

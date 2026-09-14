@@ -105,9 +105,10 @@ Reef by base URL through a reef-client sidecar, the two simulator roles stay
 outside Reef, and the verifier reads final cash, survival days, and bankruptcy
 from the run's ``world.nmdb``. The reward is weekly and online: when the
 next week's dashboard appears, every turn of the finished week is reported
-with the week's change in company value (cash plus the subscription run-rate
-the dashboard implies, over the weeks left), so the recipe trains while the
-episode runs;
+with the week's credit (its change in company value, cash plus the
+subscription run-rate the dashboard implies, and the discounted changes of
+the weeks after it, scaled against the weeks before), so the recipe trains
+while the episode runs;
 the example's README records the reward-shaping choice and its smoke run.
 
 .. code:: bash

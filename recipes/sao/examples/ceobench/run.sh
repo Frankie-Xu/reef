@@ -22,6 +22,16 @@ export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-24576}"
 # run-rate (subscribers at the lowest listed price, enterprise seats at plan
 # C's) over the weeks left in the episode, at most this many of them.
 export CEOBENCH_VALUE_HORIZON_WEEKS="${CEOBENCH_VALUE_HORIZON_WEEKS:-26}"
+# A week is credited with the discounted value changes of this many weeks
+# from it on (the week that buys growth is credited with the subscribers that
+# arrive after it), and reported once that many weeks have opened after it.
+export CEOBENCH_CREDIT_WEEKS="${CEOBENCH_CREDIT_WEEKS:-4}"
+export CEOBENCH_CREDIT_DISCOUNT="${CEOBENCH_CREDIT_DISCOUNT:-0.8}"
+# Before a credit is posted it is clipped (one six-figure purchase must not
+# set the scale for the episode) and divided by the running median magnitude
+# of the credits so far, floored so a quiet stretch does not amplify noise.
+export CEOBENCH_SCORE_CLIP="${CEOBENCH_SCORE_CLIP:-0.05}"
+export CEOBENCH_SCORE_FLOOR="${CEOBENCH_SCORE_FLOOR:-0.003}"
 # The agent's shell runs as this unprivileged user inside the task container.
 export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
 # The runner's own limits, widened for a paced game (reef.patch reads them):

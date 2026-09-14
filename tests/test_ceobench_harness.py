@@ -101,7 +101,10 @@ def _agent(agent_module, monkeypatch, turns: list[dict], *, service_url="http://
     agent._days = 14
     agent._client = _Client()
     agent._capture = _Capture([])
-    agent._ledger = agent_module.WeekLedger(total_weeks=2)
+    # One week of credit and a scale that leaves small credits as they are,
+    # so the scores below read as the value changes they come from.
+    agent._ledger = agent_module.WeekLedger(total_weeks=2, credit_weeks=1)
+    agent._scale = agent_module.ScoreScale(clip=10.0, floor=1.0)
     agent._ledger_lock = threading.Lock()
     agent._max_tokens = 0
     sidecar = _Sidecar()
@@ -206,13 +209,57 @@ def test_valuation_counts_the_run_rate_over_the_remaining_horizon(monkeypatch) -
     assert report_module.valuation(100_000.0, 3_000.0, 5, 26) == 103_500.0
     assert report_module.valuation(100_000.0, 3_000.0, 0, 26) == 100_000.0
     assert report_module.valuation(100_000.0, 3_000.0, -1, 26) == 100_000.0
-    assert report_module.week_score(982_318.0, 793_047.0) == (793_047 - 982_318) / 1_000_000
+    assert report_module.week_credit([-10_000.0, 5_000.0, 2_500.0], 0.5) == (-10_000 + 2_500 + 625) / 1_000_000
+    assert report_module.week_credit([], 0.5) == 0.0
+
+
+@pytest.mark.unit
+def test_score_scale_clips_outliers_and_divides_by_the_running_median(monkeypatch) -> None:
+    _, report_module = _load_harness(monkeypatch, "ceobench")
+    scale = report_module.ScoreScale(clip=0.05, floor=0.003)
+
+    assert scale.scale(-0.34) == -1.0  # a six-figure purchase clips to the limit and sets the first scale
+    assert scale.scale(0.02) == 0.02 / ((0.02 + 0.05) / 2)
+    assert scale.scale(-0.001) == -0.001 / 0.02  # the median of 0.001, 0.02, 0.05
+
+    quiet = report_module.ScoreScale(clip=0.05, floor=0.003)
+    assert quiet.scale(0.0001) == 0.0001 / 0.003  # the floor keeps a quiet start from amplifying noise
+    quiet.scale(0.0001)
+    assert quiet.scale(0.5) == 3.0  # clipped to 0.05, then capped against the tiny running scale
+
+    with pytest.raises(ValueError, match="positive"):
+        report_module.ScoreScale(clip=0.0)
+
+
+@pytest.mark.unit
+def test_week_credit_spans_the_following_weeks_and_is_cut_short_at_the_end(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    ledger = agent_module.WeekLedger(total_weeks=4, credit_weeks=2, discount=0.5)
+    turns = [_turn("r-1", _dashboard(0, 0, 1_000_000), 1, 1), _turn("r-2", _dashboard(1, 7, 990_000), 1, 1)]
+    ledger.observe(turns)
+    # Week 0 waits until two weeks have opened after it.
+    assert ledger.finished_weeks() == []
+
+    turns.append(_turn("r-3", _dashboard(2, 14, 985_000), 1, 1))
+    ledger.observe(turns)
+    # Week 0 closes on week 1's opening state and is credited with its own
+    # change and half of week 1's.
+    assert ledger.finished_weeks() == [(0, 990_000.0, 990_000.0, (-10_000 - 2_500) / 1_000_000)]
+    # The episode ends: week 1's window is cut short at the final cash, and
+    # week 2 closes on the final cash alone.
+    assert ledger.finished_weeks(final_cash=980_000.0) == [
+        (0, 990_000.0, 990_000.0, (-10_000 - 2_500) / 1_000_000),
+        (1, 985_000.0, 985_000.0, (-5_000 - 2_500) / 1_000_000),
+        (2, 980_000.0, 980_000.0, -5_000 / 1_000_000),
+    ]
+    with pytest.raises(ValueError, match="credit_weeks"):
+        agent_module.WeekLedger(total_weeks=4, credit_weeks=0)
 
 
 @pytest.mark.unit
 def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monkeypatch) -> None:
     agent_module, _ = _load_harness(monkeypatch, "ceobench")
-    ledger = agent_module.WeekLedger(total_weeks=2)
+    ledger = agent_module.WeekLedger(total_weeks=2, credit_weeks=1)
     ledger.observe(
         [
             _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
@@ -235,9 +282,14 @@ def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monke
     # Week 1 opens worth its cash plus the one week left of 30 subscribers at the $10 plan.
     assert ledger.value(week_1) == 982_381.0
     # Week 0 closed when week 1's dashboard appeared; week 1 waits for the final cash, valued as cash.
-    assert ledger.finished_weeks() == [(0, 982_311.0, 982_381.0)]
-    assert ledger.finished_weeks(final_cash=793_047.0) == [(0, 982_311.0, 982_381.0), (1, 793_047.0, 793_047.0)]
+    credit_0, credit_1 = (982_381 - 1_000_000) / 1_000_000, (793_047 - 982_381) / 1_000_000
+    assert ledger.finished_weeks() == [(0, 982_311.0, 982_381.0, credit_0)]
+    assert ledger.finished_weeks(final_cash=793_047.0) == [
+        (0, 982_311.0, 982_381.0, credit_0),
+        (1, 793_047.0, 793_047.0, credit_1),
+    ]
     ledger.posted.add(0)
+    ledger.scores[0] = -1.0
     assert ledger.finished_weeks() == []
     assert ledger.summary(final_cash=793_047.0) == [
         {
@@ -250,6 +302,8 @@ def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monke
             "run_rate": 0.0,
             "value_start": 1_000_000.0,
             "value_end": 982_381.0,
+            "credit": credit_0,
+            "score": -1.0,
             "turns": 2,
             "reported": True,
         },
@@ -263,6 +317,8 @@ def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monke
             "run_rate": 300.0,
             "value_start": 982_381.0,
             "value_end": 793_047.0,
+            "credit": credit_1,
+            "score": None,
             "turns": 2,
             "reported": False,
         },
@@ -297,7 +353,8 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
     # Week 1 opens worth its cash plus one week of three $10 subscribers: the score follows the value.
     payloads = [payload for _, payload in agent._client.calls]
     assert [payload["references"] for payload in payloads] == [["r-1"], ["r-2"]]
-    assert {payload["score"] for payload in payloads} == {(982_318 - 1_000_000) / 1_000_000}
+    credit = (982_318 - 1_000_000) / 1_000_000
+    assert {payload["score"] for payload in payloads} == {credit}
     assert payloads[1]["metadata"]["ceobench"] == {
         "week": 0,
         "day": 0,
@@ -305,6 +362,7 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         "cash_end": 982_311.0,
         "value_start": 1_000_000.0,
         "value_end": 982_318.0,
+        "credit": credit,
         "turn": 1,
         "turns": 2,
     }
@@ -319,6 +377,10 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         "seed": 7,
         "days": 14,
         "horizon_weeks": 26,
+        "credit_weeks": 1,
+        "discount": 0.8,
+        "score_clip": 10.0,
+        "score_floor": 1.0,
         "turns": 4,
         "exit_code": 0,
         "weeks": [
@@ -332,6 +394,8 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
                 "run_rate": 0.0,
                 "value_start": 1_000_000.0,
                 "value_end": 982_318.0,
+                "credit": credit,
+                "score": credit,
                 "turns": 2,
                 "reported": True,
             },
@@ -345,6 +409,8 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
                 "run_rate": 30.0,
                 "value_start": 982_318.0,
                 "value_end": None,
+                "credit": None,
+                "score": None,
                 "turns": 1,
                 "reported": False,
             },
@@ -382,7 +448,7 @@ def test_last_week_closes_with_the_verifier_final_cash(monkeypatch, tmp_path) ->
     assert scenario == "ceobench-host-test"
     assert payload["references"] == ["r-2"]
     # The last week is valued as cash alone at both ends of the comparison's close.
-    assert payload["score"] == (793_047 - 982_318) / 1_000_000
+    assert payload["score"] == payload["metadata"]["ceobench"]["credit"] == (793_047 - 982_318) / 1_000_000
     assert payload["metadata"]["ceobench"]["week"] == 1 and payload["metadata"]["ceobench"]["cash_end"] == 793_047.0
     assert payload["metadata"]["ceobench"]["value_end"] == 793_047.0
     assert "week 1" in payload["feedback"]
@@ -512,6 +578,8 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
         cash_end=905_000.0,
         value_start=900_000.0,
         value_end=910_000.0,
+        credit=0.0125,
+        score=1.25,
         turns=[("r-1", 9000), ("r-2", 50000), ("r-3", 48000)],
         max_tokens=49152,
     )
@@ -521,10 +589,12 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
     payloads = [payload for _, payload in client.calls]
     assert [payload["references"] for payload in payloads] == [["r-1"], ["r-3"]]
     assert [payload["metadata"]["ceobench"]["turn"] for payload in payloads] == [0, 2]
-    # The score follows the value, not the cash.
-    assert {payload["score"] for payload in payloads} == {0.01}
+    # The scaled credit is the score; the credit and the values travel along.
+    assert {payload["score"] for payload in payloads} == {1.25}
+    assert {payload["metadata"]["ceobench"]["credit"] for payload in payloads} == {0.0125}
     feedback = payloads[0]["feedback"]
-    assert "week 3" in feedback and "value 900000 -> 910000" in feedback and "cash 900000 -> 905000" in feedback
+    assert "week 3" in feedback and "credit 0.0125, score 1.25" in feedback
+    assert "value 900000 -> 910000" in feedback and "cash 900000 -> 905000" in feedback
     # No limit reports every turn.
     client.calls.clear()
     report_module.post_week_reports(
@@ -536,6 +606,8 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
         cash_end=905_000.0,
         value_start=900_000.0,
         value_end=910_000.0,
+        credit=0.0125,
+        score=1.25,
         turns=[("r-1", 1), ("r-2", 2), ("r-3", 3)],
     )
     assert len(client.calls) == 3

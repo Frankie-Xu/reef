@@ -552,6 +552,36 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
 
 
 @pytest.mark.unit
+def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_has_its_own(tmp_path) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    critic_save, critic_init = tmp_path / "megatron-critic", tmp_path / "critic-init"
+    critic_init.mkdir()
+    (critic_init / "latest_checkpointed_iteration.txt").write_text("23", encoding="utf-8")
+
+    # No checkpoint of its own yet: the value model trained on an earlier
+    # episode is loaded, weights and optimizer, and saves go to the save root.
+    args = _critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+    assert (critic_args.load, critic_args.save) == (str(critic_init), str(critic_save))
+    assert (critic_args.no_load_optim, critic_args.finetune) == (False, False)
+
+    # Once the critic has saved, its own checkpoint wins over the init.
+    critic_save.mkdir()
+    (critic_save / "latest_checkpointed_iteration.txt").write_text("7", encoding="utf-8")
+    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init)))
+    assert critic_args.load == str(critic_save)
+
+    # An init directory without a checkpoint changes nothing.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
+    assert critic_args.load == "/ckpt/megatron"
+
+
+@pytest.mark.unit
 def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args

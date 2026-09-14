@@ -167,27 +167,44 @@ its turns is reported with the week's change in company value:
 
     run_rate_N = subscribers_N x lowest nonzero listed price_N + seats_N x plan C price_N   (monthly)
     V_N        = cash_N + run_rate_N x 7/30 x min(weeks left after week N, H)
-    score      = (V_{N+1} - V_N) / $1,000,000
+    credit_N   = sum over j < K of gamma^j x (V_{N+j+1} - V_{N+j}) / $1,000,000
+    score_N    = clip(credit_N, +-C) / max(median |credit| so far, F), capped at +-3
 
 as a single-reference report, so the `sao` recipe trains on the week's turns
-while the agent is already playing week N+1 and the engine serves the
+while the agent is already playing later weeks and the engine serves the
 updated adapter from then on. `H` is `CEOBENCH_VALUE_HORIZON_WEEKS` (26 in
 `run.sh`, about six months of a subscription, which stands in for retention);
 the weeks left are `days // 7 - N`, so the valuation converges on cash as the
 episode ends. The estimate uses what the dashboard shows: the plan mix,
 promotions, and negotiated enterprise seat prices are not visible, so it is a
-floor on the subscription revenue, not the books. The last week closes with
-the verifier's final cash, valued as cash alone, posted by a watcher thread
-once Harbor writes `result.json`. The Harbor reward itself stays the
+floor on the subscription revenue, not the books.
+
+The credit spans `K = CEOBENCH_CREDIT_WEEKS` weeks (4) discounted by
+`gamma = CEOBENCH_CREDIT_DISCOUNT` (0.8) per week, so the week that pays for
+acquisition is credited with the subscribers that arrive over the weeks after
+it; a week is reported once `K` weeks have opened after it, and the pacer
+holds week N until the batches of weeks up to N-K-1 have committed. The
+last weeks close with the verifier's final cash, valued as cash alone, posted
+by a watcher thread once Harbor writes `result.json`, and a window that
+reaches the end is cut short there. Before it is posted the credit is clipped
+at `C = CEOBENCH_SCORE_CLIP` (0.05, a $50,000 swing) and divided by the
+running median magnitude of the credits so far, floored at
+`F = CEOBENCH_SCORE_FLOOR` (0.003): one six-figure R&D purchase then cannot
+set the scale for the whole episode, and an ordinary week's difference from
+the one before it keeps a gradient. The Harbor reward itself stays the
 benchmark's terminal metric (final cash over the starting balance); it is
 evaluation only.
 
 The first two trained episodes (results below) scored the week's cash change
 alone. Under that signal every purchase is a loss and the emptiest week is
 the safest, and both policies converged on a company with no customers. The
-run-rate term is what pays for growth inside the horizon: 671 subscribers at
-$9 a month (the untrained baseline's week 11) are worth +0.037 in score
-units, while a $500,000 R&D purchase still costs -0.5 in the week it lands.
+third scored the valuation change of one week at a time: the growth weeks
+were the first with a positive reward, but they were played by the untrained
+policy during the ten critic-only warm-up commits, and the two R&D
+purchases of the warm-up (-0.17 and -0.34) set the critic's scale for the
+rest of the episode. The credit window, the scaling, and a value model that
+starts from an earlier episode's critic with two warm-up commits
+(`--critic-init`, `num-critic-only-steps`) answer those three findings.
 
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
 the recipe's batch size). The sidecar peeks at each request's dashboard;
@@ -201,13 +218,12 @@ the runner's own per-call limit past it (`SAAS_BENCH_LLM_TIMEOUT`). The
 untrained baseline runs with the pacer off.
 
 Turns of one week share the week's score; the critic's skip-observation GAE
-does the credit assignment inside each turn. A weekly delta is dense enough
+does the credit assignment inside each turn. A weekly credit is dense enough
 for SAO's one-rollout-per-step cadence and lines up with the benchmark's own
 decision period. It is still myopic about anything the run-rate does not
-see: R&D raises quality and pays through retention and upgrades weeks later.
-Two extensions are left open: a lag of `k` weeks (report week N once week
-N+k's state is known) and a judged turn-level signal of the kind
-single-stream PPO wants (`recipes/openclawrl/`).
+see inside the window: R&D raises quality and pays through retention and
+upgrades weeks later. A judged turn-level signal of the kind single-stream
+PPO wants (`recipes/openclawrl/`) is the extension left open.
 
 ## Run
 
@@ -236,7 +252,14 @@ directory under the trial's `agent/ceobench/`.
 
 This is test-time training: the policy adapts inside the episode it is
 scored on, and the number to compare is that episode's final cash against the
-same seed played by the untrained model. Replicates are independent runs from
+same seed played by the untrained model. The value model need not start
+cold: `serve.yaml` points `--critic-init` at `$RUN_DIR/critic-init`, and a
+copy of an earlier run's latest critic checkpoint there
+(`checkpoints/megatron-critic/iter_N` with its
+`latest_checkpointed_iteration.txt`) is loaded, weights and optimizer, at
+the first start; the critic then trains for two commits on its own before
+the actor's first update (`num-critic-only-steps`). An empty directory
+leaves it cold. Replicates are independent runs from
 the base model, one stack each (`docker compose down` between them, or a
 fresh `RUN_DIR`): a Reef process trains one scenario for its lifetime, so a
 second seed on the same stack would start from the first seed's adapter.

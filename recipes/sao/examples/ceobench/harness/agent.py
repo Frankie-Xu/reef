@@ -16,9 +16,10 @@ started with. While the episode runs, a reporter thread watches for the next
 week's dashboard; when it appears the previous week is over, and every turn
 of that week is reported with the week's change in company value as its
 score: cash plus the subscription run-rate the dashboard implies, over the
-weeks left in the episode (``harness.report``). The last week ends with the
-verifier's final cash, which a watcher thread reads from Harbor's
-``result.json`` after the trial.
+weeks left in the episode, credited over the next ``CEOBENCH_CREDIT_WEEKS``
+weeks with a discount and scaled against the weeks before it
+(``harness.report``). The last weeks end with the verifier's final cash,
+which a watcher thread reads from Harbor's ``result.json`` after the trial.
 When the episode ends, the run directory (``world.nmdb``, config, checkpoint,
 logs) is copied into the trial's log directory and the receipts, with their
 weeks and token counts, go into the agent context in call order.
@@ -41,7 +42,12 @@ because the trainer could not hold it.
 ``CEOBENCH_VALUE_HORIZON_WEEKS`` (default 26) caps the weeks of run-rate a
 week's opening state is valued at, so a subscriber is worth at most about six
 months of the listed price and the valuation converges on cash as the episode
-ends.
+ends. ``CEOBENCH_CREDIT_WEEKS`` (default 4) and ``CEOBENCH_CREDIT_DISCOUNT``
+(default 0.8) set how many later weeks' value changes a week is credited with
+and how fast they discount; a week is reported once that many weeks have
+opened after it. ``CEOBENCH_SCORE_CLIP`` (default 0.05) and
+``CEOBENCH_SCORE_FLOOR`` (default 0.003) clip a week's credit and floor the
+running scale it is divided by before it is posted.
 
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
 to the recipe's batch size, the sidecar holds the first request of each new
@@ -72,7 +78,17 @@ from harbor.models.agent.context import AgentContext
 from reef_client import ReefClient
 from reef_client.serve import CaptureStore, ServeConfig, build_handler
 
-from .report import DEFAULT_VALUE_HORIZON_WEEKS, post_week_reports, valuation
+from .report import (
+    DEFAULT_CREDIT_DISCOUNT,
+    DEFAULT_CREDIT_WEEKS,
+    DEFAULT_SCORE_CLIP,
+    DEFAULT_SCORE_FLOOR,
+    DEFAULT_VALUE_HORIZON_WEEKS,
+    ScoreScale,
+    post_week_reports,
+    valuation,
+    week_credit,
+)
 
 #: The pinned checkout and the run root inside the task container.
 CEOBENCH_DIR = "/opt/ceobench"
@@ -217,15 +233,28 @@ class WeekLedger:
     ``observe`` reads the sidecar's captures; a served turn without a
     dashboard of its own belongs to the week the previous turn was in. A week
     is valued from its opening state (:func:`harness.report.valuation`) with
-    ``total_weeks - week`` weeks left, at most ``horizon_weeks`` of them.
+    ``total_weeks - week`` weeks left, at most ``horizon_weeks`` of them, and
+    credited with the value changes of the ``credit_weeks`` weeks from it on,
+    discounted by ``discount`` per week (:func:`harness.report.week_credit`).
     """
 
-    def __init__(self, total_weeks: int = 0, horizon_weeks: int = DEFAULT_VALUE_HORIZON_WEEKS) -> None:
+    def __init__(
+        self,
+        total_weeks: int = 0,
+        horizon_weeks: int = DEFAULT_VALUE_HORIZON_WEEKS,
+        credit_weeks: int = DEFAULT_CREDIT_WEEKS,
+        discount: float = DEFAULT_CREDIT_DISCOUNT,
+    ) -> None:
+        if credit_weeks < 1:
+            raise ValueError("credit_weeks must be at least 1")
         self.total_weeks = total_weeks
         self.horizon_weeks = horizon_weeks
+        self.credit_weeks = credit_weeks
+        self.discount = discount
         self.weeks: dict[int, dict] = {}  # week -> {"start": WeekStart, "turns": [(receipt, tokens)]}
         self.turns: list[dict] = []  # {"receipt", "tokens", "week"} per served turn
         self.posted: set[int] = set()
+        self.scores: dict[int, float] = {}  # week -> the scaled score it was posted with
         #: Weeks whose dashboard was seen on a request not yet served (the
         #: pacer's peek), so the week before can close before that request
         #: is forwarded.
@@ -254,22 +283,39 @@ class WeekLedger:
         """What a week's opening state is worth, given the weeks left after it."""
         return valuation(start.cash, start.run_rate, self.total_weeks - start.week, self.horizon_weeks)
 
-    def _closing(self, ordered: list[int], position: int, final_cash: float | None) -> tuple[float, float] | None:
-        """``(cash_end, value_end)`` of the week at ``position``: the next week's opening state, or the final cash."""
-        if position + 1 < len(ordered):
-            start = self.weeks[ordered[position + 1]]["start"]
-            return start.cash, self.value(start)
-        if final_cash is not None:
-            return final_cash, final_cash
-        return None
+    def _closing(
+        self, ordered: list[int], position: int, final_cash: float | None
+    ) -> tuple[float, float, float] | None:
+        """``(cash_end, value_end, credit)`` of the week at ``position``, or ``None`` while it is open.
 
-    def finished_weeks(self, final_cash: float | None = None) -> list[tuple[int, float, float]]:
-        """Unreported weeks with a known closing state, as ``(week, cash_end, value_end)``.
-
-        A week closes with the opening state of the next week seen; the last
-        week closes with ``final_cash`` when the caller has it, valued as cash
-        alone since nothing of the episode is left.
+        The week closes with the opening state of the next week seen and is
+        credited with the value changes of the ``credit_weeks`` weeks from it
+        on, so it stays open until that many later weeks have opened. With
+        ``final_cash`` the episode is over: the last week seen ends there,
+        valued as cash alone, and a window that reaches the end is cut short.
         """
+        deltas: list[float] = []
+        closing: tuple[float, float] | None = None
+        for offset in range(self.credit_weeks):
+            index = position + offset
+            value = self.value(self.weeks[ordered[index]]["start"])
+            if index + 1 < len(ordered):
+                start = self.weeks[ordered[index + 1]]["start"]
+                cash_end, value_end = start.cash, self.value(start)
+            elif final_cash is not None:
+                cash_end, value_end = final_cash, final_cash
+            else:
+                return None
+            deltas.append(value_end - value)
+            closing = closing or (cash_end, value_end)
+            if index + 1 >= len(ordered):
+                break  # the episode ended inside the window
+        if closing is None:
+            return None
+        return (*closing, week_credit(deltas, self.discount))
+
+    def finished_weeks(self, final_cash: float | None = None) -> list[tuple[int, float, float, float]]:
+        """Unreported weeks whose credit is known, as ``(week, cash_end, value_end, credit)``."""
         ordered = sorted(self.weeks)
         finished = []
         for position, week in enumerate(ordered):
@@ -286,7 +332,7 @@ class WeekLedger:
         for position, week in enumerate(ordered):
             entry = self.weeks[week]
             start: WeekStart = entry["start"]
-            closing = self._closing(ordered, position, final_cash) or (None, None)
+            closing = self._closing(ordered, position, final_cash) or (None, None, None)
             rows.append(
                 {
                     "week": week,
@@ -298,6 +344,8 @@ class WeekLedger:
                     "run_rate": start.run_rate,
                     "value_start": self.value(start),
                     "value_end": closing[1],
+                    "credit": closing[2],
+                    "score": self.scores.get(week),
                     "turns": len(entry["turns"]),
                     "reported": week in self.posted,
                 }
@@ -399,8 +447,17 @@ class HarborAgent(BaseAgent):
 
     def _init_week_reporting(self) -> None:
         self._capture = CaptureStore()
-        horizon = int(os.environ.get("CEOBENCH_VALUE_HORIZON_WEEKS", "") or DEFAULT_VALUE_HORIZON_WEEKS)
-        self._ledger = WeekLedger(total_weeks=self._days // 7, horizon_weeks=horizon)
+        environ = os.environ
+        self._ledger = WeekLedger(
+            total_weeks=self._days // 7,
+            horizon_weeks=int(environ.get("CEOBENCH_VALUE_HORIZON_WEEKS", "") or DEFAULT_VALUE_HORIZON_WEEKS),
+            credit_weeks=int(environ.get("CEOBENCH_CREDIT_WEEKS", "") or DEFAULT_CREDIT_WEEKS),
+            discount=float(environ.get("CEOBENCH_CREDIT_DISCOUNT", "") or DEFAULT_CREDIT_DISCOUNT),
+        )
+        self._scale = ScoreScale(
+            clip=float(environ.get("CEOBENCH_SCORE_CLIP", "") or DEFAULT_SCORE_CLIP),
+            floor=float(environ.get("CEOBENCH_SCORE_FLOOR", "") or DEFAULT_SCORE_FLOOR),
+        )
         self._ledger_lock = threading.Lock()
         self._max_tokens = int(os.environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
         batch = int(os.environ.get("CEOBENCH_PACE_BATCH", "0") or 0)
@@ -459,6 +516,10 @@ class HarborAgent(BaseAgent):
                 "seed": self._seed,
                 "days": self._days,
                 "horizon_weeks": self._ledger.horizon_weeks,
+                "credit_weeks": self._ledger.credit_weeks,
+                "discount": self._ledger.discount,
+                "score_clip": self._scale.clip,
+                "score_floor": self._scale.floor,
                 "turns": len(turns),
                 "exit_code": result.return_code,
                 "weeks": weeks,
@@ -540,10 +601,11 @@ class HarborAgent(BaseAgent):
         with self._ledger_lock:
             self._ledger.observe(self._capture.snapshot())
             finished = self._ledger.finished_weeks(final_cash)
-            for week, cash_end, value_end in finished:
+            for week, cash_end, value_end, credit in finished:
                 entry = self._ledger.weeks[week]
                 start: WeekStart = entry["start"]
                 value_start = self._ledger.value(start)
+                score = self._scale.scale(credit)
                 posted = post_week_reports(
                     self._client,
                     self._scenario,
@@ -553,13 +615,19 @@ class HarborAgent(BaseAgent):
                     cash_end=cash_end,
                     value_start=value_start,
                     value_end=value_end,
+                    credit=credit,
+                    score=score,
                     turns=entry["turns"],
                     max_tokens=self._max_tokens,
                 )
                 self._ledger.posted.add(week)
+                self._ledger.scores[week] = score
                 self.logger.info(
-                    "reported week %d (value %.0f -> %.0f, cash %.0f -> %.0f) against %d of %d turns",
+                    "reported week %d (credit %.4f, score %.2f; value %.0f -> %.0f, cash %.0f -> %.0f)"
+                    " against %d of %d turns",
                     week,
+                    credit,
+                    score,
                     value_start,
                     value_end,
                     start.cash,

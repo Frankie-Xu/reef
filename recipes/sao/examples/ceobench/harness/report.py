@@ -2,25 +2,36 @@
 
 The agent (``harness.agent``) routes every model call of an episode through
 Reef and knows, from the dashboard each request carries, which simulated week
-a call belongs to and the state the week started in. When the next week's
-dashboard appears the week is over, and :func:`post_week_reports` turns it
-into one Reef report per turn: the week's change in company value over the
-starting balance as the score, that turn's receipt as the only reference. One
-reference per report is what the ``sao`` recipe trains on.
+a call belongs to and the state the week started in. When enough later weeks
+have opened the week is scored, and :func:`post_week_reports` turns it into
+one Reef report per turn: the week's credit as the score, that turn's receipt
+as the only reference. One reference per report is what the ``sao`` recipe
+trains on.
 
 A week's opening state is valued as its cash plus the subscription run-rate
 the dashboard implies (each individual subscriber at the lowest listed price,
 each enterprise seat at plan C's), counted over the weeks left in the episode
 and at most ``horizon_weeks`` of them (:func:`valuation`). Cash alone made
 every purchase a loss and inaction the safest week; the run-rate term is what
-pays for growth inside the horizon. The last week of an episode ends with the
-verifier's final cash, valued as cash alone, instead of a next dashboard.
+pays for growth inside the horizon.
+
+A week's credit is the discounted sum of the value changes of the next
+``credit_weeks`` weeks (:func:`week_credit`): the week that spends on
+acquisition is credited with the subscribers that arrive over the weeks
+after it. The last weeks of an episode end with the verifier's final cash,
+valued as cash alone, and their sums are cut short there.
+
+Credits are posted through :class:`ScoreScale`, which clips one week's
+outliers (the benchmark's six-figure R&D purchases) and divides by the
+running median magnitude, so an ordinary week's difference from the one
+before it keeps a gradient instead of vanishing next to the outliers.
 
 A turn longer than the trainer's window (``max_tokens``, prompt and
 completion together) is skipped: the engine served it and Reef recorded it,
 but the trainer could not hold it, so it stays evaluation-only.
 """
 
+import statistics
 import uuid
 from collections.abc import Sequence
 
@@ -32,6 +43,15 @@ INITIAL_CASH = 1_000_000.0
 DEFAULT_VALUE_HORIZON_WEEKS = 26
 #: Subscriptions bill every 30 days; a simulated week is this share of a bill.
 DAYS_PER_WEEK, DAYS_PER_BILLING_MONTH = 7, 30
+#: Weeks of value change a week is credited with, and the discount per week.
+DEFAULT_CREDIT_WEEKS = 4
+DEFAULT_CREDIT_DISCOUNT = 0.8
+#: A week's credit is clipped to this magnitude (in units of the starting
+#: balance) before scaling, and the scale never drops below the floor.
+DEFAULT_SCORE_CLIP = 0.05
+DEFAULT_SCORE_FLOOR = 0.003
+#: Scaled scores stay within this magnitude.
+SCORE_CAP = 3.0
 
 
 def valuation(cash: float, run_rate: float, remaining_weeks: int, horizon_weeks: int) -> float:
@@ -40,9 +60,37 @@ def valuation(cash: float, run_rate: float, remaining_weeks: int, horizon_weeks:
     return cash + run_rate * DAYS_PER_WEEK * weeks / DAYS_PER_BILLING_MONTH
 
 
-def week_score(value_start: float, value_end: float, initial_cash: float = INITIAL_CASH) -> float:
-    """A week's change in company value in units of the starting balance."""
-    return (value_end - value_start) / initial_cash
+def week_credit(deltas: Sequence[float], discount: float, initial_cash: float = INITIAL_CASH) -> float:
+    """The discounted sum of the value changes in ``deltas``, in units of the starting balance.
+
+    ``deltas[0]`` is the week's own change, ``deltas[1]`` the next week's, and
+    so on; a shorter sequence is an episode that ended inside the window.
+    """
+    return sum(delta * discount**position for position, delta in enumerate(deltas)) / initial_cash
+
+
+class ScoreScale:
+    """Scale each week's credit by the running median magnitude of the credits so far.
+
+    The credit is clipped to ``clip`` first, so one six-figure purchase does
+    not set the scale for the rest of the episode; the scale never drops
+    below ``floor``, so a run of near-zero weeks does not blow small noise up
+    to the cap. Scaling keeps the sign: a week that grew the company scores
+    positive whatever the weeks around it did.
+    """
+
+    def __init__(self, clip: float = DEFAULT_SCORE_CLIP, floor: float = DEFAULT_SCORE_FLOOR) -> None:
+        if clip <= 0 or floor <= 0:
+            raise ValueError("score clip and floor must be positive")
+        self.clip = float(clip)
+        self.floor = float(floor)
+        self.magnitudes: list[float] = []
+
+    def scale(self, credit: float) -> float:
+        clipped = max(-self.clip, min(self.clip, credit))
+        self.magnitudes.append(abs(clipped))
+        scale = max(statistics.median(self.magnitudes), self.floor)
+        return max(-SCORE_CAP, min(SCORE_CAP, clipped / scale))
 
 
 def post_week_reports(
@@ -55,18 +103,21 @@ def post_week_reports(
     cash_end: float,
     value_start: float,
     value_end: float,
+    credit: float,
+    score: float,
     turns: Sequence[tuple[str, int]],
     max_tokens: int = 0,
 ) -> list[dict]:
     """Report one finished week against each of its turns' receipts.
 
-    ``turns`` are ``(receipt, tokens)`` pairs in call order; the score is the
-    week's change in value, the cash figures travel along for the record.
+    ``turns`` are ``(receipt, tokens)`` pairs in call order; ``score`` is the
+    scaled ``credit`` and is what Reef trains on, the rest travels along for
+    the record.
     """
-    score = week_score(value_start, value_end)
     feedback = (
-        f"ceobench week {week} (from day {day}): value {value_start:.0f} -> {value_end:.0f}"
-        f" (cash {cash_start:.0f} -> {cash_end:.0f}), score {score:.4f} over {len(turns)} turns"
+        f"ceobench week {week} (from day {day}): credit {credit:.4f}, score {score:.2f};"
+        f" value {value_start:.0f} -> {value_end:.0f} (cash {cash_start:.0f} -> {cash_end:.0f})"
+        f" over {len(turns)} turns"
     )
     posted = []
     for index, (receipt, tokens) in enumerate(turns):
@@ -87,6 +138,7 @@ def post_week_reports(
                     "cash_end": cash_end,
                     "value_start": value_start,
                     "value_end": value_end,
+                    "credit": credit,
                     "turn": index,
                     "turns": len(turns),
                 }
