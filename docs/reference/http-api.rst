@@ -128,19 +128,22 @@ committed state; it does not restore the originating release. The API
 requires no inference receipts or score.
 
 A request may also carry ``requires``: what the change needs from the
-person's machine, at most 8 ``{name, kind, check}`` items, default none.
-``kind`` is ``permission`` (an OS permission the person grants), ``env``
-(a variable the person sets; the extension reads it from the environment,
-and its value never enters a request or the tree) or ``service`` (an
-account or endpoint the person connects). ``name`` matches the entry name
-pattern and is what a check off is recorded under. ``check`` is optional:
-the variable name for ``env``; for ``permission`` and ``service`` a shell
-command whose exit status zero means satisfied. For ``env`` the variable
-named (the check, else the name) is a shell identifier,
-``^[A-Za-z_][A-Za-z0-9_]*$``. The credential and directive screens run
-over every ``name`` and ``check`` as they run over ``text``, with the same
-HTTP 400 and a reason that names the rule; a malformed list is HTTP 400
-naming the first bad item. The method's ``propose`` may add items of its
+person's machine, at most 8 ``{name, kind, check, prompt}`` items, default
+none. ``kind`` is ``permission`` (an OS permission the person grants),
+``env`` (a variable the person sets; the extension reads it from the
+environment, and its value never enters a request or the tree) or
+``service`` (an account or endpoint the person connects). ``name`` matches
+the entry name pattern and is what a check off is recorded under.
+``check`` is optional: the variable name for ``env``; for ``permission``
+and ``service`` a shell command whose exit status zero means satisfied.
+For ``env`` the variable named (the check, else the name) is a shell
+identifier, ``^[A-Za-z_][A-Za-z0-9_]*$``. ``prompt`` is optional: one
+sentence telling the person what to enter or grant, at most 200
+characters, stripped and dropped when blank; ``reef-<adapter> setup`` and
+the pages show it beside the item. The credential and directive screens
+run over every ``name``, ``check`` and ``prompt`` as they run over
+``text``, with the same HTTP 400 and a reason that names the rule; a
+malformed list is HTTP 400 naming the first bad item. The method's ``propose`` may add items of its
 own to the mapping it received (an extension that reads a variable, say);
 the backend merges them by name into the commit's
 ``training_request.requires`` after the same screens (a bad item of the
@@ -198,7 +201,8 @@ that answered a request carries, for example:
 
    {"training_request": {"id": "change-001", "text": "Text me when the run is blocked",
                          "session": "session-1", "release_id": "release-1",
-                         "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}]}}
+                         "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID",
+                                       "prompt": "The Twilio account SID"}]}}
 
 When the backend dropped an item the method added (malformed, or credential
 or directive shaped), ``training_request.refused_requires`` lists each as

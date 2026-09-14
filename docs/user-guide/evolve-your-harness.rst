@@ -486,8 +486,8 @@ the tools on PATH, the installed release against the served head) and exits
 0 when they all hold; it also lists every release that waits for your
 review, in the words ``reef-pi harness --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``harness``, ``page``, ``doctor``, ``setup``; anything else runs pi) before
-pi's help. Pinning,
+``harness``, ``page``, ``doctor``, ``setup``, ``update``; anything else
+runs pi) before pi's help. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
@@ -525,6 +525,13 @@ installed until you promote it: /reef-versions <step> promote. Page:
 model call); ``not covered: ...`` follows when the step's review lists
 points the change left out. The exit status is 0 for a selected or pending
 release, 1 for a rejected or skipped step, 2 when the timeout passes first.
+On a terminal the wrapper then hands you the next step: a selected release
+asks ``Install now? [Y/n]`` and, on yes, runs ``reef-pi setup`` for it and
+then ``reef-pi update``, closing with ``Installed release <id>. Restart
+reef-pi to use it.``; a pending release names ``reef-pi page <step>`` to
+read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
+the new head the same way. Declined, or in a script without a terminal,
+it prints the commands to run instead.
 To return to failure driven
 evolution alone, use the same update endpoint with
 ``{"training_mode": "auto"}``. The commands surface an error when the
@@ -580,40 +587,64 @@ which requests won the gate (``./run.sh bugfix``, ``./run.sh research``,
 ``./run.sh measure``).
 
 A release can need something from you before it runs. A request may carry
-``requires``, a list of ``{name, kind, check}`` items: ``permission`` (an OS
-permission you grant), ``env`` (a variable you set; the extension reads it
-from the environment, and its value never goes to reef) or ``service`` (an
-account or endpoint you connect), each with an optional ``check``: the
-variable name for ``env``, a shell command that exits 0 once satisfied for
-the other two. The proposer adds items of its own when the extension it
-wrote needs them. A releases row carries what its own change named; the
-manifest carries what the release needs over its whole chain, so a later
-change that names nothing still needs what an earlier one added. The
-install script refuses a release with an item you have not checked off: it
-prints the setup list and the newest release in the chain that requires
-nothing, the one that installs on a machine with nothing set up
-(``?release_id=<id>``), and exits 1 before it installs or writes anything.
-``reef-pi setup`` is the one place a check runs: it lists the
-newest release's items with each check as written, asks ``run it? [y/N]``
-before running a command (``--yes`` answers for scripts), reads a variable
-from your environment without asking, records what passed in the
-``.reef-harness-release`` release metadata file under ``setup`` with the check it stood
-for, and exits 0 once every item is met; ``reef-pi setup --mark <name>``
-checks an item off by hand, and ``reef-pi setup --release <id>`` reads a
-pending release's items, so you check them off before you promote it. An
-item whose check changed since its check off is asked again. On a fresh
-machine install the release the refusal names first (it requires nothing,
-so ``reef-pi`` exists), run ``reef-pi setup`` for the head's list, then
-install the head. Until every item is met the update
-notice, in a session with the ``reef-pi`` wrapper on disk, asks ``Set up
-release <id8> now?`` with the list and collects what is missing the same
-way (each item once, a check only after your yes), then offers the
-install, which runs ``reef-pi update`` and ends with ``Installed release
-<id8>. Type /reload to load it now.``; without the wrapper, or headless,
-it prints the setup list instead of offering the install. A session
-that starts on a tree with an unmet item prints the list once and runs
-anyway. No check runs at install, and none at session start without your
-yes.
+``requires``, a list of ``{name, kind, check, prompt}`` items:
+``permission`` (an OS permission you grant), ``env`` (a variable you set;
+the extension reads it from the environment, and its value never goes to
+reef) or ``service`` (an account or endpoint you connect), each with an
+optional ``check``, the variable name for ``env`` and a shell command that
+exits 0 once satisfied for the other two, and an optional ``prompt``, one
+sentence saying what to enter or grant. The proposer adds items of its own
+when the extension it wrote needs them. A releases row carries what its
+own change named; the manifest carries what the release needs over its
+whole chain, so a later change that names nothing still needs what an
+earlier one added. The install script refuses a release with an item you
+have not checked off: it prints the setup list and the newest release in
+the chain that requires nothing, the one that installs on a machine with
+nothing set up (``?release_id=<id>``), and exits 1 before it installs or
+writes anything. ``reef-pi setup`` is the one place a check runs: it lists
+the newest release's items with each check as written and its prompt,
+asks ``run it? [y/N]`` before running a command (``--yes`` answers for
+scripts), records what passed in the ``.reef-harness-release`` release
+metadata file under ``setup`` with the check it stood for, and exits 0
+once every item is met; ``reef-pi setup --mark <name>`` checks an item off
+by hand, and ``reef-pi setup --release <id>`` reads a pending release's
+items, so you check them off before you promote it. An item whose check
+changed since its check off is asked again.
+
+An ``env`` item is met when its variable (the check, else the name) is set
+in your environment or in the env file, ``<install root>/.reef-harness-env``
+beside the release metadata file. When it is set in neither, ``reef-pi
+setup`` shows the prompt and asks you for the value (without echo when the
+name contains TOKEN, KEY, SECRET or PASSWORD; ``--yes`` asks nothing) and
+stores it there: ``NAME=VALUE`` lines, readable by you alone (mode 0600),
+written by ``setup`` only, never in the tree and never sent anywhere. Every
+``reef-pi`` session gets each stored variable in its environment unless
+your shell already sets it (the shell wins), so an evolved extension reads
+``process.env.NAME`` and keeps no file of its own. Three more forms take
+one item at a time, for scripts and for the session's extensions:
+``reef-pi setup --json`` prints the release to set up and its items as one
+JSON object, ``{"release_id": ..., "items": [{name, kind, check, prompt,
+met}, ...]}``, and runs nothing; ``reef-pi setup --set NAME=VALUE`` stores
+the value of the ``env`` item NAME and checks it off (exit 2 for an
+unknown or non-env name; the value is an argument, never shell source);
+``reef-pi setup --run NAME`` runs that item's check without asking and
+checks it off when it passes (exit 0 when met, 1 otherwise, 2 for an
+unknown name). ``reef-pi update`` fetches the install script for the
+served head (``--release <id>`` for another release) with your token and
+runs it for your install root, printing the installed release; while the
+release requires an item you have not met, it prints the items and exits
+3 without installing. On a fresh machine install the release the refusal
+names first (it requires nothing, so ``reef-pi`` exists), run ``reef-pi
+setup`` for the head's list, then ``reef-pi update``. Until every item is
+met the update notice, in a session with the ``reef-pi`` wrapper on disk,
+asks ``Set up release <id8> now?`` with the list and collects what is
+missing the same way (each item once, a check only after your yes), then
+offers the install, which runs ``reef-pi update`` and ends with
+``Installed release <id8>. Type /reload to load it now.``; without the
+wrapper, or headless, it prints the setup list instead of offering the
+install. A session that starts on a tree with an unmet item prints the
+list once and runs anyway. No check runs at install, and none at session
+start without your yes.
 
 See what a version is with ``/reef-versions`` in a ``reef-pi`` session: one
 line per catalog row, oldest first, with the step, the first eight characters

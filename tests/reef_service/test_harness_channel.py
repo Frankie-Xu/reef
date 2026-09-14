@@ -1415,6 +1415,33 @@ def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -
 
 
 @pytest.mark.unit
+def test_a_reinstall_leaves_the_env_file_and_other_files_the_tree_does_not_own_alone(tmp_path) -> None:
+    """The prune removes what a previous release file recorded and this composition lacks, and nothing else:
+    the env file ``reef-<adapter> setup`` keeps beside the release file, and any other file of the person's at
+    the install root, survive a reinstall and an already current rerun with their bytes and mode."""
+    from reef.harness.client.wrapper import HARNESS_ENV_FILE
+
+    prefix, env = _pinned_env(tmp_path)
+    dest = tmp_path / "dest"
+    v1 = _render_to(tmp_path / "install-v1.sh", {"pi-agent/AGENTS.md": "one\n", "pi-agent/old.md": "old\n"}, "v1")
+    v2 = _render_to(tmp_path / "install-v2.sh", {"pi-agent/AGENTS.md": "two\n", "pi-agent/new.md": "new\n"}, "v2")
+    assert _run_install(v1, dest, prefix, env).returncode == 0
+    env_file = dest / HARNESS_ENV_FILE
+    descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT, 0o600)
+    os.write(descriptor, b"REEF_AWAY_PHONE=+15550100\n")
+    os.close(descriptor)
+    (dest / "notes.txt").write_text("mine\n", encoding="utf-8")
+    for expect_current in (False, True):
+        result = _run_install(v2, dest, prefix, env)
+        assert result.returncode == 0, result.stderr
+        assert ("already current" in result.stdout) is expect_current
+    assert env_file.read_bytes() == b"REEF_AWAY_PHONE=+15550100\n"
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert (dest / "notes.txt").read_text(encoding="utf-8") == "mine\n"
+    assert not (dest / "pi-agent/old.md").exists() and (dest / "pi-agent/new.md").read_bytes() == b"new\n"
+
+
+@pytest.mark.unit
 def test_render_refuses_a_composition_path_that_escapes_the_destination(tmp_path) -> None:
     """The generator applies the same escape rule as the client pull: an
     absolute path or any ``..`` part refuses the render, nothing is written."""

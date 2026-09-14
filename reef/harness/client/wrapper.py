@@ -35,7 +35,13 @@ When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are bloc
   verdict with the next action (a pending release says it is not installed
   until promoted and names its page link; a skipped step's line quotes why
   the proposer produced nothing): exit 0 for a selected or pending release,
-  1 for a rejected or skipped step, 2 when the timeout passes first.
+  1 for a rejected or skipped step, 2 when the timeout passes first. On a
+  terminal the verdict hands over the next step: a selected release asks
+  ``Install now? [Y/n]`` and, on yes, runs the setup prompts for it and
+  then ``update``, closing with ``Installed release <id>. Restart reef-pi
+  to use it.``; a pending release names its page, asks ``Promote now?
+  [y/N]`` and, on yes, posts the promote and installs the new head the same
+  way. Declined, or without a terminal, the next commands are printed.
 
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
@@ -54,26 +60,52 @@ When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
   installed release against the served head.
 
 When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
-``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``):
+``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``, ``reef-pi setup --json``,
+``reef-pi setup --set NAME=VALUE``, ``reef-pi setup --run NAME``):
 
   1. Reads what the newest release that is not pending (``--release <id>``
      names any catalog release instead, a pending one included) requires of
      you: every ``training_request.requires`` item over the release's chain
      in ``GET /reef/harness/releases``, merged by name as the manifest merges
      them (``permission``, ``env`` or ``service`` items, each with an optional
-     ``check``), and the check offs the ``.reef-harness-release`` release file
-     records under ``setup``.
-  2. Prints every item with its check as written; for an unmet ``permission``
-     or ``service`` item asks ``run it? [y/N]`` (``--yes`` answers yes) and
-     runs the check through the shell, exit status zero meaning met; an
-     ``env`` item is met when the variable (its check, else its name) is set;
-     ``--mark <name>`` checks an item off by hand and runs nothing. A check
-     off records the check it stood for, so an item whose check changed
-     since counts as unmet and runs again.
+     ``check`` and an optional ``prompt``, one sentence saying what to enter
+     or grant), the check offs the ``.reef-harness-release`` release file
+     records under ``setup``, and the values the ``.reef-harness-env`` env
+     file beside it holds.
+  2. Prints every item with its check as written and its prompt. An ``env``
+     item is met when its variable (the check, else the name) is set in the
+     environment or the env file; otherwise it asks for the value
+     (``getpass`` when the name contains TOKEN, KEY, SECRET or PASSWORD,
+     ``input`` else; ``--yes`` asks nothing) and stores it in the env file.
+     For an unmet ``permission`` or ``service`` item it asks ``run it?
+     [y/N]`` (``--yes`` answers yes) and runs the check through the shell,
+     exit status zero meaning met; ``--mark <name>`` checks an item off by
+     hand and runs nothing. A check off records the check it stood for, so
+     an item whose check changed since counts as unmet and runs again.
   3. Records each met item in the release file's ``setup`` and exits 0 when every
      item is met, 1 otherwise. This is the one place a check ever runs: the
      install script only reads the check offs, and a session start prints
      what is unmet and runs the session anyway.
+
+  Three flag forms serve scripts and the extensions, one item at a time:
+  ``--json`` prints ``{"release_id": ..., "items": [{name, kind, check,
+  prompt, met}, ...]}`` for the release to set up and runs nothing (exit 0);
+  ``--set NAME=VALUE`` stores the value of the ``env`` item NAME in the env
+  file and checks it off (exit 0; an unknown or non-env name is exit 2; the
+  value is an argument, never shell source, and stays one line); ``--run
+  NAME`` runs that one item's check without asking, the caller having
+  confirmed it, and checks it off when it passes (exit 0 when met, 1
+  otherwise, 2 for an unknown name).
+
+When invoked with ``update`` (e.g. ``reef-pi update``, ``reef-pi update --release <id>``):
+
+  Fetches the install script (``GET /reef/harness/install?adapter=<adapter>``,
+  plus ``&release_id=<id>`` with ``--release``) with the token and the
+  scenario header, runs it with ``bash`` for this install root, and prints
+  the installed release: exit 0, or 1 when the fetch or the script fails.
+  While the release requires an item that is not met, the items are printed
+  and nothing is fetched: exit 3, since the script would refuse anyway;
+  this says why first.
 
 When invoked with ``--help``, ``-h`` or ``help``:
 
@@ -94,11 +126,21 @@ Optional:
 
   ``REEF_TOKEN``  bearer token for the reef service (if auth is enabled); unset, the wrapper
                   uses the token the install wrote into the tree's model binding
+
+The env file, ``<install root>/.reef-harness-env`` beside the release file,
+holds the values the person gave ``setup`` for ``env`` items: ``NAME=VALUE``
+lines, mode 0600, written by ``setup`` alone. A session run through the
+wrapper gets each variable unless the shell already sets it (the shell
+wins); the values never enter the tree and are never sent anywhere. The
+wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>``
+script at the install root, so an extension in the agent can run ``update``
+and ``setup`` from the session.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -604,6 +646,53 @@ def _write_release_info(compose_dir: str, record: Mapping[str, Any]) -> None:
     os.replace(staging, release_file)
 
 
+#: The values the person gave ``setup`` for ``env`` items, beside the release file; ``run_agent`` reads it.
+HARNESS_ENV_FILE = ".reef-harness-env"
+#: A variable named like one of these holds a credential, so its value is asked for without echo.
+_SECRET_WORDS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+
+
+def _env_file_path(compose_dir: str) -> Path:
+    return Path(compose_dir).parent / HARNESS_ENV_FILE
+
+
+def _read_env_file(compose_dir: str) -> dict[str, str]:
+    """The env file as a dict, ``NAME=VALUE`` per line; blank lines, ``#`` comments and lines without ``=`` are skipped."""
+    try:
+        lines = _env_file_path(compose_dir).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for line in lines:
+        name, separator, value = line.partition("=")
+        if not separator or not name.strip() or name.lstrip().startswith("#"):
+            continue
+        values[name.strip()] = value.strip()
+    return values
+
+
+def _write_env_file(compose_dir: str, values: Mapping[str, str]) -> None:
+    """Write the env file whole, readable by the person alone (mode 0600), renamed over so a run reads old or new."""
+    path = _env_file_path(compose_dir)
+    staging = path.with_name(f".{path.name}.part")
+    staging.unlink(missing_ok=True)
+    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("".join(f"{name}={value}\n" for name, value in values.items()))
+    os.replace(staging, path)
+
+
+def _env_variable(item: Mapping[str, Any]) -> str:
+    """The variable an ``env`` item stands for, its check else its name: what the extension reads."""
+    return str(item.get("check") or item["name"])
+
+
+def _env_met(item: Mapping[str, Any], values: Mapping[str, str]) -> bool:
+    """Whether an ``env`` item's variable is set: in the environment, else in the env file ``values``."""
+    variable = _env_variable(item)
+    return bool(os.environ.get(variable) or values.get(variable))
+
+
 def _installed_release(compose_dir: str) -> str | None:
     """The release id of the installed tree, from the release file beside it."""
     release = (_read_release_info(compose_dir) or {}).get("release_id")
@@ -642,7 +731,13 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
 
     record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
-    unmet = _unmet(record.get("requires"), record.get("setup"))
+    stored = _read_env_file(compose_dir)
+    # An env item the environment or the env file meets needs no check off to run.
+    unmet = [
+        item
+        for item in _unmet(record.get("requires"), record.get("setup"))
+        if not (item.get("kind") == "env" and _env_met(item, stored))
+    ]
     if unmet:
         # Said once, on stderr so a -p run's output stays clean; no check runs here and the session runs anyway.
         print(
@@ -666,11 +761,20 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     # What an interactive run needs beyond the episode env; the person's own setting wins.
     for key, value in get_adapter(adapter).client_env.items():
         env.setdefault(key, value)
+    # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
+    for key, value in stored.items():
+        if not env.get(key):
+            env[key] = value
     # The update notice extension needs the service address, the scenario,
     # and the true install root; the relocated temp copy carries none of them.
+    install_root = Path(compose_dir).resolve().parent
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
-    env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
+    env["REEF_HARNESS_DEST"] = str(install_root)
+    wrapper = install_root / f"reef-{adapter}"
+    if wrapper.is_file():
+        # The wrapper the install wrote, so an extension can run its update and setup from the session.
+        env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
     if adapter == "native":
@@ -908,7 +1012,7 @@ def _step_started(upstream: str, scenario: str, token: str | None, record_id: st
     return isinstance(record, Mapping) and record.get("compacted_at") is not None
 
 
-def _await_verdict(
+def _await_step(
     upstream: str,
     scenario: str,
     adapter: str,
@@ -918,34 +1022,119 @@ def _await_verdict(
     *,
     timeout_s: float,
     poll_s: float,
-) -> int:
-    """Poll the catalog until the step that consumed the request settles, print its verdict line, exit by it.
+) -> tuple[int, list[dict[str, Any]]] | None:
+    """Poll the catalog until a step has consumed the request: its index and the catalog; None once ``timeout_s`` passes.
 
     One line says when the request's record shows a step took it, so the
-    wait is seen to move. 0 for a release to install or review, 1 for a
-    step that changed nothing, 2 when ``timeout_s`` passes first: the step
-    is still running, and ``/reef-versions`` shows it when it settles."""
+    wait is seen to move; the timeout line says where the verdict shows
+    later, the step still running."""
     deadline = time.monotonic() + timeout_s
     started = False
     while True:
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
         if step is not None:
-            page = _step_page_link(upstream, scenario, token, step)
-            print(f"reef-{adapter}: {_verdict_line(adapter, step, rows, page)}")
-            uncovered = _uncovered(rows[step])
-            if uncovered:
-                print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
-            return 1 if _verdict_of(rows[step], rows) in ("rejected", "skipped") else 0
+            return step, rows
         if time.monotonic() >= deadline:
             print(
                 f"reef-{adapter}: no verdict yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
             )
-            return 2
+            return None
         if not started and _step_started(upstream, scenario, token, record_id):
             started = True
             print(f"reef-{adapter}: the step started; usually one to three minutes")
         time.sleep(poll_s)
+
+
+def _confirm(adapter: str, question: str, *, default_yes: bool) -> bool:
+    """Ask ``question`` on the terminal; an empty answer takes the default the question shows in capitals."""
+    print(f"reef-{adapter}: {question} ", end="", flush=True)
+    answer = sys.stdin.readline().strip().lower()
+    if not answer:
+        return default_yes
+    return answer in ("y", "yes")
+
+
+def _promote(upstream: str, scenario: str, adapter: str, token: str | None, release: str) -> str | None:
+    """Promote a pending release through ``POST /reef/scenarios/<scenario>/promote``; the new head's id, or None, said."""
+    req = urllib.request.Request(
+        f"{upstream}/reef/scenarios/{urllib.parse.quote(scenario, safe='')}/promote",
+        data=json.dumps({"release_id": release}).encode(),
+        headers=_reef_headers(scenario, token),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            answer = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        print(f"reef-{adapter}: promote failed ({exc.code}): {exc.read().decode(errors='replace')}", file=sys.stderr)
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"reef-{adapter}: promote failed: {exc}", file=sys.stderr)
+        return None
+    head = answer.get("release_id") if isinstance(answer, Mapping) else None
+    if not isinstance(head, str) or not head:
+        print(
+            f"reef-{adapter}: reef answered the promote without a release_id: {json.dumps(answer)[:200]}",
+            file=sys.stderr,
+        )
+        return None
+    print(f"reef-{adapter}: promoted; the served head is release {head[:8]}")
+    return head
+
+
+def _next_commands(adapter: str, step: int, verdict: str) -> str:
+    """The commands that take the next step by hand, for a person who declined it or has no terminal."""
+    if verdict == "pending":
+        return f"/reef-versions {step} promote in a reef-{adapter} session, then reef-{adapter} setup and reef-{adapter} update"
+    return f"reef-{adapter} setup, then reef-{adapter} update"
+
+
+def _install(scenario: str, adapter: str, compose_dir: str, release: str) -> int:
+    """The setup prompts for ``release``, then its install; the install's status when it fails, else 0, said."""
+    # Setup first: the install script refuses a release whose items are not checked off.
+    setup(scenario, adapter, compose_dir, release=release)
+    status = update(scenario, adapter, compose_dir, release=release)
+    if status != 0:
+        return status
+    print(f"reef-{adapter}: Installed release {release[:8]}. Restart reef-{adapter} to use it.")
+    return 0
+
+
+def _next_step(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    upstream: str,
+    token: str | None,
+    row: Mapping[str, Any],
+    step: int,
+    verdict: str,
+) -> int:
+    """After a release, hand the person the next step: install a selected one, promote then install a pending one.
+
+    On a terminal each step is a question; declined, or without a terminal,
+    the commands are printed for later. 0 unless a step the person took
+    failed, then its status."""
+    release = str(row.get("release_id") or "")
+    if verdict not in ("selected", "pending") or not release:
+        return 0
+    if not sys.stdin.isatty():
+        print(f"reef-{adapter}: next: {_next_commands(adapter, step, verdict)}")
+        return 0
+    if verdict == "pending":
+        print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
+        if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
+            print(f"reef-{adapter}: next: {_next_commands(adapter, step, verdict)}")
+            return 0
+        head = _promote(upstream, scenario, adapter, token, release)
+        if head is None:
+            return 1
+        release = head
+    elif not _confirm(adapter, "Install now? [Y/n]", default_yes=True):
+        print(f"reef-{adapter}: next: {_next_commands(adapter, step, verdict)}")
+        return 0
+    return _install(scenario, adapter, compose_dir, release)
 
 
 def harness(
@@ -960,8 +1149,10 @@ def harness(
 ) -> int:
     """Submit a native manual training request, leaving feedback receipts available; with ``wait``, report its verdict.
 
-    The status is 0 once the request is accepted, or, with ``wait``, what
-    ``_await_verdict`` returns for the step that consumed it."""
+    The status is 0 once the request is accepted. With ``wait`` it is the
+    verdict's: 0 for a release to install or review, 1 for a step that
+    changed nothing, 2 when the timeout passes first; on a terminal a
+    release hands over its next step and a failed step's status stands."""
     text = text.strip()
     if not text:
         sys.exit(f"reef-{adapter} harness: the request is empty")
@@ -1003,9 +1194,20 @@ def harness(
         print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /reef-versions later")
         return 0
     print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its verdict")
-    return _await_verdict(
+    settled = _await_step(
         upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
+    if settled is None:
+        return 2
+    step, rows = settled
+    print(f"reef-{adapter}: {_verdict_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
+    uncovered = _uncovered(rows[step])
+    if uncovered:
+        print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
+    verdict = _verdict_of(rows[step], rows)
+    if verdict in ("rejected", "skipped"):
+        return 1
+    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, verdict)
 
 
 def _page_cache_dir() -> Path:
@@ -1084,16 +1286,131 @@ def _release_to_set_up(rows: Sequence[Mapping[str, Any]], release: str | None) -
     return next((row for row in reversed(rows) if not row.get("pending")), None)
 
 
-def _run_check(item: Mapping[str, Any], name: str, yes: bool) -> bool:
-    """Whether the item is met once its check ran: a variable read for ``env``, a shell command the person confirmed else."""
+@dataclass
+class _Setup:
+    """What every ``setup`` form and ``update`` read first: the release to set up, its items and what is met so far.
+
+    ``row`` is the catalog row to set up, None when nothing is served yet;
+    ``requires`` its chain's union; ``recorded`` the check offs the release
+    file holds and ``checked`` the working copy a form fills; ``values`` the
+    env file; ``upstream`` and ``token`` reach reef for what comes next."""
+
+    record: dict[str, Any]
+    row: Mapping[str, Any] | None
+    requires: list[dict[str, Any]]
+    recorded: dict[str, dict[str, Any]]
+    checked: dict[str, dict[str, Any]]
+    values: dict[str, str]
+    upstream: str
+    token: str | None
+
+    @property
+    def release_id(self) -> str | None:
+        release = (self.row or {}).get("release_id")
+        return release if isinstance(release, str) and release else None
+
+    @property
+    def label(self) -> str:
+        """``release <id> `` for the messages; empty when the row names no id."""
+        return f"release {self.release_id} " if self.release_id else ""
+
+    def item(self, name: str) -> dict[str, Any] | None:
+        return next((item for item in self.requires if item["name"] == name), None)
+
+    def met(self, item: Mapping[str, Any]) -> bool:
+        """Checked off with its check, or an ``env`` item whose variable the environment or the env file sets."""
+        if _met(item, self.checked.get(item["name"])):
+            return True
+        return item.get("kind") == "env" and _env_met(item, self.values)
+
+    def unmet(self) -> list[dict[str, Any]]:
+        return [item for item in self.requires if not self.met(item)]
+
+    def check_off(self, item: Mapping[str, Any]) -> None:
+        """Record the item as met; the check rides beside the name, so a release that changes it asks again."""
+        self.checked[item["name"]] = {"name": item["name"], "checked_at": time.time(), "check": item.get("check")}
+
+
+def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | None, prog: str) -> _Setup | None:
+    """What a ``setup`` form or ``update`` reads first; None, said on stderr as ``prog``, when ``release`` is unknown.
+
+    The release is ``release`` when named (a pending or trial release
+    included, so its items are checked off before its install), else the
+    newest that is not pending; what it requires is its chain's union, as
+    the manifest lists it. A tree without a release file exits: it did not
+    come through the install channel, so there is nothing to set up or
+    update."""
+    record = _read_release_info(compose_dir)
+    if record is None:
+        sys.exit(
+            f"reef-{adapter}: no {HARNESS_RELEASE_FILE} release file at {Path(compose_dir).resolve().parent}: this "
+            "tree did not come through reef's install channel, so there is no installed release to set up or update"
+        )
+    upstream = _reef_url_of(adapter, compose_dir)
+    token = _reef_token(adapter, compose_dir)
+    rows = _catalog(upstream, scenario, adapter, token)
+    row = _release_to_set_up(rows, release)
+    if row is None and release is not None:
+        print(f"reef-{adapter} {prog}: no release {release} in the catalog", file=sys.stderr)
+        return None
+    release_id = row.get("release_id") if row is not None else None
+    requires = required_by(rows, release_id if isinstance(release_id, str) else None)
+    recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
+    return _Setup(record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), upstream, token)
+
+
+def _save_setup(compose_dir: str, state: _Setup) -> None:
+    """Check off the ``env`` items whose variable is set and write the release file when the check offs changed."""
+    for item in state.requires:
+        if (
+            item.get("kind") == "env"
+            and not _met(item, state.checked.get(item["name"]))
+            and _env_met(item, state.values)
+        ):
+            state.check_off(item)
+    if state.checked != state.recorded:
+        _write_release_info(compose_dir, {**state.record, "setup": list(state.checked.values())})
+
+
+def _store_env_value(compose_dir: str, state: _Setup, item: Mapping[str, Any], value: str) -> None:
+    """Store an ``env`` item's value in the env file, under the variable the item stands for."""
+    state.values[_env_variable(item)] = value
+    _write_env_file(compose_dir, state.values)
+
+
+def _ask_env_value(item: Mapping[str, Any]) -> str:
+    """Ask the person for an ``env`` item's value, without echo when the name looks like a credential; "" skips."""
+    variable = _env_variable(item)
+    secret = any(word in f"{item['name']} {variable}".upper() for word in _SECRET_WORDS)
+    try:
+        if secret:
+            return getpass.getpass(f"    value for {variable} (not echoed; blank to skip): ").strip()
+        return input(f"    value for {variable} (blank to skip): ").strip()
+    except EOFError:
+        return ""
+
+
+def _settle_env(compose_dir: str, state: _Setup, item: Mapping[str, Any], yes: bool) -> bool:
+    """Whether an ``env`` item is met: its variable set, else the value the person gives here, kept in the env file.
+
+    ``yes`` is for scripts, which cannot answer, so it asks nothing."""
+    if _env_met(item, state.values):
+        print("    met", flush=True)
+        return True
+    value = "" if yes else _ask_env_value(item)
+    if not value:
+        print("    not set", flush=True)
+        return False
+    _store_env_value(compose_dir, state, item, value)
+    print(f"    met (stored in {_env_file_path(compose_dir)})", flush=True)
+    return True
+
+
+def _settle_command(item: Mapping[str, Any], yes: bool) -> bool:
+    """Whether a ``permission`` or ``service`` item is met once its check ran, after the person confirmed it."""
     check = item.get("check")
-    if item.get("kind") == "env":
-        # Reading a variable runs nothing, so it needs no confirmation.
-        met = bool(os.environ.get(check or name))
-        print("    met" if met else "    not set", flush=True)
-        return met
     if not check:
-        print(f"    no check; mark it with --mark {name} once it is done", flush=True)
+        print(f"    no check; mark it with --mark {item['name']} once it is done", flush=True)
         return False
     if not yes:
         print("    run it? [y/N] ", end="", flush=True)
@@ -1101,9 +1418,9 @@ def _run_check(item: Mapping[str, Any], name: str, yes: bool) -> bool:
             print("    skipped", flush=True)
             return False
     # The person read the command and said yes: it runs in their shell with their privileges, output and all.
-    completed = subprocess.run(check, shell=True)
-    print("    met" if completed.returncode == 0 else f"    not met (exit {completed.returncode})", flush=True)
-    return completed.returncode == 0
+    status = subprocess.run(check, shell=True).returncode
+    print("    met" if status == 0 else f"    not met (exit {status})", flush=True)
+    return status == 0
 
 
 def setup(
@@ -1115,66 +1432,209 @@ def setup(
     marks: Sequence[str] = (),
     release: str | None = None,
 ) -> int:
-    """Check off what a release requires: list, run the checks the person confirms, record, 0 when every item is met.
+    """Check off what a release requires: list, ask for what is missing, record, 0 when every item is met.
 
-    The release is ``release`` when named (a pending or trial release
-    included, so its items are checked off before its install), else the
-    newest that is not pending; what it requires is its chain's union, as
-    the manifest lists it. ``marks`` are items checked off by hand, running
-    nothing; an unknown name is exit 2. A check runs here and nowhere else."""
-    record = _read_release_info(compose_dir)
-    if record is None:
-        sys.exit(
-            f"reef-{adapter}: no {HARNESS_RELEASE_FILE} release file at {Path(compose_dir).resolve().parent}: this "
-            "tree did not come through reef's install channel, so there is nowhere to record a check off"
-        )
-    upstream = _reef_url_of(adapter, compose_dir)
-    rows = _catalog(upstream, scenario, adapter, _reef_token(adapter, compose_dir))
-    row = _release_to_set_up(rows, release)
-    if row is None:
-        if release is not None:
-            print(f"reef-{adapter} setup: no release {release} in the catalog", file=sys.stderr)
-            return 2
+    An unmet ``env`` item asks for its value and keeps it in the env file
+    (``yes`` asks nothing); an unmet ``permission`` or ``service`` item runs
+    its check once the person confirms it (``yes`` confirms). ``marks`` are
+    items checked off by hand, running nothing; an unknown name is exit 2.
+    A check runs here and nowhere else."""
+    state = _load_setup(scenario, adapter, compose_dir, release, "setup")
+    if state is None:
+        return 2
+    if state.row is None:
         print(f"reef-{adapter} setup: no served release yet")
         return 0
-    release_id = row.get("release_id")
-    label = f"release {release_id} " if isinstance(release_id, str) and release_id else ""
-    requires = required_by(rows, release_id if isinstance(release_id, str) else None)
-    names = [item["name"] for item in requires]
+    names = [item["name"] for item in state.requires]
     unknown = [name for name in marks if name not in names]
     if unknown:
         print(
-            f"reef-{adapter} setup: no item named {', '.join(unknown)}; {label}requires {', '.join(names) or 'nothing'}",
+            f"reef-{adapter} setup: no item named {', '.join(unknown)}; {state.label}requires {', '.join(names) or 'nothing'}",
             file=sys.stderr,
         )
         return 2
-    if not requires:
-        print(f"reef-{adapter} setup: {label}requires nothing")
+    if not state.requires:
+        print(f"reef-{adapter} setup: {state.label}requires nothing")
         return 0
-    recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
-    checked = dict(recorded)
-    print(f"reef-{adapter} setup: {label}requires {len(requires)} item(s)", flush=True)
-    for item in requires:
+    print(f"reef-{adapter} setup: {state.label}requires {len(state.requires)} item(s)", flush=True)
+    for item in state.requires:
         name = item["name"]
         print(f"  {_item_line(item)}", flush=True)
-        if _met(item, checked.get(name)):
+        if _met(item, state.checked.get(name)):
             print("    met (checked off)", flush=True)
             continue
-        if name in checked:
+        if name in state.checked:
             print("    the check changed since it was checked off", flush=True)
+        if item.get("prompt"):
+            print(f"    {item['prompt']}", flush=True)
         if name in marks:
             print("    met (marked by hand)", flush=True)
-        elif not _run_check(item, name, yes):
+        elif item.get("kind") == "env":
+            if not _settle_env(compose_dir, state, item, yes):
+                continue
+        elif not _settle_command(item, yes):
             continue
-        # The check rides beside the name, so a release that changes it asks again.
-        checked[name] = {"name": name, "checked_at": time.time(), "check": item.get("check")}
-    if checked != recorded:
-        _write_release_info(compose_dir, {**record, "setup": list(checked.values())})
-    unmet = [item["name"] for item in requires if not _met(item, checked.get(item["name"]))]
+        state.check_off(item)
+    _save_setup(compose_dir, state)
+    unmet = [item["name"] for item in state.unmet()]
     if unmet:
         print(f"reef-{adapter} setup: {len(unmet)} item(s) not met: {', '.join(unmet)}")
         return 1
-    print(f"reef-{adapter} setup: every item is met; install the release when the notice offers it")
+    print(f"reef-{adapter} setup: every item is met; reef-{adapter} update installs the release")
+    return 0
+
+
+def setup_json(scenario: str, adapter: str, compose_dir: str, *, release: str | None = None) -> int:
+    """Print the release to set up and its items, each with whether it is met, as one JSON object; runs nothing.
+
+    0, or 2 when ``release`` is not in the catalog; nothing served yet is
+    a null release with no items."""
+    state = _load_setup(scenario, adapter, compose_dir, release, "setup")
+    if state is None:
+        return 2
+    items = [
+        {
+            "name": item["name"],
+            "kind": item.get("kind"),
+            "check": item.get("check"),
+            "prompt": item.get("prompt"),
+            "met": state.met(item),
+        }
+        for item in state.requires
+    ]
+    print(json.dumps({"release_id": state.release_id, "items": items}))
+    return 0
+
+
+def setup_set(scenario: str, adapter: str, compose_dir: str, assignment: str, *, release: str | None = None) -> int:
+    """Store the value of the ``env`` item in ``NAME=VALUE`` in the env file and check it off; 0, or 2, said on stderr.
+
+    The value is an argument, never shell source, and stays one line; an
+    unknown name or a non-env item is refused."""
+    name, separator, value = assignment.partition("=")
+    value = value.strip()
+    if not separator or not name:
+        print(f"reef-{adapter} setup: --set takes NAME=VALUE", file=sys.stderr)
+        return 2
+    if not value or "\n" in value or "\r" in value:
+        print(f"reef-{adapter} setup: the value for {name} must be one non-empty line", file=sys.stderr)
+        return 2
+    state = _load_setup(scenario, adapter, compose_dir, release, "setup")
+    if state is None:
+        return 2
+    item = state.item(name)
+    if item is None:
+        names = ", ".join(required["name"] for required in state.requires) or "nothing"
+        print(f"reef-{adapter} setup: no item named {name}; {state.label}requires {names}", file=sys.stderr)
+        return 2
+    if item.get("kind") != "env":
+        print(
+            f"reef-{adapter} setup: {name} is a {item.get('kind')} item; --set stores the value of an env item, "
+            "--run runs a check",
+            file=sys.stderr,
+        )
+        return 2
+    _store_env_value(compose_dir, state, item, value)
+    state.check_off(item)
+    _save_setup(compose_dir, state)
+    print(f"reef-{adapter} setup: {name} stored in {_env_file_path(compose_dir)}")
+    return 0
+
+
+def setup_run(scenario: str, adapter: str, compose_dir: str, name: str, *, release: str | None = None) -> int:
+    """Run one item's check without asking, the caller having confirmed it, and check it off when it passes.
+
+    0 when the item is met, 1 when it is not, 2 for a name the release does
+    not require; an ``env`` item's check is reading its variable."""
+    state = _load_setup(scenario, adapter, compose_dir, release, "setup")
+    if state is None:
+        return 2
+    item = state.item(name)
+    if item is None:
+        names = ", ".join(required["name"] for required in state.requires) or "nothing"
+        print(f"reef-{adapter} setup: no item named {name}; {state.label}requires {names}", file=sys.stderr)
+        return 2
+    if item.get("kind") == "env":
+        met = _env_met(item, state.values)
+        detail = "met" if met else f"not met ({_env_variable(item)} is not set; --set {name}=VALUE stores it)"
+    elif not item.get("check"):
+        met, detail = False, f"not met (no check; --mark {name} checks it off by hand)"
+    else:
+        # The caller confirmed the command: it runs in the person's shell with their privileges, output and all.
+        status = subprocess.run(str(item["check"]), shell=True).returncode
+        met, detail = status == 0, "met" if status == 0 else f"not met (exit {status})"
+    if met:
+        state.check_off(item)
+    _save_setup(compose_dir, state)
+    print(f"reef-{adapter} setup: {name} {detail}")
+    return 0 if met else 1
+
+
+def _run_install_script(script: bytes, install_root: Path, token: str | None) -> int:
+    """Run a fetched install script with ``bash`` for ``install_root``; its exit status, 127 when bash cannot run.
+
+    ``REEF_TOKEN`` rides in the script's environment, so the binding it
+    writes keeps the token the wrapper reaches reef with."""
+    env = os.environ.copy()
+    if token:
+        env["REEF_TOKEN"] = token
+    with tempfile.NamedTemporaryFile(prefix="reef-harness-install-", suffix=".sh", delete=False) as handle:
+        handle.write(script)
+        path = Path(handle.name)
+    try:
+        return subprocess.run(["bash", str(path), str(install_root)], env=env).returncode
+    except OSError as exc:
+        print(f"reef-harness: cannot run bash: {exc}", file=sys.stderr)
+        return 127
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None = None) -> int:
+    """Install the served release, or ``release``, into this install root through the install script; 0 once it ran.
+
+    The script comes from ``GET /reef/harness/install`` with the token and
+    the scenario header and runs with ``bash`` and the install root as its
+    destination; 1 when the fetch or the script fails. While the release
+    requires an item that is not met the items are printed and nothing is
+    fetched: 3, the script would refuse anyway, this says why first."""
+    state = _load_setup(scenario, adapter, compose_dir, release, "update")
+    if state is None:
+        return 1
+    if state.row is None:
+        print(f"reef-{adapter} update: no served release yet", file=sys.stderr)
+        return 1
+    # The env items the environment or the env file meets are checked off, so the script's gate sees them met.
+    _save_setup(compose_dir, state)
+    unmet = state.unmet()
+    if unmet:
+        print(f"reef-{adapter} update: {state.label}requires setup first:", file=sys.stderr)
+        for item in unmet:
+            print(f"  {_item_line(item)}", file=sys.stderr)
+        named = f" --release {release}" if release is not None else ""
+        print(f"reef-{adapter} update: run reef-{adapter} setup{named}, then update again", file=sys.stderr)
+        return 3
+    query = f"adapter={urllib.parse.quote(adapter, safe='')}"
+    if release is not None:
+        query += f"&release_id={urllib.parse.quote(release, safe='')}"
+    req = urllib.request.Request(
+        f"{state.upstream}/reef/harness/install?{query}", headers=_reef_headers(scenario, state.token)
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            script = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        print(f"reef-{adapter} update: install script read failed ({exc.code}): {detail}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"reef-{adapter} update: reef unreachable at {state.upstream}: {exc}", file=sys.stderr)
+        return 1
+    status = _run_install_script(script, Path(compose_dir).resolve().parent, state.token)
+    if status != 0:
+        print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
+        return 1
+    print(f"reef-{adapter} update: installed release {_installed_release(compose_dir) or state.release_id}")
     return 0
 
 
@@ -1282,6 +1742,8 @@ def _usage(adapter: str) -> str:
             f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
             f"  {prog} doctor                                                     check what the install needs",
             f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
+            f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
+            f"  {prog} update [--release ID]                                       install the served release here",
             f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.",
         ]
     )
@@ -1344,9 +1806,33 @@ def main() -> None:
         parser.add_argument(
             "--release", default=None, metavar="ID", help="the release to set up (default: the newest not pending)"
         )
+        form = parser.add_mutually_exclusive_group()
+        form.add_argument(
+            "--json", action="store_true", help="print the items and whether each is met, as JSON; run nothing"
+        )
+        form.add_argument(
+            "--set", dest="assignment", default=None, metavar="NAME=VALUE", help="store an env item's value"
+        )
+        form.add_argument(
+            "--run", dest="run_name", default=None, metavar="NAME", help="run one item's check without asking"
+        )
         ns = parser.parse_args(args[1:])
         chosen = {"release": ns.release} if ns.release is not None else {}
+        if ns.json:
+            sys.exit(setup_json(scenario, adapter, compose, **chosen))
+        if ns.assignment is not None:
+            sys.exit(setup_set(scenario, adapter, compose, ns.assignment, **chosen))
+        if ns.run_name is not None:
+            sys.exit(setup_run(scenario, adapter, compose, ns.run_name, **chosen))
         sys.exit(setup(scenario, adapter, compose, yes=ns.yes, marks=tuple(ns.mark), **chosen))
+    elif args and args[0] == "update":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} update")
+        parser.add_argument(
+            "--release", default=None, metavar="ID", help="the release to install (default: the served head)"
+        )
+        ns = parser.parse_args(args[1:])
+        chosen = {"release": ns.release} if ns.release is not None else {}
+        sys.exit(update(scenario, adapter, compose, **chosen))
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 
