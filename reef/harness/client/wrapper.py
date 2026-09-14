@@ -89,11 +89,12 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any
 
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
@@ -418,9 +419,10 @@ RELEASE_HEADER = "x-reef-release-id"
 CAPTURE_PATHS = ("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true")
 
 
-class ReleaseObserver(Protocol):
+class ReleaseObserver(ABC):
     """Where the proxy hands the release id an inference response names."""
 
+    @abstractmethod
     def observe(self, release_id: str) -> None: ...
 
 

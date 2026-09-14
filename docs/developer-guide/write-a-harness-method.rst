@@ -14,8 +14,8 @@ A method fills three slots:
 
    def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | None: ...
    def evaluate(task, result) -> float: ...
-   class Selection:  # optional
-       def decide(self, candidate, evaluation) -> SelectionDecision: ...
+   class SelectionFactory(CandidatePluginFactory):  # optional
+       def build(self, candidate_backend) -> CandidateEvaluationPlugin: ...
 
 ``propose`` sees the tree as ``(kind, config)`` pairs, the batch of
 ATIF ``TrajectoryItem`` values, and
@@ -42,9 +42,9 @@ Reef passes each keyword only to a signature that names it.
 pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
 that could not run never reach it.
 
-``promote`` is optional and only matters with ``evolution.promote_failures``:
-it receives the step's trace samples, plus the ``FailureManifest`` when its
-signature names ``manifest``, and returns the prompts to add to the gate as
+``promote`` is an optional ``Promoter`` subclass or instance and only matters
+with ``evolution.promote_failures``. Its ``__call__(samples, *, manifest=None)``
+receives the step's trace samples and ``FailureManifest``, and returns the prompts to add to the gate as
 permanent tasks. Reef dedupes, screens for credentials, and caps what it
 returns. Without it every failing trace's user prompt is promoted.
 
@@ -189,10 +189,17 @@ regressed and at least one improved.
 
 .. code:: python
 
-   from reef import SelectionDecision
+   from reef import CandidateEvaluationPlugin, CandidateEvaluator, SelectionDecision
+   from reef.train.evaluation import CandidatePluginFactory
 
 
-   class ParetoSelectionPolicy:
+   class ParetoPlugin(CandidateEvaluationPlugin):
+       def __init__(self, candidate_backend: CandidateEvaluator):
+           self._candidate_backend = candidate_backend
+
+       def evaluate(self, candidate):
+           return self._candidate_backend.evaluate(candidate)
+
        def decide(self, candidate, evaluation):
            pairs = zip(
                evaluation.metrics["candidate_scores"],
@@ -210,10 +217,16 @@ regressed and at least one improved.
            )
 
 
-   pareto_selection = ParetoSelectionPolicy()
+   class ParetoFactory(CandidatePluginFactory):
+       def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+           return ParetoPlugin(candidate_backend)
 
-Name it ``selection: my_pkg.policies:pareto_selection``. Publishing outside
-candidate selection breaks revert.
+Name it ``selection: my_pkg.policies:ParetoFactory``. Reef constructs the
+factory without arguments, then calls ``build`` for each scenario's candidate
+backend. A factory instance can also be supplied directly from Python. The
+plugin explicitly inherits both evaluation and selection through
+``CandidateEvaluationPlugin``; a selector-only object is not a complete plugin.
+Publishing outside candidate selection breaks revert.
 
 Untrusted input
 ~~~~~~~~~~~~~~~

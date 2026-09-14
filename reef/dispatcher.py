@@ -35,7 +35,7 @@ from reef.observability import (
 )
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.runtime.base import RuntimeContractError, TrainingRuntime
+from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
@@ -214,9 +214,9 @@ class Dispatcher:
             return {"scenario": scenario, "training_mode": current.trainer.training_mode}
 
     def _wake_training(self, current: Scenario) -> None:
-        if isinstance(current.runtime, TrainingRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
-        elif current.trainer.training_backend is not None:
+        elif current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
@@ -247,7 +247,7 @@ class Dispatcher:
             self._publication.forget(scenario)
             self._record_training_error(scenario, None)
             if dropped is not None:
-                backend = dropped.trainer.training_backend
+                backend = dropped.trainer.candidate_backend
                 if backend is not None:
                     backend.retire_scenario(scenario)
                 dropped.close()
@@ -375,7 +375,7 @@ class Dispatcher:
                 return existing
             if current.trainer.training_mode == "auto":
                 raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-            if current.trainer.training_backend is None:
+            if current.trainer.candidate_backend is None:
                 raise ValueError("explicit training requests require a training backend")
             request = TrainingRequest.from_dict(item.payload)
             if item.references:
@@ -406,10 +406,10 @@ class Dispatcher:
         stored = appended.item
         if not appended.inserted:
             return stored
-        if isinstance(current.runtime, TrainingRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
             return stored
-        if current.trainer.training_backend is not None:
+        if current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
             return stored
         result = current.prepare_training_step()
@@ -454,7 +454,7 @@ class Dispatcher:
             logger.exception("experiment tracker failed to record committed training step")
 
     def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
-        backend = current.trainer.training_backend
+        backend = current.trainer.candidate_backend
         try:
             backend_config = None if backend is None else dict(backend.experiment_config())
         except Exception:
@@ -598,7 +598,7 @@ class Dispatcher:
         current = self._registry.get_optional(scenario)
         if current is None:
             raise RuntimeContractError(f"local backend scenario {scenario!r} is not loaded")
-        if current.trainer.training_backend is None:
+        if current.trainer.candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
         try:
@@ -712,7 +712,7 @@ class Dispatcher:
         current = self._registry.get_optional(name)
         if current is None:
             raise RuntimeContractError(f"training thread is not bound to scenario {name!r}")
-        runtime = current.runtime
+        runtime = current.training_runtime
         if not isinstance(runtime, TrainingRuntime):
             raise RuntimeContractError(
                 f"training thread requires a TrainingRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
@@ -721,7 +721,7 @@ class Dispatcher:
         # A crash may leave remote serving updated but paused after Reef's
         # commit, or checkpointed before the weight update. Recover that
         # pending step before deciding whether another batch is available.
-        backend = current.trainer.training_backend
+        backend = current.trainer.candidate_backend
         if backend is None or not backend.dispatched:
             raise RuntimeContractError(f"training scenario {current.name!r} has no dispatched training backend")
         backend.recover_pending_step(
@@ -869,16 +869,18 @@ class Dispatcher:
             # A version is current only after Reef commits its head
             # and reopens admission. The backend may report it
             # earlier while the update is still being published.
-            "current_runtime_load_id": (
-                runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
-            ),
+            "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
             "training_mode": current.trainer.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
-        if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
+        if (
+            runtime is not None
+            and current.training_runtime is not None
+            and current.training_runtime.concurrent_training_scenarios
+        ):
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
         return block
 
@@ -944,10 +946,13 @@ class Dispatcher:
         except BaseException as exc:
             errors.append(exc)
         if self._recipe.runtime is not None:
-            try:
-                self._recipe.runtime.shutdown()
-            except BaseException as exc:
-                errors.append(exc)
+            self._recipe.runtime.pause_admission()
+        for component in (self._recipe.training_runtime, self._recipe.runtime):
+            if component is not None:
+                try:
+                    component.shutdown()
+                except BaseException as exc:
+                    errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:

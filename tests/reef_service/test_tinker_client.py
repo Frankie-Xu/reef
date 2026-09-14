@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.inference.tinker import TinkerSDKSampler
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
@@ -128,6 +129,17 @@ def client(tmp_path):
     return value
 
 
+@pytest.fixture
+def sampler(client):
+    value = object.__new__(TinkerSDKSampler)
+    value._sdk = client._sdk
+    value._model = client._model
+    value._timeout_s = 10
+    value._service = client._service
+    value._base_sampler = client._base_sampler
+    return value
+
+
 def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
@@ -200,17 +212,19 @@ def test_initial_checkpoint_failure_closes_session_as_errored(client, monkeypatc
     assert client._sdk.events[-1] == ("close", "errored")
 
 
-def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client):
+def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client, sampler):
     checkpoint = client.initialize()
     assert client._sdk.events[1] == ("initialize", client._model, 32, 0)
     assert client._sdk.events[-1] == ("close", "success")
-    result = client.sample(checkpoint, [10, 11], {"max_tokens": 2})
+    result = sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
     assert result.tokens == (20, 21)
     assert result.logprobs == (-0.25, -0.5)
     assert client._sdk.events[-2] == ("sampler", checkpoint.sampler_path)
+    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    assert client._sdk.events[-1][0] == "sample"  # the base sampler needs no new client
     client._service.sampler.logprobs = None
     with pytest.raises(ValueError, match="exact log probabilities"):
-        client.sample(checkpoint, [10, 11], {"max_tokens": 2})
+        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
     client.close()
     assert client._sdk.events[-1] == ("close", "success")
 
@@ -222,7 +236,7 @@ def test_frozen_base_logprobs_align_to_response_and_reject_missing_values(client
         client._base_logprobs([TokenRow((10, 20), (1,), (-0.1,), 1)])
 
 
-def test_remote_model_mismatch_fails_before_training_or_sampling(client, monkeypatch):
+def test_remote_model_mismatch_fails_before_training_or_sampling(client, sampler, monkeypatch):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 20), (1,), (-0.25,), 1)
     monkeypatch.setattr(
@@ -235,11 +249,12 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, monkeyp
     assert not any(event[0] == "forward_backward" for event in client._sdk.events)
     monkeypatch.setattr(Sampler, "get_base_model", lambda _: "other/model")
     with pytest.raises(ValueError, match="remote Tinker sampler checkpoint"):
-        client.sample(base, [10], {"max_tokens": 1})
+        sampler.sample(base.sampler_path, [10], {"max_tokens": 1})
     assert not any(event[0] == "sample" for event in client._sdk.events)
 
 
-def test_real_chat_template_returns_token_ids_without_model_download(client):
+def test_real_chat_template_returns_token_ids_without_model_download(sampler):
+    client = sampler
     transformers = pytest.importorskip("transformers")
     from tokenizers import Tokenizer, models, pre_tokenizers
 

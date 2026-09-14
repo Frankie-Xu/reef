@@ -24,11 +24,11 @@ from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
 from recipes.beta.coral.reporter import AttemptReport
 from reef.dispatcher import build_default_dispatcher
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import InferenceHandler
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class _EchoBackend(InferenceBackend):
+class _EchoBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del artifact, path, payload
         return {"choices": [{"message": {"content": "a proposed config"}}]}
@@ -96,7 +96,7 @@ def test_full_loop_against_real_reef_service(tmp_path):
             TestServer(
                 reef_service.create_app(
                     build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
-                    inference_backend=_EchoBackend(),
+                    inference_handler=_EchoBackend(),
                 )
             )
         )

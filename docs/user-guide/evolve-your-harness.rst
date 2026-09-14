@@ -199,9 +199,9 @@ instruction override (``ignore the previous instructions``, a forged system
 message, a chat-template control token) is screened the same way, and one
 tagged client holds at most ``evolution.max_promoted_per_client`` promoted
 tasks, so a single sender cannot fill the suite. Which prompts are
-promoted is the method's call: an optional ``evolution.promote`` callable
-receives the step's trace samples (and the failure manifest when its
-signature names ``manifest``) and returns the prompts to promote; without it
+promoted is the method's call: an optional ``evolution.promote`` names a
+``Promoter`` subclass or instance. Its ``__call__(samples, *, manifest=None)``
+receives the step's trace samples and failure manifest and returns the prompts to promote; without it
 every failing trace's user prompt is promoted. Reef still dedupes, screens,
 and caps whatever it returns. ``batch_size`` lives under ``data:`` in the
 recipe config, and

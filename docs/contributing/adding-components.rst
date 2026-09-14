@@ -75,11 +75,21 @@ Implementation
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
   implementation, framework adapters, bridge code, and plugins inside that
   subtree.
-- Change ``reef/train/backend.py`` or ``reef/runtime/base.py`` only when the
+- Implement ``TrainingBackend`` from ``reef/runtime/interfaces.py`` for native
+  training operations. ``TrainingRuntime`` in ``reef/runtime/interfaces.py`` is Reef's
+  scheduling interface. The recipe candidate lifecycle is ``CandidateBackend``
+  in ``reef/train/backend.py``.
+- Put the integration's scheduling connection in ``runtime.py`` within its
+  package. Reuse ``reef.train.runtime.ExecutorTrainingRuntime`` when the backend
+  uses Reef's coordinator RPC; keep native optimizer and weight-transfer operations
+  in its ``TrainingBackend`` implementation.
+- Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
-- Implement ``TrainingDeployment`` in the integration to own process preparation
-  and its runtime connection. In-process integrations can extend
+- Implement ``TrainingDeployment`` in the integration to describe process preparation
+  and its runtime connection. Implement ``create_training_plan`` when using Reef's
+  shared model driver; return an unstarted trainer and launch data. Reef selects
+  the inference factory independently and owns both lifecycles. In-process integrations can extend
   ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
   ``reef.training_backends`` entry-point group; see `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
@@ -110,16 +120,33 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/runtime/base.py`` before adding configuration.
+``reef/runtime/interfaces.py`` before adding configuration.
 
 - For an external runtime, expose a factory as
   ``package.module:factory_name`` and use that dotted value as the runtime
   ``type``.
-- For an accepted bundled runtime, add an adapter under
-  ``reef/runtime/adapters/``. Subclass ``RuntimeFactory``, set its ``kind``,
+- For a concrete inference backend, add its native implementation under
+  ``reef/inference/<integration>/``. Keep native engine launch, request
+  adaptation, weight reception, and framework imports inside that package.
+  ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
+  it must not import a concrete inference or training implementation.
+  Implement the applicable contracts in
+  ``reef/runtime/interfaces.py`` when integrating with managed
+  training and publication. Import those contracts instead of the coordinator.
+  Put the integration's ``InferenceRuntime`` implementation in its ``runtime.py``;
+  it may reuse ``reef.inference.runtime.ExecutorInferenceRuntime`` with an explicit
+  request handler. Shared monitoring and engine recovery belong in
+  ``runtime/recovery.py``; publication, residency and transfer locking belong in
+  ``runtime/publication.py``. Shared contracts and version values belong in
+  ``runtime/interfaces.py``.
+- For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
-  and import its module from ``reef/runtime/adapters/__init__.py``.
-- A ``RuntimeFactory`` can expose ``config_type()`` returning a settings
+  and load the selected integration from service assembly. ``RuntimeFactory`` and
+  factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
+  package: importing ``reef.runtime`` does not register integrations or re-export
+  classes. Keep its top level limited to ``interfaces.py``, ``scheduler.py``,
+  ``deployment.py``, ``publication.py``, ``recovery.py`` and ``executor/``.
+- A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the
   dataclass's validation before calling the factory. Keep schema imports

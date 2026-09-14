@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import importlib
 import math
+import shutil
 import sys
+import tarfile
+import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
@@ -16,15 +19,8 @@ from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
 
 
-@dataclass(frozen=True)
-class SampleResult:
-    tokens: tuple[int, ...]
-    logprobs: tuple[float, ...]
-    stop_reason: str
-
-
 class TinkerClient(ABC):
-    """Remote operations used by the runtime, also implementable by offline tests."""
+    """Remote training operations, also implementable by offline tests; sampling lives in ``reef.inference.tinker``."""
 
     @abstractmethod
     def initialize(self) -> TinkerCheckpoint: ...
@@ -35,16 +31,25 @@ class TinkerClient(ABC):
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]: ...
 
     @abstractmethod
-    def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]: ...
-
-    @abstractmethod
-    def decode(self, tokens: Sequence[int]) -> str: ...
-
-    @abstractmethod
-    def sample(self, checkpoint: TinkerCheckpoint, prompt: list[int], params: Mapping[str, Any]) -> SampleResult: ...
+    def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Materialize the checkpoint's sampler weights as a PEFT adapter directory."""
 
     @abstractmethod
     def close(self) -> None: ...
+
+
+def _extract_archive(archive: Path, directory: Path) -> None:
+    """Unpack a checkpoint archive, refusing links and paths outside ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    base = directory.resolve()
+    with tarfile.open(archive) as tar:
+        members = tar.getmembers()
+        for member in members:
+            if member.issym() or member.islnk():
+                raise ValueError(f"checkpoint archive contains a link: {member.name}")
+            if not (base / member.name).resolve().is_relative_to(base):
+                raise ValueError(f"checkpoint archive escapes its directory: {member.name}")
+        tar.extractall(path=base, members=members)
 
 
 class TinkerSDKClient(TinkerClient):
@@ -54,7 +59,6 @@ class TinkerSDKClient(TinkerClient):
     _api_key: str
     _service: Any
     _base_sampler: Any
-    _tokenizer: Any
 
     def __init__(self, base_model: str, config: TinkerConfig, api_key: str) -> None:
         if sys.version_info < (3, 11):
@@ -68,8 +72,8 @@ class TinkerSDKClient(TinkerClient):
         self._api_key = api_key
         self._service = self._new_service()
         try:
+            # The frozen base scores KL terms; sampling for requests is the inference runtime's.
             self._base_sampler = self._service.create_sampling_client(base_model=base_model)
-            self._tokenizer = self._base_sampler.get_tokenizer()
         except BaseException:
             self._service.close("errored").result(timeout=self._config.train_timeout_s)
             raise
@@ -160,40 +164,36 @@ class TinkerSDKClient(TinkerClient):
             result.append([float(value) for value in response])
         return result
 
-    def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]:
-        prefill = messages[-1]["role"] == "assistant"
-        return list(
-            self._tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                return_dict=False,
-                add_generation_prompt=not prefill,
-                continue_final_message=prefill,
-                **template_kwargs,
-            )
+    def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Fetch the sampler archive, then convert it with the cookbook into PEFT layout.
+
+        Tinker's archive holds the adapter in its own key naming; the
+        cookbook's converter renames tensors to the base model's parameter
+        names, which is what SGLang and vLLM load.
+        """
+        try:
+            from tinker_cookbook import weights
+        except ImportError as exc:
+            raise RuntimeError(
+                "serving Tinker checkpoints on a local engine needs tinker-cookbook: "
+                "uv pip install 'reef-infra[tinker]'"
+            ) from exc
+        response = (
+            self._service.create_rest_client()
+            .get_checkpoint_archive_url_from_tinker_path(checkpoint.sampler_path)
+            .result(timeout=self._config.train_timeout_s)
         )
-
-    def decode(self, tokens: Sequence[int]) -> str:
-        return str(self._tokenizer.decode(list(tokens), skip_special_tokens=True))
-
-    def sample(self, checkpoint: TinkerCheckpoint, prompt: list[int], params: Mapping[str, Any]) -> SampleResult:
-        # Each request binds an immutable sampler path, never a mutable model ID.
-        sampler = self._service.create_sampling_client(model_path=checkpoint.sampler_path)
-        if sampler.get_base_model() != self._model:
-            raise ValueError("remote Tinker sampler checkpoint does not match the configured model")
-        result = sampler.sample(
-            prompt=self._sdk.ModelInput.from_ints(prompt),
-            num_samples=1,
-            sampling_params=self._sdk.SamplingParams(**params),
-        ).result(timeout=self._config.inference_timeout_s)
-        if len(result.sequences) != 1:
-            raise ValueError("Tinker returned an unexpected number of sequences")
-        sequence = result.sequences[0]
-        if sequence.logprobs is None or len(sequence.tokens) != len(sequence.logprobs):
-            raise ValueError("Tinker must return exact log probabilities for every sampled token")
-        if any(not math.isfinite(value) for value in sequence.logprobs):
-            raise ValueError("Tinker returned non-finite sampled log probabilities")
-        return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
+        staging = directory.parent / f".{directory.name}.download"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        try:
+            archive = staging / "checkpoint.tar"
+            urllib.request.urlretrieve(response.url, archive)
+            raw = staging / "tinker"
+            _extract_archive(archive, raw)
+            weights.build_lora_adapter(base_model=self._model, adapter_path=str(raw), output_path=str(directory))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def close(self) -> None:
         self._service.close("success").result(timeout=self._config.train_timeout_s)

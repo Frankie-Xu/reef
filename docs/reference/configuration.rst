@@ -90,12 +90,25 @@ Version 2 contains no process definitions. ``service`` and ``services`` are
 rejected; HTTP settings belong in ``reef``. The selected Recipe and inference
 or training backend determine the processes, dependencies and connections.
 ``training.config`` holds workload variables such as checkpoint directories;
-native backend flags belong in ``training.options``.
+native training flags belong in ``training.options`` and engine flags in ``inference.options``.
 
 With the default Slime backend, Reef starts a local driver, waits for its healthy
-bridge, then starts HTTP and obtains the inference connection from that bridge.
-Slime owns the SGLang model workers; Reef does not start a second inference
-server. Both processes share the Ray address, namespace, actor name and resolved
+coordinator, then starts HTTP and obtains the inference connection from that coordinator.
+For managed full-weight and LoRA training, including colocated configurations,
+the backend-neutral Reef model driver owns separate
+resource, inference and training components. Reef selects the two backend
+definitions independently, starts each component, then attaches a weight-transfer
+session. Training workers send directly to inference workers; batch processing
+uses Slime's adapter inside Reef's coordinator. Publication, version verification,
+LoRA residency and colocated memory handoffs live in ``reef.runtime``.
+Native engine launch and control live in ``reef.inference.sglang``. Reef
+reserves the model GPUs itself (``reef.runtime.executor.placement``): one
+placement group per deployment, ordered by node and device, sliced for the
+training and inference components; ``training.colocate`` gives both the same
+bundles.
+External-engine paths use the same component lifecycle while borrowing their
+external engines; automatic cold-rebuild supervision remains disabled for them.
+HTTP and the driver share the Ray address, namespace, actor name and resolved
 model path. With no Ray address, Reef owns the shared runtime and stops it on
 exit; an existing cluster is left running. Model topology, optimizer settings
 and checkpoint paths still need the complete options for the selected recipe.
@@ -105,10 +118,11 @@ The same path supports CLI-only training with
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
 ``training.backend`` defaults to ``slime`` for compatibility. The optional
 ``tinker`` backend provides remote LoRA training and immutable sampling without
-local GPUs; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
+local GPUs, or trains behind Reef's coordinator for a local SGLang engine when
+``inference.backend: sglang`` is selected; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
 installed ``reef.training_backends`` entry-point name or an importable
-``package.module:Deployment`` class. The selected definition owns the process
-plan and HTTP runtime connection; other backends do not inherit Slime's Ray,
+``package.module:Deployment`` class. The selected definition describes the process
+plan and HTTP runtime connection; Reef owns the managed component lifecycle; other backends do not inherit Slime's Ray,
 SGLang or native-argument requirements.
 
 An in-process integration can use ``InProcessTrainingDeployment``: it starts
@@ -121,11 +135,97 @@ support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/32
 this extension contract alone does not install or implement MLX.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
-Slime-owned inference uses ``training.options.sglang-*`` for native engine
-settings; upstream provider settings and standalone ``inference.options`` cannot
-be combined with it. Reef binds ``training.options.hf-checkpoint`` to
+Slime-integrated inference uses the same ``inference`` fields as standalone
+serving. ``inference.num-gpus`` is the total inference GPU budget;
+``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
+The total defaults to the per-engine count and must be a positive multiple of
+it. For example, 4 GPUs with tensor parallel size 2 creates two engines.
+Standalone serving currently supports one engine, so its total must equal its
+tensor parallel size. An external provider does not accept local GPU requests.
+
+.. code:: yaml
+
+   inference:
+     model-path: Qwen/Qwen2.5-1.5B-Instruct
+     num-gpus: 1
+     tensor-parallel-size: 1
+     options:
+       mem-fraction-static: 0.6
+       router-port: 30000  # Slime-integrated inference only
+   training:
+     backend: slime
+     colocate: false  # true trains on the inference GPUs
+     options:
+       actor-num-nodes: 1
+       actor-num-gpus-per-node: 1
+       # Add the recipe's optimizer, model and checkpoint options here.
+
+CLI overrides use the same parser, for example
+``--inference.num-gpus 4 --inference.tensor-parallel-size 2`` or
+``--inference.options.mem-fraction-static 0.7``. Native engine options use
+SGLang's names without a ``sglang-`` prefix. The Slime integration translates
+these only when constructing driver arguments; generated inference flags are
+not stored in ``training.options``. Router bind settings use ``router-ip`` and
+``router-port``; other supported router flags retain their native ``router-*``
+names. The standalone engine launcher does not include a router.
+
+Migration from the previous version 2 training configuration:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous field
+     - Replacement
+   * - ``training.options.rollout-num-gpus``
+     - ``inference.num-gpus``
+   * - ``training.options.rollout-num-gpus-per-engine``
+     - ``inference.tensor-parallel-size`` (tensor-parallel engines)
+   * - ``training.options.sglang-context-length`` (and other ``sglang-*`` options)
+     - ``inference.options.context-length`` (remove the prefix)
+   * - ``training.options.sglang-router-port``
+     - ``inference.options.router-port``
+   * - ``training.options.colocate`` (with ``offload-train`` and ``offload-rollout``)
+     - ``training.colocate``
+
+Managed launches reject the previous inference flags in ``training.options``,
+even if their values agree with the new fields. Native options cannot override
+managed model, placement or parallelism settings. Pipeline/data parallel and
+prefill/decode-disaggregated inference topologies are not supported by this
+managed path yet. Unversioned explicit process stacks keep their native flags
+for those legacy deployments. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
+
+The training-capable SGLang implementation lives in ``reef.inference.sglang``.
+Its native engine launch and control do not depend on Slime. Slime converts its
+training requirements to plain configuration data and supplies the weight transport;
+the inference component receives ordinary configuration and borrowed GPU
+reservations. Custom inference executors now receive ``config`` and ``pg``
+instead of Slime's argument namespace. See `Worker executors
+<../developer-guide/executors.rst#independent-sglang-backend>`__ for the boundary.
+
+This continues `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+Training GPU capacity remains in ``training.options.actor-num-*``; the shared
+physical node size remains ``training.options.num-gpus-per-node``. Inference
+and training share one allocation plan, with no duplicate model-GPU
+reservations. Full-weight, LoRA and colocated training borrow Reef-owned
+inference. ``training.colocate`` shares the GPU reservation between them; Reef
+derives the native training and inference offload flags from it, and managed
+launches reject their spellings in ``training.options``.
+``training.options.keep-lora-base-resident`` retains the frozen inference base
+during later colocated LoRA steps; cold startup still releases all inference
+memory before training initializes. The separate inference control actor requires
+one Ray CPU and zero GPUs. Batch processing runs locally in the training
+coordinator, so no separate batch-manager CPU is reserved. The HTTP endpoint is
+still discovered through the training bridge. Managed deployments, including
+LoRA and colocated modes, automatically rebuild both components after failure,
+rerun checkpoint recovery and rediscover the endpoint
+without restarting the HTTP service. Explicit gateway URLs stay fixed. This
+recovery does not replay ambiguous optimizer steps and stops if old resources
+cannot be confirmed retired. A rejected Slime candidate also requires restoring
+the committed checkpoint before restart; its training checkpoint must not be
+used to reconstruct serving. See `Worker executors <../developer-guide/executors.rst>`__ for the
+recovery policy and compatibility limits.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -188,15 +288,17 @@ For Slime, a versioned training stack can contain:
 
 Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
-options reach ``reef.service.slime_driver`` through the same effective config
+options reach ``reef.service.training_driver`` through the same effective config
 as the HTTP child. The driver passes them through its existing recipe-specific
 argument handling and Slime's native parser. Automatic training launches use
 only this effective config and ignore an ambient ``SLIME_ARGS_FILE``. Explicit
 unversioned ``services`` stacks retain ``SLIME_ARGS_FILE`` and driver command flags, which
 take precedence over the options object; avoid specifying a flag in both places.
 
-``inference.backend-config`` has a different owner: it configures Reef's
-selected ``inference.backend-factory`` adapter, for example its tool parser.
+``inference.handler-config`` has a different owner: it configures Reef's
+selected ``inference.handler-factory`` adapter, for example its tool parser.
+The factory path must name an ``InferenceHandler`` subclass with a
+``from_config`` class method; handler functions are not supported.
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
@@ -304,7 +406,7 @@ objects are preserved, and an explicit container replaces the YAML value:
 .. code:: bash
 
    reef serve -c stack.yaml --reef.tokens '[]' \
-     --inference.backend-config '{"tool_call_parser": "qwen25"}'
+     --inference.handler-config '{"tool_call_parser": "qwen25"}'
 
 The parsed public values are also supplied to service commands and the HTTP
 child's config. An empty string, as an unset ``${VAR}`` reference expands to,
@@ -726,7 +828,7 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
    evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
-   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
+   evolution.promote | | optional ``Promoter`` subclass, instance, or dotted ``module:attribute`` reference; its ``__call__(samples, *, manifest=None)`` chooses which trace prompts to promote; without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
    evolution.publish | auto | ``review`` holds every gate win as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
    evolution.review_kinds | [] | node kinds whose wins wait for a promote while the rest publish at once; a win that touches a ``native_loop`` waits whether or not the list names it
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
@@ -773,13 +875,14 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
+   training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
    training.config.checkpoint_retention | storage-fraction bounds and the retention policy
-   training.options | native backend flags as a mapping: GPU layout, optimizer, sequence length, and loss settings
+   training.options | native training flags: actor GPU layout, optimizer, sequence length, and loss settings
 
 Slime fills architecture flags such as layer counts and hidden sizes from
 ``inference.model-path``. Do not put them in the config.
@@ -791,21 +894,26 @@ Only weight-training recipes read this section; a deployment that pairs it
 with any other recipe fails at startup, because a harness recipe builds its
 evaluator in code. Absent by default, in which case a successful
 weight-training step publishes without a gate. When present, Reef calls the
-named factory once per scenario and hands the plugin the exported but
+named factory's ``build`` method once per scenario and hands the plugin the exported but
 unpublished checkpoint.
 
 .. config::
 
-   evaluation.module | a ``package.module:factory`` reference to the plugin factory. Required.
-   evaluation.config | opaque mapping handed to the factory; Reef never reads it
+   evaluation.module | a ``package.module:Factory`` reference to a ``CandidateEvaluationPluginFactory`` subclass with a no-argument constructor, or a factory instance. Required.
+   evaluation.config | opaque mapping handed to ``factory.build``; Reef never reads it
 
 .. code:: yaml
 
    evaluation:
-     module: my_pkg.evaluation:build_evaluator
+     module: my_pkg.evaluation:EvaluationFactory
      config:
        benchmark: gsm8k
        threshold: 0.8
+
+``build(config, *, runtime, training_runtime, scenario, environ)`` must return
+a ``CandidateEvaluationPlugin`` subclass instance. The factory constructor is
+validated while loading recipe config and must not allocate model resources.
+Plain function factories and structural lookalikes are not accepted.
 
 The plugin interface is in `Write a recipe
 <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.

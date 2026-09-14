@@ -35,8 +35,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Python-side inference adapters; install native SGLang in its GPU environment.
+sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 tinker = [
     "tinker==0.28.1; python_version >= '3.11'",
+    # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
+    "tinker-cookbook==0.5.7; python_version >= '3.11'",
     "jinja2>=3.1.0; python_version >= '3.11'",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
@@ -59,8 +63,10 @@ slime = [
     "omegaconf",
     "peft",
     "pillow",
+    "psutil>=5.9",
     "pylatexenc",
     "qwen_vl_utils",
+    "requests",
     "ray[default]",
     "safetensors",
     "sglang-router>=0.3.2",
@@ -96,7 +102,7 @@ reef-native = "reef.harness.runners.native.__main__:main"
 reef-terminus = "reef.harness.runners.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
-reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"
+reef = "reef.inference.sglang.plugin:install_sglang_plugin"
 
 [tool.setuptools]
 include-package-data = true
@@ -108,7 +114,9 @@ fallback_version = "0.0.0.dev0"
 # declared dependency; the reef wheel must not ship its source.
 # `reef` is the shared machinery. The sibling `recipes` tree is a cookbook,
 # not package code, so neither its methods nor its runnable examples ship.
+# runtime/ intentionally contains only its five modules and executor/ (PEP 420).
 [tool.setuptools.packages.find]
+namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]

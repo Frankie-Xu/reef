@@ -155,11 +155,13 @@ protocols, and never imports a concrete one.
 Remote weight snapshots
 ------------------------
 
-``WeightLoader.activate`` calls the runtime's ``activate_checkpoint(artifact)``
-when a materializable head becomes available, including startup recovery and
-rollback. ``TrainingRuntime`` binds nothing by default, since a local engine
-already serves what the artifact names. A runtime that serves immutable remote
-snapshots overrides it to validate the checkpoint and bind its remote sampler
-and training state. Tinker uses this to restore the authoritative artifact
-before the scenario serves requests; the surface layer never imports the
-concrete SDK.
+``WeightLoader.activate`` calls the inference runtime's
+``activate_checkpoint(artifact)`` when a materializable head becomes
+available, including startup recovery and rollback. ``WeightRuntime`` binds
+nothing by default, since a local engine already serves what the artifact
+names. An inference runtime that serves immutable remote snapshots overrides
+it to validate the checkpoint and bind its remote sampler and training state.
+Tinker's inference runtime uses this to restore the authoritative artifact
+before the scenario serves requests; its training runtime learns the same
+head through ``TrainingRuntime.commit_candidate`` and rollback's
+``restore_checkpoint``. The surface layer never imports the concrete SDK.

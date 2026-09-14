@@ -15,14 +15,14 @@ import pytest
 import yaml
 from reef_service._training_deployment import LocalDeployment
 
-from reef.runtime.registry import RuntimeConfigError
+from reef.runtime.deployment import RuntimeConfigError
 from reef.service.assembly import _connect_training_runtime, _training_recipe
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.train.runtime_backend import RuntimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 
 BACKEND = "reef_service._training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -51,14 +51,15 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
     for config in (file_config, cli_config):
         assert [process["name"] for process in config["services"]] == ["reef"]
         assert "execution" not in config
-        assert not {"ray_address", "ray_namespace", "inference_backend_factory"} & config["reef"].keys()
+        assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
+        runtime, inference = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
         assert runtime.config["label"] == "001"
         assert runtime.max_staleness == 2
+        inference.shutdown()
         runtime.shutdown()
         assert runtime.closed
 
@@ -105,7 +106,7 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
 def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
     from reef_service._training_deployment import runtime_factory
 
-    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+    from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(base_url="http://unused")
     closed = []
@@ -127,11 +128,13 @@ def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_pat
     records = SQLiteRecordStore()
     try:
         trainer = recipe.build("scenario", records)
-        assert isinstance(trainer.training_backend, RuntimeTrainingBackend)
-        assert trainer.training_backend.runtime is recipe.runtime
-        assert trainer.training_backend.experiment_config()["runtime"] == "LocalRuntime"
+        assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
+        assert trainer.candidate_backend.inference_runtime is recipe.runtime
+        assert trainer.candidate_backend.training_runtime is recipe.training_runtime
+        assert trainer.candidate_backend.experiment_config()["runtime"] == "LocalRuntime"
     finally:
         recipe.runtime.shutdown()
+        recipe.training_runtime.shutdown()
         records.close()
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 import threading
@@ -16,8 +17,9 @@ from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
 from reef.cli import main
 from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
-from reef.runtime.inference import UpstreamStatusError
-from reef.runtime.registry import RuntimeConfigError
+from reef.inference.tinker import SampleResult, TinkerInferenceRuntime, TinkerSampler
+from reef.runtime.deployment import RuntimeConfigError
+from reef.runtime.interfaces import TrainingRuntimeError, UpstreamStatusError
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
@@ -25,21 +27,24 @@ from reef.surface.weights import WeightLoader
 from reef.train.algos.base import StepPreparer
 from reef.train.algos.registry import register_preparer, unregister_preparer
 from reef.train.algos.signals import StepScheduling, StepSignal
-from reef.train.runtime_backend import RuntimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
-from reef.train.tinker_backend.client import SampleResult, TinkerClient
+from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_step
-from reef.train.tinker_backend.runtime import TinkerRuntime
+from reef.train.tinker_backend.runtime import TinkerTrainingRuntime
 
 
-class RemoteClient(TinkerClient):
+class RemoteClient(TinkerClient, TinkerSampler):
+    """One offline double for both SDK boundaries: the trainer's and the sampler's."""
+
     def __init__(self):
         self.initializations = 0
         self.calls = []
         self.sampled = []
+        self.downloads = []
         self.closed = False
         self.fail = False
 
@@ -63,9 +68,15 @@ class RemoteClient(TinkerClient):
     def decode(self, tokens):
         return "hello"
 
-    def sample(self, checkpoint, prompt, params):
-        self.sampled.append((checkpoint, prompt, params))
+    def sample(self, sampler_path, prompt, params):
+        self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
+
+    def download(self, checkpoint, directory):
+        self.downloads.append((checkpoint, directory))
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 32}))
+        (directory / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def close(self):
         self.closed = True
@@ -97,10 +108,26 @@ def preparer():
     unregister_preparer(value.name)
 
 
+class Deployment:
+    """The training and inference runtimes as the factory builds them: two SDK boundaries, no shared object."""
+
+    def __init__(self, config, client):
+        self.config = config
+        self.training = TinkerTrainingRuntime("Qwen/Qwen3-8B", config, client)
+        self.inference = TinkerInferenceRuntime(client, base_model="Qwen/Qwen3-8B")
+
+    def backend(self, preparer):
+        return RuntimeCandidateBackend(self.training, preparer.name, inference_runtime=self.inference)
+
+    def shutdown(self):
+        self.training.shutdown()
+        self.inference.shutdown()
+
+
 @pytest.fixture
 def runtime(tmp_path):
     client = RemoteClient()
-    value = TinkerRuntime("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "state")), client)
+    value = Deployment(TinkerConfig(state_dir=str(tmp_path / "state")), client)
     yield value, client
     value.shutdown()
 
@@ -127,8 +154,8 @@ def item(version, group="g"):
 
 
 def prepared(runtime, preparer, *, step=0):
-    batch = TrainingBatch("batch", (item(runtime.serving_runtime_load_id()),))
-    return runtime.prepare_training_step(batch, preparer.name, {}, step)
+    batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
+    return runtime.training.prepare_training_step(batch, preparer.name, {}, step)
 
 
 def decision(selected):
@@ -145,56 +172,63 @@ def empty_artifact(tmp_path):
 
 def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, preparer, tmp_path):
     value, client = runtime
+    backend = value.backend(preparer)
     base = empty_artifact(tmp_path)
-    original = value.serving_runtime_load_id()
-    candidate = value.train_candidate(prepared(value, preparer).payload)
-    assert value.current_runtime_load_id() == original
-    assert value.snapshot(base)[1] == original
-    activated = value.activate_candidate(candidate)
-    assert value.current_runtime_load_id() is None
-    assert not value.inference_admission_status["open"]
-    assert value.snapshot(base)[1] == original
-    published = Artifact.local(Path(candidate.checkpoint_path))
-    WeightLoader().activate(published, value)
-    assert not value.inference_admission_status["open"]
-    with pytest.raises(RuntimeError, match="does not match"):
-        value.reconcile_training_job(1, committed_training_job_id="another")
-    value.reconcile_training_job(1, committed_training_job_id=candidate.training_job_id)
-    assert value.current_runtime_load_id() == activated.runtime_load_id
+    original = value.inference.serving_runtime_load_id()
+    batch = TrainingBatch("batch", (item(original),))
+    step = backend.prepare_step(batch, {}, 0)
+    assert value.inference.current_runtime_load_id() == original
+    assert value.inference.snapshot(base)[1] == original
+    result = backend.settle_step(step, decision(True))
+    assert value.inference.current_runtime_load_id() == original
+    assert value.inference.serving_runtime_load_id() == result.runtime_load_id != original
+    assert not value.inference.inference_admission_status["open"]
+    assert value.inference.snapshot(base)[1] == original
+    published = Artifact.local(Path(result.checkpoint_path))
+    WeightLoader().activate(published, value.inference)
+    assert not value.inference.inference_admission_status["open"]
+    with pytest.raises(TrainingRuntimeError, match="does not match"):
+        backend.acknowledge_commit(1, "another")
+    backend.acknowledge_commit(1, result.training_job_id)
+    assert value.inference.current_runtime_load_id() == result.runtime_load_id
+    assert value.inference.inference_admission_status["open"]
+    assert value.training.incumbent.state_path == "tinker://update-1/state"
     assert len(client.calls) == 1
 
 
 def test_rejected_and_uncertain_candidates_leave_incumbent_optimizer_unchanged(runtime, preparer):
     value, client = runtime
     payload = prepared(value, preparer).payload
-    original = value.current_runtime_load_id()
-    candidate = value.train_candidate(payload)
-    assert value.train_candidate(payload) == candidate
+    original = value.inference.current_runtime_load_id()
+    candidate = value.training.train_candidate(payload)
+    assert value.training.train_candidate(payload) == candidate
     assert len(client.calls) == 1
-    value.reject_candidate(candidate, decision(False))
+    value.training.reject_candidate(candidate, decision(False))
     client.fail = True
     with pytest.raises(TimeoutError):
-        value.train_candidate(payload)
+        value.training.train_candidate(payload)
     client.fail = False
-    value.train_candidate(payload)
+    value.training.train_candidate(payload)
     assert len(client.calls) == 3
     assert all(call[0].state_path == "tinker://base/state" for call in client.calls)
-    assert value.current_runtime_load_id() == original
+    assert value.inference.current_runtime_load_id() == original
 
 
 def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime, preparer, tmp_path):
     value, client = runtime
-    candidate = value.train_candidate(prepared(value, preparer).payload)
-    value.activate_candidate(candidate)
-    value.activate_checkpoint(empty_artifact(tmp_path))
-    assert value.inference_admission_status["open"]
+    candidate = value.training.train_candidate(prepared(value, preparer).payload)
+    value.inference.activate_candidate(candidate)
+    assert value.inference.pending_training_job_id == candidate.training_job_id
+    # Reloading a different head after a failed publication drops the pending candidate.
+    value.inference.activate_checkpoint(empty_artifact(tmp_path))
+    assert value.inference.pending_training_job_id is None
     value.shutdown()
-    restored = TinkerRuntime("Qwen/Qwen3-8B", value._config, client)
+    restored = Deployment(value.config, client)
     try:
-        restored.activate_checkpoint(Artifact.local(Path(candidate.checkpoint_path)))
-        restored.reconcile_training_job(1, committed_training_job_id=candidate.training_job_id)
-        assert restored.current_runtime_load_id() != value.serving_runtime_load_id()
-        restored.train_candidate(prepared(restored, preparer, step=1).payload)
+        restored.inference.activate_checkpoint(Artifact.local(Path(candidate.checkpoint_path)))
+        restored.backend(preparer).acknowledge_commit(1, candidate.training_job_id)
+        assert restored.inference.current_runtime_load_id() != value.inference.serving_runtime_load_id()
+        restored.training.train_candidate(prepared(restored, preparer, step=1).payload)
         assert client.calls[-1][0].state_path == "tinker://update-1/state"
         assert client.initializations == 1
     finally:
@@ -203,32 +237,39 @@ def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime,
 
 def test_live_versions_and_rollback_bind_exact_snapshots(runtime, preparer, tmp_path):
     value, _ = runtime
-    candidate = value.train_candidate(prepared(value, preparer).payload)
-    activated = value.activate_candidate(candidate)
-    value.reconcile_training_job(1, committed_training_job_id=candidate.training_job_id)
+    candidate = value.training.train_candidate(prepared(value, preparer).payload)
+    activated = value.inference.activate_candidate(candidate)
+    value.backend(preparer).acknowledge_commit(1, candidate.training_job_id)
     live = Artifact(LiveWeightArtifactRef("live", "release", "parent", activated.runtime_load_id), None)
-    assert value.snapshot(live)[0].state_path == "tinker://update-1/state"
+    assert value.inference.snapshot(live)[0] == "tinker://update-1/sampler"
+    assert value.training.incumbent.state_path == "tinker://update-1/state"
     base = empty_artifact(tmp_path)
-    WeightLoader().load(base, value)
-    WeightLoader().activate(base, value, source=base)
-    assert value.snapshot(live)[1] == activated.runtime_load_id
-    assert value.current_runtime_load_id() != activated.runtime_load_id
+    value.training.restore_checkpoint(base)
+    WeightLoader().load(base, value.inference)
+    WeightLoader().activate(base, value.inference, source=base)
+    assert value.training.incumbent.state_path == "tinker://base/state"
+    assert value.inference.snapshot(live)[1] == activated.runtime_load_id
+    assert value.inference.current_runtime_load_id() != activated.runtime_load_id
     with pytest.raises(ValueError, match="incarnation"):
-        value.snapshot(Artifact(LiveWeightArtifactRef("live", "x", None, "old:0"), None))
+        value.inference.snapshot(Artifact(LiveWeightArtifactRef("live", "x", None, "old:0"), None))
 
 
 def test_exclusive_state_dir_and_model_validation(runtime, tmp_path):
     value, _ = runtime
     with pytest.raises(ValueError, match="already owned"):
-        TinkerRuntime("Qwen/Qwen3-8B", value._config, RemoteClient())
+        TinkerTrainingRuntime("Qwen/Qwen3-8B", value.config, RemoteClient())
     other = TinkerCheckpoint("other/model", 32, "tinker://other/state", "tinker://other/sampler")
     other.write(tmp_path / "other")
+    with pytest.raises(ValueError, match="base model"):
+        value.inference.activate_checkpoint(Artifact.local(tmp_path / "other"))
     with pytest.raises(ValueError, match="model/rank"):
-        value.activate_checkpoint(Artifact.local(tmp_path / "other"))
+        value.training.restore_checkpoint(Artifact.local(tmp_path / "other"))
     (tmp_path / "other" / "tinker-checkpoint.json").unlink()
     (tmp_path / "other" / "weights.bin").write_bytes(b"not a manifest")
     with pytest.raises(ValueError, match="missing"):
-        value.snapshot(Artifact.local(tmp_path / "other"))
+        value.inference.snapshot(Artifact.local(tmp_path / "other"))
+    with pytest.raises(ValueError, match="missing"):
+        value.training.restore_checkpoint(Artifact.local(tmp_path / "other"))
 
 
 def test_exact_chat_tokens_and_buffered_sse(runtime, tmp_path):
@@ -239,17 +280,16 @@ def test_exact_chat_tokens_and_buffered_sse(runtime, tmp_path):
         "max_tokens": 2,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    response = asyncio.run(value.inference_backend.inference(artifact, "/v1/chat/completions", request))
+    handler = value.inference.inference_handler
+    response = asyncio.run(handler.inference(artifact, "/v1/chat/completions", request))
     assert response["training"]["tokens"] == [101, 102, 201, 202]
     assert response["training"]["rollout_log_probs"] == [-0.2, -0.3]
-    assert response["training"]["runtime_load_id"] == value.current_runtime_load_id()
+    assert response["training"]["runtime_load_id"] == value.inference.current_runtime_load_id()
     assert response["usage"]["total_tokens"] == 4
     assert client.rendered[1] == {"enable_thinking": False}
 
     async def read_stream():
-        stream = await value.inference_backend.inference_stream(
-            artifact, "/v1/chat/completions", {**request, "stream": True}
-        )
+        stream = await handler.inference_stream(artifact, "/v1/chat/completions", {**request, "stream": True})
         body = b"".join([chunk async for chunk in stream.chunks])
         assert stream.record_response["training"]["tokens"] == [101, 102, 201, 202]
         assert b"training" not in body
@@ -276,7 +316,7 @@ def test_unsupported_chat_options_fail_explicitly(runtime, tmp_path, extra):
     value, client = runtime
     with pytest.raises(UpstreamStatusError):
         asyncio.run(
-            value.inference_backend.inference(
+            value.inference.inference_handler.inference(
                 empty_artifact(tmp_path),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}], **extra},
@@ -288,7 +328,7 @@ def test_unsupported_chat_options_fail_explicitly(runtime, tmp_path, extra):
 def test_schedule_keeps_comparison_sets_and_handles_epochs(preparer):
     preparer.scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_step(batch, preparer.name, {}, 0, runtime_load_id="v", batch_size=1)
+    step = prepare_tinker_step(batch, preparer.name, {}, runtime_load_id="v", batch_size=1)
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -296,7 +336,7 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(preparer):
 
 def test_stale_policy_is_dropped_through_generic_backend(runtime, preparer):
     value, client = runtime
-    backend = RuntimeTrainingBackend(value, step_preparer=preparer.name)
+    backend = value.backend(preparer)
     result = backend.prepare_step(TrainingBatch("stale", (item("old:0"),)), {}, 0)
     assert result.outcome == "drop"
     assert not client.calls
@@ -439,11 +479,11 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     settings = TinkerConfig(state_dir=str(tmp_path / "runtime"))
     client = RemoteClient()
-    runtime = TinkerRuntime("Qwen/Qwen3-8B", settings, client)
+    runtime = Deployment(settings, client)
 
     def build(value):
         return Dispatcher(
-            PolicyRecipe(value),
+            PolicyRecipe(value.training, runtime=value.inference),
             factory,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=tmp_path / "records",
@@ -455,7 +495,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
         scenario = first.get_or_create_scenario("math")
         base = scenario.current_artifact_ref().release_id
         response = asyncio.run(
-            runtime.inference_backend.inference(
+            runtime.inference.inference_handler.inference(
                 scenario.artifact_for_version(base),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hello"}]},
@@ -479,35 +519,39 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
             )
         )
         deadline = time.monotonic() + 5
-        while scenario.scenario_step < 1 and time.monotonic() < deadline:
+        # The commit advances the step first; the trainer thread reopens admission right after.
+        while (
+            scenario.scenario_step < 1 or not runtime.inference.inference_admission_status["open"]
+        ) and time.monotonic() < deadline:
             time.sleep(0.01)
         assert scenario.scenario_step == 1, first.build_training_status()
         published = scenario.current_artifact_ref()
         assert scenario.committed_training_job_id
-        assert runtime.inference_admission_status["open"]
+        assert runtime.inference.inference_admission_status["open"]
         assert (
-            runtime.snapshot(scenario.artifact_for_version(published.release_id))[0].state_path
-            == "tinker://update-1/state"
+            runtime.inference.snapshot(scenario.artifact_for_version(published.release_id))[0]
+            == "tinker://update-1/sampler"
         )
+        assert runtime.training.incumbent.state_path == "tinker://update-1/state"
     finally:
         first.close()
 
-    restored = TinkerRuntime("Qwen/Qwen3-8B", settings, RemoteClient())
+    restored = Deployment(settings, RemoteClient())
     second = build(restored)
     try:
         scenario = second.get_or_create_scenario("math")
         assert scenario.scenario_step == 1
         assert scenario.trainer.state == {"steps": 1}
         assert (
-            restored.snapshot(scenario.artifact_for_version(published.release_id))[1]
-            == restored.current_runtime_load_id()
+            restored.inference.snapshot(scenario.artifact_for_version(published.release_id))[1]
+            == restored.inference.current_runtime_load_id()
         )
+        assert restored.training.incumbent.state_path == "tinker://update-1/state"
         scenario.rollback(base)
         assert scenario.scenario_step == 2
-        assert (
-            restored.snapshot(scenario.artifact_for_version(scenario.current_artifact_ref().release_id))[0].state_path
-            == "tinker://base/state"
-        )
+        current = scenario.artifact_for_version(scenario.current_artifact_ref().release_id)
+        assert restored.inference.snapshot(current)[0] is None
+        assert restored.training.incumbent.state_path == "tinker://base/state"
     finally:
         second.close()
 
@@ -526,9 +570,9 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     initial = tmp_path / "initial"
     initial.mkdir()
     remote = RemoteClient()
-    runtime = TinkerRuntime("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "runtime")), remote)
+    runtime = Deployment(TinkerConfig(state_dir=str(tmp_path / "runtime")), remote)
     dispatcher = Dispatcher(
-        TTTDRecipe(runtime, groups_per_step=1, rollouts_per_group=4),
+        TTTDRecipe(runtime.training, runtime=runtime.inference, groups_per_step=1, rollouts_per_group=4),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -553,25 +597,24 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
 
 def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, preparer, tmp_path):
     value, _ = runtime
+    inference = value.inference
     base = empty_artifact(tmp_path)
-    first = value.activate_checkpoint(base)
-    candidate = value.train_candidate(prepared(value, preparer).payload)
-    selected = value.activate_candidate(candidate)
+    first = inference.activate_checkpoint(base)
+    candidate = value.training.train_candidate(prepared(value, preparer).payload)
+    selected = inference.activate_candidate(candidate)
     published = Artifact.local(Path(candidate.checkpoint_path))
-    value.activate_checkpoint(published)
-    value.reconcile_training_job(1, committed_training_job_id=candidate.training_job_id)
+    inference.activate_checkpoint(published)
+    inference.acknowledge_publication(candidate.training_job_id)
     rollback = Artifact.local(base.local_path)
-    latest = value.activate_checkpoint(rollback)
+    latest = inference.activate_checkpoint(rollback)
     assert int(first.split(":")[-1]) < int(selected.runtime_load_id.split(":")[-1]) < int(latest.split(":")[-1])
-    assert value.snapshot(base)[1] == first
-    assert value.snapshot(published)[1] == selected.runtime_load_id
-    assert value.snapshot(rollback)[1] == latest
-    assert value.activate_checkpoint(rollback) == latest
+    assert inference.snapshot(base)[1] == first
+    assert inference.snapshot(published)[1] == selected.runtime_load_id
+    assert inference.snapshot(rollback)[1] == latest
+    assert inference.activate_checkpoint(rollback) == latest
 
 
 def test_configured_batch_size_respects_error_remainder(preparer):
     preparer.scheduling = StepScheduling(batch_size="configured", remainder="error")
     with pytest.raises(ValueError, match="configured batch_size"):
-        prepare_tinker_step(
-            TrainingBatch("batch", (item("v"),)), preparer.name, {}, 0, runtime_load_id="v", batch_size=2
-        )
+        prepare_tinker_step(TrainingBatch("batch", (item("v"),)), preparer.name, {}, runtime_load_id="v", batch_size=2)

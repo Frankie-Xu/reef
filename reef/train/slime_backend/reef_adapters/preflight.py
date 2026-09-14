@@ -1,4 +1,4 @@
-"""Fail-fast checks before ``start_bridge`` boots the Slime training stack.
+"""Fail-fast checks before Reef starts the Slime training stack.
 
 Everything here runs before any placement group or GPU worker exists, so a
 configuration or storage problem stops the driver with a clear error instead
@@ -7,15 +7,8 @@ of a half-started cluster.
 
 from __future__ import annotations
 
-import os
-
+from reef.runtime.recovery import marker_rollouts, read_marker
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
-from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
-    require_lora_distributed_request_schema,
-    require_lora_tensor_request_schema,
-)
-from reef.train.slime_backend.reef_adapters.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
-from reef.train.slime_backend.reef_adapters.training_job.marker import marker_rollouts, read_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
@@ -55,7 +48,7 @@ def validate_bridge_args(args, spec: SlimeAlgorithm | None) -> None:
         # a non-colocated engine never releases anything to begin with.
         # Spelled out rather than calling megatron_lora_enabled, which would
         # put torch on this module's import path. It is the same predicate:
-        # start_bridge derives its own `lora` from that helper, and the helper
+        # prepare_bridge derives its own `lora` from that helper, and the helper
         # is this comparison, so the two cannot disagree.
         if int(getattr(args, "megatron_lora_rank", 0) or 0) <= 0:
             raise ValueError("--keep-lora-base-resident requires LoRA training; set --megatron-lora-rank")
@@ -66,56 +59,6 @@ def validate_bridge_args(args, spec: SlimeAlgorithm | None) -> None:
     save = getattr(args, "save", None)
     if not isinstance(save, str) or not save.strip():
         raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
-
-
-def configure_sglang_runtime(args) -> None:
-    """Apply Reef's serving invariants through generic Slime/SGLang options.
-
-    Disjoint/PD weight updates preserve each active request's private KV state.
-    Colocated regular engines retract instead, because their KV allocation
-    must leave the GPU during training, and recompute it after publication. A
-    shared radix-cache entry has no runtime-load-ID identity, so Reef disables
-    cross-request prefix reuse. SGLang's native plugin hook installs Reef's
-    token metadata and colocated suspension policy inside each scheduler.
-    """
-    colocate = bool(getattr(args, "colocate", False))
-    args.sglang_disable_radix_cache = True
-    # Reef consumes /generate as a token-native SSE source. Disjoint chunks
-    # keep text, ids, log-probs, and scheduler metadata linear in rollout
-    # length and give the capture path one unambiguous wire contract.
-    args.sglang_incremental_streaming_output = True
-    args.weight_update_pause_mode = "retract" if colocate else "in_place"
-    os.environ[REEF_SGLANG_PLUGIN_ENV] = "1"
-    configured_plugins = os.environ.get("SGLANG_PLUGINS")
-    plugins = (
-        tuple(name.strip() for name in configured_plugins.split(",") if name.strip()) if configured_plugins else ()
-    )
-    os.environ["SGLANG_PLUGINS"] = ",".join(dict.fromkeys((*plugins, SGLANG_PLUGIN_NAME)))
-
-    if int(getattr(args, "megatron_lora_rank", 0) or 0) > 0:
-        require_lora_tensor_request_schema()
-        require_lora_distributed_request_schema()
-
-    if colocate and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
-        raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
-
-    config_path = getattr(args, "sglang_config", None)
-    if config_path is None:
-        return
-
-    from slime.backends.sglang_utils.sglang_config import SglangConfig
-
-    config = SglangConfig.from_yaml(config_path)
-    if colocate and config.has_pd_disaggregation:
-        raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
-    for model in config.models:
-        for group in model.server_groups:
-            overrides = {key.replace("-", "_"): value for key, value in group.overrides.items()}
-            if overrides.get("disable_radix_cache", True) is not True:
-                raise ValueError(
-                    "Reef weight updates require disable_radix_cache=true "
-                    f"for SGLang model {model.name!r} group {group.worker_type!r}"
-                )
 
 
 def configure_megatron_runtime(args) -> None:
@@ -143,7 +86,7 @@ def _validate_advantage_computation(args, spec: SlimeAlgorithm | None) -> None:
 
     A loss family that keeps Slime's advantage pass declares
     ``allows_slime_advantage_computation``.  Without a resolved family
-    (``start_bridge`` called directly), any registered family that allows
+    (``prepare_bridge`` called directly), any registered family that allows
     it is accepted.
     """
     if not getattr(args, "compute_advantages_and_returns", True):
@@ -186,6 +129,13 @@ def prepare_checkpoint_storage(args, retention: RetentionConfig) -> CheckpointSt
     marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] == "RUNNING":
         raise RuntimeError(f"ambiguous training job {marker['job_id']}")
+    if marker is not None and marker["status"] in {"REJECTING", "REJECTED"}:
+        # The newest training checkpoint still contains the declined candidate;
+        # it cannot reconstruct the incumbent engines or committed adapters.
+        raise RuntimeError(
+            f"training job {marker['job_id']} is {marker['status']}; "
+            "restore the committed checkpoint before restarting inference"
+        )
     storage_plan = storage.validate_capacity(active_rollouts=marker_rollouts(marker))
     if storage_plan["blocked"]:
         reasons = "; ".join(storage_plan["reasons"])

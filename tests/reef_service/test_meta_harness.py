@@ -23,9 +23,9 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
@@ -482,7 +482,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         _report_once(scenario, scenario_name, "1")
         result = scenario.prepare_training_step()
         assert result is not None and result.state is not None
-        backend = scenario.trainer._training_backend
+        backend = scenario.trainer._candidate_backend
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
@@ -648,7 +648,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
         _report_once(scenario, "commit-failure", "2")
         second = scenario.prepare_training_step()
         assert second is not None and second.artifact is None
-        backend = scenario.trainer._training_backend
+        backend = scenario.trainer._candidate_backend
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
@@ -696,7 +696,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         _report_once(scenario, "publish-failure", "1")
         result = scenario.prepare_training_step()
         assert result.artifact is not None
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         assert tuple(backend._entries()) == SEED
         head = scenario.current_artifact_ref()
         checkpoint = scenario.repository.require_checkpoint_artifact()

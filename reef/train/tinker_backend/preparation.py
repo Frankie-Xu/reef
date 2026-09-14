@@ -8,7 +8,7 @@ from typing import Any
 
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import TrainingBatch, trajectories
-from reef.runtime.base import PreparedTrainingStep
+from reef.runtime.interfaces import PreparedTrainingStep
 from reef.train.algos.registry import resolve_preparer
 from reef.train.algos.schedule import materialize_schedule, schedule_seed
 from reef.train.tinker_backend.losses import TokenRow, resolve_tinker_loss
@@ -18,11 +18,16 @@ def prepare_tinker_step(
     batch: TrainingBatch,
     preparer: str,
     state: Mapping[str, Any],
-    scenario_step: int,
     *,
-    runtime_load_id: str,
     batch_size: int,
+    runtime_load_id: str | None = None,
 ) -> PreparedTrainingStep:
+    """Shape one batch into Tinker optimizer batches.
+
+    With ``runtime_load_id`` the payload also records that serving version
+    and whether any trajectory was produced under another one; without it,
+    Reef's coordinator performs staleness admission from the batch itself.
+    """
     signal = resolve_preparer(preparer)(batch, state)
     if signal.action == "skip":
         return PreparedTrainingStep("skip", signal.next_algorithm_state, signal.metrics)
@@ -36,13 +41,14 @@ def prepare_tinker_step(
     rollout_ids = []
     for index, (item, advantage) in enumerate(zip(items, signal.advantages, strict=True)):
         training = item.training
-        if training.get("runtime_load_id") != runtime_load_id:
-            stale = True
-        spans = training.get("runtime_load_spans")
-        if spans:
-            parsed_spans = parse_runtime_load_spans(spans, response_length=len(training.get("loss_mask", ())))
-            if any(span.runtime_load_id != runtime_load_id for span in parsed_spans):
+        if runtime_load_id is not None:
+            if training.get("runtime_load_id") != runtime_load_id:
                 stale = True
+            spans = training.get("runtime_load_spans")
+            if spans:
+                parsed_spans = parse_runtime_load_spans(spans, response_length=len(training.get("loss_mask", ())))
+                if any(span.runtime_load_id != runtime_load_id for span in parsed_spans):
+                    stale = True
         rows.append(asdict(TokenRow.from_item(item, advantage)))
         key = f"group:{item.group_id}" if item.group_id is not None else f"row:{index}"
         rollout_ids.append(index if signal.scheduling.unit == "sample" else groups.setdefault(key, len(groups)))
@@ -70,10 +76,8 @@ def prepare_tinker_step(
         {**signal.metrics, "optimizer_steps": len(batches), "dropped_rollouts": schedule.dropped_rollouts},
         {
             "batch_id": batch.batch_id,
-            "scenario_step": scenario_step,
-            "source_runtime_load_id": runtime_load_id,
             "loss": signal.loss_family,
             "batches": batches,
-            "stale": stale,
+            **({"source_runtime_load_id": runtime_load_id, "stale": stale} if runtime_load_id is not None else {}),
         },
     )

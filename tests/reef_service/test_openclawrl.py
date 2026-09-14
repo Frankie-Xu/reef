@@ -7,7 +7,7 @@ import time
 
 import pytest
 from reef_service._trajectories import policy_trajectory
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.openclawrl.sessions import SessionIndex
@@ -17,7 +17,7 @@ from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.processors.computed import JudgingWorker
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import ProcessorContext, TrainingBatch
 
@@ -316,14 +316,14 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
 
 @pytest.mark.unit
 def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
-    recipe = OpenClawRLRecipe(StubTrainingRuntime(), batch_size=4)
+    recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=4)
     surface = recipe.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
     assert isinstance(surface.inference, WeightInferenceHooks)
     trainer = recipe.build("s", SQLiteRecordStore())
-    assert isinstance(trainer.training_backend, SlimeTrainingBackend)
-    assert trainer.training_backend.step_preparer == "openclawrl"
+    assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
+    assert trainer.candidate_backend.step_preparer == "openclawrl"
     trainer.close()
 
 
@@ -332,7 +332,7 @@ def test_recipe_reads_config() -> None:
     configured = OpenClawRLRecipe.from_environment(
         {},
         config={"data": {"batch_size": 2, "prm_timeout_s": 3600.0}},
-        runtime=StubTrainingRuntime(),
+        **runtime_bindings(StubTrainingRuntime()),
     )
     assert configured.batch_size == 2
     assert configured.prm_timeout_s == 3600.0
@@ -341,7 +341,7 @@ def test_recipe_reads_config() -> None:
 @pytest.mark.unit
 def test_recipe_requires_the_tokenizer_next_to_prm_url() -> None:
     with pytest.raises(ValueError, match="prm_tokenizer_path"):
-        OpenClawRLRecipe(StubTrainingRuntime(), prm_url="http://prm:23001")
+        OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), prm_url="http://prm:23001")
 
 
 @pytest.mark.unit
@@ -621,18 +621,18 @@ def test_truncated_reasoning_never_comes_back_as_the_reply() -> None:
     cap, not an answer. Handing it back as content is what makes a judge score
     chain-of-thought as the agent's reply.
     """
-    from reef.train.slime_backend.reef_adapters.sglang.chat import SGLangChatTrainingInferenceBackend
+    from reef.inference.sglang.chat import SGLangInferenceHandler
 
     truncated = "Okay, the user wants me to solve this. First I should read the file"
-    leaked, _ = SGLangChatTrainingInferenceBackend._assistant_message(truncated, None)
+    leaked, _ = SGLangInferenceHandler._assistant_message(truncated, None)
     assert leaked["content"] == truncated  # unguarded default is unchanged
 
-    caught, _ = SGLangChatTrainingInferenceBackend._assistant_message(truncated, None, force_reasoning=True)
+    caught, _ = SGLangInferenceHandler._assistant_message(truncated, None, force_reasoning=True)
     assert caught["content"] == ""
     assert caught["reasoning_content"] == truncated
 
     closed = "<think>pondering</think>The answer is 36."
-    parsed, _ = SGLangChatTrainingInferenceBackend._assistant_message(closed, None, force_reasoning=True)
+    parsed, _ = SGLangInferenceHandler._assistant_message(closed, None, force_reasoning=True)
     assert parsed["content"] == "The answer is 36."
     assert parsed["reasoning_content"] == "pondering"
 
@@ -643,6 +643,6 @@ def test_retired_openclawrl_fields_are_accepted_and_ignored(caplog) -> None:
     from recipes.openclawrl import OpenClawRLRecipe
 
     with caplog.at_level("WARNING"):
-        recipe = OpenClawRLRecipe(StubTrainingRuntime(), prm_teacher_timeout_s=5.0)
+        recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), prm_teacher_timeout_s=5.0)
     assert recipe.prm_teacher_timeout_s == 5.0
     assert "prm_teacher_timeout_s is deprecated and ignored" in caplog.text

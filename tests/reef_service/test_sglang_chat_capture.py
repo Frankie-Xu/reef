@@ -10,9 +10,9 @@ from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.inference.sglang.chat import SGLangInferenceHandler, _NativeStreamCapture
 from reef.service.request_service import client_inference_response
 from reef.service.streaming import stream_record
-from reef.train.slime_backend.reef_adapters.sglang.chat import SGLangChatTrainingInferenceBackend, _NativeStreamCapture
 
 
 class FakeTokenizer:
@@ -76,7 +76,7 @@ def test_native_stream_capture_rejects_cumulative_chunks() -> None:
 
 @pytest.mark.unit
 def test_chat_facade_forwards_only_an_explicit_lora_path() -> None:
-    backend = SGLangChatTrainingInferenceBackend(
+    backend = SGLangInferenceHandler(
         "http://unused",
         model_path="model",
         tokenizer=FakeTokenizer(),
@@ -122,7 +122,7 @@ def test_chat_facade_records_engine_native_ids_without_retokenizing(tmp_path) ->
         await server.start_server()
         try:
             tokenizer = FakeTokenizer()
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=tokenizer,
@@ -189,7 +189,7 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -238,7 +238,7 @@ def test_nonstream_fallback_uses_the_scheduler_stamped_final_version() -> None:
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -281,7 +281,7 @@ def test_live_chat_rejects_tokenizer_only_runtime_load_ids() -> None:
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -345,7 +345,7 @@ def test_chat_facade_parses_tool_calls_without_changing_training_tokens(tmp_path
         await server.start_server()
         try:
             tokenizer = FakeTokenizer()
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=tokenizer,
@@ -429,7 +429,7 @@ def test_anthropic_facade_normalizes_messages_and_keeps_private_training_transcr
         await server.start_server()
         try:
             tokenizer = FakeTokenizer()
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=tokenizer,
@@ -485,7 +485,7 @@ def test_anthropic_facade_normalizes_messages_and_keeps_private_training_transcr
 @pytest.mark.unit
 def test_anthropic_count_tokens_uses_the_exact_template_without_exposing_training(tmp_path) -> None:
     tokenizer = FakeTokenizer()
-    backend = SGLangChatTrainingInferenceBackend(
+    backend = SGLangInferenceHandler(
         "http://unused",
         model_path="model",
         tokenizer=tokenizer,
@@ -553,7 +553,7 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
         await server.start_server()
         try:
             tokenizer = FakeTokenizer()
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=tokenizer,
@@ -664,7 +664,7 @@ def test_streaming_chat_keeps_exact_training_response_for_recording(tmp_path) ->
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -737,7 +737,7 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -821,7 +821,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -904,7 +904,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -990,7 +990,7 @@ def test_openclaw_reads_canonical_anthropic_exchange_from_private_training_block
 )
 def test_chat_facade_rejects_requests_it_cannot_capture_exactly(tmp_path, overrides, message) -> None:
     async def run() -> None:
-        backend = SGLangChatTrainingInferenceBackend(
+        backend = SGLangInferenceHandler(
             "http://unused",
             model_path="model",
             tokenizer=FakeTokenizer(),
@@ -1034,7 +1034,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path) -> None:
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangChatTrainingInferenceBackend(
+            backend = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),

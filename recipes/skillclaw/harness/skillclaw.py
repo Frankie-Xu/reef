@@ -30,22 +30,17 @@ import json
 import re
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
+
+from reef.core.batches import TrajectoryItem
+from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.run import EpisodeResult
 
 from . import evolver, night, prompts
 from .config import RUN, SUCCESS_THRESHOLD, UNSCORED_SENTINEL, WORKDIR
 from .sessions import annotate_score, build_aggregate_session, parse_recorded, read_skill_names
-
-
-class EpisodeResultLike(Protocol):
-    trajectory: tuple[dict[str, Any], ...]
-
-
-class TrajectoryLike(Protocol):
-    trajectory: Mapping[str, Any]
-    metadata: Mapping[str, Any]
 
 
 #: Expected final answers of the probe tasks, keyed by the stable prefix
@@ -73,7 +68,7 @@ def _report_index() -> dict[str, dict[str, Any]]:
     return index
 
 
-def _fallback_meta(sample: TrajectoryLike) -> dict[str, Any]:
+def _fallback_meta(sample: TrajectoryItem) -> dict[str, Any]:
     """Task metadata derived from the trace alone, for a sample without a
     saved report. The -1.0 sentinel is the unscored report, never a grade.
 
@@ -113,7 +108,7 @@ def _fallback_meta(sample: TrajectoryLike) -> dict[str, Any]:
     }
 
 
-def digest(sample: TrajectoryLike, meta: dict[str, Any]) -> dict[str, Any]:
+def digest(sample: TrajectoryItem, meta: dict[str, Any]) -> dict[str, Any]:
     """One task's aggregated session from its recorded traffic and verdict."""
     from reef.core.trajectories import recorded_payload, source_record_id
 
@@ -174,8 +169,8 @@ def _pool_mutations(incumbent: dict[str, str], evolved: dict[str, str]) -> Seque
 
 def propose(
     nodes: tuple[tuple[str, Any], ...],
-    samples: tuple[TrajectoryLike, ...],
-    models: evolver.ModelsLike,
+    samples: tuple[TrajectoryItem, ...],
+    models: ModelBindings,
 ) -> Sequence[object] | None:
     """One night step over a day of traffic: incumbent pool in, mutations out.
 
@@ -221,7 +216,7 @@ def propose(
         shutil.rmtree(incumbent, ignore_errors=True)
 
 
-def evaluate(task: str, result: EpisodeResultLike) -> float:
+def evaluate(task: str, result: EpisodeResult) -> float:
     """Grade the last line of the probe episode's final assistant text, 1.0 exact."""
     return grade_probe(task, _final_assistant_text(result.trajectory))
 

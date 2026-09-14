@@ -14,8 +14,11 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any
+
+from reef.harness.client.wrapper import ReleaseObserver
 
 #: The poll backoff never waits longer than this between attempts.
 MAX_BACKOFF_S = 600.0
@@ -38,15 +41,17 @@ def _timed_out(exc: BaseException) -> bool:
     return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
 
 
-class ReleaseUpdateListener(Protocol):
+class ReleaseUpdateListener(ABC):
     """What learns of a new head: the serve process, which mounts it or announces it."""
 
+    @abstractmethod
     def new_head(self, release_id: str, source: str) -> None: ...
 
 
-class EventWriter(Protocol):
+class EventWriter(ABC):
     """Where the watch logs: the serve process's event log."""
 
+    @abstractmethod
     def write(self, type_: str, data: Mapping[str, Any]) -> None: ...
 
 
@@ -113,7 +118,7 @@ class ReleaseClient:
             raise
 
 
-class HeadWatch:
+class HeadWatch(ReleaseObserver):
     """Compares every release id it hears of with the mounted one and notifies the listener of a new head once.
 
     The poll runs on its own thread every ``interval_s``; a response header

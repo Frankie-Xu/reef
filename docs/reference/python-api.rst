@@ -43,6 +43,76 @@ Start with Recipe and add only what the method actually needs.
 Method code should depend only on what this page documents. Anything else under
 ``reef.`` is an implementation detail and may change.
 
+Backend and runtime contracts
+-----------------------------
+
+Native backends implement model operations; Reef runtimes expose the scheduling
+interface used by recipes and serving. The two sides are independent:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 35 40
+
+   * - Layer
+     - Training
+     - Inference
+   * - Native backend
+     - ``TrainingBackend``
+     - ``InferenceBackend``
+   * - Reef scheduling
+     - ``TrainingRuntime``
+     - ``InferenceRuntime``
+
+.. code:: python
+
+   from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
+
+The native contracts are abstract base classes in ``reef/runtime/interfaces.py``.
+The engine supervision hooks an inference integration also implements
+(``InferenceEngines``, ``InferenceMonitor``, ``WeightUpdateConnection``,
+``EngineHealthChecks``, ``EngineHealthTarget``) live in
+``reef/runtime/recovery.py``, next to the objects that drive them.
+Implementations inherit the corresponding interface and provide every abstract
+operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
+SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
+coordinator owns publication and recovery ordering across them. Component
+allocation and service shutdown belong to ``TrainingService`` and
+``InferenceService`` in ``reef/runtime/deployment.py``. Those service interfaces
+also require explicit inheritance; inference factory discovery rejects objects
+that only happen to expose similarly named methods.
+
+Two other extension points have separate names and purposes:
+
+- ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
+  including harness edits. ``RuntimeCandidateBackend`` connects weight updates
+  to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
+- ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
+  request. Runtime and recipe objects expose it as ``inference_handler``;
+  ``create_app`` accepts the same keyword for an injected handler.
+
+Native backend selectors remain ``training.backend`` and ``inference.backend``.
+Custom request adapters use ``inference.handler-factory`` and
+``inference.handler-config``. The factory path names an ``InferenceHandler``
+subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
+**config)`` class method; arbitrary functions are not accepted. Handlers injected
+directly into ``create_app`` need only implement the inference methods.
+These configuration names replace the previous request-adapter
+``backend-factory`` and ``backend-config`` names. Python extensions migrate the
+old recipe-facing ``TrainingBackend`` to ``CandidateBackend`` and the old
+request-facing ``InferenceBackend`` to ``InferenceHandler``; the names now
+reserved for native interfaces must not be used as replacement import aliases
+for those different contracts.
+
+Python extension contracts use abstract base classes and explicit inheritance.
+This also applies to repository factories, candidate evaluation plugins, harness
+plugins, and surface capabilities. Implement optional capabilities only when
+supported: adapter weight residency, artifact activation, and request leases
+remain separate interfaces. CI rejects ``typing.Protocol``,
+``typing_extensions.Protocol``, and ``runtime_checkable`` in all first-party
+Python files, including scripts and tutorials; these findings cannot be baselined.
+Third-party, generated result and golden fixture exclusions follow the
+contribution policy.
+
 Recipe
 ------
 
@@ -58,7 +128,7 @@ for every scenario in a deployment.
 .. code:: text
 
    Recipe                       record-only by default   reef.recipe
-   ├── WeightTrainingRecipe     step preparer, loss family, TrainingRuntime
+   ├── WeightTrainingRecipe     step preparer, loss family, separate runtimes
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
@@ -95,9 +165,11 @@ Common members
 | ``name``                                          | ``str``                     | instance field; the default    |
 |                                                   |                             | registry key                   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``runtime``                                       | ``InferenceRuntime | None`` | narrowed to a required         |
-|                                                   |                             | ``TrainingRuntime`` by         |
-|                                                   |                             | ``WeightTrainingRecipe``       |
+| ``runtime``                                       | ``InferenceRuntime`` or     | required inference component   |
+|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
++---------------------------------------------------+-----------------------------+--------------------------------+
+| ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
+|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
 |                                                   |                             | ``EveryNVersions(1)``          |
@@ -259,7 +331,7 @@ local directory for scenario model settings. Configure it to retain those
 settings across restarts even when records and commits use a remote adapter.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
-``reef.runtime.model_config``. ``ModelConfig.from_value(value)`` validates the
+``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
 model override; its ``runtime`` field holds an ``InferenceProxyRuntime``, or
 ``None`` for the recipe default. ``view()`` returns the credential-redacted
 API representation. The type holds no file path and performs no file I/O.
@@ -814,7 +886,10 @@ Candidate evaluation
 
    from reef import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision
 
-A plugin measures a produced candidate before it is published, and decides. Reef
+A plugin explicitly inherits ``CandidateEvaluationPlugin``, measures a produced
+candidate before it is published, and decides. ``CandidateEvaluator`` and
+``CandidateSelector`` remain separate abstract capabilities; implementing only
+one does not make an object a plugin. Reef
 enforces the fixed evaluate-then-decide order and verifies the decision kept the
 exact result it was given.
 
@@ -835,6 +910,19 @@ idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
 result was not durably committed. The deployment names the factory in its
 ``evaluation`` section (`Configuration
 <configuration.rst#the-evaluation-section>`__).
+
+``CandidateEvaluationPluginFactory`` is an abstract base class whose
+``build(config, *, runtime, training_runtime, scenario, environ)`` returns one
+scenario-local plugin. ``evaluation.module`` names its subclass or instance;
+factory subclasses must construct without arguments and without allocating
+model resources. Plain callable factories and objects that merely expose
+matching methods are rejected.
+
+Harness recipes instead use ``reef.train.evaluation.CandidatePluginFactory``:
+its ``build(candidate_backend)`` binds a plugin to an existing candidate
+backend. ``AlwaysSelectPluginFactory`` and ``ScoreComparisonPluginFactory``
+provide the built-in policies; custom factory classes explicitly inherit the
+same interface.
 
 Surface
 -------
@@ -878,12 +966,78 @@ is separate, through ``Recipe.build_artifact_validator()``. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.
 
+Runtime responsibilities
+------------------------
+
+``TrainingRuntime`` and ``InferenceRuntime`` are independent interfaces. Neither
+inherits from the other, and there is no aggregate runtime.
+
+* ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
+  candidates and restores training weights/optimizer state. It receives serving
+  versions as values; it does not own an inference endpoint or request backend.
+* ``InferenceRuntime`` executes requests, manages admission and reconnection,
+  loads selected weights or adapters, and reports serving versions. It restores
+  serving weights without restoring optimizer state.
+* The existing ``RuntimeCandidateBackend`` coordinates both: prepare/train,
+  evaluate, activate or reject, delegating scheduling and durable publication
+  acknowledgement to ``RuntimeScheduler``. ``ScenarioCommitter`` coordinates rollback across both runtimes and
+  commits the restored artifact before reopening inference.
+
+Weight recipes hold ``training_runtime: TrainingRuntime`` and
+``runtime: InferenceRuntime`` separately. Construction is explicit:
+
+.. code:: python
+
+   recipe = SAORecipe(training_runtime=training, runtime=inference)
+
+Training deployment factories return ``(training_runtime, inference_runtime)``;
+inference-only factories return an ``InferenceRuntime``. ``connect_ray_runtime``
+and ``connect_executor_runtimes`` in ``reef.service.runtime`` return the same pair.
+``ExecutorTrainingRuntime`` in ``reef.train.runtime`` and
+``ExecutorInferenceRuntime`` in ``reef.inference.runtime`` use the existing
+``CoordinatorClient`` control connection for their respective operations. That
+legacy RPC connection still exposes both training and publication operations;
+it is not a public runtime or a new backend-neutral weight transport.
+
+Migration: split implementations of the former combined training runtime into
+these two interfaces and inject both into the recipe. The aggregate runtime
+classes and the ``RayRuntime`` alias are removed. The ``executor_training`` and
+``ray_training`` config kinds, control RPCs and stored artifact formats remain
+unchanged. Adding another backend combination still requires compatible native
+weight transport and recovery behavior.
+
+``reef.runtime`` is a namespace package without an import facade. Its five modules
+are ``interfaces``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
+``executor/`` contains worker transports. Import the ABCs and shared values from
+``reef.runtime.interfaces`` and the factory registry from
+``reef.runtime.deployment``. Concrete scheduling connections live in their owning
+integration: ``SlimeTrainingRuntime`` in ``reef.train.slime_backend.runtime`` and
+``SGLangInferenceRuntime`` in ``reef.inference.sglang.runtime``. These remain
+distinct from the native ``TrainingBackend``/``InferenceBackend`` pair consumed by
+Reef's coordinator.
+
 Tinker integration
 ------------------
 
 ``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
-``tinker`` backend. Its ``runtime_factory`` constructs ``TinkerRuntime`` from
-``TinkerConfig`` only after deployment selection. ``TrainingDeployment``
+``tinker`` backend. Its ``runtime_factory`` builds, from ``TinkerConfig`` and only
+after deployment selection, a ``TinkerTrainingRuntime`` and, through the
+``tinker`` inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``.
+The two hold no shared object: the training runtime branches every candidate
+from the incumbent it remembers on disk, learning commits through
+``TrainingRuntime.commit_candidate`` and rollbacks through
+``restore_checkpoint``; the inference runtime reads each candidate's or
+artifact's ``tinker-checkpoint.json`` manifest, samples from the immutable
+sampler it names, activates selected candidates and binds the head Reef
+publishes through ``activate_checkpoint``. With a local inference engine the
+same deployment instead returns a model-driver plan: ``TinkerTrainingService``
+supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
+that delivers each published adapter as a PEFT directory through
+``adapter_files``; Reef's publisher then calls the receiver's
+``InferenceBackend.load_adapter_files`` (the ``reef-adapter-files-v1``
+transfer any engine that loads adapter directories can declare), so the
+trainer never holds an engine handle. The HTTP service connects through the
+``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.
 

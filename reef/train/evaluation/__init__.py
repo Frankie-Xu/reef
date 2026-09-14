@@ -25,13 +25,16 @@ from reef.train.evaluation.config import (
 )
 from reef.train.evaluation.evaluators import (
     AlwaysSelectMixin,
+    AlwaysSelectPluginFactory,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
+    CandidatePluginFactory,
     RegressionGateMixin,
 )
 
 __all__ = [
     "AlwaysSelectMixin",
+    "AlwaysSelectPluginFactory",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
     "CandidateEvaluationConfig",
@@ -39,6 +42,7 @@ __all__ = [
     "CandidateEvaluationPlugin",
     "CandidateEvaluationPluginFactory",
     "CandidateEvaluator",
+    "CandidatePluginFactory",
     "CandidateSelector",
     "EvaluationResult",
     "RegressionGateMixin",

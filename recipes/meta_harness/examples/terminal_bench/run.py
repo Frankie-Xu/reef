@@ -22,9 +22,9 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.scenario.scenario import Scenario
 from reef.service.deploy.config_utils import load_config
 from reef.storage.sqlite import SQLiteScenarioStorage

@@ -15,19 +15,19 @@ from reef_service._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
-from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker
+from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker, SupportsReceipt
 from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
 
 pytestmark = pytest.mark.unit
 
 
 @dataclass(frozen=True)
-class _Job:
+class _Job(SupportsReceipt):
     receipt: str
 
 
 @dataclass(frozen=True)
-class _Judgment:
+class _Judgment(SupportsReceipt):
     receipt: str
     good: bool = True
 

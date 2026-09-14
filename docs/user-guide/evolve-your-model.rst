@@ -86,6 +86,7 @@ What to review
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
    training.config.global_batch_size | samples in one optimizer step
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
+   training.colocate | share the inference GPUs with training instead of reserving separate ones
    training.options | GPU layout, optimizer, sequence length, loss settings
 
 Three things to get right:

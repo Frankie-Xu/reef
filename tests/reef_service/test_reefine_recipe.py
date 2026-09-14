@@ -16,8 +16,8 @@ from reef.recipe.reefine import ReefineRecipe
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend.backend import ScoreComparisonPlugin
-from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
+from reef.train.cordis_backend.backend import ScoreComparisonPluginFactory
+from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:
@@ -30,7 +30,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
-    assert built.candidate_plugin is BackendAlwaysSelectPlugin
+    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
     assert [entry["id"] for entry in built.seed] == [
         "reef-version-check",
         "reef-requests",
@@ -58,7 +58,7 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.batch_size == 3
     assert built.seed == () and built.review_kinds == ()
-    assert built.candidate_plugin is ScoreComparisonPlugin
+    assert isinstance(built.candidate_plugin, ScoreComparisonPluginFactory)
 
 
 @pytest.mark.parametrize("evolution", [None, [], {"tasks": []}, {"tasks": ["task"], "requests": "yes"}])

@@ -65,9 +65,10 @@ the sandbox (for example under ``/opt``). Ordinary declarative trees can still
 use the local executor and Docker. Docker inside bubblewrap and extensions in
 an unisolated runner are rejected before process launch.
 
-An adapter quirk can expose ``validate_execution(files, executor)`` to check its
-rendered tree against the configured executor before any episode files are
-written. It raises ``EpisodeLaunchError`` for unsupported combinations and
+An adapter quirk can expose an ``ExecutionValidator`` instance as
+``validate_execution``. Its ``__call__(files, executor)`` checks the rendered
+tree against the configured executor before any episode files are written.
+It raises ``EpisodeLaunchError`` for unsupported combinations and
 replaces the default ``self_isolating`` nesting restriction. The Terminus quirk
 uses this seam; execution, timeout, cleanup and trajectory handling remain shared.
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from reef.runtime.adapters.inference_proxy import PROVIDER_APIS
+from reef.inference.http import PROVIDER_APIS
 from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
@@ -19,7 +19,7 @@ from reef.service.profiles import profile_names
 
 
 @dataclass(frozen=True)
-class InferenceBackend:
+class InferenceCommand:
     """Native command bindings and readiness for an OpenAI-compatible engine."""
 
     command: tuple[str, ...]
@@ -27,8 +27,8 @@ class InferenceBackend:
     reserved_options: tuple[str, ...] = ()
 
 
-INFERENCE_BACKENDS = {
-    "sglang": InferenceBackend(
+INFERENCE_COMMANDS = {
+    "sglang": InferenceCommand(
         command=(
             "{python}",
             "-m",
@@ -78,12 +78,17 @@ def http_readiness_command(python: str, endpoint: str) -> list[str]:
 def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
     """Resolve launch choices once, before model downloads or service creation."""
     backend = settings.inference_backend or "sglang"
-    definition = INFERENCE_BACKENDS.get(backend)
+    definition = INFERENCE_COMMANDS.get(backend)
     if definition is None:
-        raise DeployConfigError(f"managed local inference supports: {', '.join(sorted(INFERENCE_BACKENDS))}")
+        raise DeployConfigError(f"managed local inference supports: {', '.join(sorted(INFERENCE_COMMANDS))}")
     parallel_size = settings.tensor_parallel_size if settings.tensor_parallel_size is not None else 1
     if parallel_size < 1:
         raise DeployConfigError("--inference.tensor-parallel-size must be positive")
+    num_gpus = settings.inference_num_gpus if settings.inference_num_gpus is not None else parallel_size
+    if num_gpus != parallel_size:
+        raise DeployConfigError(
+            "standalone inference launches one engine; inference.num-gpus must equal inference.tensor-parallel-size"
+        )
     if settings.upstream_url or settings.upstream_model or settings.upstream_api != "openai":
         raise DeployConfigError("--inference.model-path cannot be combined with upstream provider selection")
     reserved = {token[2:] for token in definition.command if token.startswith("--")}
@@ -102,6 +107,7 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
     config["reef"].update(
         inference_backend=backend,
         tensor_parallel_size=parallel_size,
+        inference_num_gpus=num_gpus,
         upstream_url=endpoint,
         upstream_model=settings.model_path,
         upstream_api_key=None,
@@ -134,8 +140,8 @@ _ENVIRONMENT_FIELDS = {
 }
 _CONFIGURED_FIELDS = {
     "inference_url",
-    "inference_backend_factory",
-    "inference_backend_config",
+    "inference_handler_factory",
+    "inference_handler_config",
     "ray_address",
     "ray_namespace",
     "ray_actor_name",
@@ -180,6 +186,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
     elif (
         settings.inference_backend is not None
         or settings.tensor_parallel_size is not None
+        or settings.inference_num_gpus is not None
         or settings.inference_options
     ):
         raise DeployConfigError(

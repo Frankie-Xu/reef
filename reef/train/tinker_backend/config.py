@@ -19,6 +19,9 @@ class TinkerConfig:
     )
     seed: int = config_option(0, help="Initial adapter seed.")
     api_key_env: str = config_option("TINKER_API_KEY", help="Environment variable containing the Tinker API key.")
+    max_loaded_adapters: int = config_option(
+        1, help="Adapter slots a local inference engine keeps resident when it serves Tinker's checkpoints."
+    )
     project_id: str | None = config_option(None, help="Optional Tinker project ID.")
     inference_timeout_s: float = config_option(300.0)
     train_timeout_s: float | None = config_option(None)
@@ -27,8 +30,8 @@ class TinkerConfig:
     def __post_init__(self) -> None:
         if not self.state_dir.strip() or not self.api_key_env.strip():
             raise ValueError("Tinker requires non-empty state_dir and api_key_env")
-        if self.lora_rank <= 0 or self.batch_size <= 0:
-            raise ValueError("Tinker lora_rank and batch_size must be positive")
+        if self.lora_rank <= 0 or self.batch_size <= 0 or self.max_loaded_adapters <= 0:
+            raise ValueError("Tinker lora_rank, batch_size and max_loaded_adapters must be positive")
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("Tinker learning_rate must be finite and positive")
         if not math.isfinite(self.kl_coef) or self.kl_coef < 0:

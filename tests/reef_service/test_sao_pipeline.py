@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from reef_service._trajectories import policy_trajectory
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOProcessor
@@ -24,17 +25,16 @@ from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
-from reef.runtime.candidates import StaleCandidate
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch
 
 
-class _StateOnlySaoBackend(TrainingBackend):
+class _StateOnlySaoBackend(CandidateBackend):
     @property
     def dispatched(self) -> bool:
         return True
@@ -111,7 +111,7 @@ def test_sao_recipe_resolves_by_dotted_reference() -> None:
     assert recipe_class_for(reference) is SAORecipe
     assert recipe_class_for("sao") is None
 
-    recipe = build_recipe(reference, {}, runtime=_StubTrainingRuntime())
+    recipe = build_recipe(reference, {}, **runtime_bindings(_StubTrainingRuntime()))
 
     assert isinstance(recipe, SAORecipe)
     assert recipe.name == "sao"
@@ -119,7 +119,7 @@ def test_sao_recipe_resolves_by_dotted_reference() -> None:
 
 @pytest.mark.unit
 def test_sao_recipe_defaults_are_reef_side_only() -> None:
-    recipe = SAORecipe(_StubTrainingRuntime())
+    recipe = SAORecipe(**runtime_bindings(_StubTrainingRuntime()))
 
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only batching and checkpoint cadence.
@@ -135,7 +135,7 @@ def test_sao_recipe_reads_reef_side_config() -> None:
             "data": {"batch_size": 2},
             "artifact": {"checkpoint_every_n_versions": 4},
         },
-        runtime=_StubTrainingRuntime(),
+        **runtime_bindings(_StubTrainingRuntime()),
     )
 
     assert recipe.batch_size == 2
@@ -150,7 +150,7 @@ def test_sao_recipe_rejects_backend_objective_config() -> None:
         SAORecipe.from_environment(
             {},
             config={"optimization": {"eps_low": 0.8}},
-            runtime=_StubTrainingRuntime(),
+            **runtime_bindings(_StubTrainingRuntime()),
         )
 
 
@@ -349,7 +349,7 @@ def test_backend_preparation_advances_step_state() -> None:
 # --- e2e: accept -> train -> commit ----------------------------------------
 
 
-class _StubTrainingRuntime(TrainingRuntime):
+class _StubTrainingRuntime(StubTrainingRuntime):
     """A durable SAO runtime driven by the background training worker.
 
     Mirrors the runtime's prepare/train/activate contract: training exports a
@@ -372,13 +372,15 @@ class _StubTrainingRuntime(TrainingRuntime):
         self._served_version = "slime-v3"
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
     def serving_runtime_load_id(self):
         return self._served_version
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         assert isinstance(batch, TrainingBatch)
         sample = batch.items[0]
         prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
@@ -443,7 +445,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     initial.mkdir()
 
     dispatcher = Dispatcher(
-        SAORecipe(runtime),
+        SAORecipe(**runtime_bindings(runtime)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -478,7 +480,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         {"EVALUATION_TOKEN": "secret"},
         config={
             "evaluation": {
-                "module": "reef_service._candidate_evaluation_plugin:build_evaluator",
+                "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
                 "config": {
                     "score": 0.25,
                     "threshold": 0.8,
@@ -486,7 +488,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
                 },
             }
         },
-        runtime=runtime,
+        **runtime_bindings(runtime),
     )
     dispatcher = Dispatcher(
         recipe,
@@ -526,7 +528,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
-        SAORecipe(runtime, checkpoint_strategy=EveryNVersions(99)),
+        SAORecipe(**runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -565,7 +567,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     def _make_dispatcher() -> Dispatcher:
         return Dispatcher(
-            SAORecipe(runtime),
+            SAORecipe(**runtime_bindings(runtime)),
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
@@ -626,7 +628,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             first_store,
             processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
-            training_backend=_StateOnlySaoBackend(),
+            candidate_backend=_StateOnlySaoBackend(),
         )
         batch = first.reserve_training_batch()
         assert batch is not None
@@ -641,7 +643,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             second_store,
             processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
-            training_backend=_StateOnlySaoBackend(),
+            candidate_backend=_StateOnlySaoBackend(),
             algorithm_state={"steps": 1},
         )
         assert second.state == {"steps": 1}

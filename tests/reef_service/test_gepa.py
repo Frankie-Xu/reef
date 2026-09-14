@@ -17,7 +17,7 @@ from reef_service._trajectories import recorded_trajectory
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
 from recipes.gepa.backend import ARCHIVE_STATE_KEY
-from recipes.gepa.method import GEPAPlugin, GEPAProposer, default_feedback
+from recipes.gepa.method import EpisodeRunner, Feedback, GEPAPlugin, GEPAProposer, ScoreFeedback
 from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -29,9 +29,9 @@ from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult
 from reef.harness.tree.mutations import Mutation
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend.strategies import resolve_episode_scorer
@@ -100,7 +100,7 @@ def score_rules(task: str, result: EpisodeResult) -> float:
     return 1.0 if MARKER in str(last.get("content", last.get("rules", ""))) else 0.0
 
 
-class FakeEpisodes:
+class FakeEpisodes(EpisodeRunner):
     """An episode runner that answers with the rules text it was rendered."""
 
     def __init__(self, failure: Exception | None = None, *, residue: tuple[str, ...] = ()) -> None:
@@ -111,7 +111,7 @@ class FakeEpisodes:
         self.failure = failure
         self.residue = residue
 
-    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
+    def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         self.prompts.append(prompt)
         self.executors.append(executor)
         self.timeouts.append(timeout)
@@ -206,7 +206,7 @@ def proposer(
         descriptor=get_adapter("pi"),
         binary=None,
         score_episode=resolve_episode_scorer(score_rules),
-        feedback=default_feedback,
+        feedback=ScoreFeedback(),
         episode_runner=episodes,
         **settings,
     )
@@ -484,7 +484,7 @@ def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> No
         descriptor=get_adapter("pi"),
         binary=None,
         score_episode=resolve_episode_scorer(lambda task, result: float("nan")),
-        feedback=default_feedback,
+        feedback=ScoreFeedback(),
         minibatch_size=1,
         rng_seed=0,
         skip_perfect_score=False,
@@ -617,8 +617,12 @@ def test_the_seed_is_validated_once(tmp_path: Path) -> None:
 # -- recipe: config boot and the per-scenario binding -----------------------
 
 
-def feedback_hook(task: str, output: str, score: float) -> str:
-    return f"{task} answered {output} at {score}"
+class FeedbackHook(Feedback):
+    def feedback(self, task: str, output: str, score: float) -> str:
+        return f"{task} answered {output} at {score}"
+
+
+feedback_hook = FeedbackHook()
 
 
 def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
@@ -701,12 +705,12 @@ def test_a_missing_gepa_block_is_refused(tmp_path: Path) -> None:
 
 def test_a_configured_selection_object_is_left_alone(tmp_path: Path) -> None:
     """Only the empty seams are filled: an operator who names a policy keeps it."""
-    from reef.train.evaluation import BackendAlwaysSelectPlugin
+    from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
 
     config = sections(tmp_path)
-    config["evolution"]["selection"] = BackendAlwaysSelectPlugin
+    config["evolution"]["selection"] = AlwaysSelectPluginFactory()
     built = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-    assert built.candidate_plugin is BackendAlwaysSelectPlugin
+    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
 
 
 # -- one full step through the real backend and commit path -----------------
