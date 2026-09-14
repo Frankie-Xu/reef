@@ -34,10 +34,10 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.install_script import (
     HARNESS_RELEASE_FILE,
@@ -140,7 +140,7 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-class _EchoBackend(InferenceBackend):
+class _EchoBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del artifact, path, payload
         return {"choices": [{"message": {"content": "ok"}}]}
@@ -192,7 +192,7 @@ async def _gate_step(client: TestClient) -> dict:
     """Drive one gated evolution step through the wire; return the new manifest.
 
     One traced inference plus its failing report fills the batch (batch_size
-    1, max_score 0.0). The report POST only records and schedules the step;
+    1). The report POST only records and schedules the step;
     the harness read channel exposes the winner after the background commit.
     """
     response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -234,7 +234,7 @@ async def _gate_step(client: TestClient) -> dict:
 @pytest.mark.unit
 def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/status")
@@ -281,7 +281,7 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
 @pytest.mark.unit
 def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/harness/adapters")
@@ -306,7 +306,7 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
     async def run() -> None:
         mutation = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, (mutation,)), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, (mutation,)), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -352,7 +352,7 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
 def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -379,7 +379,7 @@ def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> Non
 @pytest.mark.unit
 def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             first = await _gate_step(client)
@@ -413,7 +413,7 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
 @pytest.mark.unit
 def test_unknown_version_is_a_404_naming_the_version(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -433,7 +433,7 @@ def test_unknown_version_is_a_404_naming_the_version(tmp_path) -> None:
 def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -470,7 +470,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
         dispatcher = _dispatcher(tmp_path, MUTATIONS)
         scenario = dispatcher.get_or_create_scenario("delivery")
         assert scenario is not None
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         assert backend is not None
         evaluate_candidate = backend.evaluate
 
@@ -480,7 +480,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             assert finish_evaluation.wait(_ASYNC_UPDATE_TIMEOUT_S), "evaluation was not released"
             return result
 
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         second_step = None
         try:
@@ -540,7 +540,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 def test_client_pull_writes_the_release_file_outside_the_served_tree(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -568,7 +568,7 @@ def test_crlf_content_survives_the_pull_byte_exact(tmp_path) -> None:
     crlf = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker win\r\nrules"}})
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, [crlf]), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, [crlf]), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             manifest = await _gate_step(client)
@@ -1485,7 +1485,7 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
     dispatcher = _dispatcher(tmp_path, (), seed=seed)
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             manifest = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -1520,7 +1520,7 @@ def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(t
     dispatcher = _dispatcher(tmp_path, (), seed=seed)
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -1545,7 +1545,7 @@ def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(t
 @pytest.mark.unit
 def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             first = await _gate_step(client)
@@ -1594,7 +1594,7 @@ def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_
     )
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
@@ -1622,7 +1622,7 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
     dispatcher.get_or_create_scenario("weights-only")
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/harness/install", params={"adapter": "pi"})
@@ -1637,7 +1637,7 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
 @pytest.mark.unit
 def test_install_route_refuses_an_unknown_adapter_with_a_404_naming_it(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -1666,7 +1666,7 @@ def test_install_route_answers_400_when_the_adapter_declares_no_install_section(
 
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -1687,7 +1687,7 @@ def test_install_route_answers_400_when_the_adapter_declares_no_install_section(
 @pytest.mark.unit
 def test_install_route_refuses_an_unknown_version_with_a_404_naming_it(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -1712,7 +1712,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
 
     async def run() -> None:
         dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], batch_policy="records", batch_size=2)
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             for prompt in ("first", "second"):
@@ -1928,7 +1928,7 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
 
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -1964,7 +1964,7 @@ def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one
     dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=seed)
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             base = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -1995,7 +1995,7 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
     dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=(notice,))
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             base = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})

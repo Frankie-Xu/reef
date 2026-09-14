@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import json
 import secrets
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any
 
-from reef.harness.runners.native import ToolModule
+from reef.harness.runners.native import ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.release_client import ReleaseClient
 from reef.harness.runners.native.seed import SEED_GRAPH
@@ -72,21 +73,28 @@ TRY_DESCRIPTION = (
 )
 
 
-class ServeState(Protocol):
+class ServeState(ABC):
     """What the self tools read and drive: the serve process."""
 
-    client: ReleaseClient
+    @property
+    @abstractmethod
+    def client(self) -> ReleaseClient: ...
 
     @property
+    @abstractmethod
     def release_id(self) -> str | None: ...
 
     @property
+    @abstractmethod
     def session_id(self) -> str | None: ...
 
+    @abstractmethod
     def live_entries(self) -> list[dict[str, Any]]: ...
 
+    @abstractmethod
     def status(self) -> dict[str, Any]: ...
 
+    @abstractmethod
     def try_mount(self, mutations: Sequence[Mutation], try_id: str) -> dict[str, Any]: ...
 
 
@@ -119,11 +127,21 @@ def _records(mutations: Sequence[Mutation]) -> list[dict[str, Any]]:
     return [{"op": m.op, "id": m.id, "options": None if m.options is None else dict(m.options)} for m in mutations]
 
 
-class SelfTools:
+class SelfTools(ToolRunner):
     """The three tools' ``run`` bodies over one serve process."""
 
-    def __init__(self, state: ServeState) -> None:
+    def __init__(self, state: ServeState, action: str = "inspect") -> None:
         self._state = state
+        self._action = action
+
+    def __call__(self, args: dict[str, Any], workdir: str, /) -> Any:
+        if self._action == "inspect":
+            return self.inspect(args, workdir)
+        if self._action == "try":
+            return self.try_(args, workdir)
+        if self._action == "propose":
+            return self.propose(args, workdir)
+        raise ToolFailed(f"unknown self tool action {self._action!r}")
 
     def inspect(self, args: dict[str, Any], workdir: str) -> Any:
         what = str(args.get("what", ""))
@@ -199,7 +217,6 @@ class SelfTools:
 
 def self_tools(state: ServeState) -> list[HostTool]:
     """The three built-in tools over ``state``, in the order the model should read them."""
-    tools = SelfTools(state)
     return [
         HostTool(
             "harness_inspect",
@@ -215,14 +232,14 @@ def self_tools(state: ServeState) -> list[HostTool]:
                 },
                 "required": ["what"],
             },
-            tools.inspect,
+            SelfTools(state, "inspect"),
             capabilities=("network",),
         ),
         HostTool(
             "harness_try",
             TRY_DESCRIPTION,
             {"type": "object", "properties": {"mutations": _MUTATIONS_SCHEMA}, "required": ["mutations"]},
-            tools.try_,
+            SelfTools(state, "try"),
             capabilities=("exec",),
         ),
         HostTool(
@@ -236,7 +253,7 @@ def self_tools(state: ServeState) -> list[HostTool]:
                 },
                 "required": ["mutations", "reason"],
             },
-            tools.propose,
+            SelfTools(state, "propose"),
             capabilities=("network",),
         ),
     ]

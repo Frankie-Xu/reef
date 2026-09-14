@@ -11,10 +11,11 @@ Resolving a dotted reference imports the module and wraps the callable in a
 :class:`_CallableStepPreparer` if it is not already a :class:`StepPreparer`.
 
 Loss families register here too, but only as a dotted ``"package.module:SPEC"``
-reference (:func:`register_loss_family_ref`): the service process never
-loads the Slime side, and the Slime registry
-(``slime_backend/loss_families.py``) imports the reference the first time the
-name is resolved.
+reference (:func:`register_loss_family_ref`) keyed by the training backend
+that implements it: the service process never loads a backend's side, and
+each backend registry (``slime_backend/loss_families.py``,
+``tinker_backend/losses.py``) imports its reference the first time the name
+is resolved.
 """
 
 from __future__ import annotations
@@ -116,24 +117,33 @@ def resolve_preparer(preparer_id: str) -> StepPreparer:
     return PREPARERS.resolve(preparer_id)
 
 
-_loss_family_refs: dict[str, str] = {}
+#: ``{backend: {loss_family: reference}}``; Slime is the default backend.
+_loss_family_refs: dict[str, dict[str, str]] = {}
+_DEFAULT_BACKEND = "slime"
 
 
-def register_loss_family_ref(loss_family: str, reference: str) -> None:
-    """Record that ``loss_family`` is implemented by the dotted ``reference``."""
+def register_loss_family_ref(loss_family: str, reference: str, *, backend: str = _DEFAULT_BACKEND) -> None:
+    """Record that ``backend`` implements ``loss_family`` at the dotted ``reference``.
+
+    A method registers one reference per backend it supports; the same family
+    name selects each backend's implementation.
+    """
     if ":" not in reference:
         raise ValueError(f"loss family reference {reference!r} must be 'package.module:SPEC'")
-    existing = _loss_family_refs.get(loss_family)
+    if not backend:
+        raise ValueError("loss family references need a non-empty backend name")
+    table = _loss_family_refs.setdefault(backend, {})
+    existing = table.get(loss_family)
     if existing is not None and existing != reference:
-        raise ValueError(f"loss family {loss_family!r} is already registered to {existing!r}")
-    _loss_family_refs[loss_family] = reference
+        raise ValueError(f"loss family {loss_family!r} is already registered to {existing!r} for {backend}")
+    table[loss_family] = reference
 
 
-def loss_family_refs() -> dict[str, str]:
-    """The registered ``{loss_family: reference}`` table (a copy)."""
-    return dict(_loss_family_refs)
+def loss_family_refs(backend: str = _DEFAULT_BACKEND) -> dict[str, str]:
+    """The registered ``{loss_family: reference}`` table of one backend (a copy)."""
+    return dict(_loss_family_refs.get(backend, {}))
 
 
-def _unregister_loss_family_ref(loss_family: str) -> bool:
+def _unregister_loss_family_ref(loss_family: str, *, backend: str = _DEFAULT_BACKEND) -> bool:
     """Remove a registered family reference, returning whether it existed."""
-    return _loss_family_refs.pop(loss_family, None) is not None
+    return _loss_family_refs.get(backend, {}).pop(loss_family, None) is not None

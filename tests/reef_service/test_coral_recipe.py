@@ -14,7 +14,7 @@ from reef.train.algos import base as algos_base
 
 
 def _recipe_cls():
-    from recipes.coral.recipe import CoralRecipe
+    from recipes.beta.coral.recipe import CoralRecipe
 
     return CoralRecipe
 
@@ -22,7 +22,7 @@ def _recipe_cls():
 def test_training_spec_binds_processor_and_grouped_machinery():
     recipe_cls = _recipe_cls()
     spec = recipe_cls.training_spec()
-    from recipes.coral.processor import CoralProcessor
+    from recipes.beta.coral.processor import CoralProcessor
 
     assert spec.processor is CoralProcessor
     assert spec.step_preparer == "tttd"
@@ -36,8 +36,8 @@ def test_importing_the_recipe_registers_the_reused_preparer():
 
 def test_group_size_floor():
     recipe_cls = _recipe_cls()
-    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+    from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000")
     with pytest.raises(ValueError, match="at least two"):
-        recipe_cls(runtime=runtime, group_size=1)
+        recipe_cls(training_runtime=None, runtime=runtime, group_size=1)

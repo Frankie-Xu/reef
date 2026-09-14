@@ -14,10 +14,10 @@ dependency order.
 from __future__ import annotations
 
 import graphlib
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from types import SimpleNamespace
-from typing import Any, Protocol
+from typing import Any
 
 from .context import Context
 from .fiber import Fiber
@@ -28,9 +28,10 @@ class MissingProviderError(RuntimeError):
     """Raised by ``load`` when a declared inject has no provider anywhere."""
 
 
-class ObjectPlugin(Protocol):
-    """The object plugin shape: anything with an ``apply(ctx, config)``."""
+class ObjectPlugin(ABC):
+    """Base class for object plugins implementing ``apply(ctx, config)``."""
 
+    @abstractmethod
     def apply(self, ctx: Context, config: Any) -> Any: ...
 
 
@@ -85,9 +86,8 @@ class RegistryService:
         """The callable a plugin dedups on: itself, or its ``apply``."""
         if callable(plugin):
             return plugin
-        apply = getattr(plugin, "apply", None)
-        if callable(apply):
-            return apply
+        if isinstance(plugin, ObjectPlugin):
+            return plugin.apply
         return None
 
     def get(self, plugin: Plugin) -> Runtime | None:
@@ -141,8 +141,8 @@ class RegistryService:
         def apply(inner: Context, config: Any) -> Any:
             return callback(inner)
 
-        plugin = SimpleNamespace(inject=deps, apply=apply, name=getattr(callback, "__name__", None))
-        return self.plugin(plugin, None, ctx=ctx)
+        vars(apply).update(inject=deps, name=getattr(callback, "__name__", None))
+        return self.plugin(apply, None, ctx=ctx)
 
     def load(self, components: Sequence[tuple[Plugin, Any]], ctx: Context | None = None) -> list[Fiber]:
         """Instantiate components in dependency order, from declarations alone.

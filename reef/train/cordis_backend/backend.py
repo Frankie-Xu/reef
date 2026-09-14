@@ -23,8 +23,15 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import (
+    CandidateEvaluationPlugin,
+    CandidateEvaluator,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
+from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
@@ -52,15 +59,16 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, accepts_keyword, accepts_manifest
-from reef.train.evaluation.evaluators import BackendEvaluateMixin
-from reef.train.types import TraceBatch, TraceSample, TrainingBatch, TrainStepResult
+from reef.train.evaluation.evaluators import BackendEvaluateMixin, CandidatePluginFactory
+from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
 
 @dataclass(repr=False)
@@ -234,9 +242,9 @@ def _episode_name(side: str, task_index: int, repeat: int) -> str:
     return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
 
 
-def _prompt_of(sample: TraceSample) -> str | None:
+def _prompt_of(sample: TrajectoryItem) -> str | None:
     """The trace's last user message, the prompt ``evaluate`` scores; ``None`` for a tool-only turn."""
-    messages = sample.payload.get("messages") if isinstance(sample.payload, Mapping) else None
+    messages = recorded_payload(sample).get("messages")
     if not isinstance(messages, Sequence):
         return None
     for message in reversed(list(messages)):
@@ -254,15 +262,15 @@ def _prompt_of(sample: TraceSample) -> str | None:
     return None
 
 
-def _default_promote(samples: Sequence[TraceSample]) -> list[str]:
+def _default_promote(samples: Sequence[TrajectoryItem]) -> list[str]:
     """The default policy: every trace's user prompt is a candidate task."""
     prompts = (_prompt_of(sample) for sample in samples)
     return [prompt for prompt in prompts if prompt is not None]
 
 
-def _client_of(sample: TraceSample) -> str:
+def _client_of(sample: TrajectoryItem) -> str:
     """The client that sent a trace: its x-reef-tag-client, else its session tag, else ``untagged``."""
-    metadata = sample.payload.get("metadata") if isinstance(sample.payload, Mapping) else None
+    metadata = recorded_payload(sample).get("metadata")
     tags = metadata.get("tags") if isinstance(metadata, Mapping) else None
     for key in ("client", "session"):
         value = tags.get(key) if isinstance(tags, Mapping) else None
@@ -271,9 +279,9 @@ def _client_of(sample: TraceSample) -> str:
     return "untagged"
 
 
-def _source_of(sample: TraceSample) -> dict[str, Any]:
+def _source_of(sample: TrajectoryItem) -> dict[str, Any]:
     """What a proposer may know about where a sample came from; the text itself stays untrusted."""
-    return {"record": sample.source_agent_record_id, "client": _client_of(sample), "untrusted": True}
+    return {"record": source_record_id(sample), "client": _client_of(sample), "untrusted": True}
 
 
 def _screened(prompt: str) -> bool:
@@ -467,11 +475,21 @@ class ScoreComparisonMixin(CandidateEvaluationPlugin):
 
 
 class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
-    """Cordis's default evaluation: measure through the backend, decide by score comparison."""
+    """Cordis's default evaluation: measure through the candidate backend, decide by score comparison."""
 
-    def __init__(self, backend: Any, *, min_win_margin: int = 0) -> None:
+    def __init__(self, candidate_backend: Any, *, min_win_margin: int = 0) -> None:
         super().__init__(min_win_margin=min_win_margin)
-        self._backend = backend
+        self._candidate_backend = candidate_backend
+
+
+@dataclass(frozen=True)
+class ScoreComparisonPluginFactory(CandidatePluginFactory):
+    """Bind a scenario's score comparison policy with its configured margin."""
+
+    min_win_margin: int = 0
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        return ScoreComparisonPlugin(candidate_backend, min_win_margin=self.min_win_margin)
 
 
 def _score_vectors(
@@ -494,7 +512,7 @@ def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[
     return wins, losses
 
 
-class CordisBackend(TrainingBackend):
+class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
     """Settle one proposal per step through episode pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies
@@ -626,7 +644,7 @@ class CordisBackend(TrainingBackend):
         # remove its source without touching caller-owned Artifact.local paths.
         self._rendered_publications: dict[int, Artifact] = {}
         # Agent proposals wait here between the route that admitted them and the step that takes them.
-        self.proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
+        self._proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         self._current_step_record: Path | None = None
@@ -666,6 +684,10 @@ class CordisBackend(TrainingBackend):
 
     def close(self) -> None:
         self._pool_finalizer()
+
+    @property
+    def proposals(self) -> ProposalInbox | None:
+        return self._proposals
 
     @property
     def descriptor(self) -> AdapterDescriptor:
@@ -713,8 +735,7 @@ class CordisBackend(TrainingBackend):
         scenario_step: int,
     ) -> PreparedStep:
         self._current_step_record = None
-        if not isinstance(batch, TraceBatch):
-            raise TypeError(f"harness evolution requires TraceBatch, got {type(batch).__name__}")
+        samples = trajectories(batch)
         if self._model_resolver is not None:
             self._models = self._model_resolver.resolve()
             self._binding_nodes = self._models.served.compose_nodes(self._descriptor)
@@ -762,7 +783,7 @@ class CordisBackend(TrainingBackend):
         if rejected:
             carried["rejected_proposals"] = rejected
 
-        metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
+        metrics: dict[str, Any] = {"steps": steps, "traces": len(samples)}
         # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
         if batch.request is None and self._max_steps and steps > self._max_steps:
             return PreparedStep.skipped(
@@ -783,12 +804,12 @@ class CordisBackend(TrainingBackend):
         # An instruction step consumes the failures it carries, so it promotes them too or they are lost.
         if self._promote_failures:
             if self._promote_task is None:
-                candidates: Sequence[str] = _default_promote(batch.samples)
+                candidates: Sequence[str] = _default_promote(samples)
             elif self._promote_accepts_manifest:
-                candidates = self._promote_task(batch.samples, manifest=manifest)
+                candidates = self._promote_task(samples, manifest=manifest)
             else:
-                candidates = self._promote_task(batch.samples)
-            clients = {prompt: _client_of(sample) for sample in batch.samples if (prompt := _prompt_of(sample))}
+                candidates = self._promote_task(samples)
+            clients = {prompt: _client_of(sample) for sample in samples if (prompt := _prompt_of(sample))}
             promoted = _admit_promoted(
                 promoted,
                 candidates,
@@ -874,7 +895,7 @@ class CordisBackend(TrainingBackend):
             if self._propose_accepts_rejected:
                 extra["rejected"] = tuple(rejected)
             if self._propose_accepts_sources:
-                extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
+                extra["sources"] = tuple(_source_of(sample) for sample in samples)
             handed: dict[str, Any] | None = None
             if batch.request is not None:
                 if not self._propose.reads_requests:
@@ -883,7 +904,7 @@ class CordisBackend(TrainingBackend):
                 handed = {"id": batch.request.id, **batch.request.to_dict(), "untrusted": True}
                 extra["requests"] = (handed,)
             try:
-                proposal = self._propose(self._nodes(), batch.samples, models, **extra)
+                proposal = self._propose(self._nodes(), samples, models, **extra)
             finally:
                 # Written even when propose raised: the calls before the failure are the decision's record.
                 self._write_record(step_dir, RECORD_PROPOSER_FILE, record)

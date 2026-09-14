@@ -23,16 +23,16 @@ to train model weights with Slime and SGLang, or improve an agent's harness, inc
 
 </div>
 
-**[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
-[Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
-[Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
-[Join Discord](https://discord.gg/5y8e5f937k) |
-[Join WeChat Group](docs/community/wechat.md)**
+**🚀 [Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
+🗺️ [Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
+📣 [Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
+💬 [Join Discord](https://discord.gg/5y8e5f937k) |
+📱 [Join WeChat Group](docs/community/wechat.md)**
 
 </div>
 
 
-## When to use Reef
+## 🎯 When to use Reef
 
 Use Reef when you want your agent to keep improving simply by learning from how you interact with your agent.
 
@@ -43,7 +43,7 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Scientific discoveries | Test-time training | An execution environment, a correctness checker, and a measurable objective |
 
 
-## How Reef fits your stack
+## 🧩 How Reef fits your stack
 
 | Ability | Inference engine (vLLM, SGLang, …) | RL training framework (Slime, veRL, AReaL, …) | **Reef** |
 |---|:---:|:---:|:---:|
@@ -54,7 +54,7 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Evolves beyond weights (skills, harness) | ❌ | ❌ | ✅ |
 
 
-## How it works
+## 🔄 How it works
 
 <div align="center">
 <picture>
@@ -74,7 +74,7 @@ modules implement each step.
 | **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
-## Installation
+## 📦 Installation
 
 > 💡 **Note**
 >
@@ -106,10 +106,16 @@ python3 -c "import reef; print(reef.__version__)"
 Use the source checkout for development and for the training examples below.
 
 
-## Using Reef
+## 🔧 Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
+
+As a minimal example, start Reef as a pure inference server:
+
+```bash
+uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+```
 
 ### Weight-training deployment
 
@@ -126,7 +132,7 @@ export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
 
 reef serve -c recipes/sao/examples/sao/serve.yaml \
-  --reef.model_path "$MODEL_PATH" \
+  --inference.model-path "$MODEL_PATH" \
   --reef.port "8900"
 
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
@@ -195,17 +201,19 @@ current version without restarting Reef.
 
 Improve harness skills using a model API instead of GPUs.
 
-The harness evolve recipe carries its own profile, so the model is the one thing
-you name. From your Reef checkout and activated Python environment:
+The harness evolve recipe carries its own profile; specify the provider URL
+and model. From your Reef checkout and activated Python environment:
 
 ```bash
-reef serve --recipe harness-evolve --model ollama/gemma4:26b
+reef serve --recipe harness-evolve \
+  --inference.upstream-url http://127.0.0.1:11434 \
+  --inference.upstream-model gemma4:26b
 ```
 
-`ollama/` and `openai/` prefixes fill the endpoint and the key (`openai/` reads
-`REEF_UPSTREAM_API_KEY`); any other spelling is the model ID as is, with the
-endpoint from `REEF_UPSTREAM_URL`. The profile listens on `127.0.0.1:8900` with
-no token and keeps its state under `.reef/harness-evolve/`. To change anything
+The example connects to a local Ollama server. For another provider, change
+`--inference.upstream-url` and `--inference.upstream-model`, and set
+`REEF_UPSTREAM_API_KEY` if authentication is required. The profile listens on
+`127.0.0.1:8900` with no token and keeps its state under `.reef/harness-evolve/`. To change anything
 else, copy [the profile](reef/service/profiles/harness-evolve.yaml) and pass
 your copy with `-c`.
 
@@ -220,8 +228,8 @@ reef-pi -p "fix the failing test in auth.py"
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
 
-To change the model, restart `reef serve` with another `--model` and rerun the
-install command before `reef-pi`: installation writes the model ID into the
+To change the model, restart `reef serve` with another `--inference.upstream-model`
+and rerun the install command before `reef-pi`: installation writes the model ID into the
 local harness configuration.
 
 Failed reports trigger a candidate skill update. Reef evaluates it against the
@@ -229,40 +237,44 @@ current harness on the tutorial's three coding tasks and publishes it only if
 it wins. See the [tutorial](tutorials/evolve-your-harness/README.md) to customize the
 tasks and evaluation.
 
-To ask for a harness change in plain words and see the whole path from the ask to the install, run the [harness requests tutorial](tutorials/harness-requests/README.md).
+To ask for a harness change in plain words and see the whole path from the ask to the install, run the [Reefine tutorial](tutorials/reefine/README.md).
+
+Reefine ships with `reef-infra`: start it with `reef serve --recipe reefine --model ollama/gemma4:26b`.
+
+## 📚 Recipes and examples
+
+Pick a recipe by the **task type** of your workload and by **what it should
+evolve**, model weights or the agent harness. Weight recipes need the GPU
+training stack, while harness recipes need only a model endpoint. Each recipe
+below links to its guide and each measured benchmark links to its results
+page, and the [recipe catalog](https://reefinfra.ai/docs/user-guide/recipes/)
+adds the code and example for every recipe. Reefine ships with `reef-infra`,
+and the other implementations live in this repository's `recipes/` cookbook,
+selected by dotted class reference and not shipped in the Reef wheel.
+
+| Task type | Task shape | Evolves the model | Evolves the harness | Standard benchmarks |
+|---|---|---|---|---|
+| Scientific discovery | Repeated attempts at one hard problem with a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
+| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), Terminal-Bench ([example](recipes/meta_harness/examples/terminal_bench/README.md), [results](recipes/meta_harness/RESULTS.md)). |
+| Learning from usage | Real interaction where no one reports a score or feedback arrives late | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [simulated student with GSM8K task stream](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
+
+[`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
+outside the catalog. For a small walkthrough of feedback, candidate edits, and
+publication, start with [the coding harness tutorial](tutorials/evolve-your-harness/README.md).
+Each result page documents its task, evaluation setup, measurements, and
+limitations.
 
 
-## Recipes and examples
-
-Choose a recipe based on your workload's feedback and the artifact you want to
-update. The implementations live in this repository's `recipes/` cookbook,
-are selected by dotted class reference, and do not ship in the Reef wheel.
-
-| Workload | Recipe guide | Updated artifact | Examples and results |
-|---|---|---|---|
-| A stream of tasks scored by tests or a verifier | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | Model weights | [Example](recipes/sao/examples/sao/README.md) · [Results](recipes/sao/examples/sao/README.md#results) |
-| Agent traffic with useful next-state signals and no explicit reports | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | Model weights | [Example](recipes/openclawrl/examples/openclawrl/README.md) |
-| Repeated, scored attempts at one problem | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | Model weights | [Example](recipes/tttd/examples/tttd/README.md) · [Results](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |
-| Parallel coding agents on one task, attempts scored by a grader ([CORAL](https://github.com/Human-Agent-Society/CORAL)) | [CORAL TTT](recipes/coral/README.md) | Model weights | [Example](recipes/coral/README.md#quickstart-2-gpus) |
-| Scored code search with a trainable guidance model and a frozen executor | [Guidance-TTT / TTTD](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | Guidance-model weights | [Example](recipes/tttd/examples/guidance_ttt/README.md) · [Results](recipes/tttd/examples/guidance_ttt/results/README.md) |
-| Agent feedback used to evolve its skill pool | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Harness skills; no training GPUs | [Example](recipes/skillclaw/README.md) |
-| Scores and transcripts used to improve prompts and instructions | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness; fixed model weights | [Example and results](recipes/gepa/examples/aime/README.md) |
-
-For a small walkthrough of feedback, candidate edits, and publication, start with
-[the coding harness tutorial](tutorials/evolve-your-harness/README.md). Each result
-page documents its task, evaluation setup, measurements, and limitations.
-
-
-## Architecture
+## 📐 Architecture
 
 <div align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.gif">
-  <img src="docs/assets/architecture-light.gif" alt="Reef architecture: harness requests flow through a scenario to inference. Receipt-linked feedback feeds records and recipe training; artifact evaluation selects updates for versioned publication. Rejected candidates leave the current release serving." width="1200">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture-light.svg" alt="Reef architecture: harness requests flow through a scenario to inference. Receipt-linked feedback feeds records and recipe training; artifact evaluation selects updates for versioned publication. Rejected candidates leave the current release serving." width="1200">
 </picture>
 </div>
 
-## Learn more
+## 📖 Learn more
 
 The [documentation](https://reefinfra.ai/docs/) is organized in the following order:
 
@@ -271,12 +283,12 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [Write a recipe](https://reefinfra.ai/docs/developer-guide/write-a-recipe/): configure how Reef processes data and produces updates
 - [Evolve your harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/): evolve a harness instead of model weights
 - [Evolve your model](https://reefinfra.ai/docs/user-guide/evolve-your-model/): configure and operate a training deployment
-- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/): additional references on
-  the cookbook implementations in this repository
+- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/): the catalog of cookbook
+  recipes by task type, with code, docs, example, and results for each
 - [The core loop](https://reefinfra.ai/docs/getting-started/core-loop/): The core loop of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 
-## Community & Contributing
+## 🤝 Community & Contributing
 
 Working on continual self-improving agent?
 
@@ -290,7 +302,7 @@ Working on continual self-improving agent?
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
 
 
-## The Team
+## 👥 The Team
 
 Reef brings together people exploring how agents can learn from experience and
 improve over time. The people below help turn that idea into working infrastructure.
@@ -324,7 +336,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Dingyi Zhuang](https://github.com/ZhuangDingyi).
 
 
-## Star History
+## ⭐ Star History
 
 <a href="https://star-history.com/#Human-Agent-Society/reef&Date">
   <picture>
@@ -335,7 +347,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 </a>
 
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 We are particularly grateful to these projects which power important parts of Reef:
 

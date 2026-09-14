@@ -91,7 +91,7 @@ reef-eval starts one Harbor trial for the next problem
   -> Reef stores the sampled tokens, the loss mask, and the rollout log-probabilities
   -> the agent extracts \boxed{} and scores it against the gold answer
   -> the agent reports the score against that rollout's receipt
-  -> SAOProcessor accepts the report and emits one PolicySample
+  -> SAOProcessor accepts the report and emits one ATIF TrajectoryItem
   -> the sao step preparer hands Slime a batch of one
   -> the colocated critic computes values; skip-observation GAE builds the advantages
   -> Slime runs policy_loss with SAO's per-token DIS primitive, after two critic steps
@@ -145,13 +145,25 @@ paths must mean the same thing to the host docker daemon.
 ./run.sh
 ```
 
+The launcher waits for Reef's health endpoint and stops waiting if Reef
+exits. Configure bridge startup with `training.ready-timeout` and HTTP startup
+with `reef.ready-timeout` in `serve.yaml`; startup errors are in `work/reef.log`. Exiting or interrupting
+the script also stops its Reef process.
+
 `run.sh` starts `reef serve -c serve.yaml` with its state under `./work`,
 waits for `/healthz`, and runs `run.py`. `serve.yaml` describes a two-GPU
 stack: one Megatron actor with the critic colocated on it, and one SGLang
 rollout engine, serving `Qwen2.5-1.5B-Instruct`. On the first start Reef
 loads the Hugging Face weights directly and writes the Megatron checkpoint
 that later starts load. Ray, Slime, Megatron, and SGLang take minutes to come
-up; `work/reef.log` has the service log if the wait never ends.
+up; `work/reef.log` has the service log if startup fails.
+
+The config omits `services`: Reef assembles the Slime driver and HTTP process,
+waits for the training bridge, and connects HTTP to the bridge's SGLang workers.
+The native training adapter captures rollout log-probabilities directly from the
+engine for SAO; no separate inference process or manual bridge wiring is needed.
+`training.options` still holds the model and algorithm settings. CLI overrides
+use the same paths, for example `--training.options.lr 0.000002`.
 
 Reef starts and stops the shared Ray runtime automatically; no `ray start`
 or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
@@ -189,10 +201,10 @@ asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
 
 ### A larger model
 
-Change `reef.model_path`, the GPU counts and parallelism flags, and
+Change `inference.model-path`, the GPU counts and parallelism flags, and
 `--seq-length` and `--rollout-max-response-len` in `serve.yaml`. The
 objective flags are the paper's reasoning-domain values and do not change
-with model size. `reef.batch_size` and `training.global_batch_size` must stay
+with model size. `recipe.config.batch-size` and `training.config.global_batch_size` must stay
 equal, because each rollout sample is its own data-parallel unit.
 
 ## Paper fidelity

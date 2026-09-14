@@ -5,10 +5,10 @@ from concurrent.futures import Future
 import pytest
 
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFailedError, ExecutorFailure, WorkerSpec
-from reef.runtime.executor.failure import FailureState
+from reef.runtime.executor.failure import ExecutorFailureListener, FailureState
 
 
-class Listener:
+class Listener(ExecutorFailureListener):
     def __init__(self):
         self.events = []
 
@@ -17,7 +17,7 @@ class Listener:
 
 
 def test_failure_is_terminal_notifies_once_and_fails_pending_requests(caplog):
-    class BadListener:
+    class BadListener(ExecutorFailureListener):
         def on_executor_failure(self, failure):
             raise ValueError("bad observer")
 

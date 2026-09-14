@@ -572,3 +572,87 @@ def test_peer_waits_for_source_phase_completion_before_continuing(
 
     assert not thread.is_alive()
     assert peer_result == [None]
+
+
+def test_native_trainer_attaches_to_inference_without_pushing_batch_config(monkeypatch):
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    worker = object.__new__(module.ReefMegatronTrainRayActor)
+    worker.train_parallel_config = {"dp_size": 2, "cp_size": 1}
+    inference = object()  # No batch scheduling RPCs exist on the inference handle.
+    layout = worker.set_rollout_manager(inference)
+    assert worker.rollout_manager is inference
+    assert layout == worker.train_parallel_config
+    assert layout is not worker.train_parallel_config
+
+
+@pytest.mark.parametrize(
+    "current,target,expected",
+    [
+        ("engine:2", "engine:3", "engine:2"),
+        ("engine:2", "engine:2", "engine:1"),
+        ("fresh:0", "recovered:7", "recovered:6"),
+    ],
+)
+def test_sender_prepares_the_next_reef_assigned_identity(monkeypatch, current, target, expected):
+    module = _load_module(monkeypatch, "base.py")
+    from reef.runtime.interfaces import RuntimeLoadId
+
+    updater = module.SynchronizedWeightUpdateMixin()
+    updater.runtime_load_id = RuntimeLoadId.parse(current)
+    updater.prepare_exact_runtime_load_id(target)
+    assert str(updater.runtime_load_id) == expected
+
+
+@pytest.mark.parametrize("target", ["engine:0", "engine:5", "other:3"])
+def test_live_sender_rejects_invalid_reef_transfer_sequence(monkeypatch, target):
+    module = _load_module(monkeypatch, "base.py")
+    from reef.runtime.interfaces import RuntimeLoadId
+
+    updater = module.SynchronizedWeightUpdateMixin()
+    updater.runtime_load_id = RuntimeLoadId.parse("engine:2")
+    with pytest.raises((ValueError, RuntimeError)):
+        updater.prepare_exact_runtime_load_id(target)
+    assert str(updater.runtime_load_id) == "engine:2"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_reef_sender_disables_native_receiver_recovery_and_restores_flags(monkeypatch, fails):
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    observed = []
+    base = module.ReefMegatronTrainRayActor.__mro__[1]
+
+    def native_update(actor):
+        observed.append(actor.args.use_fault_tolerance)
+        if actor.args.use_fault_tolerance:
+            pytest.fail("native trainer tried to recover an inference service")
+        if fails:
+            raise RuntimeError("sender failed")
+        return actor.weight_updater.update_weights()
+
+    monkeypatch.setattr(base, "update_weights", native_update)
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+    actor.args = types.SimpleNamespace(use_fault_tolerance=True)
+    actor.weight_updater = types.SimpleNamespace(update_weights=lambda: "sent")
+    if fails:
+        with pytest.raises(RuntimeError, match="sender failed"):
+            actor.update_weights(manage_generation=False)
+    else:
+        assert actor.update_weights(manage_generation=False) == "sent"
+    assert observed == [False]
+    assert actor.args.use_fault_tolerance is True
+
+
+def test_lora_sender_does_not_recover_receiver_with_native_fault_tolerance_enabled(monkeypatch):
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+    actor.args = types.SimpleNamespace(
+        debug_train_only=False,
+        debug_rollout_only=False,
+        use_fault_tolerance=True,
+        offload_train=False,
+    )
+    actor.rollout_manager = types.SimpleNamespace(
+        recover_updatable_engines=types.SimpleNamespace(remote=lambda: pytest.fail("receiver recovery")),
+        get_updatable_engines_and_lock=types.SimpleNamespace(remote=lambda: ([], None, 0, [], [], [])),
+    )
+    actor._with_lora_engines(lambda: pytest.fail("no receiver is available"))

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import pytest
 
+from reef.core.trajectories import trajectory_reward
+from reef.train.types import trajectory_groups
+
 reef_types = pytest.importorskip("reef.train.types", reason="requires a reef checkout")
 
-from recipes.coral.processor import ROOT_GROUP, CoralProcessor
-
+from recipes.beta.coral.processor import ROOT_GROUP, CoralProcessor
 from reef.core import AgentRecord, RequestType
-from reef.train.types import GroupedPolicyBatch, ProcessorContext
+from reef.train.types import ProcessorContext, TrainingBatch
 
 SCENARIO = "coral-demo"
 
@@ -74,9 +76,9 @@ def test_sibling_group_trains_as_one_grouped_batch():
     assert processor.ready()
 
     batch = processor.build_batch()
-    assert isinstance(batch, GroupedPolicyBatch)
-    (group,) = batch.comparison_sets
-    assert sorted(sample.reward for sample in group) == [0.3, 0.9]
+    assert isinstance(batch, TrainingBatch)
+    (group,) = trajectory_groups(batch)
+    assert sorted(trajectory_reward(sample) for sample in group) == [0.3, 0.9]
 
 
 def test_root_attempts_group_together():
@@ -111,7 +113,7 @@ def test_regrade_retry_at_same_commit_is_terminal_not_double_counted():
 
     processor.ingest(_attempt_report("r2", "i2", 0.7, commit="c-b", parent="p0"))
     assert processor.ready()
-    (group,) = processor.build_batch().comparison_sets
+    (group,) = trajectory_groups(processor.build_batch())
     assert len(group) == 2
 
 
@@ -123,24 +125,25 @@ def test_multi_call_attempt_assembles_multi_turn():
     processor.ingest(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
     processor.ingest(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
     assert processor.ready()
-    (group,) = processor.build_batch().comparison_sets
-    multi = next(s for s in group if s.reward == 0.5)
-    assert multi.is_multi_turn and multi.turn_count == 2
+    (group,) = trajectory_groups(processor.build_batch())
+    multi = next(s for s in group if trajectory_reward(s) == 0.5)
+    assert multi.training["turn_count"] == 2
 
 
-def test_report_without_coral_metadata_is_named_never():
+def test_report_without_coral_metadata_fails_explicitly():
     processor = _processor()
     processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(
-        AgentRecord.create(
-            scenario=SCENARIO,
-            request_type=RequestType.REPORT,
-            agent_record_id="r-bare",
-            references=("i1",),
-            payload={"score": 1.0, "references": ["i1"]},
+    with pytest.raises(ValueError, match=r"metadata\.coral"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario=SCENARIO,
+                request_type=RequestType.REPORT,
+                agent_record_id="r-bare",
+                references=("i1",),
+                payload={"score": 1.0, "references": ["i1"]},
+            )
         )
-    )
-    assert any("metadata.coral" in reason for reason in processor.never_reasons)
+    assert {"i1", "r-bare"} <= processor.retention_decision().protected_agent_record_ids
 
 
 def test_group_size_floor():
@@ -153,4 +156,4 @@ def test_status_is_a_mapping_even_before_any_discard():
     status() call .items() on the base's discard set."""
     processor = _processor()
     status = processor.status()
-    assert status == {"discarded_groups": [], "never_reasons": {}}
+    assert status == {"discarded_groups": []}

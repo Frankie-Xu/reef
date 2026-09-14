@@ -20,15 +20,19 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.base import PreparedTrainingStep, RuntimeContractError, TrainingRuntime
-from reef.runtime.candidates import ActivatedModel, ModelCandidate
-from reef.runtime.inference import InferenceBackend
-from reef.runtime.registry import RuntimeFactory, register_runtime_kind
+from reef.runtime.deployment import RuntimeBuild, RuntimeFactory, register_runtime_kind
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    ModelCandidate,
+    PreparedTrainingStep,
+    RuntimeContractError,
+    TrainingRuntime,
+)
 from reef.train.algos.registry import resolve_preparer
 from reef.train.mlx_backend.rows import DistillationRow, TeacherCandidate, TrainingRow
-from reef.train.types import PolicySample, TrainingBatch, policy_samples
+from reef.train.mlx_backend.serving import MLXServingRuntime
+from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +53,19 @@ class MLXRuntime(TrainingRuntime):
         engine: Any,
         *,
         checkpoint_dir: str,
-        base_url: str = "mlx://local",
         inference_timeout_s: float = 300.0,
         kl_coef: float = 0.0,
         adapter_name: str = "reef-mlx",
         openclawrl: Mapping[str, Any] | None = None,
+        serving: MLXServingRuntime | None = None,
     ) -> None:
-        super().__init__(base_url=base_url, inference_timeout_s=inference_timeout_s)
+        super().__init__()
+        #: The half that owns the parameters, the admission gate and the served
+        #: version. Training reaches the engine only through it, so there is one
+        #: owner of the weights even though both halves live in this process.
+        self._serving = serving or MLXServingRuntime(
+            engine, adapter_name=adapter_name, inference_timeout_s=inference_timeout_s
+        )
         self._engine = engine
         self._checkpoint_root = Path(checkpoint_dir)
         self._checkpoint_root.mkdir(parents=True, exist_ok=True)
@@ -74,40 +84,18 @@ class MLXRuntime(TrainingRuntime):
             "native_k": 20,
             **dict(openclawrl or {}),
         }
-        # The freshly loaded base plus its zero-initialised adapter is already
-        # a servable version, and every durable training record must name the
-        # weights that answered it. Minting the identity at boot is what lets
-        # the very first rollout — served before anything is published — be
-        # recorded as trainable.
-        self._serving_runtime_load_id: str | None = engine.next_runtime_load_id()
-        #: The version Reef has committed. Equal to the serving version except
-        #: between an activation and that step's durable commit.
-        self._committed_runtime_load_id: str | None = self._serving_runtime_load_id
         self._pending: dict[str, Any] = {}
-        self._backend: Any = None
 
     # ---------------------------------------------------------------- serving
 
     @property
-    def engine(self) -> Any:
-        return self._engine
+    def serving(self) -> MLXServingRuntime:
+        """The half that owns the parameters, the gate and the served version."""
+        return self._serving
 
     @property
-    def inference_backend(self) -> InferenceBackend:
-        if self._backend is None:
-            from reef.train.mlx_backend.inference import MLXInferenceBackend
-
-            self._backend = MLXInferenceBackend(self)
-        return self._backend
-
-    def serving_runtime_load_id(self) -> str | None:
-        return self._serving_runtime_load_id
-
-    def serving_adapter_name(self) -> str | None:
-        # The adapter is resident in this process rather than addressed by
-        # name over a wire, but naming it keeps the served identity explicit
-        # in records and in the weight surface.
-        return self._adapter_name
+    def engine(self) -> Any:
+        return self._engine
 
     def experiment_config(self) -> Mapping[str, Any]:
         config = self._engine.config
@@ -129,6 +117,8 @@ class MLXRuntime(TrainingRuntime):
         step_preparer: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
+        *,
+        serving_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         """Run the recipe's registered preparer in this process.
 
@@ -152,7 +142,7 @@ class MLXRuntime(TrainingRuntime):
                 next_algorithm_state=signal.next_algorithm_state,
                 metrics=signal.metrics,
             )
-        samples = policy_samples(batch)
+        samples = trajectories(batch)
         self._require_supported_scheduling(signal, step_preparer)
         advantages = signal.advantages
         if advantages is None or len(advantages) != len(samples):
@@ -198,7 +188,7 @@ class MLXRuntime(TrainingRuntime):
                 f"{', '.join(unsupported)}. Supported: epochs=1, shuffle=False, batch_size='actual'."
             )
 
-    def _distillation_rows(self, samples: Sequence[PolicySample], advantages: Sequence[float]) -> list[Any]:
+    def _distillation_rows(self, samples: Sequence[TrajectoryItem], advantages: Sequence[float]) -> list[Any]:
         """Turn reserved samples into the rows the distillation step consumes.
 
         Two channels have to be present and cannot be rebuilt afterwards: the
@@ -209,12 +199,17 @@ class MLXRuntime(TrainingRuntime):
         """
         rows = []
         for index, (sample, advantage) in enumerate(zip(samples, advantages, strict=True)):
-            if not sample.topk_indices or not sample.topk_log_probs:
+            # The captured tensors live in the item's ATIF extension, written
+            # there by the processor; nothing here re-tokenizes.
+            captured = sample.training
+            topk_indices = captured.get("topk_indices") or ()
+            topk_log_probs = captured.get("topk_log_probs") or ()
+            if not topk_indices or not topk_log_probs:
                 raise RuntimeContractError(
                     f"sample {index} carries no generation top-K; the openclawrl objective distils onto "
-                    "the candidates the policy considered, so set reef.runtime_config.capture_topk"
+                    "the candidates the policy considered, so set the runtime's capture_topk"
                 )
-            raw = sample.extras.get("teacher_cands")
+            raw = (captured.get("extras") or {}).get("teacher_cands")
             if not raw:
                 raise RuntimeContractError(
                     f"sample {index} carries no teacher candidates; the processor attaches them as "
@@ -229,12 +224,12 @@ class MLXRuntime(TrainingRuntime):
             )
             rows.append(
                 DistillationRow(
-                    tokens=sample.tokens,
-                    loss_mask=sample.loss_mask,
-                    rollout_log_probs=sample.rollout_log_probs,
+                    tokens=tuple(int(t) for t in captured.get("tokens") or ()),
+                    loss_mask=tuple(int(m) for m in captured.get("loss_mask") or ()),
+                    rollout_log_probs=tuple(float(v) for v in captured.get("rollout_log_probs") or ()),
                     reward=float(advantage),
-                    topk_indices=sample.topk_indices,
-                    topk_log_probs=sample.topk_log_probs,
+                    topk_indices=tuple(tuple(int(i) for i in row) for row in topk_indices),
+                    topk_log_probs=tuple(tuple(float(v) for v in row) for row in topk_log_probs),
                     candidates=candidates,
                 )
             )
@@ -242,7 +237,7 @@ class MLXRuntime(TrainingRuntime):
 
     def _run_training(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Dispatch to the objective the recipe's loss family names."""
-        samples: Sequence[PolicySample] = payload["samples"]
+        samples: Sequence[TrajectoryItem] = payload["samples"]
         advantages: Sequence[float] = payload["advantages"]
         if payload.get("loss_family") == "openclawrl":
             rows = self._distillation_rows(samples, advantages)
@@ -259,15 +254,18 @@ class MLXRuntime(TrainingRuntime):
                     kl_coef=self._openclawrl["kl_coef"],
                 )
             )
-        rows = [
-            TrainingRow(
-                tokens=sample.tokens,
-                loss_mask=sample.loss_mask,
-                rollout_log_probs=sample.rollout_log_probs,
-                advantages=(float(advantage),) * len(sample.loss_mask),
+        rows = []
+        for sample, advantage in zip(samples, advantages, strict=True):
+            captured = sample.training
+            loss_mask = tuple(int(m) for m in captured.get("loss_mask") or ())
+            rows.append(
+                TrainingRow(
+                    tokens=tuple(int(t) for t in captured.get("tokens") or ()),
+                    loss_mask=loss_mask,
+                    rollout_log_probs=tuple(float(v) for v in captured.get("rollout_log_probs") or ()),
+                    advantages=(float(advantage),) * len(loss_mask),
+                )
             )
-            for sample, advantage in zip(samples, advantages, strict=True)
-        ]
         if self._kl_coef:
             rows = self._apply_frozen_base_kl(rows)
         return dict(self._engine.train_step(rows))
@@ -280,13 +278,13 @@ class MLXRuntime(TrainingRuntime):
         requests.
         """
         scenario_step = int(payload["rollout_id"])
-        current = self.current_runtime_load_id()
+        current = self._serving.current_runtime_load_id()
         before = self._engine.adapter_snapshot()
         # One admission window covers everything that touches the live
         # parameters. The frozen-base pass zeroes ``lora_b`` in place, so
         # running it while inference is still admitted would let a request
         # generate from the bare base model.
-        self._inference_admission.close(wait=True, timeout=self.inference_timeout_s)
+        self._serving.hold()
         try:
             metrics = self._run_training(payload)
             after = self._engine.adapter_snapshot()
@@ -329,7 +327,7 @@ class MLXRuntime(TrainingRuntime):
             self._engine.apply_adapter(before)
             raise
         finally:
-            self._inference_admission.open()
+            self._serving.release()
 
         return ModelCandidate(
             candidate_id=candidate_id,
@@ -389,28 +387,18 @@ class MLXRuntime(TrainingRuntime):
         # old artifact and then be answered by the new weights, which the
         # weight surface correctly rejects as a runtime-load mismatch.
         # ``reconcile_training_job`` reopens once the commit is durable.
-        self._inference_admission.close(wait=True, timeout=self.inference_timeout_s)
+        self._serving.hold()
         try:
-            self._engine.apply_adapter(snapshot)
-            self._serving_runtime_load_id = self._engine.next_runtime_load_id()
+            runtime_load_id = self._serving.swap_adapter(snapshot)
         except BaseException:
-            self._inference_admission.open()
+            self._serving.release()
             raise
         logger.info(
             "activated mlx candidate %s at runtime load ID %s",
             candidate.candidate_id,
-            self._serving_runtime_load_id,
+            runtime_load_id,
         )
-        return ActivatedModel(candidate_id=candidate.candidate_id, runtime_load_id=self._serving_runtime_load_id)
-
-    def current_runtime_load_id(self) -> str | None:
-        """The version Reef has actually made available to new inference.
-
-        Between activation and Reef's durable commit this deliberately lags
-        :meth:`serving_runtime_load_id`: the engine already holds the new
-        weights, but no request may be admitted against them yet.
-        """
-        return self._committed_runtime_load_id
+        return ActivatedModel(candidate_id=candidate.candidate_id, runtime_load_id=runtime_load_id)
 
     def reconcile_training_job(
         self,
@@ -426,8 +414,7 @@ class MLXRuntime(TrainingRuntime):
         publication is committed, and again at recovery, which is the first
         moment a new request can safely freeze the new head.
         """
-        self._committed_runtime_load_id = self._serving_runtime_load_id
-        self._inference_admission.open()
+        self._serving.commit_serving()
 
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
         """Drop a rejected candidate's weights; serving already never saw them."""
@@ -453,7 +440,7 @@ class MLXRuntime(TrainingRuntime):
         snapshot = self._pending.get(candidate_id)
         if snapshot is None:
             raise RuntimeContractError(f"no pending mlx candidate {candidate_id!r} to probe")
-        self._inference_admission.close(wait=True, timeout=self.inference_timeout_s)
+        self._serving.hold()
         try:
             serving = self._engine.adapter_snapshot()
             self._engine.apply_adapter(snapshot)
@@ -464,20 +451,7 @@ class MLXRuntime(TrainingRuntime):
             finally:
                 self._engine.apply_adapter(serving)
         finally:
-            self._inference_admission.open()
-
-    def restore_checkpoint(self, artifact: Artifact) -> str:
-        """Roll serving back to a published adapter."""
-        local_path = artifact.local_path
-        if local_path is None:
-            raise RuntimeContractError("mlx rollback requires a materialized adapter")
-        self._inference_admission.close(wait=True, timeout=self.inference_timeout_s)
-        try:
-            self._engine.load_adapter(Path(local_path))
-            self._serving_runtime_load_id = self._engine.next_runtime_load_id()
-        finally:
-            self._inference_admission.open()
-        return self._serving_runtime_load_id
+            self._serving.release()
 
 
 def _template_kwargs(value: Any) -> Mapping[str, Any]:
@@ -511,7 +485,7 @@ class MLXRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> MLXRuntime:
+    ) -> RuntimeBuild:
         # The deployment's contract is checked before MLX is imported: a
         # misconfiguration is reported as itself, not as a missing extra,
         # and the checks hold on any machine.
@@ -555,14 +529,22 @@ class MLXRuntimeFactory(RuntimeFactory):
             chat_template_kwargs=chat_template_kwargs,
         )
         timeout = config.get("inference_timeout_s")
-        return MLXRuntime(
+        # One engine, two halves: the serving runtime owns the parameters and
+        # the admission gate, the training runtime reaches them through it.
+        serving = MLXServingRuntime(
             MLXEngine(engine_config),
+            adapter_name=str(config.get("adapter_name", "reef-mlx")),
+            inference_timeout_s=float(timeout) if timeout else 300.0,
+        )
+        training = MLXRuntime(
+            serving.engine,
             checkpoint_dir=checkpoint_dir,
             kl_coef=float(config.get("kl_coef", 0.0)),
-            inference_timeout_s=float(timeout) if timeout else 300.0,
             adapter_name=str(config.get("adapter_name", "reef-mlx")),
             openclawrl=config.get("openclawrl") if isinstance(config.get("openclawrl"), Mapping) else None,
+            serving=serving,
         )
+        return training, serving
 
 
 __all__ = ["MLXRuntime", "MLXRuntimeFactory"]

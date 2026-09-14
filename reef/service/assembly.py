@@ -1,6 +1,6 @@
 """Assemble the Reef HTTP service from settings: dispatcher, registry, app.
 
-This is the service's composition logic — a :class:`ServiceSettings` in, a
+This is the service's composition logic — a :class:`ServiceConfig` in, a
 running aiohttp application out. It knows nothing about the deployment config
 format; ``reef.service.deploy`` translates YAML into these settings and
 orchestrates processes around the result.
@@ -8,25 +8,25 @@ orchestrates processes around the result.
 
 from __future__ import annotations
 
-import importlib
 import os
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceBackendFactory
-from reef.runtime.registry import RuntimeRegistry
+from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry, runtime_pair
+from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
-from reef.service.deploy.settings import ServiceSettings, service_owned_keys
+from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
+from reef.service.deploy.training import training_deployment_for
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -41,10 +41,10 @@ def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
     return None
 
 
-def _recipe_owned_settings(settings: ServiceSettings) -> dict[str, Any]:
+def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     """The flat ``reef.*`` keys that belong to the recipe, not the service.
 
-    The service's own vocabulary is :class:`ServiceSettings`' fields plus the
+    The service's own vocabulary is :class:`ServiceConfig`' fields plus the
     config spellings that map onto them (``reef.token`` feeds ``tokens``), so
     it never drifts from what the settings layer consumes. Everything else
     the operator wrote under ``reef:`` is recipe configuration and must be
@@ -66,84 +66,29 @@ def _require_non_empty(value: str | None, setting: str) -> str:
     return value.strip()
 
 
-def _configured_inference_backend_factory(path: str | None) -> InferenceBackendFactory | None:
-    """Load an optional backend factory selected by deployment config."""
-
-    if path is None:
-        return None
-    if not isinstance(path, str) or not path.strip():
-        raise ValueError("reef.inference_backend_factory must be a non-empty dotted path")
-    module_path, separator, attribute = path.strip().rpartition(".")
-    if not separator or not module_path or not attribute:
-        raise ValueError("reef.inference_backend_factory must be a dotted path")
-    try:
-        factory = getattr(importlib.import_module(module_path), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot load reef.inference_backend_factory {path!r}") from exc
-    if not callable(factory):
-        raise ValueError(f"reef.inference_backend_factory {path!r} is not callable")
-    return factory
-
-
 def _connect_training_runtime(
-    settings: ServiceSettings,
+    settings: ServiceConfig,
     *,
     model_path: str,
     max_staleness: int,
     connector: Any = None,
-) -> TrainingRuntime:
-    """Build the training runtime the deployment's ``reef.runtime_type`` names.
-
-    The kind defaults to ``ray_training``, so a deployment that never mentions
-    a runtime keeps the Ray bridge and its required ``reef.ray_address``. Any
-    other kind resolves through the same registry and receives only the
-    service-owned keys plus whatever ``reef.runtime_config`` adds, because the
-    Ray connection settings are meaningless to it.
-    """
-    inference_url = settings.inference_url.strip() if isinstance(settings.inference_url, str) else None
-    if settings.inference_timeout_s <= 0:
-        raise ValueError("reef.inference_timeout_s must be positive")
-    if settings.train_timeout_s is not None and settings.train_timeout_s <= 0:
-        raise ValueError("reef.train_timeout_s must be positive when set")
-    runtime_type = _require_non_empty(settings.runtime_type, "reef.runtime_type")
-    runtime_config: dict[str, Any] = {
-        "type": runtime_type,
-        "inference_url": inference_url or None,
-        "inference_timeout_s": settings.inference_timeout_s,
-        "train_timeout_s": settings.train_timeout_s,
-    }
-    if runtime_type == "ray_training":
-        runtime_config.update(
-            actor_name=settings.ray_actor_name,
-            namespace=settings.ray_namespace,
-            ray_address=_require_non_empty(settings.ray_address, "reef.ray_address"),
-        )
-    if not isinstance(settings.runtime_config, Mapping):
-        raise ValueError("reef.runtime_config must be an object")
-    for key, value in settings.runtime_config.items():
-        if key in runtime_config:
-            raise ValueError(f"reef.runtime_config.{key} is supplied by the service and cannot be overridden")
-        runtime_config[key] = value
-    if max_staleness:
-        runtime_config["max_staleness"] = max_staleness
-    inference_backend_factory = _configured_inference_backend_factory(settings.inference_backend_factory)
-    if inference_backend_factory is not None:
-        runtime_config["inference_backend_factory"] = inference_backend_factory
-    if not isinstance(settings.inference_backend_config, Mapping):
-        raise ValueError("reef.inference_backend_config must be an object")
-    if settings.inference_backend_config:
-        if inference_backend_factory is None:
-            raise ValueError("reef.inference_backend_config requires reef.inference_backend_factory")
-        runtime_config["inference_backend_config"] = dict(settings.inference_backend_config)
-    if connector is not None and runtime_type == "ray_training":
-        runtime_config["connect"] = connector
-    runtime = RuntimeRegistry().build(runtime_config, model_path=model_path)
-    if not isinstance(runtime, TrainingRuntime):
-        raise TypeError(f"{runtime_type!r} runtime factory must build a TrainingRuntime")
-    return runtime
+) -> tuple[TrainingRuntime, InferenceRuntime]:
+    """Build the selected integration's runtime, independently of its process topology."""
+    RuntimeConnectionConfig(
+        inference_timeout_s=settings.inference_timeout_s,
+        train_timeout_s=settings.train_timeout_s,
+        max_staleness=max_staleness,
+    )
+    backend = training_deployment_for(settings.training_backend)
+    runtime_config = backend.runtime_config(asdict(settings), max_staleness=max_staleness, connector=connector)
+    built = RuntimeRegistry().build(runtime_config, model_path=model_path)
+    pair = runtime_pair(built)
+    if pair is None:
+        raise TypeError("training backend runtime factory must build a (TrainingRuntime, InferenceRuntime) pair")
+    return pair
 
 
-def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
+def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
     """The proxy runtime ``reef.upstream_url`` names, or None to leave recipes
     to their own resolution (a recipe-config ``runtime`` section, else the
     ``REEF_UPSTREAM_URL`` environment)."""
@@ -160,16 +105,14 @@ def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
 
 def _training_recipe(
     recipe_type: type[WeightTrainingRecipe],
-    settings: ServiceSettings,
+    settings: ServiceConfig,
     env: Mapping[str, str],
     connector: Any,
 ) -> Recipe:
-    """Build a weight-training recipe on the Ray training runtime the settings name."""
+    """Build a weight-training recipe on the selected backend runtime."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
-    # The recipe owns its config fields: service_config parses the recipe-owned
-    # slice of the flat reef section (rejecting keys no config field consumes)
-    # and from_environment resolves them, so this builder never names
-    # recipe-specific keys.
+    # Translate the legacy layout, then resolve the recipe fields once before
+    # connecting its runtime. Construction consumes those same resolved values.
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
     if settings.evaluation_settings is not None:
         recipe_config["evaluation"] = dict(settings.evaluation_settings)
@@ -177,21 +120,24 @@ def _training_recipe(
     # resolve the shared runtime-owned config field from the same inputs first.
     # WeightTrainingRecipe then verifies that both resolved the same value.
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
-    runtime = _connect_training_runtime(
+    training_runtime, runtime = _connect_training_runtime(
         settings,
         model_path=model_path,
         max_staleness=resolved_recipe_data["max_staleness"],
         connector=connector,
     )
     try:
-        return recipe_type.from_environment(env, config=recipe_config, runtime=runtime)
+        return recipe_type.from_resolved_config(
+            recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_runtime=training_runtime
+        )
     except BaseException:
-        with suppress(Exception):
-            runtime.shutdown()
+        for component in (training_runtime, runtime):
+            with suppress(Exception):
+                component.shutdown()
         raise
 
 
-def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, str], connector: Any) -> Recipe:
+def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str], connector: Any) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
     The spellings differ only in where config and runtime come from: a dotted
@@ -207,17 +153,44 @@ def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, 
     if settings.evaluation_settings is not None:
         raise ValueError("the top-level evaluation section requires a weight-training recipe")
     if ":" in selected:
-        return build_recipe(
-            selected,
-            env,
-            config=_recipe_owned_settings(settings),
-            runtime=_upstream_runtime(settings),
+        config = _recipe_owned_settings(settings)
+        if settings.preset_config is not None:
+            config.update(
+                {
+                    key: settings.preset_config[key]
+                    for key in ("execution", "executors")
+                    if key in settings.preset_config
+                }
+            )
+        runtime_config = config.get("runtime")
+        runtime = (
+            RuntimeRegistry().build(
+                runtime_config,
+                model_path=settings.model_path or settings.upstream_model or "",
+                recipe_config=config,
+                environ=env,
+            )
+            if runtime_config
+            else _upstream_runtime(settings)
         )
-    return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
+        training_runtime = None
+        if isinstance(runtime, tuple):
+            training_runtime, runtime = runtime
+        try:
+            return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
+        except BaseException:
+            for component in (training_runtime, runtime):
+                if component is not None:
+                    with suppress(Exception):
+                        component.shutdown()
+            raise
+    return build_named_recipe(
+        selected, env, default_runtime=_upstream_runtime(settings), preset_config=settings.preset_config
+    )
 
 
 def build_dispatcher(
-    settings: ServiceSettings, *, environ: Mapping[str, str] | None = None, connector: Any = None
+    settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None
 ) -> Dispatcher:
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
@@ -260,16 +233,17 @@ def build_dispatcher(
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
-        if recipe.runtime is not None:
-            with suppress(Exception):
-                recipe.runtime.shutdown()
+        for component in (recipe.training_runtime, recipe.runtime):
+            if component is not None:
+                with suppress(Exception):
+                    component.shutdown()
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
         raise
 
 
-def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
+def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
     record_retention = RecordRetention(settings.agent_record_retention_days, settings.agent_record_retention_max_bytes)
     retry_policy = InferenceRetryPolicy(
         initial_s=settings.inference_retry_initial_s,

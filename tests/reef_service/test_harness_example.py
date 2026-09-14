@@ -14,17 +14,18 @@ from types import ModuleType
 
 import pytest
 import yaml
+from reef_service._trajectories import recorded_trajectory
+from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
+from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.cordis import CordisRecipe
-from reef.service.deploy.config import load_config
-from reef.service.deploy.settings import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import Mutation
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
 
@@ -33,7 +34,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-h
 #: reef hands the proposer is the only endpoint in play.
 NODES = (("skill", {"name": "answer-style", "text": "# answer-style\n\nStarter skill."}),)
 
-SAMPLES = (TraceSample("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
+SAMPLES = (recorded_trajectory("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
 
 #: One queued instruction, as the backend forwards it to a proposer that names ``requests``.
 REQUEST = {
@@ -54,8 +55,10 @@ def _method(monkeypatch: pytest.MonkeyPatch, module: str) -> ModuleType:
     return importlib.import_module(f"harness.{module}")
 
 
-@pytest.fixture
-def evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+@pytest.fixture(params=["tutorial", "builtin"])
+def evolution(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> ModuleType:
+    if request.param == "builtin":
+        return importlib.import_module("reef.recipe.reefine.evolution")
     return _method(monkeypatch, "evolution")
 
 
@@ -149,13 +152,13 @@ def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     model = canned(proposal("answer-style"))
     (mutation,) = evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert (mutation.op, mutation.id) == ("update", "answer-style")
-    assert model.calls == 1
+    assert model.calls == 2  # the plan call, then the entries
     assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
 
 
 #: A report's feedback beside its request: what the reporter said was wrong, which the payload alone cannot show.
 REPORTED = (
-    TraceSample(
+    recorded_trajectory(
         "a2",
         {"messages": [{"role": "user", "content": "fix the failing test in auth.py"}]},
         0.0,
@@ -165,7 +168,7 @@ REPORTED = (
 
 
 def test_propose_shows_each_failure_with_its_report_score_and_feedback(evolution) -> None:
-    """The step hands the proposer TraceSamples whose ``feedback`` is the report's text verbatim; a proposer that
+    """The step hands the proposer ATIF trajectory items whose ``feedback`` is the report's text verbatim; a proposer that
     serialized the payload alone would learn what the model answered but never why it was scored down."""
     model = canned(proposal("answer-style"))
     evolution.propose(NODES, REPORTED + SAMPLES, model)
@@ -212,7 +215,7 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     mutations = evolution.propose(
         (*NODES, ("rules", {"text": "Be brief."}), API_SKILL), (), model, requests=(REQUEST,)
     )
-    assert model.calls == 1
+    assert model.calls == 2  # the plan call, then the entries
     prompt = model.prompt
     assert REQUEST["text"] in prompt and "[BEGIN user request" in prompt
     assert '"id": "answer-style"' in prompt and '"body": "# answer-style' in prompt
@@ -222,6 +225,9 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
         assert reserved in prompt
     for kind in ("skill", "rules", "agent_command", "code_extension"):
         assert f"- {kind}:" in prompt
+    # The tool must run on every platform; a canned reply names no tool step, so the write prompt carries no plan.
+    assert "macOS, Linux or Windows under WSL 2" in prompt and "process.platform" in prompt
+    assert "need a tool the harness does not have" not in prompt
     assert [(m.op, m.id, m.options) for m in mutations] == [
         ("create", "test-first", {"name": "skill", "config": skill})
     ]
@@ -229,6 +235,54 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert "pi.registerTool" not in model.prompt and "code_extension" in model.prompt
+
+
+class Sequenced(Model):
+    """A ModelBindings stand-in whose ``served`` answers one canned reply per call, in order."""
+
+    def __init__(self, *replies: str) -> None:
+        super().__init__(replies[-1])
+        self.replies = list(replies)
+        self.prompts: list[str] = []
+
+    def chat(self, messages, **params):
+        self.prompts.append(messages[-1]["content"])
+        reply = self.replies[len(self.prompts) - 1] if len(self.prompts) <= len(self.replies) else self.replies[-1]
+        self.reply = reply
+        return super().chat(messages, **params)
+
+
+def test_propose_asks_for_a_plan_first_and_demands_a_tool_for_a_step_the_harness_cannot_perform(evolution) -> None:
+    """The first call lists the request's steps; the ones the harness cannot perform go into the second
+    call's prompt with the demand for a code_extension beside the rule. A plan the model does not give
+    in that shape, or a step it can perform, adds nothing."""
+    plan = json.dumps(
+        [
+            {"step": "reproduce the bug with a failing test", "needs_tool": False},
+            {"step": "have a second agent review the diff", "needs_tool": True},
+        ]
+    )
+    entries = request_reply({"id": "bug-fix-workflow", "name": "rules", "config": {"text": "# Bug fix\n"}})
+    model = Sequenced(plan, entries)
+    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert model.calls == 2 and [m.id for m in mutations] == ["bug-fix-workflow"]
+    plan_prompt, write_prompt = model.prompts
+    assert REQUEST["text"] in plan_prompt and '"needs_tool": true or false' in plan_prompt
+    assert "need a tool the harness does not have" in write_prompt
+    assert "- have a second agent review the diff" in write_prompt
+    assert (
+        "reproduce the bug with a failing test"
+        not in write_prompt.split("need a tool the harness does not have")[1].split("\n\n")[0]
+    )
+    assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}
+    # No step needs a tool: the write prompt carries no plan section.
+    model = Sequenced(json.dumps([{"step": "run the tests", "needs_tool": False}]), entries)
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert "need a tool the harness does not have" not in model.prompts[1]
+    # A plan call that fails, or answers prose, leaves the request answered as before.
+    model = Sequenced("I cannot list steps.", entries)
+    assert [m.id for m in evolution.propose(NODES, (), model, requests=(REQUEST,))] == ["bug-fix-workflow"]
+    assert "need a tool the harness does not have" not in model.prompts[1]
 
 
 def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
@@ -309,14 +363,14 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 120 s and 4096 tokens, the failure path with 60 s and 2048, unless
-    REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is
-    ignored rather than turning the step into an error."""
+    """The request path asks with 600 s and 65536 tokens (its plan call before that with 60 s and 4096), the
+    failure path with 60 s and 2048, unless REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say
+    otherwise; a value that is not a number is ignored rather than turning the step into an error."""
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 120.0, "max_tokens": 4096}
+    assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}  # the entries call, after the plan
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
     assert model.params == {"timeout_s": 60.0, "max_tokens": 2048}
@@ -328,7 +382,7 @@ def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evoluti
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 900.0, "max_tokens": 4096}
+    assert model.params == {"timeout_s": 900.0, "max_tokens": 65536}
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
@@ -407,11 +461,12 @@ def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
 @pytest.mark.parametrize("selector", ["role", "worker"])
 def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypatch, tmp_path, filename, selector):
     materializer = _method(monkeypatch, "materialize_recipe")
+    monkeypatch.syspath_prepend(str(EXAMPLE_DIR.parents[1]))
     config = yaml.safe_load((EXAMPLE_DIR / "configs" / filename).read_text())
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2, "resources": {"cpus_per_worker": 2}}}
-    config["execution"] = {"services": "local", "evolution": "cpu-pool"}
+    config["execution"] = {"evolution": "cpu-pool"}
     if selector == "worker":
-        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"  # The explicit worker profile must win.
     serve = tmp_path / "serve.yaml"
     serve.write_text(yaml.safe_dump(config))
@@ -420,13 +475,13 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert settings["execution"] == config["execution"]
     assert settings["executors"] == config["executors"]
     assert "reef" not in settings and "services" not in settings
-    assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["evolution"]["tasks"]
+    assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["recipe"]["config"]["evolution"]["tasks"]
     # Boot the real recipe; a retained selector without its profile would fail here.
-    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+    from reef.inference.http import InferenceProxyRuntime
 
     recipe = CordisRecipe.from_environment(
         {},
-        config=settings,
+        config=recipe_config_from_mapping(settings),
         runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
     )
     assert recipe.worker_executor.backend == "mp"
@@ -435,7 +490,7 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert recipe.worker_executor.resources.cpus_per_worker == 2
 
 
-def test_materializer_accepts_legacy_config_without_execution_sections(monkeypatch, tmp_path):
+def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp_path):
     materializer = _method(monkeypatch, "materialize_recipe")
     config = yaml.safe_load((EXAMPLE_DIR / "configs/serve.yaml").read_text())
     config.pop("execution")
@@ -443,7 +498,7 @@ def test_materializer_accepts_legacy_config_without_execution_sections(monkeypat
     serve.write_text(yaml.safe_dump(config))
     materializer.materialize(serve, tmp_path / "work")
     result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
-    assert set(result) == {"implementation", "model", "evolution", "data"}
+    assert set(result) == {"schema-version", "recipe", "inference"}
 
 
 def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_path, monkeypatch) -> None:
@@ -460,7 +515,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
 
     # The deployment names the upstream once, on the reef section; the
     # service builds the recipe's runtime from it.
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     assert (service.upstream_url, service.upstream_api_key, service.upstream_model) == (
         "http://127.0.0.1:8000",
         "dummy",
@@ -474,7 +529,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.max_score, built.training_mode) == (1, 0.0, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]
@@ -668,7 +723,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime
 
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )
@@ -710,16 +765,15 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     monkeypatch.setenv("PWD", str(repo_root))
     path = EXAMPLE_DIR / "configs" / "deployment.yaml"
     config = load_config(path)
-    env = next(service for service in config["services"] if service["name"] == "reef")["env"]
-    recipe_dir = repo_root / env["REEF_RECIPE_CONFIG_DIR"]
+    recipe_dir = EXAMPLE_DIR / "configs"
     assert (recipe_dir / "deployment.yaml").resolve() == path.resolve()
-    method_root = Path(env["PYTHONPATH"].split(":")[0])
-    assert (method_root / "harness" / "evolution.py").is_file()
-    monkeypatch.syspath_prepend(str(method_root))  # what the service env PYTHONPATH gives the recipe
+    method_reference = config["evolution"]["propose"]
+    module, _, function = method_reference.partition(":")
+    assert callable(getattr(importlib.import_module(module), function))
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
     assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     monkeypatch.delenv("REEF_UPSTREAM_MODEL")  # Recipe construction uses the resolved runtime, not the environment.
     built = build_named_recipe(
         "deployment",
@@ -768,7 +822,7 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
-        default_runtime=_upstream_runtime(service_settings_from_config(config)),
+        default_runtime=_upstream_runtime(service_config_from_mapping(config)),
     )
     assert isinstance(built, CordisRecipe)
     assert built.review_kinds == ("code_extension",)
@@ -794,7 +848,7 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime
 
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )

@@ -2,9 +2,9 @@
 
 import pytest
 
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor import WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, select_executor
 from reef.runtime.executor.requirements import ExecutionRequirements

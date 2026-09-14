@@ -24,13 +24,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.runtime.assistant_message import (
+from reef.core.errors import ReefError
+from reef.runtime.interfaces import InferenceBackend, InferenceHandler, InferenceStream, UpstreamStatusError
+from reef.train.mlx_backend.assistant_message import (
     THINK_OPEN,
     ReasoningStreamSplitter,
+    ToolCallParser,
     ToolMarkerStreamHold,
     split_assistant_message,
 )
-from reef.runtime.inference import InferenceBackend, InferenceStream, UpstreamStatusError
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,7 @@ class ParsedToolCall:
     parameters: Any
 
 
-class MLXToolCallParser:
+class MLXToolCallParser(ToolCallParser):
     """mlx-lm's per-model tool parser behind the interface the message split reads.
 
     mlx-lm chooses the parser from the chat template when it loads the
@@ -157,8 +159,14 @@ def _sse(event: Mapping[str, Any]) -> bytes:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
 
 
-class MLXInferenceBackend(InferenceBackend):
-    """Answer chat completions from the runtime's resident MLX model."""
+class MLXInferenceBackend(InferenceHandler, InferenceBackend):
+    """Answer chat completions from the runtime's resident MLX model.
+
+    Both halves of Reef's inference contract: it executes a request
+    (``InferenceHandler``) and it is the receiver Reef drives around a weight
+    change (``InferenceBackend``). A receiver that runs as a separate service
+    splits these; an in-process engine is one object.
+    """
 
     def __init__(self, runtime: Any) -> None:
         self._runtime = runtime
@@ -171,6 +179,56 @@ class MLXInferenceBackend(InferenceBackend):
         # decode corrupts the mixed GatedDeltaNet/attention cache), so a shared
         # batch bought corruption, not throughput.
         self._engine_lock = asyncio.Lock()
+
+    # -- #432's receiver contract.
+    #
+    # Reef drives a remote receiver through pause/drain/offload so it can share
+    # a device with other work and be recovered after a restart. This engine's
+    # weights are objects in the serving process: there is no endpoint to
+    # retarget, no device to hand back, and nothing that outlives the process.
+    # The no-ops below say that; the raisers say Reef is asking for something
+    # this receiver genuinely cannot do, rather than silently doing nothing.
+
+    def initialize_version(self, runtime_load_id: str) -> None:
+        """No-op: a version becomes servable when the runtime swaps the adapter."""
+
+    def inference_url(self) -> str:
+        """This receiver has no endpoint; requests arrive as calls, not HTTP."""
+        return "mlx://local"
+
+    def runtime_load_ids(self) -> Sequence[str]:
+        """The one adapter the engine currently serves, if any."""
+        current = getattr(self._runtime, "current_runtime_load_id", None)
+        return (current,) if isinstance(current, str) and current else ()
+
+    def pause(self) -> None:
+        """Stop admitting requests; in-flight generation drains on the lock."""
+        self._runtime._inference_admission.close(wait=True, timeout=self._runtime.inference_timeout_s)
+
+    def resume(self) -> None:
+        self._runtime._inference_admission.open()
+
+    def recover(self) -> None:
+        """No-op: nothing survives the process, so there is nothing to reattach."""
+
+    def abort(self) -> None:
+        """Stop admitting requests without waiting for in-flight generation."""
+        self._runtime._inference_admission.close(wait=False)
+
+    def offload(self, tags: tuple[str, ...] | None) -> None:
+        raise ReefError(
+            "the mlx receiver cannot offload: its weights are objects in the serving process, "
+            "not a device allocation Reef can hand back"
+        )
+
+    def onload_weights(self) -> None:
+        raise ReefError("the mlx receiver never offloads its weights, so there is nothing to onload")
+
+    def onload_kv(self) -> None:
+        raise ReefError("the mlx receiver never offloads its KV cache, so there is nothing to onload")
+
+    def unload_adapter(self, name: str) -> None:
+        raise ReefError(f"the mlx receiver serves one adapter for the life of the process; it cannot unload {name!r}")
 
     async def inference(
         self,

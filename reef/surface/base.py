@@ -8,58 +8,64 @@ they use.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
-
-
-class ArtifactValidator(Protocol):
-    """Artifact admission checks selected for one scenario."""
-
-    def validate(self, artifact: Artifact) -> None: ...
+from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
 
 
 @dataclass(frozen=True)
-class AcceptAnyArtifact:
+class AcceptAnyArtifact(ArtifactValidator):
     """Default admission policy for shape-agnostic scenarios."""
 
     def validate(self, artifact: Artifact) -> None:
         return None
 
 
-class ServingRuntime(Protocol):
+class ServingRuntime(ABC):
     """The runtime shape visible to surface loaders."""
 
     @property
+    @abstractmethod
     def base_url(self) -> str: ...
 
 
-@runtime_checkable
-class WeightRuntime(ServingRuntime, Protocol):
+class WeightRuntime(ServingRuntime):
     """A runtime that can inspect and restore served model weights."""
 
+    @abstractmethod
     def serving_runtime_load_id(self) -> str | None: ...
 
+    @abstractmethod
     def restore_checkpoint(self, artifact: Artifact) -> str: ...
 
+    def activate_checkpoint(self, artifact: Artifact) -> str:
+        """Bind a recovered or republished artifact before the scenario serves it.
 
-@runtime_checkable
-class RecoveryRestorer(Protocol):
-    """Optional loader capability: reload a recovered head at startup.
+        Called once a release is final and before traffic routes to it. The
+        default binds nothing and returns the release ID: for runtimes whose
+        serving update and Reef publication are one operation, the artifact
+        already names what the engine serves. A runtime that serves immutable
+        remote snapshots overrides this to select the sampler and training
+        state the artifact references, and returns the runtime load ID it
+        now serves under.
+        """
+        return artifact.ref.release_id
 
-    Separate from ``ArtifactActivator`` because that also runs after every
-    publication and rollback, where the weights are already resident and the
-    signature gives no way to tell the callers apart.
-    """
 
-    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None: ...
+class AdapterWeightRuntime(WeightRuntime):
+    """A weight runtime that can inspect each scenario's resident adapter."""
+
+    @abstractmethod
+    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None: ...
 
 
-class ArtifactLoader(Protocol):
+class ArtifactLoader(ABC):
     """Runtime-backed artifact loading and startup recovery."""
 
+    @abstractmethod
     def recover(
         self,
         current: ArtifactRef | None,
@@ -67,11 +73,11 @@ class ArtifactLoader(Protocol):
         runtime: ServingRuntime | None,
     ) -> ArtifactRef: ...
 
+    @abstractmethod
     def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str: ...
 
 
-@runtime_checkable
-class ArtifactActivator(Protocol):
+class ArtifactActivator(ArtifactLoader):
     """Optional loader capability: make a published release servable.
 
     Called once a release is final — after startup recovery has a
@@ -80,27 +86,45 @@ class ArtifactActivator(Protocol):
     ``source`` names the artifact whose bytes a rollback republished.
     """
 
+    @abstractmethod
     def activate(
         self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None
     ) -> str: ...
 
 
-class InferenceHooks(Protocol):
+class RecoveryRestorer(ArtifactLoader):
+    """Optional loader capability: reload a recovered head at startup.
+
+    Separate from :class:`ArtifactActivator`, which also runs after every
+    publication and rollback: there the weights are already resident, and the
+    signature gives no way to tell the two callers apart. A runtime whose
+    weights live in this process lost them when the previous one exited, so
+    without this the scenario resumes reporting its full step count while
+    answering from the bare base model.
+    """
+
+    @abstractmethod
+    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None: ...
+
+
+class InferenceHooks(ABC):
     """Request and response hooks around one provider inference."""
 
+    @abstractmethod
     def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]: ...
 
+    @abstractmethod
     def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None: ...
 
 
-class InferenceLease(Protocol):
+class InferenceLease(ABC):
     """Serving state held for one inference attempt; released exactly once."""
 
+    @abstractmethod
     def release(self) -> None: ...
 
 
-@runtime_checkable
-class LeasingInferenceHooks(Protocol):
+class LeasingInferenceHooks(InferenceHooks):
     """Optional inference capability: hold serving state for one attempt.
 
     ``begin_request`` runs after ``prepare_request`` froze the artifact and
@@ -108,12 +132,14 @@ class LeasingInferenceHooks(Protocol):
     completed, aborted, or failed.
     """
 
+    @abstractmethod
     def begin_request(self, artifact: Artifact, path: str) -> InferenceLease: ...
 
 
-class FileTree(Protocol):
+class FileTree(ABC):
     """A client-readable file tree derived from an artifact."""
 
+    @abstractmethod
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None: ...
 
 
@@ -142,6 +168,7 @@ class Surface:
 
 
 __all__ = [
+    "AdapterWeightRuntime",
     "ArtifactActivator",
     "ArtifactLoader",
     "FileTree",
@@ -149,7 +176,6 @@ __all__ = [
     "InferenceHooks",
     "InferenceLease",
     "LeasingInferenceHooks",
-    "RecoveryRestorer",
     "ServingRuntime",
     "Surface",
     "WeightRuntime",

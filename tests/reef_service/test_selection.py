@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from reef.runtime.candidates import ActivatedModel, ModelCandidate
-from reef.train.backend import TrainingBackend
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate
+from reef.train.backend import CandidateBackend
 from reef.train.cordis_backend import ScoreComparisonMixin, ScoreComparisonPlugin
 from reef.train.evaluation import (
     AlwaysSelectMixin,
@@ -22,6 +22,7 @@ from reef.train.evaluation import (
     BackendEvaluateMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
+    CandidateSelector,
     EvaluationResult,
     RegressionGateMixin,
     SelectionDecision,
@@ -29,7 +30,7 @@ from reef.train.evaluation import (
 )
 
 
-class DecideOnlyBackend:
+class DecideOnlyBackend(CandidateEvaluator):
     """Stands in for the training backend: these cases exercise ``decide`` only."""
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
@@ -44,8 +45,30 @@ def evaluation() -> EvaluationResult:
     )
 
 
+def test_evaluation_and_selection_remain_independent_nominal_capabilities() -> None:
+    class Selector(CandidateSelector):
+        def decide(self, candidate, result):
+            return SelectionDecision("select", "test", "1", "accepted", result)
+
+    evaluator = DecideOnlyBackend()
+    selector = Selector()
+    assert isinstance(evaluator, CandidateEvaluator)
+    assert not isinstance(evaluator, (CandidateSelector, CandidateEvaluationPlugin))
+    assert isinstance(selector, CandidateSelector)
+    assert not isinstance(selector, (CandidateEvaluator, CandidateEvaluationPlugin))
+
+    class DuckPlugin:
+        def evaluate(self, candidate):
+            return evaluation()
+
+        def decide(self, candidate, result):
+            return selector.decide(candidate, result)
+
+    assert not isinstance(DuckPlugin(), (CandidateEvaluator, CandidateSelector, CandidateEvaluationPlugin))
+
+
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:
-    assert issubclass(TrainingBackend, CandidateEvaluator)
+    assert issubclass(CandidateBackend, CandidateEvaluator)
     # The shipped plugins are whole plugins: they evaluate and decide.
     for plugin in (BackendAlwaysSelectPlugin, ScoreComparisonPlugin):
         assert issubclass(plugin, CandidateEvaluationPlugin)
@@ -185,7 +208,7 @@ def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
     class Plugin(AlwaysSelectMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
         def __init__(self, backend: object) -> None:
             super().__init__()
-            self._backend = backend
+            self._candidate_backend = backend
 
     candidate = UpdateCandidate("job-7")
     plugin = Plugin(Backend())

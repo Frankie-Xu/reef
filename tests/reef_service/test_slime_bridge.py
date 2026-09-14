@@ -9,29 +9,34 @@ tests belong to a separate deployment suite.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import ray
+from reef_service._trajectories import policy_trajectory
+from reef_service.slime_coordinator import build_slime_coordinator
 from slime.utils.misc import Box
 
-from reef.runtime.base import TrainingJobResult
+from reef.runtime.interfaces import TrainingJobResult
+from reef.runtime.recovery import read_marker, transition_marker, write_marker
+from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.preparation import _build_payload
-from reef.train.slime_backend.reef_adapters.training_job.marker import read_marker, transition_marker, write_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig, _allocated_bytes
-from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
+from reef.train.types import TrainingBatch
 
 
 @pytest.fixture(autouse=True)
 def _local_ray_get(monkeypatch):
-    monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
+    monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
 
 
-def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failure(monkeypatch):
+def test_bridge_shutdown_releases_only_training_even_on_failure(monkeypatch):
     from threading import Lock
 
     from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
@@ -52,78 +57,22 @@ def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failu
         train_group._executor = Executor(name)
         return train_group
 
-    class Dispose:
-        def remote(self):
-            events.append("rollout-dispose")
+    actor = object.__new__(TrainingCoordinator)
+    from reef.runtime.publication import TrainingPublication
 
-    manager = SimpleNamespace(dispose=Dispose())
-    actor = object.__new__(bridge.TrainBridgeActorImpl)
+    actor._publication = TrainingPublication(None, None)
+    actor._owns_training = True
+    actor._training = object.__new__(bridge.SlimeTrainingBackend)
     actor._closed = False
     actor._operation_lock = Lock()
-    actor._critic_group = group("critic")
-    actor._group = group("actor")
-    actor._rollout_manager = manager
-    actor._manager_executor = bridge.RayExecutor.from_workers([manager])
-    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("rollout-kill"))
+    actor._training._critic_group = group("critic")
+    actor._training._group = group("actor")
+    monkeypatch.setattr(ray, "kill", lambda target, **kwargs: events.append("rollout-kill"))
     with pytest.raises(RuntimeError, match="critic unavailable"):
         actor.shutdown()
     actor.shutdown()
-    assert events == ["critic", "actor", "rollout-dispose", "rollout-kill"]
-    assert actor._phase == "stopped"
-
-
-def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tmp_path, monkeypatch):
-    import importlib
-
-    from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
-
-    events = []
-
-    class Executor:
-        def __init__(self, name):
-            self.name = name
-
-        def shutdown(self):
-            events.append(self.name)
-
-    def group(name):
-        train_group = object.__new__(SlimeTrainGroup)
-        train_group._executor = Executor(name)
-        return train_group
-
-    actor_group = group("actor")
-    critic_group = group("critic")
-
-    class Dispose:
-        def remote(self):
-            events.append("dispose")
-
-    manager = SimpleNamespace(dispose=Dispose())
-    pg = SimpleNamespace(id="shared")
-    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("kill"))
-    pg_module = importlib.import_module("ray.util.placement_group")
-    monkeypatch.setattr(pg_module, "remove_placement_group", lambda target: events.append("remove-pg"))
-    monkeypatch.setattr(
-        bridge, "create_placement_groups", lambda args: {"actor": (pg, [], []), "rollout": (pg, [], [])}
-    )
-    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: manager)
-    monkeypatch.setattr(bridge, "create_train_groups", lambda *args: (actor_group, critic_group))
-
-    class FailingBridgeActor:
-        @staticmethod
-        def options(**kwargs):
-            return SimpleNamespace(
-                remote=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bridge creation failed"))
-            )
-
-    monkeypatch.setattr(bridge, "TrainBridgeActor", FailingBridgeActor)
-    monkeypatch.setattr(
-        bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
-    )
-    with pytest.raises(RuntimeError, match="bridge creation failed"):
-        bridge.start_bridge(_bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron")))
-    assert events == ["critic", "actor", "dispose", "kill", "remove-pg"]
+    assert events == ["critic", "actor"]
+    assert actor._publication.phase == "stopped"
 
 
 def _row(
@@ -167,7 +116,7 @@ def _payload(
 
 
 def _execute_and_update_weights(
-    actor: bridge.TrainBridgeActorImpl,
+    actor: TrainingCoordinator,
     payload: dict,
 ) -> TrainingJobResult:
     result = actor.execute_training_job(payload)
@@ -295,14 +244,20 @@ def test_to_slime_rollout_data_validates_non_empty_and_parallel_shapes(payload, 
 
 @pytest.mark.unit
 def test_slime_preparation_emits_stable_rollout_ids_for_comparison_sets() -> None:
-    batch = GroupedPolicyBatch(
+    batch = TrainingBatch(
         "batch",
-        (
-            (
-                PolicySample("a", (1, 2), (1, 1), (-0.1, -0.2), 0.2),
-                PolicySample("b", (3, 4), (1, 1), (-0.3, -0.4), 0.8),
-            ),
-            (PolicySample("c", (5, 6), (1, 1), (-0.5, -0.6), 0.4),),
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                (
+                    (
+                        policy_trajectory("a", (1, 2), (1, 1), (-0.1, -0.2), 0.2),
+                        policy_trajectory("b", (3, 4), (1, 1), (-0.3, -0.4), 0.8),
+                    ),
+                    (policy_trajectory("c", (5, 6), (1, 1), (-0.5, -0.6), 0.4),),
+                )
+            )
+            for sample in group
         ),
     )
 
@@ -314,13 +269,19 @@ def test_slime_preparation_emits_stable_rollout_ids_for_comparison_sets() -> Non
 
 @pytest.mark.unit
 def test_slime_preparation_honors_sample_scheduling_and_actual_batch_size() -> None:
-    batch = GroupedPolicyBatch(
+    batch = TrainingBatch(
         "batch",
-        (
-            (
-                PolicySample("a", (1, 2), (1,), (-0.1,), 0.2),
-                PolicySample("b", (3, 4), (1,), (-0.2,), 0.8),
-            ),
+        tuple(
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                (
+                    (
+                        policy_trajectory("a", (1, 2), (1,), (-0.1,), 0.2),
+                        policy_trajectory("b", (3, 4), (1,), (-0.2,), 0.8),
+                    ),
+                )
+            )
+            for sample in group
         ),
     )
 
@@ -338,11 +299,11 @@ def test_slime_preparation_honors_sample_scheduling_and_actual_batch_size() -> N
 
 @pytest.mark.unit
 def test_slime_preparation_assigns_distinct_stable_ids_to_policy_samples() -> None:
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "batch",
         (
-            PolicySample("a", (1,), (1,), (-0.1,), 0.2),
-            PolicySample("b", (2,), (1,), (-0.2,), 0.8),
+            policy_trajectory("a", (1,), (1,), (-0.1,), 0.2),
+            policy_trajectory("b", (2,), (1,), (-0.2,), 0.8),
         ),
     )
 
@@ -353,7 +314,7 @@ def test_slime_preparation_assigns_distinct_stable_ids_to_policy_samples() -> No
 
 @pytest.mark.unit
 def test_assembled_multi_turn_sample_uses_existing_slime_payload_path() -> None:
-    sample = PolicySample(
+    sample = policy_trajectory(
         "harbor-report",
         (10, 20, 11, 21),
         (1, 0, 1),
@@ -362,8 +323,8 @@ def test_assembled_multi_turn_sample_uses_existing_slime_payload_path() -> None:
         "wv-1",
         turn_count=2,
     )
-    assert sample.is_multi_turn
-    payload = _build_payload(PolicyBatch("batch", (sample,)), "sft", None, StepScheduling())
+    assert sample.training.get("turn_count", 1) > 1
+    payload = _build_payload(TrainingBatch("batch", (sample,)), "sft", None, StepScheduling())
 
     assert payload["samples"] == [["harbor-report", [10, 20, 11, 21], [1, 0, 1], [-0.1, 0.0, -0.2], 0.75]]
     converted = to_slime_rollout_data(payload)
@@ -394,7 +355,7 @@ class _FakeRolloutManager:
         # interleaved. ``lifecycle_calls`` stays the rollout only view.
         self.lifecycle_calls: list[str] = []
         self.timeline = timeline if timeline is not None else []
-        self.prepare_external_train_data = _RemoteMethod(self._prepare)
+        self.prepare_external_train_data = self._prepare
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
         self.get_runtime_load_ids = _RemoteMethod(
             lambda: self.versions if self.versions is not None else [self.version]
@@ -455,6 +416,24 @@ class _FakeGroup:
         self.update_generation_management.append(manage_generation)
         self.update_force_full.append(force_full)
 
+    def register_failure_listener(self, listener):
+        pass
+
+    def initialize_runtime_load_id(self, runtime_load_id):
+        self._actor_handlers[0].version = runtime_load_id
+
+    def next_runtime_load_id(self):
+        return self._actor_handlers[0].version
+
+    def prepare_weight_update(self, runtime_load_id, *, force_full):
+        self.set_runtime_load_id_for_update(runtime_load_id)
+
+    def send_prepared_weights(self, runtime_load_id, *, force_full):
+        self.update_weights(manage_generation=False, force_full=force_full)
+
+    def set_runtime_load_id_for_update(self, runtime_load_id):
+        self.restore_runtime_load_id_for_republication(runtime_load_id)
+
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.republication_calls.append(runtime_load_id)
 
@@ -484,7 +463,12 @@ class _DurableGroup(_FakeGroup):
 def _durable_actor(tmp_path):
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
-    actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager(["packed"]), save_hf_template=template)
+    actor = build_slime_coordinator(
+        group,
+        _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
+        save_hf_template=template,
+    )
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
     return actor, group, payload
@@ -502,9 +486,10 @@ def _sao_durable_actor(
     group._actor_handlers[0].version = serving_version
     manager = _FakeRolloutManager(["packed"])
     manager.version = serving_version
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         loss_runtime=resolve_loss_family("sao").bind(),
         critic_group=_FakeGroup(),
@@ -553,9 +538,10 @@ def _loss_family_durable_actor(
     manager = _FakeRolloutManager(["packed"])
     manager.version = serving_version
     loss_runtime = resolve_loss_family(loss_family).bind()
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         loss_runtime=loss_runtime,
     )
@@ -610,8 +596,12 @@ def _bridge_args(**overrides) -> SimpleNamespace:
 @pytest.mark.unit
 def test_bridge_health_reports_start_rollout_id() -> None:
     group = _FakeGroup()
-    actor = bridge.TrainBridgeActorImpl(
-        group, _FakeRolloutManager(["packed"]), save_hf_template=None, start_rollout_id=3
+    actor = build_slime_coordinator(
+        group,
+        _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
+        save_hf_template=None,
+        start_rollout_id=3,
     )
 
     health = actor.health()
@@ -622,7 +612,9 @@ def test_bridge_health_reports_start_rollout_id() -> None:
 @pytest.mark.unit
 def test_bridge_reports_the_serving_runtime_load_id() -> None:
     group = _FakeGroup()
-    actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager([]), save_hf_template=None)
+    actor = build_slime_coordinator(
+        group, _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
+    )
 
     assert actor.serving_runtime_load_id() == "v1"
 
@@ -632,25 +624,27 @@ def test_durable_bridge_syncs_training_weights_before_reporting_ready(tmp_path) 
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
 
-    actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager([]), save_hf_template=template)
+    actor = build_slime_coordinator(
+        group, _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=template
+    )
 
     assert group.update_calls == 1
     assert actor.health()["ok"] is True
 
 
 @pytest.mark.unit
-def test_bridge_packs_with_rollout_manager_then_passes_list_of_boxes(tmp_path, monkeypatch) -> None:
+def test_bridge_packs_locally_then_passes_list_of_boxes(tmp_path, monkeypatch) -> None:
     packed = [Box("dp-0"), Box("dp-1")]
     manager = _FakeRolloutManager(packed)
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
 
-    def fake_ray_get(value, **kwargs):
-        del kwargs
-        return packed if value == "packed-ref" else value
+    def prepare(data):
+        manager.calls.append(data)
+        return packed
 
-    monkeypatch.setattr(bridge.ray, "get", fake_ray_get)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    manager.prepare_external_train_data = prepare
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
@@ -673,7 +667,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
     timeline: list[str] = []
     group = _DurableGroup(template, timeline=timeline)
     manager = _FakeRolloutManager(["packed"], timeline=timeline)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template, colocate=True)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template, colocate=True)
     payload = _payload(loss="tttd", advantages=[0.25, -0.25, 0.0])
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
@@ -681,17 +675,27 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 
     assert result.outcome == "complete"
     assert timeline == [
+        "pause_generation",
+        "offload",
         "onload_weights",
         "onload_kv",
+        "continue_generation",
         "pause_generation",
         "offload",
         "save_model",
+        "pause_generation",
+        "offload",
         "onload_weights",
         "onload_kv",
     ]
     assert manager.lifecycle_calls == [
+        "pause_generation",
+        "offload",
         "onload_weights",
         "onload_kv",
+        "continue_generation",
+        "pause_generation",
+        "offload",
         "pause_generation",
         "offload",
         "onload_weights",
@@ -701,7 +705,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 
     # Default: the base is released with everything else, so the step passes no
     # tags and the weights half of the restore runs.
-    assert manager.release_tags == [None]
+    assert manager.release_tags == [None, None, None]
 
     assert actor.health()["completed_train_steps"] == 1
     assert actor.health()["last_train_rollout_id"] == 0
@@ -715,11 +719,13 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 
 @pytest.mark.unit
 def test_bridge_checkpoint_requires_save_template() -> None:
-    actor = bridge.TrainBridgeActorImpl(_FakeGroup(), _FakeRolloutManager([]), save_hf_template=None)
+    actor = build_slime_coordinator(
+        _FakeGroup(), _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
+    )
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
-    with pytest.raises(RuntimeError, match="save_hf"):
+    with pytest.raises(RuntimeError, match="checkpoint path"):
         _execute_and_update_weights(actor, payload)
 
 
@@ -745,7 +751,9 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     manager = _FakeRolloutManager(["packed"])
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    manager.lifecycle_calls.clear()
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
@@ -757,14 +765,14 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     assert marker["status"] == "CHECKPOINT"
     assert manager.lifecycle_calls == []
     assert group.update_calls == 1  # startup publication only
-    assert group.update_generation_management == [True]
+    assert group.update_generation_management == [False]
 
     updated = actor.update_serving_weights(checkpoint.training_job_id)
 
     assert updated.outcome == "complete"
     assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "READY_TO_COMMIT"
     assert manager.lifecycle_calls == ["pause_generation"]
-    assert group.update_generation_management == [True, False]
+    assert group.update_generation_management == [False, False]
     assert actor.health()["training_job"]["status"] == "READY_TO_COMMIT"
 
     actor.acknowledge_training_commit(checkpoint.training_job_id)
@@ -778,7 +786,7 @@ def test_pause_barrier_failure_leaves_checkpoint_replayable(tmp_path) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     manager = _FakeRolloutManager(["packed"])
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
@@ -822,7 +830,7 @@ def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> N
     group._actor_handlers[0].version = "engine:7"
     manager = _FakeRolloutManager(["packed"])
     manager.version = "engine:7"
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = {
         "samples": [
             _row(
@@ -861,7 +869,7 @@ def test_bridge_rejects_mixed_token_versions_at_exact_admission_without_running_
     group._actor_handlers[0].version = "engine:7"
     manager = _FakeRolloutManager(["packed"])
     manager.version = "engine:7"
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = {
         "samples": [_row("mixed", tokens=(10, 20, 21), loss_mask=(1, 1), log_probs=(-0.1, -0.2))],
         "rollout_ids": [0],
@@ -1121,11 +1129,12 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
     pair_bytes = max(hf_bytes + _allocated_bytes(source_megatron / "iter_0000000"), 8 * hf_bytes)
     group = _DurableGroup(template, megatron_root)
     manager = _FakeRolloutManager(["packed"])
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
-        storage_config=RetentionConfig(max_storage_bytes=pair_bytes),
+        storage_config=RetentionConfig(max_storage_bytes=pair_bytes, min_free_space_bytes=0),
         megatron_save_root=str(megatron_root),
         source_hf=str(source_hf),
         source_megatron=str(source_megatron),
@@ -1137,7 +1146,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
     assert first.training_job_id is not None
     actor.acknowledge_training_commit(first.training_job_id)
     record = read_marker(root / "hf" / ".reef-latest-job.json")
-    catalog = actor._storage._record_path(0)
+    catalog = actor._training._storage._record_path(0)
     stored = json.loads(catalog.read_text(encoding="utf-8"))
 
     assert first.outcome == "complete"
@@ -1182,10 +1191,15 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
 
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
-            bridge.TrainBridgeActorImpl(group, _FakeRolloutManager(["packed"]), save_hf_template=template)
+            build_slime_coordinator(
+                group,
+                _FakeRolloutManager(["packed"]),
+                batch_processor=_FakeRolloutManager(["packed"]),
+                save_hf_template=template,
+            )
     else:
         manager = _FakeRolloutManager(["packed"])
-        actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+        actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
         result = _execute_and_update_weights(actor, payload)
         assert result.outcome == "complete"
         assert result.training_job_id is not None
@@ -1195,7 +1209,7 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
         assert recovered["commit_acknowledged"] is True
         assert group.update_force_full == [True]
         if status == "UPDATING_WEIGHTS":
-            assert manager.lifecycle_calls[:2] == ["recover_engines", "pause_generation"]
+            assert manager.lifecycle_calls[:2] == ["pause_generation", "recover_engines"]
     assert not group.train_calls
 
 
@@ -1249,15 +1263,18 @@ def test_weight_update_recovery_converges_disagreeing_engines_before_startup_val
     manager.versions = ["engine:1", "engine:2"]
 
     class RecoveryGroup(_DurableGroup):
+        def next_runtime_load_id(self):
+            return "engine:3"
+
         def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
             super().update_weights(manage_generation=manage_generation, force_full=force_full)
             self._actor_handlers[0].version = "engine:3"
             manager.versions = ["engine:3", "engine:3"]
 
     group = RecoveryGroup(template)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
 
-    assert manager.lifecycle_calls[:2] == ["recover_engines", "pause_generation"]
+    assert manager.lifecycle_calls[:2] == ["pause_generation", "recover_engines"]
     assert group.update_force_full == [True]
     assert actor.health()["training_job"]["status"] == "READY_TO_COMMIT"
     assert actor.serving_runtime_load_id() == "engine:3"
@@ -1289,9 +1306,10 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
 
     group.restore_runtime_load_id_for_republication = restore_runtime_load_id
 
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         loss_runtime=resolve_loss_family("sao").bind(),
         critic_group=_FakeGroup(),
@@ -1332,7 +1350,9 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
 def test_serving_republication_preserves_current_runtime_load_id() -> None:
     manager = _FakeRolloutManager([])
     group = _FakeGroup()
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=None)
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    manager.lifecycle_calls.clear()
 
     def restore_runtime_load_id(runtime_load_id):
         group.republication_calls.append(runtime_load_id)
@@ -1342,6 +1362,9 @@ def test_serving_republication_preserves_current_runtime_load_id() -> None:
     group.restore_runtime_load_id_for_republication = restore_runtime_load_id
 
     assert actor.republish_serving() == "v1"
+    assert manager.lifecycle_calls == ["pause_generation", "recover_engines", "continue_generation"]
+    assert group.update_generation_management == [False]
+    assert group.update_force_full == [True]
     assert group.republication_calls == ["v1"]
     assert group.update_calls == 1
     assert actor.serving_runtime_load_id() == "v1"
@@ -1372,7 +1395,7 @@ def test_bridge_marker_rejects_unsafe_checkpoint_path(tmp_path, kind) -> None:
 
 @pytest.mark.unit
 def test_load_args_file_expands_variables_and_uses_shell_like_quotes(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.slime_driver import load_args_file
+    from reef.train.slime_backend.driver import load_args_file
 
     monkeypatch.setenv("BRIDGE_MODEL", "/models/demo model")
     args_file = tmp_path / "args.txt"
@@ -1393,7 +1416,8 @@ def test_load_args_file_expands_variables_and_uses_shell_like_quotes(tmp_path: P
 
 @pytest.mark.unit
 def test_driver_ready_file_is_atomic_and_driver_option_is_not_forwarded(tmp_path: Path) -> None:
-    from reef.service.slime_driver import READY_MARKER, _driver_options, _retention_options, _write_ready_file
+    from reef.service.training_driver import READY_MARKER, _driver_options, _write_ready_file
+    from reef.train.slime_backend.driver import _retention_options
 
     ready_file = tmp_path / "state" / "bridge.ready"
     parsed_ready_file, remaining = _driver_options([f"--ready-file={ready_file}", "--loss-type", "sft_loss"])
@@ -1419,7 +1443,7 @@ def test_driver_ready_file_is_atomic_and_driver_option_is_not_forwarded(tmp_path
 
 @pytest.mark.unit
 def test_slime_rejects_its_legacy_raw_wandb_flags() -> None:
-    from reef.service.slime_driver import _validate_tracking_args
+    from reef.train.slime_backend.driver import _validate_tracking_args
 
     _validate_tracking_args(SimpleNamespace(use_wandb=False, wandb_key=None))
     with pytest.raises(RuntimeError, match=r"observability\.wandb"):
@@ -1446,14 +1470,12 @@ def test_driver_accepts_matching_reef_and_slime_objectives(loss_family, loss_typ
 
 @pytest.mark.unit
 def test_driver_derives_the_loss_family_from_the_configured_recipe() -> None:
-    from reef.service.slime_driver import _resolve_training_recipe
-    from reef.train.slime_backend.loss_families import resolve_loss_family
+    from reef.service.training_driver import _resolve_training_recipe
 
     recipe = "recipes.sao.recipe:SAORecipe"
     assert _resolve_training_recipe({"reef": {"recipe": recipe}}) == (
         "sao",
         recipe,
-        resolve_loss_family("sao"),
     )
     with pytest.raises(RuntimeError, match=r"must define reef\.recipe"):
         _resolve_training_recipe({})
@@ -1465,7 +1487,7 @@ def test_driver_derives_the_loss_family_from_the_configured_recipe() -> None:
 def test_driver_stamps_a_dotted_family_reference_for_the_workers() -> None:
     from types import SimpleNamespace
 
-    from reef.service.slime_driver import _stamp_loss_family_reference
+    from reef.train.slime_backend.driver import _stamp_loss_family_reference
 
     dotted = SimpleNamespace(loss_family="toy")
     _stamp_loss_family_reference(dotted, "toy_pkg.family:ToyAlgorithm")
@@ -1486,7 +1508,7 @@ def test_driver_rejects_a_recipe_with_an_unknown_loss_family(monkeypatch) -> Non
     from types import ModuleType
 
     from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
-    from reef.service.slime_driver import _resolve_training_recipe
+    from reef.service.training_driver import _resolve_training_recipe
 
     class UnknownLossRecipe(WeightTrainingRecipe):
         @classmethod
@@ -1496,8 +1518,13 @@ def test_driver_rejects_a_recipe_with_an_unknown_loss_family(monkeypatch) -> Non
     module = ModuleType("unknown_loss_recipe")
     module.UnknownLossRecipe = UnknownLossRecipe
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    from reef.train.slime_backend.driver import create_training_plan
+
+    config = {"reef": {"recipe": "unknown_loss_recipe:UnknownLossRecipe"}}
+    loss_family, _ = _resolve_training_recipe(config)
+    monkeypatch.setenv("RAY_ADDRESS", "local")
     with pytest.raises(RuntimeError, match="declares unsupported loss family 'grpo'"):
-        _resolve_training_recipe({"reef": {"recipe": "unknown_loss_recipe:UnknownLossRecipe"}})
+        create_training_plan(config, loss_family=loss_family)
 
 
 @pytest.mark.unit
@@ -1606,7 +1633,7 @@ def test_driver_rejects_mismatched_reef_and_slime_objectives(
 def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
     tmp_path: Path, ref_load: str | None, expected: str
 ) -> None:
-    from reef.service.slime_driver import _apply_bridge_resume_fallback
+    from reef.train.slime_backend.driver import _apply_bridge_resume_fallback
 
     args = SimpleNamespace(
         megatron_to_hf_mode="bridge",
@@ -1624,7 +1651,7 @@ def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
 
 @pytest.mark.unit
 def test_bridge_mode_restart_keeps_resumable_checkpoint(tmp_path: Path) -> None:
-    from reef.service.slime_driver import _apply_bridge_resume_fallback
+    from reef.train.slime_backend.driver import _apply_bridge_resume_fallback
 
     resume = tmp_path / "resume"
     resume.mkdir()
@@ -1652,35 +1679,38 @@ def test_bridge_mode_restart_keeps_resumable_checkpoint(tmp_path: Path) -> None:
         ({"rollout_num_gpus": 0}, "rollout-num-gpus"),
     ],
 )
-def test_start_bridge_rejects_configuration_without_local_inference(
+def test_training_preflight_rejects_configuration_without_local_inference(
     overrides,
     message,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        bridge.start_bridge(_bridge_args(**overrides))
+        bridge.prepare_bridge(_bridge_args(**overrides))
 
 
 @pytest.mark.unit
-def test_start_bridge_rejects_ambiguous_marker_before_creating_workers(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("status", ["RUNNING", "REJECTING", "REJECTED"])
+def test_training_preflight_rejects_ambiguous_marker_before_creating_workers(tmp_path, monkeypatch, status) -> None:
     root = tmp_path / "checkpoints"
     template = str(root / "hf" / "{rollout_id}")
+    checkpoint = root / "hf" / "0"
+    checkpoint.mkdir(parents=True)
     write_marker(
         root / "hf" / ".reef-latest-job.json",
-        {"status": "RUNNING", "job_id": "job", "rollout_id": 0},
+        {"status": status, "job_id": "job", "rollout_id": 0, "checkpoint_path": str(checkpoint)},
     )
     monkeypatch.setattr(
         bridge,
-        "create_placement_groups",
-        lambda args: pytest.fail("workers started before marker validation"),
+        "create_train_groups",
+        lambda *args: pytest.fail("workers started before marker validation"),
     )
     args = _bridge_args(save_hf=template, save=str(root / "megatron"))
 
-    with pytest.raises(RuntimeError, match="ambiguous"):
-        bridge.start_bridge(args, retention=RetentionConfig(max_storage_bytes=100))
+    with pytest.raises(RuntimeError, match="ambiguous" if status == "RUNNING" else "restore the committed checkpoint"):
+        bridge.prepare_bridge(args, retention=RetentionConfig(max_storage_bytes=100))
 
 
 @pytest.mark.unit
-def test_start_bridge_rejects_blocked_storage_before_creating_workers(tmp_path, monkeypatch) -> None:
+def test_training_preflight_rejects_blocked_storage_before_creating_workers(tmp_path, monkeypatch) -> None:
     root = tmp_path / "checkpoints"
     monkeypatch.setattr(
         bridge.CheckpointStorage,
@@ -1692,8 +1722,8 @@ def test_start_bridge_rejects_blocked_storage_before_creating_workers(tmp_path, 
     )
     monkeypatch.setattr(
         bridge,
-        "create_placement_groups",
-        lambda args: pytest.fail("workers started before storage validation"),
+        "create_train_groups",
+        lambda *args: pytest.fail("workers started before storage validation"),
     )
     args = _bridge_args(
         save_hf=str(root / "hf" / "{rollout_id}"),
@@ -1701,80 +1731,10 @@ def test_start_bridge_rejects_blocked_storage_before_creating_workers(tmp_path, 
     )
 
     with pytest.raises(RuntimeError, match=r"storage preflight.*free-space floor"):
-        bridge.start_bridge(args)
+        bridge.prepare_bridge(args)
 
 
-@pytest.mark.unit
-def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch) -> None:
-    events = []
-    rollout_manager = object()
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    class Group:
-        def update_weights(self):
-            events.append("update_weights")
-
-    group = Group()
-
-    class ActorClass:
-        def options(self, **kwargs):
-            events.append(("options", kwargs))
-            return self
-
-        def remote(self, *args, **kwargs):
-            events.append(("remote", args, kwargs))
-            return "bridge-handle"
-
-    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(bridge, "create_placement_groups", lambda args: {"rollout": "rollout-pg"})
-    monkeypatch.setattr(
-        bridge,
-        "create_rollout_manager",
-        lambda args, pg: rollout_manager,
-    )
-    monkeypatch.setattr(
-        bridge,
-        "create_train_groups",
-        lambda args, pgs, manager: (group, None),
-    )
-    monkeypatch.setattr(bridge, "TrainBridgeActor", ActorClass())
-    monkeypatch.setattr(
-        bridge.CheckpointStorage,
-        "validate_capacity",
-        lambda self, **kwargs: {"blocked": False, "reasons": []},
-    )
-    args = _bridge_args(
-        save_hf="~/checkpoints/hf/{rollout_id}",
-        save="~/checkpoints/megatron",
-        hf_checkpoint="/models/hf",
-        load="/models/megatron",
-        start_rollout_id=2,
-    )
-
-    result = bridge.start_bridge(args)
-
-    assert result == "bridge-handle"
-    assert events[0] == ("options", {"name": "reef-train-bridge", "namespace": "reef"})
-    assert events[1][0] == "remote"
-    assert events[1][1][0] is group
-    assert isinstance(events[1][2]["storage_config"], RetentionConfig)
-    assert events[1][2]["save_hf_template"] == args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}")
-    assert events[1][2]["megatron_save_root"] == args.save == str(tmp_path / "checkpoints/megatron")
-    # The critic group rides the keyword contract: recipes without a value
-    # model (this one) hand the bridge None rather than omitting the argument.
-    assert events[1][2]["critic_group"] is None
-
-
-@pytest.mark.unit
-def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeypatch) -> None:
-    """An external family must reach the actor as its dotted reference.
-
-    The bridge actor re-resolves ``loss_family`` in a fresh Ray process whose
-    registry is empty, so the plain name of a family registered via
-    ``register_loss_family_ref`` only resolves there as its dotted reference
-    (``resolve`` imports it and registers the spec). Names without a
-    registered reference ship unchanged.
-    """
+def test_training_preparation_keeps_a_resolvable_loss_family_reference(tmp_path, monkeypatch):
     import sys
     from types import ModuleType
 
@@ -1782,7 +1742,7 @@ def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeyp
     from reef.train.slime_backend.algorithm import SlimeAlgorithm
     from reef.train.slime_backend.loss_families import unregister_loss_family
 
-    class _ExternalAlgorithm(SlimeAlgorithm):
+    class ExternalAlgorithm(SlimeAlgorithm):
         loss_family = "external_family"
         loss_type = "sft_loss"
 
@@ -1790,46 +1750,21 @@ def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeyp
             pass
 
     module = ModuleType("external_family_pkg")
-    module.ALGORITHM = _ExternalAlgorithm()  # type: ignore[attr-defined]
+    module.ALGORITHM = ExternalAlgorithm()
     monkeypatch.setitem(sys.modules, "external_family_pkg", module)
     register_loss_family_ref("external_family", "external_family_pkg:ALGORITHM")
-
-    events = []
     monkeypatch.setenv("HOME", str(tmp_path))
-
-    class ActorClass:
-        def options(self, **kwargs):
-            return self
-
-        def remote(self, *args, **kwargs):
-            events.append(kwargs)
-            return "bridge-handle"
-
-    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(bridge, "create_placement_groups", lambda args: {"rollout": "rollout-pg"})
-    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: object())
-    monkeypatch.setattr(bridge, "create_train_groups", lambda args, pgs, manager: (object(), None))
-    monkeypatch.setattr(bridge, "TrainBridgeActor", ActorClass())
     monkeypatch.setattr(
-        bridge.CheckpointStorage,
-        "validate_capacity",
-        lambda self, **kwargs: {"blocked": False, "reasons": []},
+        bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
     )
-    args = _bridge_args(
-        save_hf="~/checkpoints/hf/{rollout_id}",
-        save="~/checkpoints/megatron",
-    )
-
+    args = _bridge_args(save_hf="~/checkpoints/hf/{rollout_id}", save="~/checkpoints/megatron")
     try:
-        assert bridge.start_bridge(args, loss_family="external_family") == "bridge-handle"
-        assert events[0]["loss_family"] == "external_family_pkg:ALGORITHM"
+        prepared = bridge.prepare_bridge(args, loss_family="external_family")
+        assert prepared.loss_family == "external_family_pkg:ALGORITHM"
     finally:
         unregister_loss_family("external_family")
-
-    # A registered family without a dotted reference ships under its own
-    # name, and an explicit dotted reference passes through untouched.
-    bridge.start_bridge(args, loss_family="sft")
-    assert events[1]["loss_family"] == "sft"
+    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "sft"
+    assert args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}")
 
 
 @pytest.mark.unit
@@ -1858,15 +1793,21 @@ def test_driver_sao_options_strip_sao_flags_and_project_them_onto_args() -> None
     assert defaults.sao_lambda_alpha == 1.5
 
 
-def _grouped_batch(groups: int, size: int, batch_id: str = "batch") -> GroupedPolicyBatch:
-    return GroupedPolicyBatch(
+def _grouped_batch(groups: int, size: int, batch_id: str = "batch") -> TrainingBatch:
+    return TrainingBatch(
         batch_id,
         tuple(
-            tuple(
-                PolicySample(f"g{group}-s{index}", (group, index), (1,), (-0.1,), float(index))
-                for index in range(size)
+            replace(sample, group_id=str(index))
+            for index, group in enumerate(
+                tuple(
+                    tuple(
+                        policy_trajectory(f"g{group}-s{index}", (group, index), (1,), (-0.1,), float(index))
+                        for index in range(size)
+                    )
+                    for group in range(groups)
+                )
             )
-            for group in range(groups)
+            for sample in group
         ),
     )
 
@@ -1946,9 +1887,12 @@ def test_slime_preparation_remainder_policy() -> None:
 
 @pytest.mark.unit
 def test_slime_preparation_actual_batch_size_applies_to_policy_batches() -> None:
-    batch = PolicyBatch(
+    batch = TrainingBatch(
         "batch",
-        (PolicySample("a", (1,), (1,), (-0.1,), 0.2), PolicySample("b", (2,), (1,), (-0.2,), 0.8)),
+        (
+            policy_trajectory("a", (1,), (1,), (-0.1,), 0.2),
+            policy_trajectory("b", (2,), (1,), (-0.2,), 0.8),
+        ),
     )
 
     payload = _build_payload(batch, "sft", None, StepScheduling(batch_size="actual"))
@@ -1999,3 +1943,116 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
 
     assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
     assert result.payload is not None and len(result.payload["samples"]) == 12
+
+
+@pytest.mark.unit
+def test_republication_reconciles_cached_pause_and_preserves_identity_after_failure():
+    manager = _FakeRolloutManager([])
+    group = _FakeGroup()
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=None)
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    manager.lifecycle_calls.clear()
+    actor._weight_publisher.generation_paused = True
+    terminated = []
+    manager.terminate_updatable_engines = _RemoteMethod(lambda: terminated.append(True))
+    group._actor_handlers[0].version = manager.version = "unexpected"
+    with pytest.raises(RuntimeError, match="weight sender returned runtime load ID"):
+        actor.republish_serving()
+    assert manager.lifecycle_calls == ["pause_generation", "recover_engines"]
+    assert terminated
+    assert actor.health()["phase"] == "weight_sync_failed"
+    assert actor.serving_runtime_load_id() == "v1"
+    assert actor._weight_publisher.generation_paused
+    group._actor_handlers[0].version = manager.version = "v1"
+    assert actor.republish_serving() == "v1"
+    assert group.republication_calls == ["v1", "v1"]
+    assert group.update_generation_management == [False, False]
+    assert group.update_force_full == [True, True]
+    assert manager.lifecycle_calls[-3:] == ["pause_generation", "recover_engines", "continue_generation"]
+    assert not actor._weight_publisher.generation_paused
+    assert actor.health()["phase"] == "serving"
+
+
+@pytest.mark.unit
+def test_standalone_republication_cannot_publish_checkpointed_candidate(tmp_path):
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    manager = _FakeRolloutManager([])
+    group = _DurableGroup(template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
+    checkpoint = Path(template.format(rollout_id=0))
+    checkpoint.mkdir()
+    write_marker(
+        tmp_path / ".reef-latest-job.json",
+        {
+            "status": "CHECKPOINT",
+            "job_id": JOB_ID,
+            "rollout_id": 0,
+            "checkpoint_path": str(checkpoint),
+        },
+    )
+    calls = group.update_calls
+    manager.lifecycle_calls.clear()
+    with pytest.raises(RuntimeError, match="use training job recovery"):
+        actor.republish_serving()
+    assert manager.lifecycle_calls == []
+    assert group.update_calls == calls
+    assert group.republication_calls == ["v1"]
+
+
+@pytest.mark.unit
+def test_committed_restart_reasserts_pause_before_checkpoint_transfer(tmp_path):
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    checkpoint = Path(template.format(rollout_id=0))
+    checkpoint.mkdir()
+    write_marker(
+        tmp_path / ".reef-latest-job.json",
+        {
+            "status": "COMPLETE",
+            "job_id": JOB_ID,
+            "rollout_id": 0,
+            "checkpoint_path": str(checkpoint),
+            "runtime_load_id": "v1",
+        },
+    )
+    manager = _FakeRolloutManager([])
+    group = _DurableGroup(template)
+    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
+    assert group.update_generation_management == [False]
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    assert actor.health()["phase"] == "serving"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["versions", "restore"])
+def test_startup_reconstruction_failure_aborts_supplied_inference(tmp_path, failure):
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    checkpoint = Path(template.format(rollout_id=0))
+    checkpoint.mkdir()
+    write_marker(
+        tmp_path / ".reef-latest-job.json",
+        {
+            "status": "COMPLETE",
+            "job_id": JOB_ID,
+            "rollout_id": 0,
+            "checkpoint_path": str(checkpoint),
+            "runtime_load_id": "v1",
+        },
+    )
+    manager = _FakeRolloutManager([])
+    group = _DurableGroup(template)
+    terminated = []
+    manager.terminate_updatable_engines = _RemoteMethod(lambda: terminated.append(True))
+    if failure == "versions":
+        manager.versions = []
+    else:
+
+        def fail_restore(version):
+            raise RuntimeError("checkpoint seed unavailable")
+
+        group.restore_runtime_load_id_for_republication = fail_restore
+    with pytest.raises(RuntimeError):
+        build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
+    assert terminated
+    assert manager.lifecycle_calls == ["pause_generation"]
+    assert group.update_calls == 0
+    assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "COMPLETE"

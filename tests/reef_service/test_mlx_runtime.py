@@ -16,13 +16,16 @@ from typing import Any
 import pytest
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision
-from reef.runtime.base import RuntimeContractError
-from reef.runtime.candidates import ModelCandidate
-from reef.runtime.registry import RuntimeRegistry
+from reef.core.trajectories import trajectory_reward
+from reef.runtime.deployment import RuntimeRegistry
+from reef.runtime.interfaces import ModelCandidate, RuntimeContractError
 from reef.train.algos.base import StepPreparer, register_step_preparer
 from reef.train.algos.signals import StepScheduling, StepSignal
 from reef.train.mlx_backend.runtime import MLXRuntime
-from reef.train.types import PolicyBatch, PolicySample
+from reef.train.mlx_backend.serving import MLXServingRuntime
+from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
+
+from ._trajectories import policy_trajectory
 
 
 class FakeEngineConfig:
@@ -89,13 +92,13 @@ class FakeEngine:
         self.loaded.append(Path(source))
 
 
-def sample(reward: float) -> PolicySample:
-    return PolicySample(
-        source_agent_record_id=f"rec-{reward}",
-        tokens=(1, 2, 3, 4),
-        loss_mask=(1, 1),
-        rollout_log_probs=(-0.5, -0.25),
-        reward=reward,
+def sample(reward: float) -> TrajectoryItem:
+    return policy_trajectory(
+        f"rec-{reward}",
+        (1, 2, 3, 4),
+        (1, 1),
+        (-0.5, -0.25),
+        reward,
     )
 
 
@@ -148,8 +151,8 @@ def build_runtime(tmp_path: Path, *, moved: bool = True, kl_coef: float = 0.0) -
     return MLXRuntime(FakeEngine(moved=moved), checkpoint_dir=str(tmp_path / "ckpt"), kl_coef=kl_coef)
 
 
-def batch() -> PolicyBatch:
-    return PolicyBatch("batch-1", (sample(1.0), sample(0.0)))
+def batch() -> TrainingBatch:
+    return TrainingBatch("batch-1", (sample(1.0), sample(0.0)))
 
 
 @pytest.mark.unit
@@ -157,7 +160,7 @@ def test_boot_names_the_weights_that_answer_the_first_request(tmp_path: Path) ->
     # A durable training record must name the weights that produced it, and
     # the first rollout is served before anything has been published.
     runtime = build_runtime(tmp_path)
-    assert runtime.serving_runtime_load_id() == "fake-1"
+    assert runtime.serving.serving_runtime_load_id() == "fake-1"
 
 
 @pytest.mark.unit
@@ -197,7 +200,7 @@ def test_a_candidate_exports_without_changing_serving(tmp_path: Path) -> None:
     # Serving still holds the pre-step weights: the trained parameters exist
     # only in the export until Reef selects them.
     assert engine.adapter_snapshot() == before
-    assert runtime.serving_runtime_load_id() == "fake-1"
+    assert runtime.serving.serving_runtime_load_id() == "fake-1"
 
 
 @pytest.mark.unit
@@ -211,7 +214,7 @@ def test_activation_moves_serving_to_the_selected_candidate(tmp_path: Path) -> N
 
     assert activated.candidate_id == candidate.candidate_id
     assert activated.runtime_load_id == "fake-2"
-    assert runtime.serving_runtime_load_id() == "fake-2"
+    assert runtime.serving.serving_runtime_load_id() == "fake-2"
     assert engine.adapter_snapshot() == {"layer.lora_a": 1.0, "layer.lora_b": 1.0}
 
 
@@ -229,7 +232,7 @@ def test_a_rejected_candidate_never_reaches_serving(tmp_path: Path) -> None:
     )
 
     assert engine.adapter_snapshot() == before
-    assert runtime.serving_runtime_load_id() == "fake-1"
+    assert runtime.serving.serving_runtime_load_id() == "fake-1"
     # A rejected candidate is gone: activating it afterwards must fail loudly
     # rather than resurrect weights Reef declined.
     with pytest.raises(RuntimeContractError, match="no pending mlx candidate"):
@@ -275,7 +278,7 @@ def test_rollback_loads_a_published_adapter(tmp_path: Path) -> None:
     (adapter / "adapters.safetensors").write_bytes(b"weights")
     runtime = build_runtime(tmp_path)
 
-    restored = runtime.restore_checkpoint(Artifact.local(adapter))
+    restored = runtime.serving.restore_checkpoint(Artifact.local(adapter))
 
     assert restored == "fake-2"
     assert runtime.engine.loaded == [adapter]
@@ -330,15 +333,15 @@ def test_inference_stays_closed_between_activation_and_the_durable_commit(tmp_pa
 
     runtime.activate_candidate(candidate)
 
-    assert runtime.inference_admission_status["open"] is False
+    assert runtime.serving.inference_admission_status["open"] is False
     # The engine holds the new weights, but Reef has not published them yet.
-    assert runtime.serving_runtime_load_id() == "fake-2"
-    assert runtime.current_runtime_load_id() == "fake-1"
+    assert runtime.serving.serving_runtime_load_id() == "fake-2"
+    assert runtime.serving.current_runtime_load_id() == "fake-1"
 
     runtime.reconcile_training_job(0, committed_training_job_id=candidate.training_job_id)
 
-    assert runtime.inference_admission_status["open"] is True
-    assert runtime.current_runtime_load_id() == "fake-2"
+    assert runtime.serving.inference_admission_status["open"] is True
+    assert runtime.serving.current_runtime_load_id() == "fake-2"
 
 
 @pytest.mark.unit
@@ -359,7 +362,7 @@ def test_a_failed_step_restores_the_weights_that_were_serving(tmp_path: Path) ->
         runtime.train_candidate(prepared.payload)
 
     assert engine.adapter_snapshot() == before
-    assert runtime.inference_admission_status["open"] is True
+    assert runtime.serving.inference_admission_status["open"] is True
 
 
 @pytest.mark.unit
@@ -371,7 +374,7 @@ def test_the_frozen_base_pass_runs_with_inference_closed(tmp_path: Path) -> None
     observed: list[bool] = []
 
     def watching_base_log_probs(rows):
-        observed.append(runtime.inference_admission_status["open"])
+        observed.append(runtime.serving.inference_admission_status["open"])
         return [[-1.0] * len(row.loss_mask) for row in rows]
 
     engine.base_log_probs = watching_base_log_probs
@@ -487,11 +490,10 @@ def _serve(payload, *, topk=True, text="an answer", finish_reason="stop", tokeni
     from reef.artifact.artifact import Artifact
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
-    runtime = MLXRuntime(
-        _FakeEngineForServing(_FakeRollout(topk=topk, text=text, finish_reason=finish_reason), tokenizer),
-        checkpoint_dir="/tmp/reef-mlx-serving-test",
+    serving = MLXServingRuntime(
+        _FakeEngineForServing(_FakeRollout(topk=topk, text=text, finish_reason=finish_reason), tokenizer)
     )
-    backend = MLXInferenceBackend(runtime)
+    backend = MLXInferenceBackend(serving)
     return asyncio.run(backend.inference(Artifact.local(Path("/tmp")), "/v1/chat/completions", payload))
 
 
@@ -523,7 +525,7 @@ def test_concurrent_completions_serialize_as_single_sequences_and_all_resolve() 
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
     engine = _FakeEngineForServing(_FakeRollout())
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-serial-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
 
     async def wave(n: int) -> list[dict]:
         calls = [
@@ -584,7 +586,7 @@ def test_a_request_steers_the_chat_template() -> None:
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
     engine = _FakeEngineForServing(_FakeRollout())
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-template-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
     asyncio.run(
         backend.inference(
             Artifact.local(Path("/tmp")),
@@ -641,7 +643,7 @@ def test_a_request_without_template_kwargs_leaves_the_deployment_default() -> No
     from reef.artifact.artifact import Artifact
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-template-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
     asyncio.run(
         backend.inference(
             Artifact.local(Path("/tmp")),
@@ -663,7 +665,7 @@ def test_a_declared_toolset_reaches_the_chat_template() -> None:
 
     tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
     engine = _FakeEngineForServing(_FakeRollout())
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-tools-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
     asyncio.run(
         backend.inference(
             Artifact.local(Path("/tmp")),
@@ -682,7 +684,7 @@ def test_a_request_without_tools_declares_none() -> None:
     from reef.artifact.artifact import Artifact
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-tools-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
     asyncio.run(
         backend.inference(
             Artifact.local(Path("/tmp")),
@@ -695,7 +697,7 @@ def test_a_request_without_tools_declares_none() -> None:
 
 @pytest.mark.unit
 def test_a_malformed_tools_field_is_refused() -> None:
-    from reef.runtime.inference import UpstreamStatusError
+    from reef.runtime.interfaces import UpstreamStatusError
 
     with pytest.raises(UpstreamStatusError, match="tools"):
         _serve({"messages": [{"role": "user", "content": "hi"}], "tools": {"name": "read_file"}})
@@ -703,7 +705,7 @@ def test_a_malformed_tools_field_is_refused() -> None:
 
 @pytest.mark.unit
 def test_a_malformed_template_kwargs_field_is_refused() -> None:
-    from reef.runtime.inference import UpstreamStatusError
+    from reef.runtime.interfaces import UpstreamStatusError
 
     with pytest.raises(UpstreamStatusError, match="chat_template_kwargs"):
         _serve({"messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": "no-think"})
@@ -711,7 +713,7 @@ def test_a_malformed_template_kwargs_field_is_refused() -> None:
 
 @pytest.mark.unit
 def test_the_buffered_path_refuses_a_stream_request_rather_than_faking_one() -> None:
-    from reef.runtime.inference import UpstreamStatusError
+    from reef.runtime.interfaces import UpstreamStatusError
 
     with pytest.raises(UpstreamStatusError, match="inference_stream"):
         _serve({"messages": [{"role": "user", "content": "hi"}], "stream": True})
@@ -719,7 +721,7 @@ def test_the_buffered_path_refuses_a_stream_request_rather_than_faking_one() -> 
 
 @pytest.mark.unit
 def test_an_empty_completion_is_refused_so_a_grid_cannot_stall() -> None:
-    from reef.runtime.inference import UpstreamStatusError
+    from reef.runtime.interfaces import UpstreamStatusError
 
     rollout = _FakeRollout()
     rollout.output_tokens = ()
@@ -748,7 +750,7 @@ class _OpenClawRLPreparer(StepPreparer):
             "openclawrl",
             {},
             {},
-            tuple(sample.reward for sample in batch.samples),
+            tuple(trajectory_reward(item) for item in trajectories(batch)),
             # The real preparer leaves scheduling at its default, which names
             # the backend's own batch size.
             StepScheduling(),
@@ -763,16 +765,16 @@ class _SubBatchedPreparer(StepPreparer):
         return StepSignal("train", "tttd", {}, {}, (1.0, -1.0), StepScheduling(unit="sample", batch_size=4))
 
 
-def _distillation_sample(*, topk=True, teacher=True) -> PolicySample:
+def _distillation_sample(*, topk=True, teacher=True) -> TrajectoryItem:
     extras = {}
     if teacher:
         extras["teacher_cands"] = ({"hint": "Be terse.", "teacher_tokens": [7, 8, 1, 2]},)
-    return PolicySample(
-        source_agent_record_id="turn-1",
-        tokens=(5, 6, 1, 2),
-        loss_mask=(1, 1),
-        rollout_log_probs=(-0.5, -0.25),
-        reward=1.0,
+    return policy_trajectory(
+        "turn-1",
+        (5, 6, 1, 2),
+        (1, 1),
+        (-0.5, -0.25),
+        1.0,
         topk_indices=((1, 3), (2, 4)) if topk else (),
         topk_log_probs=((-0.5, -2.0), (-0.25, -3.0)) if topk else (),
         extras=extras,
@@ -785,7 +787,7 @@ def test_a_configured_batch_size_is_accepted_but_sub_batching_is_not(tmp_path: P
     # have, so the reserved batch is the step either way. An explicit integer
     # really does mean several steps, which this runtime cannot honour.
     runtime = build_runtime(tmp_path)
-    batch = PolicyBatch("b", (_distillation_sample(),))
+    batch = TrainingBatch("b", (_distillation_sample(),))
 
     prepared = runtime.prepare_training_step(batch, "mlx-test-openclawrl", {}, 0)
     assert prepared.action == "train"
@@ -799,7 +801,7 @@ def test_the_distillation_objective_refuses_a_batch_with_no_captured_candidates(
     # Training a distillation objective on rollouts that recorded no candidate
     # set would silently optimise nothing; say which setting is missing.
     runtime = build_runtime(tmp_path)
-    batch = PolicyBatch("b", (_distillation_sample(topk=False),))
+    batch = TrainingBatch("b", (_distillation_sample(topk=False),))
     prepared = runtime.prepare_training_step(batch, "mlx-test-openclawrl", {}, 0)
 
     with pytest.raises(RuntimeContractError, match="capture_topk"):
@@ -809,7 +811,7 @@ def test_the_distillation_objective_refuses_a_batch_with_no_captured_candidates(
 @pytest.mark.unit
 def test_the_distillation_objective_refuses_a_batch_with_no_teacher(tmp_path: Path) -> None:
     runtime = build_runtime(tmp_path)
-    batch = PolicyBatch("b", (_distillation_sample(teacher=False),))
+    batch = TrainingBatch("b", (_distillation_sample(teacher=False),))
     prepared = runtime.prepare_training_step(batch, "mlx-test-openclawrl", {}, 0)
 
     with pytest.raises(RuntimeContractError, match="teacher_cands"):
@@ -820,7 +822,7 @@ def test_the_distillation_objective_refuses_a_batch_with_no_teacher(tmp_path: Pa
 def test_the_openclawrl_family_reaches_the_distillation_step(tmp_path: Path) -> None:
     runtime = build_runtime(tmp_path)
     engine = runtime.engine
-    batch = PolicyBatch("b", (_distillation_sample(),))
+    batch = TrainingBatch("b", (_distillation_sample(),))
     prepared = runtime.prepare_training_step(batch, "mlx-test-openclawrl", {}, 0)
 
     candidate = runtime.train_candidate(prepared.payload)
@@ -956,7 +958,7 @@ def test_a_template_mlx_lm_has_no_parser_for_leaves_the_reply_as_text() -> None:
 @pytest.mark.unit
 def test_a_call_that_never_closes_fails_the_request() -> None:
     """Half a call that hit the token cap is not a reply; the agent retries a rollout."""
-    from reef.runtime.inference import UpstreamStatusError
+    from reef.runtime.interfaces import UpstreamStatusError
 
     with pytest.raises(UpstreamStatusError) as caught:
         _serve(
@@ -1031,7 +1033,7 @@ def _serve_stream(payload, *, text="an answer", finish_reason="stop", tokenizer=
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
     engine = _FakeEngineForServing(_FakeRollout(text=text, finish_reason=finish_reason), tokenizer, pieces=pieces)
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-stream-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
 
     async def run():
         stream = await backend.inference_stream(
@@ -1158,7 +1160,7 @@ def test_a_stream_of_no_response_tokens_fails_before_the_terminal() -> None:
     import asyncio
 
     from reef.artifact.artifact import Artifact
-    from reef.runtime.inference import UpstreamStatusError
+    from reef.runtime.interfaces import UpstreamStatusError
     from reef.train.mlx_backend.inference import MLXInferenceBackend
 
     rollout = _FakeRollout(text="")
@@ -1167,7 +1169,7 @@ def test_a_stream_of_no_response_tokens_fails_before_the_terminal() -> None:
     rollout.topk_indices = ()
     rollout.topk_log_probs = ()
     engine = _FakeEngineForServing(rollout, pieces=[])
-    backend = MLXInferenceBackend(MLXRuntime(engine, checkpoint_dir="/tmp/reef-mlx-stream-test"))
+    backend = MLXInferenceBackend(MLXServingRuntime(engine))
 
     async def run():
         stream = await backend.inference_stream(

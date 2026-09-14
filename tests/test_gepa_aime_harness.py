@@ -101,11 +101,11 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
 def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path, selector):
     driver = load("run")
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
-    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
     if selector == "worker":
-        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
@@ -120,14 +120,14 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     assert config["execution"]["evolution"]["backend"] == "auto"
     config["execution"]["evolution"]["workers"] = 1
-    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records)
         try:
-            backend = trainer.training_backend
+            backend = trainer.candidate_backend
             assert backend._worker_selection.settings.backend == "uni"
             assert [row.score for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
@@ -178,7 +178,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
         trainer = recipe.build("isolated", records)
         try:
-            backend = trainer.training_backend
+            backend = trainer.candidate_backend
             assert backend._worker_selection.settings.backend == ("mp" if executor == "auto" else executor)
             rows = backend._evaluate_pairings([({}, "problem"), ({}, "problem")])
             assert [row.score for row in rows] == [1.0, 1.0]
@@ -195,14 +195,17 @@ def test_driver_keeps_custom_task_hooks(load, monkeypatch):
     def scorer(task, result):
         return 0.5
 
-    def feedback(task, output, score):
-        return "custom"
+    from recipes.gepa.method import Feedback
 
-    config["evolution"].update(evaluate=scorer, feedback=feedback)
+    class CustomFeedback(Feedback):
+        def feedback(self, task, output, score):
+            return "custom"
+
+    config["recipe"]["config"]["evolution"].update(evaluate=scorer, feedback=CustomFeedback())
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
     assert recipe.score_episode("problem", pi_episode("anything")) == 0.5
-    assert recipe.feedback("problem", "anything", 0.5) == "custom"
+    assert recipe.feedback.feedback("problem", "anything", 0.5) == "custom"
 
 
 @pytest.mark.parametrize("already_initialized", [False, True])
@@ -290,7 +293,9 @@ def test_the_pins_a_report_names_stay_exact(aime):
 def test_the_seed_composition_carries_the_quickstart_envelope():
     import yaml
 
-    seed = yaml.safe_load((EXAMPLE_DIR / "gepa.yaml").read_text(encoding="utf-8"))["evolution"]["seed"]
+    seed = yaml.safe_load((EXAMPLE_DIR / "gepa.yaml").read_text(encoding="utf-8"))["recipe"]["config"]["evolution"][
+        "seed"
+    ]
     entries = {str(entry["id"]): entry for entry in seed}
 
     assert entries["rules"]["config"]["text"].startswith("You are a helpful assistant.")
@@ -322,9 +327,9 @@ def test_episode_files_merge_the_transient_binding_into_the_served_tree(load, mo
 
 
 def _stub_backend():
-    from reef.runtime.inference import InferenceBackend
+    from reef.runtime.interfaces import InferenceHandler
 
-    class StubModel(InferenceBackend):
+    class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):
             del artifact, path, payload
             return {"choices": [{"message": {"role": "assistant", "content": "### 42"}}]}
@@ -357,7 +362,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_backend=_stub_backend(),
+        inference_handler=_stub_backend(),
     )
     service.start()
     try:

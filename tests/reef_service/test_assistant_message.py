@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.assistant_message import (
+from reef.train.mlx_backend.assistant_message import (
     ReasoningStreamSplitter,
     ToolMarkerStreamHold,
     reasoning_is_pre_opened,

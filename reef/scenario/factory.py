@@ -26,9 +26,9 @@ from reef.artifact.repository import (
     StagedReleaseRepositoryBackend,
 )
 from reef.core.errors import ReefError
+from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker
 from reef.recipe.base import Recipe
-from reef.runtime.model_config import ModelConfig
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
@@ -248,7 +248,8 @@ class ScenarioFactory:
                 binding=ScenarioBinding(
                     surface=surface,
                     runtime=runtime,
-                    inference_backend=recipe.inference_backend,
+                    training_runtime=recipe.training_runtime,
+                    inference_handler=recipe.inference_handler,
                     artifact_validator=recipe.build_artifact_validator(),
                     report_type=trainer.report_type,
                 ),

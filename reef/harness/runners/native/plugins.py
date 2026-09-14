@@ -17,15 +17,16 @@ import copy
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.harness.compose.registry import ObjectPlugin
 from reef.harness.runners.native.graph import Graph
-from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.host import NativeHost, TreeOrder
 from reef.harness.tree import nodes
 
 #: The models config fields the host pins from the installed binding; a tree entry never sets them.
 PINNED_MODEL_FIELDS = ("api", "base_url", "api_key", "model")
 
 
-class LoaderOrder:
+class LoaderOrder(TreeOrder):
     """The root group's entry ids in tree order, read live, so the host orders rules and windows as the render does.
 
     The first rules or config plugin a loader loads hands this to its host."""
@@ -51,7 +52,7 @@ def _key(ctx: Any, host: NativeHost) -> str:
     return entry.id
 
 
-class NodePlugin:
+class NodePlugin(ObjectPlugin):
     """One node kind as a compose plugin: ``apply`` admits the config, then registers the effect that installs it."""
 
     name = ""

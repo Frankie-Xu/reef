@@ -438,9 +438,9 @@ def test_recipe_parses_step_record_dir_and_the_backend_refuses_an_unwritable_one
     from reef.storage.sqlite import SQLiteRecordStore
 
     # One recipe serves many scenarios; each scenario's steps record under its own directory.
-    backend = on.build("demo", SQLiteRecordStore()).training_backend
+    backend = on.build("demo", SQLiteRecordStore()).candidate_backend
     assert isinstance(backend, CordisBackend) and backend._step_record_dir == tmp_path / "record" / "demo"
-    other = on.build("other", SQLiteRecordStore()).training_backend
+    other = on.build("other", SQLiteRecordStore()).candidate_backend
     assert isinstance(other, CordisBackend) and other._step_record_dir == tmp_path / "record" / "other"
     assert sorted(path.name for path in (tmp_path / "record").iterdir()) == ["demo", "other"]
 
@@ -465,7 +465,7 @@ def test_a_relative_record_dir_is_made_absolute_at_build(tmp_path: Path, monkeyp
         }
     }
     recipe = CordisRecipe.from_environment({}, config=config, runtime=runtime())
-    backend = recipe.build("demo", SQLiteRecordStore()).training_backend
+    backend = recipe.build("demo", SQLiteRecordStore()).candidate_backend
     assert isinstance(backend, CordisBackend)
     assert backend._step_record_dir == (tmp_path / "rel" / "demo").resolve() and backend._step_record_dir.is_absolute()
 

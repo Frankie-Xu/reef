@@ -9,11 +9,11 @@ is built.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
 
 
-class GenerationListener(Protocol):
+class GenerationListener(ABC):
     """Who a streaming generation reports to while it runs.
 
     ``emit`` is called on the engine thread with each piece of text as the
@@ -21,8 +21,10 @@ class GenerationListener(Protocol):
     is polled once per token; answering ``True`` ends the generation there.
     """
 
+    @abstractmethod
     def emit(self, piece: str) -> None: ...
 
+    @abstractmethod
     def cancelled(self) -> bool: ...
 
 

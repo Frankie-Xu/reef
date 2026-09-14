@@ -22,12 +22,12 @@ class SAORecipe(WeightTrainingRecipe):
     training the moment its score arrives, with no comparison group or
     slowest-sample barrier. The DIS ratio needs the rollout log-probabilities as
     its behaviour proxy, so SAO requires an inference backend that attaches
-    engine-native tensors (``reef.inference_backend_factory``); reef never
+    engine-native tensors (``reef.inference_handler_factory``); reef never
     re-tokenizes a rollout to reconstruct them.
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
     parameters belong to the training backend. For Slime they are configured by
-    ``training.slime_flags``; this recipe only owns Reef-side batching and
+    ``training.options``; this recipe only owns Reef-side batching and
     checkpoint cadence.
 
     ``batch_size`` must equal the Slime driver's ``--global-batch-size``: each
@@ -54,5 +54,5 @@ class SAORecipe(WeightTrainingRecipe):
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:
         if settings.get("optimization"):
             raise RecipeConfigError(
-                "SAO objective options are backend-owned; configure the Slime implementation with training.slime_flags"
+                "SAO objective options are backend-owned; configure the Slime implementation with training.options"
             )

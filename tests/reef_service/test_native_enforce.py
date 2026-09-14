@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
-from reef.harness.runners.native import LoadError, ToolModule, _invoke, _ModuleRun, load_tools
+from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
     ENFORCE_ENV,
@@ -26,6 +26,15 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.tree.render import render_native_module
+
+
+class _ConstantToolRun(ToolRunner):
+    def __init__(self, result: str = "") -> None:
+        self.result = result
+
+    def __call__(self, args, workdir):
+        return self.result
+
 
 PROBE = """\
 import errno
@@ -163,7 +172,7 @@ def test_the_environment_selects_the_enforcer(monkeypatch) -> None:
         select_enforcer({ENFORCE_ENV: "bwrap"})
     with pytest.raises(ValueError, match=r"seccomp.*names no enforcer"):
         select_enforcer({ENFORCE_ENV: "seccomp"})
-    tool = ToolModule("shout", "", {}, lambda args, workdir: "", ["read", "write"])
+    tool = ToolModule("shout", "", {}, _ConstantToolRun(), ["read", "write"])
     assert InProcessEnforcer().describe(tool) == {"mode": "none", "denied": []}
     assert BwrapEnforcer().describe(tool) == {"mode": "bwrap", "denied": ["exec", "network"]}
     assert BwrapEnforcer().describe(None) == {"mode": "bwrap", "denied": []}
@@ -181,7 +190,7 @@ def test_a_sandboxed_call_runs_the_child_protocol_and_keeps_the_error_codes(tmp_
     assert ok["arguments"] == {} and ok["meta"]["truncated"] is False
     failed = _invoke(tools, "probe", '{"raise": true}', work, enforcer=BwrapEnforcer())
     assert failed["error"] == {"code": "TOOL_FAILED", "message": "RuntimeError: kaboom"}
-    built = {"shout": ToolModule("shout", "", {}, lambda args, workdir: "", ["read"])}
+    built = {"shout": ToolModule("shout", "", {}, _ConstantToolRun(), ["read"])}
     assert _invoke(built, "shout", "{}", work, enforcer=BwrapEnforcer())["error"] == {
         "code": "SANDBOX_FAILED",
         "message": "tool 'shout' has no module file to run in a child process",

@@ -38,10 +38,11 @@ from __future__ import annotations
 
 import importlib
 import re
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any
 
 import yaml
 
@@ -49,9 +50,10 @@ from reef.core.errors import ReefError
 from reef.harness.episodes.executor import EpisodeExecutor
 
 
-class ExecutionValidator(Protocol):
+class ExecutionValidator(ABC):
     """Adapter-specific constraints checked by the shared episode lifecycle."""
 
+    @abstractmethod
     def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
 
 
@@ -406,8 +408,8 @@ def _load_quirks(
     if not all(isinstance(item, str) and item for item in whitelist):
         raise DescriptorError(f"{where} quirks cleanup_whitelist must contain non-empty strings")
     validate_execution = getattr(module, "validate_execution", None)
-    if validate_execution is not None and not callable(validate_execution):
-        raise DescriptorError(f"{where} quirks validate_execution must be callable")
+    if validate_execution is not None and not isinstance(validate_execution, ExecutionValidator):
+        raise DescriptorError(f"{where} quirks validate_execution must inherit ExecutionValidator")
     return finalize, whitelist, validate_execution
 
 

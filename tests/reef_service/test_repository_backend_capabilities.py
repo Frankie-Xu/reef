@@ -8,8 +8,11 @@ from reef.artifact import (
     Artifact,
     ArtifactPublicationError,
     ArtifactRef,
+    EnumerableRepositoryBackendFactory,
     InMemoryRepositoryBackend,
+    RegistrationAwareRepositoryBackendFactory,
     RepositoryBackend,
+    RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
@@ -52,6 +55,34 @@ class UndeclaredStagedBackend(BasicBackend):
 
 class StagedBackend(UndeclaredStagedBackend, StagedReleaseRepositoryBackend):
     pass
+
+
+def test_factory_capabilities_are_declared_independently(tmp_path):
+    backend = InMemoryRepositoryBackend("math", tmp_path)
+
+    class BasicFactory(RepositoryBackendFactory):
+        def __call__(self, scenario):
+            return backend
+
+    class RegistrationFactory(BasicFactory, RegistrationAwareRepositoryBackendFactory):
+        def has_registration(self, scenario):
+            return scenario == "math"
+
+    class ListingFactory(BasicFactory, EnumerableRepositoryBackendFactory):
+        def list_registrations(self):
+            return ("math",)
+
+    basic = BasicFactory()
+    assert basic("math") is backend
+    assert not isinstance(basic, RegistrationAwareRepositoryBackendFactory)
+    assert not isinstance(basic, EnumerableRepositoryBackendFactory)
+    assert isinstance(RegistrationFactory(), RegistrationAwareRepositoryBackendFactory)
+    assert not isinstance(RegistrationFactory(), EnumerableRepositoryBackendFactory)
+    assert isinstance(ListingFactory(), EnumerableRepositoryBackendFactory)
+    assert not isinstance(ListingFactory(), RegistrationAwareRepositoryBackendFactory)
+    cached = InMemoryRepositoryBackend.factory(tmp_path)
+    assert isinstance(cached, RegistrationAwareRepositoryBackendFactory)
+    assert isinstance(cached, EnumerableRepositoryBackendFactory)
 
 
 @pytest.mark.parametrize("backend_type", [BasicBackend, UndeclaredStagedBackend])

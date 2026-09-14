@@ -9,10 +9,9 @@ from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
+from reef.inference.model_config import ModelConfig
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
-from reef.runtime.base import InferenceRuntime
-from reef.runtime.inference import InferenceBackend
-from reef.runtime.model_config import ModelConfig
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
@@ -65,6 +64,10 @@ class Scenario:
         return self._name
 
     @property
+    def training_runtime(self) -> TrainingRuntime | None:
+        return self._binding.training_runtime
+
+    @property
     def runtime(self) -> InferenceRuntime | None:
         """Inference or training runtime bound to this scenario."""
         return self.model_config.runtime or self._binding.runtime
@@ -75,9 +78,9 @@ class Scenario:
         return self._binding.report_type
 
     @property
-    def inference_backend(self) -> InferenceBackend | None:
+    def inference_handler(self) -> InferenceHandler | None:
         runtime = self.model_config.runtime
-        return runtime.inference_backend if runtime is not None else self._binding.inference_backend
+        return runtime.inference_handler if runtime is not None else self._binding.inference_handler
 
     @property
     def repository(self) -> Repository:
