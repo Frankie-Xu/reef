@@ -104,7 +104,7 @@ public bundle is rebuilt so the engine carries it. Seven changes:
   only had Bedrock and Anthropic paths (judging the agent's own post from
   each customer group's view, and a customer's reply to it) get the same
   OpenAI Responses fallback as the other simulator calls. Without it the
-  engine's `next-week` failed the first time the agent posted.
+  engine's `next-week` fails the first time the agent posts.
 - `agents/bash_agent/tools.py`, `run_test.py`: with `SAAS_BENCH_TOOL_USER`
   set and no `bwrap`, the agent's shell runs as that user through `setpriv`
   and the runner hands it the workspace. The image creates the user
@@ -116,8 +116,8 @@ public bundle is rebuilt so the engine carries it. Seven changes:
   (its hard wall clock per LLM call; default 600 s) and
   `SAAS_BENCH_SIMULATOR_TIMEOUT_S` (one simulator request; default the
   SDK's) override the runner's fixed limits. A paced game holds an LLM call
-  through a training step, and the first 500-day episode ended at day 385
-  as a runner "timeout" when the engine's `next-week` stalled past 1200 s.
+  through a training step, and a `next-week` late in a long game can run
+  past 1200 s.
   `SAAS_BENCH_LLM_TIMEOUT` also sets the OpenAI client's HTTP timeout
   (`httpx.Timeout(600)` in the runner), which otherwise retried a call the
   serving side was still holding and left the original pending. `run.sh`
@@ -193,11 +193,10 @@ the company (prices, promotions, tiers, quotas, capacity, spend, targeting,
 research, enterprise deals, social posts, or `next-week`;
 `DECISION_CALLS` in `harness/agent.py`, matched in the bash command or in a
 script the agent wrote and ran). Turns that only queried the books, read
-docs, or wrote workspace files are recorded but not trained on. Under the
-earlier scheme every turn of a bad week carried the same negative score, so
-looking at the data was punished as much as the purchase it preceded, and
-the policy learned to skip the looking; the week's outcome now lands on the
-decisions in it. With a few decision turns a week the recipe's batch is 8.
+docs, or wrote workspace files are recorded but not trained on: scoring
+every turn of a week alike would punish looking at the data as much as the
+purchase it preceded, so the week's outcome lands on the decisions in it.
+With a few decision turns a week the recipe's batch is 8.
 
 The credit spans `K = CEOBENCH_CREDIT_WEEKS` weeks (4) discounted by
 `gamma = CEOBENCH_CREDIT_DISCOUNT` (0.8) per week, so the week that pays for
@@ -215,18 +214,6 @@ the one before it keeps a gradient. The Harbor reward itself stays the
 benchmark's terminal metric (final cash over the starting balance); it is
 evaluation only.
 
-Each piece answers something an earlier reward on this harness got wrong.
-Scoring the week's cash change alone made every purchase a loss and the
-emptiest week the safest, and the policy converged on a company with no
-customers; the valuation term is what lets a week that buys subscribers
-score. Scoring one week at a time left acquisition uncredited with what it
-brought, so the credit spans four weeks. Two six-figure R&D purchases early
-in an episode set the critic's scale for everything after them, so the
-credit is clipped and scaled. Ten critic-only warm-up commits spent the
-growth weeks on the critic alone, so the value model starts from an earlier
-episode's critic with two warm-up commits (`--critic-init`,
-`num-critic-only-steps`). The recorded episode below runs the full scheme.
-
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
 the recipe's batch size). The sidecar peeks at each request's dashboard;
 the first request of a new week closes the weeks the credit window has
@@ -234,8 +221,8 @@ finished and reports them, and every request waits until every batch the
 reported turns filled has committed a training release. A week is therefore
 played by a policy trained on every week reported so far, whatever the
 ratio of step time to play time, and no turn is generated while a step
-publishes its adapter: the engine cannot swap the adapter under a request
-in flight, and a publish that met one deadlocked both (2026-09-14). A wait
+publishes its adapter, since the engine cannot swap the adapter under a
+request in flight. A wait
 longer than `CEOBENCH_PACE_TIMEOUT_S` (20 minutes, about four steps) is
 forgiven so a batch the recipe declined cannot hold the game forever;
 `run.sh` widens the runner's own per-call limits past it
@@ -249,57 +236,6 @@ decision period. It is still myopic about anything the run-rate does not
 see inside the window: R&D raises quality and pays through retention and
 upgrades weeks later. A judged turn-level signal of the kind single-stream
 PPO wants (`recipes/openclawrl/`) is the extension left open.
-
-## Policy choices on one 8-GPU node
-
-- **Qwen3-4B-Thinking-2507** (the OpenClaw-RL example's policy): runs, but
-  cannot operate the benchmark's CLI. In a 14-day trial it never produced a
-  valid `next-week` call, wrote a stub `next_week.py` and looped on it, and
-  was stopped after 400 turns at day 0.
-- **Qwen3-30B-A3B-Thinking-2507** (the SAO example's paper-scale policy):
-  not trainable here with the critic. With six actor GPUs the expert weights
-  force either expert tensor parallelism, which the Megatron bridge does not
-  shard (`Shape mismatch loading ...experts.linear_fc1.weight0: HuggingFace
-  (1536, 2048), Megatron (768, 2048)` at TP2, ETP2), or TP1, where the
-  trainer's fp32 full-vocabulary logits and their gradient cap the sequence
-  near 32k tokens. A rollout-only Reef stack (no training) has neither limit,
-  so the untrained baseline can still use it.
-- **Qwen3-8B** at TP4, full parameters, inside its native 40960-token
-  window (its 128k needs YaRN, which the trainer's rotary embedding does not
-  apply): runs and operates the CLI, but in a 14-day episode made one
-  configuration change and never set a price. Its per-commit Megatron
-  checkpoint also failed with the CPU-offloaded optimizer
-  (`KeyError: 'master_param'`), which `no-save-optim` works around.
-- **Qwen3.6-27B through LoRA** is the configuration shipped: frozen base
-  weights in both the actor and the critic, rank-32 adapters on the
-  attention and MLP projections, the critic's value head trainable. This is
-  the first critic-bearing recipe to use Reef's Megatron LoRA, which until
-  now applied to the actor only (`prepare_critic_args` now keeps the adapters
-  for the critic). Two frozen bases fit beside one step's activations, so
-  the stack passes `--no-offload-train` (Reef otherwise offloads whichever
-  model is idle between critic and actor steps, a cycle that cost about
-  three minutes of a five-minute step), checkpoints the critic every eighth
-  commit (`--critic-save-interval`) instead of at every one, and trains 8
-  decision turns per step (`batch-size: 8`), about a week of play, so
-  training keeps pace with the game. Full-parameter training of
-  the 27B pair would need about 216 GB for weights and gradients alone.
-
-  The memory budget with both bases resident: 47 GB per GPU idle, and a
-  step adds about 1 GB per thousand tokens of its largest micro-batch (the
-  fp32 full-vocabulary logits, 248k entries per token, with their softmax
-  and gradient). Micro-batches are capped at 16k tokens
-  (`--max-tokens-per-gpu`; 48k ones killed a critic rank, and the other
-  three then waited in a collective for good), a resident model returns
-  its cached blocks after each step so the other model's step can use
-  them, and the container sets
-  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against fragmentation.
-  A step over turns of up to 32k tokens peaked at 78 GB of the H100's 81 GB,
-  so the harness reports only turns of up to 24k tokens
-  (`CEOBENCH_TRAIN_MAX_TOKENS` in `run.sh`); the engine still serves a 128k
-  window. In the recorded episode the cut dropped 39 of 493 turns (median
-  13k tokens, longest 34k): a week's context starts near 10k tokens and
-  grows with its tool outputs, so the dropped turns are the long
-  doc-reading and diagnosis turns and any turn after a large query result.
 
 ## Run
 
@@ -320,8 +256,10 @@ four actor GPUs, TP4 with the critic colocated, and a two-GPU rollout
 engine). The policy is `Qwen3.6-27B` trained through Megatron Bridge LoRA:
 the base stays frozen in the actor and in the SAO critic, the adapters and
 the critic's value head train, and the rollout engine serves the published
-adapter. The models tried before it are recorded below. It mints a token
-into `$RUN_DIR/token`, brings the stack up with `docker compose up --wait`,
+adapter. Turns longer than `CEOBENCH_TRAIN_MAX_TOKENS` (24k tokens, the
+largest a step fits beside the two resident bases; the header of
+`serve.yaml` gives the budget) are served and recorded but not trained on.
+`run.sh` mints a token into `$RUN_DIR/token`, brings the stack up with `docker compose up --wait`,
 and runs `run.py` in an ephemeral `uv` environment with `reef-eval[harbor]`
 and this harness. The episode row lands in `work/lab`, the trial's run
 directory under the trial's `agent/ceobench/`.
@@ -357,7 +295,7 @@ and each row is one episode at temperature 1.0.
 
 | Policy | Reward | Outcome | Final cash | `reward` |
 | --- | --- | --- | ---: | ---: |
-| `Qwen3.6-27B`, untrained (`serve-baseline.yaml`) | none | bankrupt on day 255 (week 37) | -$66 | -0.00007 |
+| `Qwen3.6-27B`, untrained (`CEOBENCH_REPORTS=0`) | none | bankrupt on day 255 (week 37) | -$66 | -0.00007 |
 | `Qwen3.6-27B`, trained in the episode (`serve.yaml`) | the weekly credit above | completed, day 497 | $257,682 | 0.258 |
 
 | Week | Day | Untrained cash | Subscribers | Trained cash | Subscribers | Engine MRR / month |
@@ -379,23 +317,24 @@ and each row is one episode at temperature 1.0.
 
 ### Untrained baseline
 
-`serve-baseline.yaml` serves the same model through Reef with no training
-stack (SGLang TP4, the model's 262k window, the record-only recipe). An
-episode on it is the untrained number a trained episode on `serve.yaml` is
-compared against, same seed and simulator roles. Start it in the reef image
-on four GPUs and run the episode with `CEOBENCH_TRAIN_MAX_TOKENS=0`:
+The untrained number is the same episode on the same stack with reporting
+off: `CEOBENCH_REPORTS=0` has the harness record the weeks without posting
+a report, so nothing trains and the engine serves the base model
+throughout (the pacer is off with it). A stack trains one scenario for its
+lifetime, so the baseline gets its own scenario and run directory:
 
 ```bash
-docker run -d --name reef-ceobench-baseline --network host --ipc host --shm-size 32gb \
-  --gpus '"device=0,1,2,3"' -v ~/models:/root/models -v "$PWD/work/baseline:/var/lib/reef" \
-  -v "$(cd ../../../.. && pwd):/workspace/Reef" -e REEF_TOKEN="$(cat work/token)" \
-  -e PYTHONPATH=/workspace/Reef reef \
-  reef serve -c /workspace/Reef/recipes/sao/examples/ceobench/serve-baseline.yaml
+docker compose down
+RUN_DIR=$PWD/work-baseline REEF_SCENARIO=ceobench-baseline CEOBENCH_REPORTS=0 \
+  CEOBENCH_SEED=42 CEOBENCH_DAYS=500 ./run.sh
 ```
 
 `results/2026-09-13-baseline-qwen3.6-27b-seed42/` holds the manifest, the
 run configuration, and `weeks.csv` (cash, individual subscribers, and
-enterprise seats at every weekly dashboard).
+enterprise seats at every weekly dashboard). This episode was served by a
+standalone SGLang engine (TP4, the model's 262k window, the record-only
+recipe; `run-config.json` has the configuration) rather than the training
+stack's rollout engine.
 
 | | |
 | --- | --- |
@@ -428,9 +367,9 @@ batch trains.
 
 | | |
 | --- | --- |
-| Outcome | completed, day 497 (week 71); not bankrupt; final cash $257,682, `reward` 0.258; no engine stall |
+| Outcome | completed, day 497 (week 71); not bankrupt; final cash $257,682, `reward` 0.258 |
 | Turns | 493 in 3h52m; 144 decision turns, 125 of them (87%) inside the 24k window and reported; 349 read-only turns recorded, not trained on |
-| Training | 15 releases: 2 critic-only steps, then 13 actor updates, the first served from week 9 (day 63). The pacer held 15 week starts for 51 minutes in all, 370 s at most (week 4); no publish met a request in flight |
+| Training | 15 releases: 2 critic-only steps, then 13 actor updates, the first served from week 9 (day 63). The pacer held 15 week starts for 51 minutes in all, 370 s at most (week 4) |
 | Rewards | one positive week (6, +0.006); every other week negative, weeks 12 to 16 at the clip (-0.05 to -0.41 before it) |
 
 The decision turns of a week are what the scheme credits, and the record
@@ -491,13 +430,6 @@ at all (`decisions_reported` in `weeks.csv`).
   spend line's return, so that a week of growth at the simulator's
   acquisition cost can score positive. Beyond those, a judged turn-level
   signal.
-- The engine stall: in earlier runs on this harness a `next-week` twice
-  hung inside the engine's `step_week` after the last simulator call of the
-  week returned, late in the game with no subscribers left; the recorded
-  episode had none. The runner's timeouts do not recover it cleanly (the
-  second call advanced the day while the first was still running). Its
-  cause is not known; a stack dump of the engine at the next stall is the
-  next step.
 
 ## Open items
 
@@ -510,8 +442,7 @@ at all (`decisions_reported` in `weeks.csv`).
   container is the outer sandbox and the agent's shell runs as an
   unprivileged user inside it (`SAAS_BENCH_TOOL_USER`), so it cannot signal
   the root-owned engine or read the engine's source and host-side bundle.
-  An earlier run without this, after an engine error, saw the agent read
-  the engine's source, stop the server, and start a new session. The copy of
+  The copy of
   the `novamind-operation` zipapp in the agent's workspace still embeds the
   database key, as it does upstream; the benchmark's docs recommend hiding
   it behind a wrapper.

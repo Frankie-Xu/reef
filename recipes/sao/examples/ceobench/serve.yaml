@@ -45,9 +45,21 @@ reef:
 inference:
   model-path: /root/models/Qwen3.6-27B
   timeout-s: 7200
-  backend-factory: >-
-    reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
-  backend-config:
+  # A two-GPU tensor-parallel rollout engine beside the four actor GPUs
+  # (training.colocate stays off). Engine flags use SGLang's names.
+  num-gpus: "2"
+  tensor-parallel-size: "2"
+  options:
+    router-port: "23000"
+    context-length: "131072"
+    reasoning-parser: "qwen3"
+    tool-call-parser: "qwen3_coder"
+    # LoRA serving: the adapter is published into the engine (tttd's settings).
+    mem-fraction-static: "0.5"
+    disable-prefill-cuda-graph: true
+    cuda-graph-max-bs-decode: "128"
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
     tool_call_parser: qwen3_coder
     # The bash agent pins temperature 1.0 and the completion budget on every
     # request; these fill in what it leaves unset (the model's generation_config).
@@ -70,7 +82,6 @@ training:
   # actor step, a checkpoint save, and a weight publish.
   timeout-s: 14400
   config:
-    sglang_port: "23000"
     checkpoint_dir: /var/lib/reef/checkpoints
     checkpoint_retention:
       max_storage_fraction: 0.80
@@ -96,28 +107,18 @@ training:
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "100"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    sglang-router-port: "${training.config.sglang_port}"
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"
     global-batch-size: "${training.config.global_batch_size}"
     micro-batch-size: "1"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "4"
-    rollout-num-gpus: "2"
-    rollout-num-gpus-per-engine: "2"
     num-gpus-per-node: "6"
     tensor-model-parallel-size: "4"
     pipeline-model-parallel-size: "1"
     seq-length: "49152"
     rollout-max-response-len: "16384"
     rollout-max-context-len: "131072"
-    sglang-context-length: "131072"
-    sglang-reasoning-parser: "qwen3"
-    sglang-tool-call-parser: "qwen3_coder"
-    # LoRA serving: the adapter is published into the engine (tttd's settings).
-    sglang-mem-fraction-static: "0.5"
-    sglang-disable-prefill-cuda-graph: true
-    sglang-cuda-graph-max-bs-decode: "128"
     # Qwen3.5/3.6 hybrid architecture, as in Slime's scripts/models/qwen3.5-27B.sh.
     spec:
       - slime_plugins.models.qwen3_5

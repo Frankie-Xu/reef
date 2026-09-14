@@ -129,6 +129,7 @@ def _agent(agent_module, monkeypatch, turns: list[dict], *, service_url="http://
     agent._ledger = agent_module.WeekLedger(total_weeks=2, credit_weeks=1)
     agent._scale = agent_module.ScoreScale(clip=10.0, floor=1.0)
     agent._engine_reads = False
+    agent._reports = True
     agent._ledger_lock = threading.Lock()
     agent._max_tokens = 0
     sidecar = _Sidecar()
@@ -409,6 +410,7 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         "score_clip": 10.0,
         "score_floor": 1.0,
         "engine_reads": False,
+        "reports": True,
         "turns": 4,
         "exit_code": 0,
         "weeks": [
@@ -449,6 +451,42 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
 
 
 @pytest.mark.unit
+def test_reports_off_records_the_weeks_without_posting(monkeypatch) -> None:
+    # The untrained baseline: the same stack and harness, but no report leaves
+    # it, so nothing trains and the trial metadata still carries the weeks.
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    turns = [
+        _turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3),
+        _turn("r-2", _dashboard(1, 7, 982_311, subscribers=3, prices=(10, 39, 99)), 30, 7),
+    ]
+    agent, _sidecar = _agent(agent_module, monkeypatch, turns)
+    agent._reports = False
+    context = SimpleNamespace(metadata={}, n_input_tokens=0, n_output_tokens=0)
+
+    asyncio.run(agent.run("play", _Environment(), context))
+
+    assert agent._client.calls == []
+    ceobench = context.metadata["ceobench"]
+    assert ceobench["reports"] is False
+    assert [(week["week"], week["cash_end"], week["reported"]) for week in ceobench["weeks"]] == [
+        (0, 982_311.0, True),
+        (1, None, False),
+    ]
+
+
+def test_reports_off_turns_the_pacer_off(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    monkeypatch.setenv("CEOBENCH_REPORTS", "0")
+    monkeypatch.setenv("CEOBENCH_PACE_BATCH", "8")
+    agent = object.__new__(agent_module.HarborAgent)
+    agent.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
+    agent._days = 14
+
+    agent._init_week_reporting()
+
+    assert agent._reports is False and agent._pacer is None
+
+
 def test_last_week_closes_with_the_verifier_final_cash(monkeypatch, tmp_path) -> None:
     agent_module, _ = _load_harness(monkeypatch, "ceobench")
     turns = [

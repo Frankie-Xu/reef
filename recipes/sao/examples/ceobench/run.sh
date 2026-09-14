@@ -41,6 +41,9 @@ export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
 export SAAS_BENCH_BASH_TIMEOUT="${SAAS_BENCH_BASH_TIMEOUT:-3600}"
 export SAAS_BENCH_LLM_TIMEOUT="${SAAS_BENCH_LLM_TIMEOUT:-1800}"
 export SAAS_BENCH_SIMULATOR_TIMEOUT_S="${SAAS_BENCH_SIMULATOR_TIMEOUT_S:-300}"
+# The untrained baseline: 0 records the episode without posting a report, so
+# the stack serves the base model throughout and trains nothing.
+export CEOBENCH_REPORTS="${CEOBENCH_REPORTS:-1}"
 # Pace the game to the trainer: the recipe's batch size (serve.yaml), so each
 # new week starts only after the reported weeks' batches have committed.
 export CEOBENCH_PACE_BATCH="${CEOBENCH_PACE_BATCH:-8}"

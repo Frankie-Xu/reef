@@ -60,6 +60,12 @@ read the engine's own monthly recurring revenue through the task container
 at each week start, so the valuation uses the books rather than the
 listed-price estimate; the agent's observation is untouched.
 
+``CEOBENCH_REPORTS`` (default on; ``0`` turns it off) is the untrained
+baseline switch: the harness still groups the turns by week and records the
+weekly values in the trial metadata, but posts no report, so the stack in
+``serve.yaml`` serves the base model for the whole episode and trains
+nothing. The pacer is off with it.
+
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
 to the recipe's batch size, the sidecar holds a request until every batch
 the reported weeks filled has committed a training release, so a week is
@@ -632,9 +638,12 @@ class HarborAgent(BaseAgent):
             floor=float(environ.get("CEOBENCH_SCORE_FLOOR", "") or DEFAULT_SCORE_FLOOR),
         )
         self._engine_reads = (environ.get("CEOBENCH_ENGINE_READS", "1") or "1") != "0"
+        self._reports = (environ.get("CEOBENCH_REPORTS", "1") or "1") != "0"
         self._ledger_lock = threading.Lock()
         self._max_tokens = int(os.environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
-        batch = int(os.environ.get("CEOBENCH_PACE_BATCH", "0") or 0)
+        # Nothing is reported for an untrained baseline, so nothing trains and
+        # there is no batch to wait for.
+        batch = int(os.environ.get("CEOBENCH_PACE_BATCH", "0") or 0) if self._reports else 0
         self._pacer = (
             TrainingPacer(
                 batch,
@@ -700,6 +709,7 @@ class HarborAgent(BaseAgent):
                 "score_clip": self._scale.clip,
                 "score_floor": self._scale.floor,
                 "engine_reads": self._engine_reads,
+                "reports": self._reports,
                 "turns": len(turns),
                 "exit_code": result.return_code,
                 "weeks": weeks,
@@ -830,25 +840,30 @@ class HarborAgent(BaseAgent):
                 start: WeekStart = entry["start"]
                 value_start = self._ledger.value(start)
                 score = self._scale.scale(credit)
-                posted = post_week_reports(
-                    self._client,
-                    self._scenario,
-                    week=week,
-                    day=start.day,
-                    cash_start=start.cash,
-                    cash_end=cash_end,
-                    value_start=value_start,
-                    value_end=value_end,
-                    credit=credit,
-                    score=score,
-                    turns=entry["turns"],
-                    max_tokens=self._max_tokens,
+                posted = (
+                    post_week_reports(
+                        self._client,
+                        self._scenario,
+                        week=week,
+                        day=start.day,
+                        cash_start=start.cash,
+                        cash_end=cash_end,
+                        value_start=value_start,
+                        value_end=value_end,
+                        credit=credit,
+                        score=score,
+                        turns=entry["turns"],
+                        max_tokens=self._max_tokens,
+                    )
+                    if self._reports
+                    else []
                 )
                 self._ledger.posted.add(week)
                 self._ledger.scores[week] = score
                 self.logger.info(
-                    "reported week %d (credit %.4f, score %.2f; value %.0f -> %.0f, cash %.0f -> %.0f)"
+                    "%s week %d (credit %.4f, score %.2f; value %.0f -> %.0f, cash %.0f -> %.0f)"
                     " against %d of %d decision turns (%d turns)",
+                    "reported" if self._reports else "recorded",
                     week,
                     credit,
                     score,

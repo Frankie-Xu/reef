@@ -98,6 +98,9 @@ async def main():
     print(f"seed {SEED}: reward {row.rewards}")
     if row.tags.get("error"):
         raise RuntimeError(f"Harbor trial failed: {row.tags['error']}")
+    if os.environ.get("CEOBENCH_REPORTS", "1") == "0":
+        print("    untrained: no reports posted")
+        return
     print(f"    trained: {wait_for_training()} releases committed")
 
 
