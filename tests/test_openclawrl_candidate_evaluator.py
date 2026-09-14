@@ -3,7 +3,7 @@
 The probe is the OpenClaw-RL-specific half — it scores a candidate's replies
 with the benchmark's style criterion. The generic select/reject policy is
 reef's ``RegressionGate`` (covered in ``test_regression_gate``). These tests pin
-the probe's scoring and that ``build`` pairs it with the gate into a working
+the probe's scoring and that the factory pairs it with the gate into a working
 evaluate-then-decide plugin, using a fake runtime so no model is needed.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from recipes.openclawrl.candidate_evaluator import build
+from recipes.openclawrl.candidate_evaluator import OpenClawRLCandidateEvaluation
 from reef.core.evaluation import UpdateCandidate
 
 _CLEAN = (
@@ -42,9 +42,10 @@ class _FakeRuntime:
 
 def _plugin(margin: float = 0.17):
     runtime = _FakeRuntime()
-    plugin = build(
+    plugin = OpenClawRLCandidateEvaluation().build(
         {"probe_size": 6, "max_tokens": 64, "regression_margin": margin},
-        runtime=runtime,
+        runtime=None,
+        training_runtime=runtime,
         scenario="gsm8k",
         environ={},
     )
@@ -87,4 +88,6 @@ def test_build_refuses_a_runtime_that_cannot_probe_a_candidate() -> None:
         engine = _FakeEngine()
 
     with pytest.raises(ValueError, match="probe_candidate"):
-        build({}, runtime=_NoProbe(), scenario="gsm8k", environ={})
+        OpenClawRLCandidateEvaluation().build(
+            {}, runtime=None, training_runtime=_NoProbe(), scenario="gsm8k", environ={}
+        )

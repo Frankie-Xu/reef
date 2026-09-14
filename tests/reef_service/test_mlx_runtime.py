@@ -210,7 +210,7 @@ def test_activation_moves_serving_to_the_selected_candidate(tmp_path: Path) -> N
     prepared = runtime.prepare_training_step(batch(), "mlx-test-tttd", {}, 0)
     candidate = runtime.train_candidate(prepared.payload)
 
-    activated = runtime.activate_candidate(candidate)
+    activated = runtime.serving.activate_candidate(candidate)
 
     assert activated.candidate_id == candidate.candidate_id
     assert activated.runtime_load_id == "fake-2"
@@ -236,7 +236,7 @@ def test_a_rejected_candidate_never_reaches_serving(tmp_path: Path) -> None:
     # A rejected candidate is gone: activating it afterwards must fail loudly
     # rather than resurrect weights Reef declined.
     with pytest.raises(RuntimeContractError, match="no pending mlx candidate"):
-        runtime.activate_candidate(candidate)
+        runtime.serving.activate_candidate(candidate)
 
 
 @pytest.mark.unit
@@ -331,7 +331,7 @@ def test_inference_stays_closed_between_activation_and_the_durable_commit(tmp_pa
     prepared = runtime.prepare_training_step(batch(), "mlx-test-tttd", {}, 0)
     candidate = runtime.train_candidate(prepared.payload)
 
-    runtime.activate_candidate(candidate)
+    runtime.serving.activate_candidate(candidate)
 
     assert runtime.serving.inference_admission_status["open"] is False
     # The engine holds the new weights, but Reef has not published them yet.
@@ -1186,3 +1186,59 @@ def test_a_stream_of_no_response_tokens_fails_before_the_terminal() -> None:
     frames, stream = asyncio.run(run())
     assert b"[DONE]" not in b"".join(frames)
     assert stream.record_response is None
+
+
+@pytest.mark.unit
+def test_reef_activates_a_candidate_on_the_half_that_serves(tmp_path: Path) -> None:
+    """Activation is declared on ``InferenceRuntime``, so Reef calls it there.
+
+    The split once left the trained snapshots on one object and the activation
+    on the other, and every test still passed: they called activation directly
+    on the training runtime, which is not the caller Reef uses. A live run
+    failed on its first training step with "does not support candidate
+    activation". This asserts the pair the way Reef holds it.
+    """
+    training = build_runtime(tmp_path)
+    serving = training.serving
+
+    assert not hasattr(training, "activate_candidate")
+    assert callable(serving.activate_candidate)
+
+    prepared = training.prepare_training_step(batch(), "mlx-test-tttd", {}, 0)
+    candidate = training.train_candidate({**prepared.payload, "rollout_id": 1})
+    before = serving.serving_runtime_load_id()
+
+    activated = serving.activate_candidate(candidate)
+
+    assert activated.candidate_id == candidate.candidate_id
+    assert activated.runtime_load_id != before, "activation must mint a new served version"
+    assert serving.serving_runtime_load_id() == activated.runtime_load_id
+    # Admission stays held until Reef's commit, the second half of the
+    # handshake, so the committed version still lags.
+    assert serving.current_runtime_load_id() == before
+    serving.commit_serving()
+    assert serving.current_runtime_load_id() == activated.runtime_load_id
+
+
+@pytest.mark.unit
+def test_a_rejected_candidate_is_dropped_from_the_serving_half(tmp_path: Path) -> None:
+    training = build_runtime(tmp_path)
+    serving = training.serving
+    prepared = training.prepare_training_step(batch(), "mlx-test-tttd", {}, 0)
+    candidate = training.train_candidate({**prepared.payload, "rollout_id": 1})
+    assert serving.staged_candidate(candidate.candidate_id) is not None
+
+    training.reject_candidate(
+        candidate,
+        SelectionDecision(
+            outcome="reject",
+            policy="test",
+            policy_version="1",
+            reason="not selected",
+            evaluation=EvaluationResult(evaluator="test", evaluator_version="1", metrics={}),
+        ),
+    )
+
+    assert serving.staged_candidate(candidate.candidate_id) is None
+    with pytest.raises(RuntimeContractError, match="no pending mlx candidate"):
+        serving.activate_candidate(candidate)

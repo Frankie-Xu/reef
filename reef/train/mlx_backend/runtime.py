@@ -23,7 +23,6 @@ from typing import Any
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.deployment import RuntimeBuild, RuntimeFactory, register_runtime_kind
 from reef.runtime.interfaces import (
-    ActivatedModel,
     ModelCandidate,
     PreparedTrainingStep,
     RuntimeContractError,
@@ -84,7 +83,6 @@ class MLXRuntime(TrainingRuntime):
             "native_k": 20,
             **dict(openclawrl or {}),
         }
-        self._pending: dict[str, Any] = {}
 
     # ---------------------------------------------------------------- serving
 
@@ -207,7 +205,7 @@ class MLXRuntime(TrainingRuntime):
             if not topk_indices or not topk_log_probs:
                 raise RuntimeContractError(
                     f"sample {index} carries no generation top-K; the openclawrl objective distils onto "
-                    "the candidates the policy considered, so set the runtime's capture_topk"
+                    "the candidates the policy considered, so set training.options.capture_topk"
                 )
             raw = (captured.get("extras") or {}).get("teacher_cands")
             if not raw:
@@ -318,7 +316,7 @@ class MLXRuntime(TrainingRuntime):
             )
             # Serving keeps the previous weights until Reef selects this
             # candidate; the trained parameters live only in the export.
-            self._pending[candidate_id] = after
+            self._serving.stage_candidate(candidate_id, after)
             self._engine.apply_adapter(before)
         except BaseException:
             # A failed step may have already applied an optimizer update, or
@@ -377,29 +375,6 @@ class MLXRuntime(TrainingRuntime):
             )
         return adjusted
 
-    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
-        """Make a selected candidate the weights that answer new requests."""
-        snapshot = self._pending.pop(candidate.candidate_id, None)
-        if snapshot is None:
-            raise RuntimeContractError(f"no pending mlx candidate {candidate.candidate_id!r} to activate")
-        # Admission stays closed past this method. Between swapping the
-        # weights and Reef committing the new head, a request would freeze the
-        # old artifact and then be answered by the new weights, which the
-        # weight surface correctly rejects as a runtime-load mismatch.
-        # ``reconcile_training_job`` reopens once the commit is durable.
-        self._serving.hold()
-        try:
-            runtime_load_id = self._serving.swap_adapter(snapshot)
-        except BaseException:
-            self._serving.release()
-            raise
-        logger.info(
-            "activated mlx candidate %s at runtime load ID %s",
-            candidate.candidate_id,
-            runtime_load_id,
-        )
-        return ActivatedModel(candidate_id=candidate.candidate_id, runtime_load_id=runtime_load_id)
-
     def reconcile_training_job(
         self,
         scenario_step: int,
@@ -418,7 +393,7 @@ class MLXRuntime(TrainingRuntime):
 
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
         """Drop a rejected candidate's weights; serving already never saw them."""
-        self._pending.pop(candidate.candidate_id, None)
+        self._serving.discard_candidate(candidate.candidate_id)
         logger.info("rejected mlx candidate %s: %s", candidate.candidate_id, decision.reason)
 
     def probe_candidate(
@@ -437,7 +412,7 @@ class MLXRuntime(TrainingRuntime):
         parameters are restored before this returns, so no live request is ever
         answered by weights Reef has not selected.
         """
-        snapshot = self._pending.get(candidate_id)
+        snapshot = self._serving.staged_candidate(candidate_id)
         if snapshot is None:
             raise RuntimeContractError(f"no pending mlx candidate {candidate_id!r} to probe")
         self._serving.hold()
@@ -496,7 +471,7 @@ class MLXRuntimeFactory(RuntimeFactory):
             )
         checkpoint_dir = config.get("checkpoint_dir")
         if not isinstance(checkpoint_dir, str) or not checkpoint_dir:
-            raise RuntimeContractError("the mlx runtime requires reef.runtime_config.checkpoint_dir")
+            raise RuntimeContractError("the mlx runtime requires training.options.checkpoint_dir")
         chat_template_kwargs = _template_kwargs(config.get("chat_template_kwargs"))
 
         try:

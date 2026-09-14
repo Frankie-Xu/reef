@@ -21,7 +21,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.runtime.interfaces import ActivatedModel, InferenceHandler, InferenceRuntime, RuntimeContractError
 from reef.surface.base import WeightRuntime
 from reef.train.mlx_backend.inference import MLXInferenceBackend
 
@@ -39,6 +39,8 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         self._engine = engine
         self._adapter_name = adapter_name
         self._backend: Any = None
+        #: Trained snapshots awaiting Reef's select-or-reject.
+        self._pending: dict[str, Any] = {}
         #: What the engine holds. Advances the moment weights are swapped.
         self._serving_runtime_load_id: str | None = engine.next_runtime_load_id()
         #: What Reef has made available to new requests. Lags the above between
@@ -113,8 +115,6 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         """Roll serving back to a published adapter."""
         local_path = artifact.local_path
         if local_path is None:
-            from reef.runtime.interfaces import RuntimeContractError
-
             raise RuntimeContractError("mlx rollback requires a materialized adapter")
         self.hold()
         try:
@@ -123,6 +123,37 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         finally:
             self.release()
         return self._serving_runtime_load_id
+
+    def stage_candidate(self, candidate_id: str, snapshot: Any) -> None:
+        """Hold a trained snapshot until Reef selects or rejects it."""
+        self._pending[candidate_id] = snapshot
+
+    def staged_candidate(self, candidate_id: str) -> Any:
+        """The snapshot staged under this id, or None."""
+        return self._pending.get(candidate_id)
+
+    def discard_candidate(self, candidate_id: str) -> None:
+        """Drop a rejected candidate; serving never saw its weights."""
+        self._pending.pop(candidate_id, None)
+
+    def activate_candidate(self, candidate: Any) -> ActivatedModel:
+        """Make a selected candidate the weights that answer new requests."""
+        snapshot = self._pending.pop(candidate.candidate_id, None)
+        if snapshot is None:
+            raise RuntimeContractError(f"no pending mlx candidate {candidate.candidate_id!r} to activate")
+        # Admission stays closed past this method. Between swapping the weights
+        # and Reef committing the new head, a request would freeze the old
+        # artifact and then be answered by the new weights, which the weight
+        # surface correctly rejects as a runtime-load mismatch.
+        # ``commit_serving`` reopens once the commit is durable.
+        self.hold()
+        try:
+            runtime_load_id = self.swap_adapter(snapshot)
+        except BaseException:
+            self.release()
+            raise
+        logger.info("activated mlx candidate %s at runtime load ID %s", candidate.candidate_id, runtime_load_id)
+        return ActivatedModel(candidate_id=candidate.candidate_id, runtime_load_id=runtime_load_id)
 
     def commit_serving(self) -> None:
         """Publish the swapped weights to new requests, and reopen the gate.

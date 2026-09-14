@@ -41,7 +41,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.train.evaluation import EvaluationResult, RegressionGateMixin, UpdateCandidate
+from reef.train.evaluation import (
+    CandidateEvaluationPluginFactory,
+    EvaluationResult,
+    RegressionGateMixin,
+    UpdateCandidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -177,39 +182,45 @@ class OpenClawRLCandidateEvaluationPlugin(RegressionGateMixin):
         )
 
 
-def build(
-    config: Mapping[str, Any],
-    *,
-    runtime: Any,
-    scenario: str,
-    environ: Mapping[str, str],
-) -> OpenClawRLCandidateEvaluationPlugin:
-    """Factory for ``evaluation.module``: the OpenClaw-RL probe + regression gate.
+class OpenClawRLCandidateEvaluation(CandidateEvaluationPluginFactory):
+    """Factory for ``evaluation.module``: the OpenClaw-RL probe + regression gate."""
 
-    Requires a runtime that can probe an unpublished candidate — the in-process
-    MLX runtime's ``probe_candidate``. A runtime without it (e.g. the Ray
-    training bridge, whose candidates live in a separate process) is refused
-    here rather than silently degrading to no gate.
-    """
-    if not callable(getattr(runtime, "probe_candidate", None)):
-        raise ValueError(
-            f"{_EVALUATOR} needs a runtime that can probe an unpublished candidate; "
-            f"{type(runtime).__name__} does not provide probe_candidate()"
+    def build(
+        self,
+        config: Mapping[str, Any],
+        *,
+        runtime: Any,
+        training_runtime: Any,
+        scenario: str,
+        environ: Mapping[str, str],
+    ) -> OpenClawRLCandidateEvaluationPlugin:
+        """Build the plugin against the half that can probe an unpublished candidate.
+
+        The probe applies a candidate's weights and generates from them, so it
+        belongs to the training runtime: the serving half deliberately never
+        sees a candidate before Reef selects it. A training runtime without
+        ``probe_candidate`` (the Ray bridge, whose candidates live in another
+        process) is refused here rather than silently degrading to no gate.
+        """
+        if not callable(getattr(training_runtime, "probe_candidate", None)):
+            raise ValueError(
+                f"{_EVALUATOR} needs a training runtime that can probe an unpublished candidate; "
+                f"{type(training_runtime).__name__} does not provide probe_candidate()"
+            )
+        plugin = OpenClawRLCandidateEvaluationPlugin(
+            training_runtime,
+            probe_size=int(config.get("probe_size", 8)),
+            max_tokens=int(config.get("max_tokens", 96)),
+            regression_margin=float(config.get("regression_margin", 0.17)),
         )
-    plugin = OpenClawRLCandidateEvaluationPlugin(
-        runtime,
-        probe_size=int(config.get("probe_size", 8)),
-        max_tokens=int(config.get("max_tokens", 96)),
-        regression_margin=float(config.get("regression_margin", 0.17)),
-    )
-    logger.info(
-        "%s active for scenario %s: %d pinned probes, regression-gate margin %.2f",
-        _EVALUATOR,
-        scenario,
-        len(plugin._probe),
-        plugin._margin,
-    )
-    return plugin
+        logger.info(
+            "%s active for scenario %s: %d pinned probes, regression-gate margin %.2f",
+            _EVALUATOR,
+            scenario,
+            len(plugin._probe),
+            plugin._margin,
+        )
+        return plugin
 
 
-__all__ = ["OpenClawRLCandidateEvaluationPlugin", "build"]
+__all__ = ["OpenClawRLCandidateEvaluation", "OpenClawRLCandidateEvaluationPlugin"]
