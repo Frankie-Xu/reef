@@ -1363,8 +1363,9 @@ def _proposer_requires(
 
     An item is the proposer's when its name is not among the person's
     ``base`` items, wherever the proposer put it; one that is malformed, or
-    whose name or check is credential or directive shaped, is dropped alone
-    and named once in the log, the rest stand and the mutations stand.
+    whose name, check or prompt is credential or directive shaped, is
+    dropped alone and named once in the log, the rest stand and the
+    mutations stand.
     Returns the kept items and the refused ones, each refused as the bounded
     ``item`` with the ``reason`` it was dropped, so the step can record them."""
     log = logging.getLogger(__name__)
@@ -1387,7 +1388,7 @@ def _proposer_requires(
             log.warning("propose: a requires item it added is dropped: %s", error)
             refused.append({"item": _bounded(item), "reason": str(error)})
             continue
-        texts = (parsed["name"], str(parsed.get("check") or ""))
+        texts = (parsed["name"], str(parsed.get("check") or ""), str(parsed.get("prompt") or ""))
         if any(secret_shaped(text) for text in texts):
             log.warning("propose: a requires item it added carries a credential shaped literal; dropped")
             refused.append({"item": _bounded(item), "reason": "carries a credential shaped literal"})
