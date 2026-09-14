@@ -213,7 +213,7 @@ code against these tools.
 - Give each class one clear responsibility and keep its public surface small.
   Construct valid objects rather than relying on callers to set attributes in
   a particular order.
-- Prefer composition and small protocols over deep inheritance hierarchies.
+- Prefer composition and small abstract interfaces over deep inheritance hierarchies.
   Inheritance should represent a genuine substitutable relationship, not just
   reuse implementation.
 - Encapsulate mutable state and expose intent-revealing operations. Do not add
@@ -228,8 +228,17 @@ code against these tools.
   at runtime. Resolve cycles by moving shared contracts to a lower-level module,
   correcting the dependency direction, or using a local runtime import at the
   integration boundary.
+- Do not use `typing.Protocol`, `typing_extensions.Protocol`, or `runtime_checkable`.
+  Define abstract base classes and inherit them explicitly. The Python design
+  check enforces this across all first-party Python files, including `reef/`,
+  `recipes/`, `tests/`, `tutorials/`, `docker/`, `docs/`, `.github/scripts/`, and
+  root files. It excludes third-party code, local dependency/build trees, vendored
+  benchmark inputs, published result programs, and golden fixtures using the paths
+  in [.github/scripts/check_python_design.py](.github/scripts/check_python_design.py).
+  Protocol findings cannot be exempted through the design baseline. The existing
+  `TYPE_CHECKING` and Callable checks keep their `reef/`, `recipes/`, and `tests/` scope.
 - Do not model long-lived behavior as `Callable` constructor arguments,
-  callable-valued fields, or containers of callbacks. Define a named `Protocol`
+  callable-valued fields, or containers of callbacks. Define an abstract base class
   with meaningful methods or a cohesive class so the contract, state, and
   lifecycle are explicit.
 - A single short-lived callback can be appropriate for an algorithm, decorator,
@@ -286,9 +295,9 @@ reliably:
   for established public APIs and mathematical notation are documented in
   `pyproject.toml`.
 - mypy checks type consistency in the `reef` package.
-- The Python design-policy check rejects `TYPE_CHECKING` and new Callable-based
-  object state or callback bundles. Its baseline identifies existing migration
-  debt and cannot grow without an explicit reviewed change.
+- The Python design-policy check rejects `Protocol`, `runtime_checkable`,
+  `TYPE_CHECKING`, and new Callable-based object state or callback bundles. Its baseline identifies existing migration
+  debt for Callable patterns; Protocol and `TYPE_CHECKING` findings cannot be baselined.
 
 Automation cannot determine whether a class is the right abstraction, whether
 an identifier uses the clearest domain term, or whether an interface has one

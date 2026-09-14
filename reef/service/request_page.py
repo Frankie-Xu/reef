@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from reef.service.release_page import STYLE, _esc, _requires_table, mutations_of, verdict_of
-from reef.train.cordis_backend.backend import StepProgress
+from reef.train.cordis_backend.contracts import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
 REFRESH_SECONDS = 5

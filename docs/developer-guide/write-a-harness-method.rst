@@ -14,13 +14,16 @@ A method fills three slots:
 
    def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
    def evaluate(task, result) -> float: ...
-   class Selection:  # optional
-       def decide(self, candidate, evaluation) -> SelectionDecision: ...
+   class SelectionFactory(CandidatePluginFactory):  # optional
+       def build(self, candidate_backend) -> CandidateEvaluationPlugin: ...
 
 ``propose`` sees the tree as ``(kind, config)`` pairs, the batch of
-``TraceSample`` records (recorded request payload, score, source receipt), and
+ATIF ``TrajectoryItem`` values, and
 ``models``, its only path to a model. ``models.served`` is the model under
-test, ``models["teacher"]`` comes from ``evolution.models``. Call each binding
+test, ``models["teacher"]`` comes from ``evolution.models``. Read the trajectory
+from ``item.trajectory``, reward/feedback from ``item.metadata``, and original
+provider exchanges through ``reef.core.trajectories.recorded_payloads``.
+Call each binding
 as ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The
 ``messages`` are OpenAI-shaped regardless of the endpoint's dialect, and the
 binding returns the assistant text. ``propose`` returns one ``Mutation``
@@ -46,9 +49,9 @@ Reef passes each keyword only to a signature that names it.
 pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
 that could not run never reach it.
 
-``promote`` is optional and only matters with ``evolution.promote_failures``:
-it receives the step's trace samples, plus the ``FailureManifest`` when its
-signature names ``manifest``, and returns the prompts to add to the gate as
+``promote`` is an optional ``Promoter`` subclass or instance and only matters
+with ``evolution.promote_failures``. Its ``__call__(samples, *, manifest=None)``
+receives the step's trace samples and ``FailureManifest``, and returns the prompts to add to the gate as
 permanent tasks. Reef dedupes, screens for credentials, and caps what it
 returns. Without it every failing trace's user prompt is promoted.
 
@@ -113,8 +116,8 @@ Two batching modes
 ~~~~~~~~~~~~~~~~~~
 
 Evolution batches in one of two modes, selected by ``data.batch_policy``.
-The default, ``reports``, batches explicitly scored reports through the
-score window; use it whenever the deployment has an outcome signal (a
+The default, ``reports``, batches every valid explicitly scored report;
+use it whenever the deployment has an outcome signal (a
 grader, a test result, a user action), because a measured result beats
 model self judgment. ``records`` batches recorded inference traffic alone,
 every ``batch_size`` requests, so a deployment that only serves still
@@ -197,10 +200,17 @@ regressed and at least one improved.
 
 .. code:: python
 
-   from reef import SelectionDecision
+   from reef import CandidateEvaluationPlugin, CandidateEvaluator, SelectionDecision
+   from reef.train.evaluation import CandidatePluginFactory
 
 
-   class ParetoSelectionPolicy:
+   class ParetoPlugin(CandidateEvaluationPlugin):
+       def __init__(self, candidate_backend: CandidateEvaluator):
+           self._candidate_backend = candidate_backend
+
+       def evaluate(self, candidate):
+           return self._candidate_backend.evaluate(candidate)
+
        def decide(self, candidate, evaluation):
            pairs = zip(
                evaluation.metrics["candidate_scores"],
@@ -218,10 +228,16 @@ regressed and at least one improved.
            )
 
 
-   pareto_selection = ParetoSelectionPolicy()
+   class ParetoFactory(CandidatePluginFactory):
+       def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+           return ParetoPlugin(candidate_backend)
 
-Name it ``selection: my_pkg.policies:pareto_selection``. Publishing outside
-candidate selection breaks revert.
+Name it ``selection: my_pkg.policies:ParetoFactory``. Reef constructs the
+factory without arguments, then calls ``build`` for each scenario's candidate
+backend. A factory instance can also be supplied directly from Python. The
+plugin explicitly inherits both evaluation and selection through
+``CandidateEvaluationPlugin``; a selector-only object is not a complete plugin.
+Publishing outside candidate selection breaks revert.
 
 Untrusted input
 ~~~~~~~~~~~~~~~

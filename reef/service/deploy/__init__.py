@@ -13,6 +13,7 @@ Module responsibilities:
     cli: CLI help, dotted override syntax and precedence.
     inference / training: Component-specific process and runtime assembly.
     execution: Process definition validation and executor selection.
+    diagnostics: Resolved settings and their sources for the startup log.
     process / guard: Worker process lifecycle and remote-owner cleanup.
     orchestrator: Launch coordination, supervision and HTTP child entrypoint.
 

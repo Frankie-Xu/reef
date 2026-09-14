@@ -58,7 +58,14 @@ class ServiceConfig:
         None, public_path=("inference", "backend"), help="Managed local inference backend (default: sglang)."
     )
     tensor_parallel_size: int | None = config_option(
-        None, public_path=("inference", "tensor_parallel_size"), help="Managed local inference GPU count (default: 1)."
+        None,
+        public_path=("inference", "tensor_parallel_size"),
+        help="Tensor parallel GPU count per inference engine (default: 1).",
+    )
+    inference_num_gpus: int | None = config_option(
+        None,
+        public_path=("inference", "num_gpus"),
+        help="Total inference GPUs; defaults to tensor-parallel-size. Slime can launch multiple engines.",
     )
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,
@@ -75,6 +82,11 @@ class ServiceConfig:
         metadata=config_metadata(
             "Options owned by the selected training backend.", public_path=("training", "options")
         ),
+    )
+    colocate: bool = config_option(
+        False,
+        public_path=("training", "colocate"),
+        help="Train on the inference GPUs; Reef reserves one shared allocation and hands memory between them.",
     )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The
@@ -101,13 +113,13 @@ class ServiceConfig:
     train_timeout_s: float | None = config_option(
         None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
     )
-    inference_backend_factory: str | None = config_option(
-        None, public_path=("inference", "backend_factory"), help="Dotted inference backend factory."
+    inference_handler_factory: str | None = config_option(
+        None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
     )
-    inference_backend_config: Mapping[str, Any] = field(
+    inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Inference backend options as a JSON/YAML object.", public_path=("inference", "backend_config")
+            "Inference request handler options as a JSON/YAML object.", public_path=("inference", "handler_config")
         ),
     )
     inference_retry_initial_s: float = config_option(

@@ -11,12 +11,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.base import PreparedTrainingStep
+from reef.runtime.interfaces import PreparedTrainingStep
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_preparer
 from reef.train.algos.schedule import MaterializedSchedule, materialize_schedule, schedule_seed
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.types import GroupedPolicyBatch, TrainingBatch, policy_samples
+from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 
 def prepare_slime_step(
@@ -53,15 +53,19 @@ def prepare_slime_step(
 
 def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> MaterializedSchedule:
     """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order."""
-    samples = policy_samples(batch)
-    if isinstance(batch, GroupedPolicyBatch) and scheduling.unit != "sample":
-        source_rollout_ids = [
-            group_index for group_index, comparison_set in enumerate(batch.comparison_sets) for _ in comparison_set
-        ]
-    else:
-        # PolicyBatch, or a grouped batch whose objective schedules per sample;
-        # any other batch type already failed policy_samples() above.
+    samples = trajectories(batch)
+    if scheduling.unit == "sample":
         source_rollout_ids = list(range(len(samples)))
+    else:
+        group_ids: dict[tuple[str, str | int], int] = {}
+        source_rollout_ids = []
+        for index, item in enumerate(batch.items):
+            key = (
+                ("group", item.group_id)
+                if isinstance(item, TrajectoryItem) and item.group_id is not None
+                else ("sample", index)
+            )
+            source_rollout_ids.append(group_ids.setdefault(key, len(group_ids)))
     return materialize_schedule(source_rollout_ids, scheduling, seed=schedule_seed(batch.batch_id))
 
 
@@ -79,7 +83,7 @@ def _build_payload(
     of its configured size and ``external_remainder`` says what it does with
     a tail. See :class:`StepScheduling`.
     """
-    samples = policy_samples(batch)
+    samples = trajectories(batch)
     shape_row = resolve_loss_family(loss_family).shape_sample_row
     if advantages is not None and len(advantages) != len(samples):
         raise ValueError(f"advantages length {len(advantages)} does not match sample count {len(samples)}")

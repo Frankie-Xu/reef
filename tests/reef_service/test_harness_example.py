@@ -17,6 +17,7 @@ from types import ModuleType
 
 import pytest
 import yaml
+from reef_service._trajectories import recorded_trajectory
 from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.harness.episodes.model_binding import ModelBindingError
@@ -28,7 +29,6 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
 
@@ -37,7 +37,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-h
 #: reef hands the proposer is the only endpoint in play.
 NODES = (("skill", {"name": "answer-style", "text": "# answer-style\n\nStarter skill."}),)
 
-SAMPLES = (TraceSample("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
+SAMPLES = (recorded_trajectory("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
 
 #: One queued instruction, as the backend forwards it to a proposer that names ``requests``.
 REQUEST = {
@@ -70,33 +70,43 @@ def native_evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return _method(monkeypatch, "native_evolution")
 
 
+#: What marks the plan call's prompt, the first of a request's calls.
+PLAN_MARKER = '"needs_tool": true or false'
+
+
 class Model:
     """A ModelBindings stand-in: ``served`` answers the canned replies in order, the last one again once they run
-    out; a reply that is an exception is raised on its call, and ``failure`` is raised on every call."""
+    out; a reply that is an exception is raised on its call, and ``failure`` is raised on every call. A request's
+    plan call, which comes first, is answered with ``plan`` (no step by default) and consumes no canned reply."""
 
-    def __init__(self, *replies: str | Exception, failure: Exception | None = None) -> None:
-        self.replies, self.failure, self.calls = list(replies), failure, 0
+    def __init__(self, *replies: str | Exception, plan: str = "[]", failure: Exception | None = None) -> None:
+        self.replies, self.plan, self.failure, self.calls = list(replies), plan, failure, 0
+        self.answered = 0
         self.prompts: list[str] = []
         self.params_of: list[dict[str, object]] = []
         self.served = self
 
     @property
     def prompt(self) -> str | None:
-        """The first prompt, the proposal's; a request's review call comes after it."""
-        return self.prompts[0] if self.prompts else None
+        """The write prompt: the second call's on a request (the plan call comes first), the only one otherwise."""
+        return self.prompts[1] if len(self.prompts) > 1 else (self.prompts[0] if self.prompts else None)
 
     @property
     def params(self) -> dict[str, object]:
-        """The first call's parameters."""
-        return self.params_of[0] if self.params_of else {}
+        """The write call's parameters, chosen as ``prompt`` is."""
+        return self.params_of[1] if len(self.params_of) > 1 else (self.params_of[0] if self.params_of else {})
 
     def chat(self, messages, **params):
         self.calls += 1
-        self.prompts.append(messages[-1]["content"])
+        prompt = messages[-1]["content"]
+        self.prompts.append(prompt)
         self.params_of.append(dict(params))
         if self.failure is not None:
             raise self.failure
-        reply = self.replies[min(self.calls, len(self.replies)) - 1] if self.replies else None
+        if PLAN_MARKER in prompt:
+            return self.plan
+        self.answered += 1
+        reply = self.replies[min(self.answered, len(self.replies)) - 1] if self.replies else None
         if isinstance(reply, Exception):
             raise reply
         return reply
@@ -180,14 +190,14 @@ def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     model = canned(proposal("answer-style"))
     (mutation,) = evolution.propose(NODES, (), model, requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id) == ("update", "answer-style")
-    # The proposal call, then the review of what it wrote.
-    assert model.calls == 2
+    # The plan call, the entries, then the review of what it wrote.
+    assert model.calls == 3
     assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
 
 
 #: A report's feedback beside its request: what the reporter said was wrong, which the payload alone cannot show.
 REPORTED = (
-    TraceSample(
+    recorded_trajectory(
         "a2",
         {"messages": [{"role": "user", "content": "fix the failing test in auth.py"}]},
         0.0,
@@ -197,7 +207,7 @@ REPORTED = (
 
 
 def test_propose_shows_each_failure_with_its_report_score_and_feedback(evolution) -> None:
-    """The step hands the proposer TraceSamples whose ``feedback`` is the report's text verbatim; a proposer that
+    """The step hands the proposer ATIF trajectory items whose ``feedback`` is the report's text verbatim; a proposer that
     serialized the payload alone would learn what the model answered but never why it was scored down."""
     model = canned(proposal("answer-style"))
     evolution.propose(NODES, REPORTED + SAMPLES, model)
@@ -244,7 +254,7 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     mutations = evolution.propose(
         (*NODES, ("rules", {"text": "Be brief."}), API_SKILL), (), model, requests=(REQUEST,)
     ).mutations
-    assert model.calls == 2
+    assert model.calls == 3  # the plan call, the entries, then the review
     prompt = model.prompt
     assert REQUEST["text"] in prompt and "[BEGIN user request" in prompt
     assert '"id": "answer-style"' in prompt and '"body": "# answer-style' in prompt
@@ -255,6 +265,9 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
         assert reserved in prompt
     for kind in ("skill", "rules", "agent_command", "code_extension"):
         assert f"- {kind}:" in prompt
+    # The tool must run on every platform; a canned reply names no tool step, so the write prompt carries no plan.
+    assert "macOS, Linux or Windows under WSL 2" in prompt and "process.platform" in prompt
+    assert "need a tool the harness does not have" not in prompt
     assert [(m.op, m.id, m.options) for m in mutations] == [
         ("create", "test-first", {"name": "skill", "config": skill})
     ]
@@ -262,6 +275,40 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert "pi.registerTool" not in model.prompt and "code_extension" in model.prompt
+
+
+def test_propose_asks_for_a_plan_first_and_demands_a_tool_for_a_step_the_harness_cannot_perform(evolution) -> None:
+    """The first call lists the request's steps; the ones the harness cannot perform go into the second
+    call's prompt with the demand for a code_extension beside the rule. A plan the model does not give
+    in that shape, or a step it can perform, adds nothing."""
+    plan = json.dumps(
+        [
+            {"step": "reproduce the bug with a failing test", "needs_tool": False},
+            {"step": "have a second agent review the diff", "needs_tool": True},
+        ]
+    )
+    entries = request_reply({"id": "bug-fix-workflow", "name": "rules", "config": {"text": "# Bug fix\n"}})
+    model = Model(entries, plan=plan)
+    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,)).mutations
+    assert model.calls == 3 and [m.id for m in mutations] == ["bug-fix-workflow"]
+    plan_prompt, write_prompt, _review_prompt = model.prompts
+    assert REQUEST["text"] in plan_prompt and '"needs_tool": true or false' in plan_prompt
+    assert "need a tool the harness does not have" in write_prompt
+    assert "- have a second agent review the diff" in write_prompt
+    assert (
+        "reproduce the bug with a failing test"
+        not in write_prompt.split("need a tool the harness does not have")[1].split("\n\n")[0]
+    )
+    assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}
+    # No step needs a tool: the write prompt carries no plan section.
+    model = Model(entries, plan=json.dumps([{"step": "run the tests", "needs_tool": False}]))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert "need a tool the harness does not have" not in model.prompts[1]
+    # A plan call that fails, or answers prose, leaves the request answered as before.
+    model = Model(entries, plan="I cannot list steps.")
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert [m.id for m in proposal.mutations] == ["bug-fix-workflow"]
+    assert "need a tool the harness does not have" not in model.prompts[1]
 
 
 def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
@@ -342,15 +389,19 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 120 s and 16384 tokens and reviews with 60 s and 16384, the failure path asks
-    with 60 s and 8192 (a thinking model spends part of each budget on its reasoning before the JSON), unless
-    REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is ignored
-    rather than turning the step into an error."""
+    """The request path asks with 600 s and 65536 tokens (its plan call before that with 60 s and 4096, its
+    review after with 120 s and 16384), the failure path asks with 60 s and 8192 (a thinking model spends part
+    of each budget on its reasoning before the JSON), unless REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS
+    say otherwise; a value that is not a number is ignored rather than turning the step into an error."""
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 16384}]
+    assert model.params_of == [
+        {"timeout_s": 60.0, "max_tokens": 4096},
+        {"timeout_s": 600.0, "max_tokens": 65536},
+        {"timeout_s": 120.0, "max_tokens": 16384},
+    ]
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
     assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 8192}]
@@ -358,11 +409,15 @@ def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evoluti
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 32768}] * 2
+    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 32768}] * 3
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}] * 2
+    assert model.params_of == [
+        {"timeout_s": 900.0, "max_tokens": 4096},
+        {"timeout_s": 900.0, "max_tokens": 65536},
+        {"timeout_s": 900.0, "max_tokens": 16384},
+    ]
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
@@ -392,7 +447,7 @@ def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
     assert evolution.propose(NODES, SAMPLES, canned(proposal("answer-style", name="rules"))) is None
     down = Model(failure=ModelBindingError("model endpoint unreachable: connection refused"))
     failure = failure_of(evolution.propose(NODES, (), down, requests=(REQUEST,)))
-    assert failure.endswith("(max_tokens=16384): model endpoint unreachable: connection refused")
+    assert failure.endswith("(max_tokens=65536): model endpoint unreachable: connection refused")
     # With the tree's entries in hand the failure path is what it was: one call, a bare Mutation, no design
     # and no review.
     model = canned(proposal("answer-style"))
@@ -456,7 +511,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     assert isinstance(proposal, StepProposal)
     assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
     assert proposal.notes == {"design": DESIGN, "review": REVIEW}
-    request_prompt, review_prompt = model.prompts
+    _plan_prompt, request_prompt, review_prompt = model.prompts
     # The prompt asks for the design first: the restatement, the triggers and states with their sources and
     # the explicit toggle rule, what the user must provide, then the entries, complete and nothing more.
     assert "1. Restate the request in one sentence." in request_prompt
@@ -492,7 +547,11 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     assert "a value the user must provide that the extension asks for or stores itself instead of declaring" in (
         review_prompt
     )
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 16384}]
+    assert model.params_of == [
+        {"timeout_s": 60.0, "max_tokens": 4096},
+        {"timeout_s": 600.0, "max_tokens": 65536},
+        {"timeout_s": 120.0, "max_tokens": 16384},
+    ]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
     model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
@@ -501,7 +560,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     # Without a design object the notes carry the review alone, and the review prompt says none was written.
     model = Model(request_reply(skill("run-tests")), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.notes == {"review": REVIEW} and "(none written)" in model.prompts[1]
+    assert proposal.notes == {"review": REVIEW} and "(none written)" in model.prompts[2]
 
 
 def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stand(evolution) -> None:
@@ -514,7 +573,7 @@ def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stan
         model = Model(designed(skill("run-tests")), review)
         proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
         assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
-        assert proposal.notes == {"design": DESIGN} and model.calls == 2
+        assert proposal.notes == {"design": DESIGN} and model.calls == 3
     # The verdict's case and the lists are read leniently: strings only, trimmed, anything else dropped.
     lenient = {"verdict": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
     model = Model(designed(skill("run-tests")), json.dumps(lenient))
@@ -535,11 +594,11 @@ def test_a_failed_model_call_is_the_request_steps_failure_note_and_still_a_skip_
         proposal = evolution.propose(NODES, (), down, requests=(REQUEST,), entries=ENTRIES)
     assert isinstance(proposal, StepProposal) and proposal.mutations == () and list(proposal.notes) == ["failure"]
     assert re.fullmatch(
-        r"model call failed after \d+\.\d s \(max_tokens=16384\): model endpoint returned non-text content; "
+        r"model call failed after \d+\.\d s \(max_tokens=65536\): model endpoint returned non-text content; "
         r"a thinking model may have spent the reply budget on its reasoning, raise REEF_PROPOSER_MAX_TOKENS",
         proposal.notes["failure"],
     )
-    assert down.calls == 1  # nothing to review
+    assert down.calls == 2  # the plan call and the entries call, both failed; nothing to review
     assert "propose: served model call failed after" in caplog.text
     # Any other error gets no budget hint, and the budget in the reason is the one the call was given.
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
@@ -605,7 +664,7 @@ def test_propose_brings_an_env_check_to_its_variable_before_the_shape_check(evol
     ]
     assert "refused_requires" not in proposal.notes
     # The review sees the requires items beside the entries.
-    assert '"check": "gh auth status"' in model.prompts[1] and '"name": "SMS_TO"' in model.prompts[1]
+    assert '"check": "gh auth status"' in model.prompts[2] and '"name": "SMS_TO"' in model.prompts[2]
 
 
 def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> None:
@@ -629,7 +688,7 @@ def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> Non
     ]
     assert "refused_requires" not in proposal.notes and "undeclared_env" not in proposal.notes
     # The review sees the prompts beside the items.
-    assert '"prompt": "The number to text from"' in model.prompts[1]
+    assert '"prompt": "The number to text from"' in model.prompts[2]
     # A refused item is recorded as written, its prompt included.
     refused = [{"name": "phone", "kind": "sms", "prompt": "The number to text"}]
     model = Model(designed(skill("sms"), requires=refused), json.dumps(REVIEW))
@@ -784,7 +843,7 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert "reef" not in settings and "services" not in settings
     assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["recipe"]["config"]["evolution"]["tasks"]
     # Boot the real recipe; a retained selector without its profile would fail here.
-    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+    from reef.inference.http import InferenceProxyRuntime
 
     recipe = CordisRecipe.from_environment(
         {},
@@ -837,7 +896,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.max_score, built.training_mode) == (1, 0.0, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]

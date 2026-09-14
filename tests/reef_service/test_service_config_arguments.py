@@ -34,11 +34,11 @@ from reef.service.deploy.service_config import (
         ("tokens", ["first", "second"], '["first", "second"]'),
         ("tokens", [], "[]"),
         (
-            "inference_backend_config",
+            "inference_handler_config",
             {"nested": {"enabled": False, "ids": [1, 2]}},
             '{"nested": {"enabled": false, "ids": [1, 2]}}',
         ),
-        ("inference_backend_config", {}, "{}"),
+        ("inference_handler_config", {}, "{}"),
     ],
 )
 def test_yaml_and_cli_use_the_same_field_types(name, yaml_value, cli_value):
@@ -111,14 +111,14 @@ def test_boolean_flags_can_enable_and_disable_yaml_settings(arguments, expected)
 
 def test_empty_container_overrides_replace_yaml_values_and_survive_child_serialization():
     config = _apply_overrides(
-        {"reef": {"recipe": "recipe", "tokens": ["old"], "inference_backend_config": {"old": 1}}},
-        {"tokens": "[]", "inference-backend-config": "{}"},
+        {"reef": {"recipe": "recipe", "tokens": ["old"], "inference_handler_config": {"old": 1}}},
+        {"tokens": "[]", "inference-handler-config": "{}"},
     )
     normalized = normalize_service_config(config)
     child = yaml.safe_load(yaml.safe_dump(normalized))
     settings = service_config_from_mapping(child)
     assert settings.tokens == ()
-    assert settings.inference_backend_config == {}
+    assert settings.inference_handler_config == {}
 
 
 def test_override_replaces_required_environment_reference_before_validation(monkeypatch):
@@ -181,7 +181,7 @@ def test_retry_deadline_still_follows_inference_timeout():
         ("inference_timeout_s", "nan"),
         ("allow_implicit_scenario_creation", "maybe"),
         ("tokens", [123]),
-        ("inference_backend_config", [1]),
+        ("inference_handler_config", [1]),
     ],
 )
 def test_invalid_public_values_report_the_field_without_echoing_values(name, value):
@@ -249,7 +249,7 @@ def test_launcher_passes_typed_cli_values_to_commands_and_child(tmp_path: Path, 
                 "001",
                 "--tokens",
                 "[]",
-                "--inference-backend-config",
+                "--inference-handler-config",
                 json.dumps({"nested": [1, False]}),
             ]
         )
@@ -259,7 +259,7 @@ def test_launcher_passes_typed_cli_values_to_commands_and_child(tmp_path: Path, 
         assert settings.port == 8123
         assert settings.upstream_model == "001"
         assert settings.tokens == ()
-        assert settings.inference_backend_config == {"nested": [1, False]}
+        assert settings.inference_handler_config == {"nested": [1, False]}
 
 
 def test_invalid_cli_setting_fails_before_download_or_spawn(tmp_path, monkeypatch, capsys):

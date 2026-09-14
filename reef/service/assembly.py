@@ -17,14 +17,13 @@ from typing import Any
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.registry import RuntimeRegistry
-from reef.runtime.settings import TrainingRuntimeSettings
+from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry, runtime_pair
+from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
@@ -73,21 +72,20 @@ def _connect_training_runtime(
     model_path: str,
     max_staleness: int,
     connector: Any = None,
-) -> TrainingRuntime:
+) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Build the selected integration's runtime, independently of its process topology."""
-    TrainingRuntimeSettings(
+    RuntimeConnectionConfig(
         inference_timeout_s=settings.inference_timeout_s,
         train_timeout_s=settings.train_timeout_s,
         max_staleness=max_staleness,
     )
     backend = training_deployment_for(settings.training_backend)
     runtime_config = backend.runtime_config(asdict(settings), max_staleness=max_staleness, connector=connector)
-    runtime = RuntimeRegistry().build(runtime_config, model_path=model_path)
-    if not isinstance(runtime, TrainingRuntime):
-        with suppress(Exception):
-            runtime.shutdown()
-        raise TypeError("training backend runtime factory must build a TrainingRuntime")
-    return runtime
+    built = RuntimeRegistry().build(runtime_config, model_path=model_path)
+    pair = runtime_pair(built)
+    if pair is None:
+        raise TypeError("training backend runtime factory must build a (TrainingRuntime, InferenceRuntime) pair")
+    return pair
 
 
 def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
@@ -122,17 +120,20 @@ def _training_recipe(
     # resolve the shared runtime-owned config field from the same inputs first.
     # WeightTrainingRecipe then verifies that both resolved the same value.
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
-    runtime = _connect_training_runtime(
+    training_runtime, runtime = _connect_training_runtime(
         settings,
         model_path=model_path,
         max_staleness=resolved_recipe_data["max_staleness"],
         connector=connector,
     )
     try:
-        return recipe_type.from_resolved_config(recipe_config, resolved_recipe_data, environ=env, runtime=runtime)
+        return recipe_type.from_resolved_config(
+            recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_runtime=training_runtime
+        )
     except BaseException:
-        with suppress(Exception):
-            runtime.shutdown()
+        for component in (training_runtime, runtime):
+            with suppress(Exception):
+                component.shutdown()
         raise
 
 
@@ -172,12 +173,16 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
             if runtime_config
             else _upstream_runtime(settings)
         )
+        training_runtime = None
+        if isinstance(runtime, tuple):
+            training_runtime, runtime = runtime
         try:
-            return build_recipe(selected, env, config=config, runtime=runtime)
+            return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
         except BaseException:
-            if runtime is not None:
-                with suppress(Exception):
-                    runtime.shutdown()
+            for component in (training_runtime, runtime):
+                if component is not None:
+                    with suppress(Exception):
+                        component.shutdown()
             raise
     return build_named_recipe(
         selected, env, default_runtime=_upstream_runtime(settings), preset_config=settings.preset_config
@@ -228,9 +233,10 @@ def build_dispatcher(
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
-        if recipe.runtime is not None:
-            with suppress(Exception):
-                recipe.runtime.shutdown()
+        for component in (recipe.training_runtime, recipe.runtime):
+            if component is not None:
+                with suppress(Exception):
+                    component.shutdown()
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()

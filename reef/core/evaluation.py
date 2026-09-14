@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -83,30 +83,25 @@ class SelectionDecision:
         }
 
 
-@runtime_checkable
-class CandidateSelector(Protocol):
+class CandidateSelector(ABC):
     """Turn an evaluation result into a select-or-reject decision.
 
-    Structural for callers: anything with a matching ``decide`` satisfies it.
-    The member is abstract so that a class which *inherits* this contract and
-    leaves ``decide`` unimplemented cannot be instantiated — that is what makes
-    a half-implementing mixin abstract rather than silently callable.
+    Implementations inherit this contract explicitly. Evaluation and selection
+    remain independent capabilities; a complete plugin implements both.
     """
 
     @abstractmethod
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision: ...
 
 
-@runtime_checkable
-class CandidateEvaluator(Protocol):
+class CandidateEvaluator(ABC):
     """Measure a candidate without deciding whether to publish it."""
 
     @abstractmethod
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult: ...
 
 
-@runtime_checkable
-class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector, Protocol):
+class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
     """Measure a candidate and decide whether it passes the publication gate."""
 
 

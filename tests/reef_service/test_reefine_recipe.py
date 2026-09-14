@@ -16,8 +16,7 @@ from reef.recipe.reefine import ReefineRecipe
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend import FloorPlugin
-from reef.train.cordis_backend.backend import ScoreComparisonPlugin
+from reef.train.cordis_backend.backend import FloorPluginFactory, ScoreComparisonPluginFactory
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:
@@ -31,7 +30,8 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
     # The floor: the candidate alone must pass every gate task; the current release is not run.
-    assert built.candidate_plugin is FloorPlugin and built.floor_score == 1.0
+    assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
+    assert built.candidate_plugin.floor_score == 1.0
     assert [entry["id"] for entry in built.seed] == [
         "reef-version-check",
         "reef-requests",
@@ -59,7 +59,7 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.batch_size == 3
     assert built.seed == () and built.review_kinds == ()
-    assert built.candidate_plugin is ScoreComparisonPlugin
+    assert isinstance(built.candidate_plugin, ScoreComparisonPluginFactory)
 
 
 @pytest.mark.parametrize("evolution", [None, [], {"tasks": []}, {"tasks": ["task"], "requests": "yes"}])
@@ -105,7 +105,7 @@ recipe = build_named_recipe('reefine', os.environ, config_directory=path.parent,
 assert isinstance(recipe, ReefineRecipe)
 assert recipe.training_mode == 'manual' and recipe.propose.reads_requests
 assert len(recipe.tasks) == 1 and recipe.tasks[0].startswith('[health] ')
-assert recipe.candidate_plugin.__name__ == 'FloorPlugin'
+assert type(recipe.candidate_plugin).__name__ == 'FloorPluginFactory'
 assert recipe.base_artifact_files()
 assert recipe.model_binding().model == 'test-model'
 """

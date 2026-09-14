@@ -14,7 +14,7 @@ The config adds one ``gepa:`` block under ``evolution``::
     evolution:
       adapter: pi
       evaluate: harness.aime:evaluate
-      feedback: harness.aime:feedback     # optional; the score restated when absent
+      feedback: harness.aime:AIMEFeedback # optional; the score restated when absent
       tasks: [...]                        # the validation set
       models:
         reflection: {url: ..., model: ..., api_key_env: OPENAI_API_KEY}
@@ -43,7 +43,7 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.core.evaluation import CandidateEvaluationPlugin
+from reef.core.evaluation import CandidateEvaluationPlugin, CandidateEvaluator
 from reef.harness.adapters import get_adapter
 from reef.harness.tree.mutations import Mutation
 from reef.observability import ExperimentLogger
@@ -51,13 +51,14 @@ from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.storage.records import RecordStore
 from reef.train.cordis_backend.strategies import Proposer, resolve_proposer
+from reef.train.evaluation.evaluators import CandidatePluginFactory
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 from .archive import Archive
 from .backend import ARCHIVE_STATE_KEY, GEPABackend
 from .components import EVOLVABLE_KINDS
-from .method import Feedback, GEPAPlugin, GEPAProposer, default_feedback
+from .method import Feedback, GEPAPlugin, GEPAProposer, ScoreFeedback
 
 #: Node kinds a deployment evolves unless ``gepa.components`` says otherwise.
 #: Rules and skills are the instruction surface both surveyed harnesses
@@ -77,7 +78,7 @@ class _UnboundProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: Any,
         *,
         manifest: Any = None,
@@ -85,15 +86,22 @@ class _UnboundProposer(Proposer):
         raise RecipeConfigError("the GEPA proposer is bound by GEPARecipe.build; this recipe was not built")
 
 
-class _UnboundPlugin:
+class _UnboundPlugin(CandidatePluginFactory):
     """The placeholder ``build`` swaps for a plugin factory bound to the archive.
 
-    A callable sentinel so it passes the recipe's ``candidate_plugin`` check;
-    calling it before ``GEPARecipe.build`` binds the archive is the error.
+    Building it before ``GEPARecipe.build`` binds the archive is an error.
     """
 
-    def __call__(self, backend: Any) -> CandidateEvaluationPlugin:
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
         raise RecipeConfigError("the GEPA plugin is bound by GEPARecipe.build; this recipe was not built")
+
+
+@dataclass(frozen=True)
+class _ArchivePluginFactory(CandidatePluginFactory):
+    archive: Archive
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        return GEPAPlugin(candidate_backend, self.archive)
 
 
 @dataclass(frozen=True)
@@ -185,7 +193,7 @@ class GEPARecipe(CordisRecipe):
                     episode_timeout_s=self.episode_timeout_s,
                     forbid_residue=self.forbid_residue,
                     score_episode=self.score_episode,
-                    feedback=self.feedback or default_feedback,
+                    feedback=self.feedback or ScoreFeedback(),
                     minibatch_size=self.minibatch_size,
                     rng_seed=self.rng_seed,
                     skip_perfect_score=self.skip_perfect_score,
@@ -196,18 +204,15 @@ class GEPARecipe(CordisRecipe):
                 )
             )
 
-        def bind_archive(backend: Any) -> CandidateEvaluationPlugin:
-            return GEPAPlugin(backend, archive)
-
         candidate_plugin = self.candidate_plugin
         if isinstance(candidate_plugin, _UnboundPlugin):
-            candidate_plugin = bind_archive
+            candidate_plugin = _ArchivePluginFactory(archive)
         bound = dataclasses.replace(self, propose=propose, candidate_plugin=candidate_plugin)
-        training_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
+        candidate_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
         return bound._build_trainer(
             scenario,
             records,
-            training_backend,
+            candidate_backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -235,18 +240,19 @@ def _check_seed_ids(seed: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _resolve_feedback(value: Any) -> Feedback:
-    """``evolution.feedback`` as a callable, or a dotted reference to one."""
-    if callable(value):
-        return value
+    """Resolve a Feedback instance, subclass, or dotted reference."""
+    resolved = value
     if isinstance(value, str) and ":" in value:
         module_name, _, attribute = value.partition(":")
         try:
             resolved = getattr(importlib.import_module(module_name), attribute)
         except (ImportError, AttributeError) as exc:
             raise RecipeConfigError(f"cannot import evolution.feedback {value!r}: {exc}") from exc
-        if callable(resolved):
-            return resolved
-    raise RecipeConfigError("evolution.feedback must be a callable or a dotted 'module:attribute' reference")
+    if isinstance(resolved, type) and issubclass(resolved, Feedback):
+        resolved = resolved()
+    if isinstance(resolved, Feedback):
+        return resolved
+    raise RecipeConfigError("evolution.feedback must be a Feedback instance, subclass, or dotted reference")
 
 
 def _int(section: Mapping[str, Any], key: str, default: int) -> int:

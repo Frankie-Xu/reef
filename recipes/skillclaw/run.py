@@ -73,10 +73,9 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.tree.render import render_composition
+from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
@@ -144,7 +143,7 @@ class RunService:
         upstream_url: str,
         upstream_key: str,
         port: int,
-        inference_backend: Any | None = None,
+        inference_handler: Any | None = None,
     ) -> None:
         self.scenario = scenario
         self.port = port
@@ -158,8 +157,8 @@ class RunService:
         )
         self._app = create_app(
             self.dispatcher,
-            inference_backend=inference_backend
-            or HttpInferenceBackend(
+            inference_handler=inference_handler
+            or HttpInferenceHandler(
                 upstream_url,
                 request_headers=provider_request_headers(upstream_key),
                 timeout_s=600.0,
@@ -414,9 +413,8 @@ def run_day(
             "error": str(result["error"]),
             "breakdown": result["breakdown"],
         }
-        # The day reports the night's digests read (TraceSample carries no
-        # metadata channel); written before the report so the trigger report
-        # never races its own night.
+        # Persist task metadata for the night's digests before posting the
+        # trigger report, so the night can read the complete day.
         report_path = round_dir / "reports" / f"{slug}.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")

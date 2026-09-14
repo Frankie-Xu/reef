@@ -16,30 +16,33 @@ import importlib
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
 from pathlib import Path
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
-from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.executor import EpisodeExecutor, build_executor
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
+from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
-from reef.runtime.model_config import ModelConfig
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend.backend import CordisBackend, FloorPlugin, ScoreComparisonPlugin, tree_files
+from reef.train.cordis_backend.backend import (
+    CordisBackend,
+    FloorPluginFactory,
+    ScoreComparisonPluginFactory,
+    tree_files,
+)
 from reef.train.cordis_backend.execution import evaluation_selection, legacy_worker_settings
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import (
@@ -50,29 +53,18 @@ from reef.train.cordis_backend.strategies import (
     resolve_promoter,
     resolve_proposer,
 )
-from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
+from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory, CandidatePluginFactory
 from reef.train.trainer import Trainer
 
-
-class CandidatePluginFactory(Protocol):
-    """Builds a candidate-evaluation plugin over a training backend.
-
-    Cordis chooses one at config time and applies it to the backend when it
-    builds the trainer; gepa and meta-harness override it with their own.
-    """
-
-    def __call__(self, backend: Any) -> CandidateEvaluationPlugin: ...
-
-
 _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
-    "score_comparison": ScoreComparisonPlugin,
-    "floor": FloorPlugin,
-    "always": BackendAlwaysSelectPlugin,
+    "score_comparison": ScoreComparisonPluginFactory(),
+    "floor": FloorPluginFactory(),
+    "always": AlwaysSelectPluginFactory(),
 }
 
 
 @dataclass(frozen=True)
-class _ScenarioModels:
+class _ScenarioModels(ModelBindingsResolver):
     config: ModelConfig
     recipe: CordisRecipe
 
@@ -123,14 +115,13 @@ def _resolve_candidate_plugin(value: Any) -> CandidatePluginFactory:
             resolved = getattr(importlib.import_module(module_name), attribute)
         except (ImportError, AttributeError) as exc:
             raise RecipeConfigError(f"cannot import evolution.selection {value!r}: {exc}") from exc
-    # The dotted reference names a plugin factory: a callable ``backend ->
-    # CandidateEvaluationPlugin`` (a plugin class whose ``__init__`` takes the
-    # backend, or a function that builds one).
-    if callable(resolved):
+    if isinstance(resolved, type) and issubclass(resolved, CandidatePluginFactory):
+        resolved = resolved()
+    if isinstance(resolved, CandidatePluginFactory):
         return resolved
     raise RecipeConfigError(
         "evolution.selection must be a built-in name or a dotted reference to a "
-        "candidate-evaluation plugin factory (backend -> CandidateEvaluationPlugin)"
+        "candidate-evaluation plugin factory inheriting CandidatePluginFactory"
     )
 
 
@@ -152,8 +143,7 @@ class CordisRecipe(Recipe):
     candidate-selection policy: ``score_comparison``, the default; ``floor``,
     which runs the candidate alone and selects it when every task scores at
     least ``floor_score``, default ``1.0``; ``always``;
-    or a dotted reference to a candidate-evaluation plugin factory
-    (``backend -> CandidateEvaluationPlugin``)), optional
+    or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each gate
     episode's trajectory files, so the decision is reconstructible; off by
@@ -237,7 +227,7 @@ class CordisRecipe(Recipe):
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
-    candidate_plugin: CandidatePluginFactory = field(default=ScoreComparisonPlugin, repr=False)
+    candidate_plugin: CandidatePluginFactory = field(default_factory=ScoreComparisonPluginFactory, repr=False)
     episode_workers: int | None = None  # Deprecated Python compatibility alias.
     #: Default proposal inbox root, with one directory per scenario.
     proposals_dir: str = ".reef/proposals"
@@ -248,7 +238,6 @@ class CordisRecipe(Recipe):
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     batch_size: int = config_field(1)
-    max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
     scenario_model: ModelConfig | None = field(default=None, repr=False, kw_only=True)
@@ -295,8 +284,8 @@ class CordisRecipe(Recipe):
             raise ValueError("floor_score must be positive")
         if self.publish not in ("auto", "review"):
             raise ValueError("publish must be 'auto' or 'review'")
-        if not callable(self.candidate_plugin):
-            raise ValueError("candidate_plugin must be callable as backend -> CandidateEvaluationPlugin")
+        if not isinstance(self.candidate_plugin, CandidatePluginFactory):
+            raise ValueError("candidate_plugin must be a CandidatePluginFactory instance")
         if not isinstance(self.proposals_dir, str) or not self.proposals_dir.strip():
             raise ValueError("proposals_dir must be a non-empty path")
         if isinstance(self.max_pending_proposals, bool) or self.max_pending_proposals < 1:
@@ -375,14 +364,14 @@ class CordisRecipe(Recipe):
         if budgets["min_win_margin"]:
             if selection != "score_comparison":
                 raise RecipeConfigError("evolution.min_win_margin applies only to the score_comparison selection")
-            candidate_plugin = partial(ScoreComparisonPlugin, min_win_margin=budgets["min_win_margin"])
+            candidate_plugin = ScoreComparisonPluginFactory(min_win_margin=budgets["min_win_margin"])
         floor_score = evolution.get("floor_score", 1.0)
         if isinstance(floor_score, bool) or not isinstance(floor_score, (int, float)) or floor_score <= 0:
             raise RecipeConfigError("evolution.floor_score must be a positive number")
         if "floor_score" in evolution:
             if selection != "floor":
                 raise RecipeConfigError("evolution.floor_score applies only to the floor selection")
-            candidate_plugin = partial(FloorPlugin, floor_score=float(floor_score))
+            candidate_plugin = FloorPluginFactory(floor_score=float(floor_score))
         # A recheck compares two trees; the floor gates one.
         if selection == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
@@ -579,11 +568,11 @@ class CordisRecipe(Recipe):
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:
             kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
-        training_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
+        candidate_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
             records,
-            training_backend,
+            candidate_backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -622,7 +611,7 @@ class CordisRecipe(Recipe):
         self,
         scenario: str,
         records: RecordStore,
-        training_backend: CordisBackend,
+        candidate_backend: CordisBackend,
         *,
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
@@ -641,13 +630,12 @@ class CordisRecipe(Recipe):
                 context.with_config(
                     {
                         "batch_size": self.batch_size,
-                        "max_score": self.max_score,
                         "manual_enabled": self.propose.reads_requests,
                     }
                 )
             ),
-            training_backend=training_backend,
-            candidate_evaluator=self.candidate_plugin(training_backend),
+            candidate_backend=candidate_backend,
+            candidate_evaluator=self.candidate_plugin.build(candidate_backend),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,

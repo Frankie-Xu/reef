@@ -41,6 +41,7 @@ from reef.artifact.artifact import (
     ArtifactPublicationError,
     ArtifactRef,
     ArtifactSourceError,
+    ArtifactValidator,
     LiveWeightArtifactRef,
 )
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
@@ -77,6 +78,7 @@ __all__ = [
     "ArtifactReleaseChain",
     "ArtifactSource",
     "ArtifactSourceError",
+    "ArtifactValidator",
     "CachedRepositoryBackendFactory",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",

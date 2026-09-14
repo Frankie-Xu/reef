@@ -368,4 +368,4 @@ def test_the_interpreter_reads_the_host_between_steps_and_logs_a_new_header(tmp_
     assert third["messages"][0]["content"] == fourth["messages"][0]["content"] == "Be brief and loud."
     # The pre_step hook saw the prompt the model was about to see, at every step.
     witness = host.hooks["pre_step"][0]
-    assert witness.listen.__globals__["SEEN"] == ["Be brief.", "Be brief.", "Be brief and loud.", "Be brief and loud."]
+    assert witness._module.SEEN == ["Be brief.", "Be brief.", "Be brief and loud.", "Be brief and loud."]

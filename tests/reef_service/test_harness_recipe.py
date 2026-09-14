@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from reef_service._trajectories import recorded_trajectory
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
@@ -24,11 +25,11 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError,
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.mutations import admit_mutations
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import (
@@ -40,10 +41,10 @@ from reef.train.cordis_backend import (
     ScoreComparisonPlugin,
 )
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
-from reef.train.evaluation import BackendAlwaysSelectPlugin
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
 from reef.train.trainer import Trainer
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
+from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch, TrainStepResult
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the episode scorer can prefer compositions containing the marker.
@@ -96,8 +97,8 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
-def batch() -> TraceBatch:
-    return TraceBatch("demo:trace:1", (TraceSample("a1", {"messages": []}, 0.0),))
+def batch() -> TrainingBatch:
+    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 # The deployment's model binding: where episodes and proposals reach a model.
@@ -158,7 +159,7 @@ def backend(tmp_path: Path, propose, seed: tuple = ()) -> CordisBackend:
 
 def run_backend_step(
     backend: CordisBackend,
-    trace_batch: TraceBatch,
+    trace_batch: TrainingBatch,
     state,
 ) -> TrainStepResult:
     """Exercise the backend phases directly; production runs them in Trainer."""
@@ -632,7 +633,7 @@ def test_seed_boots_the_composition_tree(tmp_path: Path) -> None:
         return
 
     trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", SQLiteRecordStore())
-    b = trainer.training_backend
+    b = trainer.candidate_backend
     assert isinstance(b, CordisBackend)
     state = b.initial_state()
     assert state == {"steps": 0, "entries": [SEED_MODELS, SEED_SETTINGS]}
@@ -1039,7 +1040,9 @@ def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\n"
         "def evaluate(task, result):\n    return 0.0\n\n"
-        "class DemoPlugin:\n"
+        "from reef.core.evaluation import CandidateEvaluationPlugin\n"
+        "from reef.train.evaluation.evaluators import CandidatePluginFactory\n\n"
+        "class DemoPlugin(CandidateEvaluationPlugin):\n"
         "    def __init__(self, backend):\n"
         "        self._backend = backend\n\n"
         "    def evaluate(self, candidate):\n"
@@ -1047,6 +1050,9 @@ def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
         "    def decide(self, candidate, evaluation):\n"
         "        from reef.train.evaluation import SelectionDecision\n"
         "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n"
+        "\nclass DemoFactory(CandidatePluginFactory):\n"
+        "    def build(self, candidate_backend):\n"
+        "        return DemoPlugin(candidate_backend)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1062,15 +1068,16 @@ def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
 
     compared = CordisRecipe.from_environment({}, config=config())
     assert compared.candidate_plugin is not None
-    assert type(compared.candidate_plugin(object())).__name__ == "ScoreComparisonPlugin"
+    assert type(compared.candidate_plugin.build(object())).__name__ == "ScoreComparisonPlugin"
 
     named = CordisRecipe.from_environment({}, config=config(selection="always"))
     assert named.candidate_plugin is not None
-    assert named.candidate_plugin is BackendAlwaysSelectPlugin
+    assert isinstance(named.candidate_plugin, AlwaysSelectPluginFactory)
 
-    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoPlugin"))
+    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoFactory"))
     assert dotted.candidate_plugin is not None
-    assert getattr(dotted.candidate_plugin, "__name__", "") == "DemoPlugin"
+    assert type(dotted.candidate_plugin).__name__ == "DemoFactory"
+    assert type(dotted.candidate_plugin.build(object())).__name__ == "DemoPlugin"
 
     with pytest.raises(RecipeConfigError, match="acceptance was removed"):
         CordisRecipe.from_environment(
@@ -1461,7 +1468,7 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
         runtime=runtime(),
     )
     trainer = built.build("demo", SQLiteRecordStore())
-    backend = trainer.training_backend
+    backend = trainer.candidate_backend
     assert isinstance(backend, CordisBackend)
 
     run_backend_step(backend, batch(), backend.initial_state())
@@ -1470,11 +1477,12 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
     assert all(received is executor for received in seen)
 
 
-def _traced_batch(*prompts: str) -> TraceBatch:
+def _traced_batch(*prompts: str) -> TrainingBatch:
     samples = tuple(
-        TraceSample(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0) for i, p in enumerate(prompts)
+        recorded_trajectory(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0)
+        for i, p in enumerate(prompts)
     )
-    return TraceBatch("demo:trace:promote", samples)
+    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
@@ -1548,16 +1556,16 @@ def test_secret_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
     assert key not in json.dumps(result.state)
 
 
-def _tagged_batch(*pairs: tuple[str, str | None]) -> TraceBatch:
+def _tagged_batch(*pairs: tuple[str, str | None]) -> TrainingBatch:
     samples = tuple(
-        TraceSample(
+        recorded_trajectory(
             f"a{i}",
             {"messages": [{"role": "user", "content": p}], "metadata": {"tags": {"client": s}} if s else {}},
             0.0,
         )
         for i, (p, s) in enumerate(pairs)
     )
-    return TraceBatch("demo:trace:promote", samples)
+    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def _promoting_backend(tmp_path: Path, **kwargs):
@@ -1731,12 +1739,13 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
     a secret-shaped one, and applies the cap to what it returns."""
     key = "sk-476-POLICY-KEY-0123456789abcdef"
 
-    def keep_marked(samples):
-        return [
-            prompt
-            for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
-            if prompt and "keep" in prompt
-        ]
+    class KeepMarked(Promoter):
+        def __call__(self, samples, *, manifest=None):
+            return [
+                prompt
+                for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
+                if prompt and "keep" in prompt
+            ]
 
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -1748,7 +1757,7 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
         models=MODEL,
         binary=str(make_binary(tmp_path)),
         promote_failures=True,
-        promote=resolve_promoter(keep_marked),
+        promote=KeepMarked(),
         max_promoted_tasks=2,
     )
     first = run_backend_step(
@@ -1761,9 +1770,10 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
 def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path) -> None:
     seen: list[object] = []
 
-    def with_manifest(samples, *, manifest=None):
-        seen.append(manifest)
-        return []
+    class WithManifest(Promoter):
+        def __call__(self, samples, *, manifest=None):
+            seen.append(manifest)
+            return []
 
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -1775,7 +1785,7 @@ def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path)
         models=MODEL,
         binary=str(make_binary(tmp_path)),
         promote_failures=True,
-        promote=resolve_promoter(with_manifest),
+        promote=WithManifest(),
     )
     first = run_backend_step(b, _traced_batch("A"), b.initial_state())
     run_backend_step(b, _traced_batch("B"), first.state)
@@ -1787,7 +1797,8 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
     module = tmp_path / "demo_promote_policy.py"
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n\n"
-        "def promote(samples):\n    return []\n"
+        "from reef.train.cordis_backend.strategies import Promoter\n\n"
+        "class Promote(Promoter):\n    def __call__(self, samples, *, manifest=None):\n        return []\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1802,7 +1813,7 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
             }
         }
 
-    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:promote"))
+    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:Promote"))
     assert isinstance(on.promote, Promoter) and on.promote(()) == []
     assert CordisRecipe.from_environment({}, config=config()).promote is None
 
@@ -2450,7 +2461,7 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
     trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
         "demo", SQLiteRecordStore()
     )
-    inbox = trainer.training_backend.proposals
+    inbox = trainer.candidate_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
     assert not inbox.directory.exists()
 

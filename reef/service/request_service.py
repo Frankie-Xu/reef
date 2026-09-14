@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
@@ -27,8 +27,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
-from reef.runtime.inference import InferenceBackend, InferenceStream
+from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page
@@ -36,37 +35,10 @@ from reef.service.request_page import build_request_page
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.train.cordis_backend.backend import StepProgress
+from reef.train.cordis_backend.contracts import ProposalGate, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 
 logger = logging.getLogger(__name__)
-
-
-@runtime_checkable
-class StepRecords(Protocol):
-    """A backend that can read its scenario-scoped retained step files."""
-
-    def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class StepProgressReader(Protocol):
-    """A backend that reports where its running step stands; the harness backend does, another need not."""
-
-    @property
-    def step_progress(self) -> StepProgress | None: ...
-
-
-@runtime_checkable
-class ProposalGate(Protocol):
-    """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
-
-    @property
-    def proposals(self) -> ProposalInbox | None: ...
-
-    def admit(
-        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
-    ) -> tuple[list[dict[str, Any]], str | None]: ...
 
 
 def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
@@ -138,7 +110,7 @@ class PreparedInference:
 
     parsed: RequestHeaders
     artifact: Artifact
-    backend: InferenceBackend
+    handler: InferenceHandler
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
     #: must then carry the engine-confirmed runtime load ID.
@@ -169,7 +141,7 @@ class InferenceRetryPolicy:
 
 
 class InferenceRetryTimeout(ReefError):
-    """Inference attempts ending with a backend ``abort`` exhausted their retry deadline."""
+    """Inference attempts ending with a handler ``abort`` exhausted their retry deadline."""
 
 
 class RequestService:
@@ -203,9 +175,9 @@ class RequestService:
         headers: Mapping[str, str],
         payload: dict[str, Any],
         path: str,
-        backend: InferenceBackend,
+        handler: InferenceHandler,
     ) -> dict[str, Any]:
-        response, _ = await self.infer_with_data(headers, payload, path, backend)
+        response, _ = await self.infer_with_data(headers, payload, path, handler)
         return response
 
     async def infer_with_data(
@@ -213,7 +185,7 @@ class RequestService:
         headers: Mapping[str, str],
         payload: dict[str, Any],
         path: str,
-        backend: InferenceBackend | None = None,
+        handler: InferenceHandler | None = None,
     ) -> tuple[dict[str, Any], AgentRecord]:
         original_payload = dict(payload)
         retry_delay = self._retry_policy.initial_s
@@ -223,7 +195,7 @@ class RequestService:
         attempt = 0
         while True:
             attempt += 1
-            prepared, payload = await self._prepare_request(headers, original_payload, path, backend)
+            prepared, payload = await self._prepare_request(headers, original_payload, path, handler)
             try:
                 if prepared.durable:
                     payload = {**payload, "return_meta_info": True}
@@ -232,7 +204,7 @@ class RequestService:
                 started = loop.time()
                 try:
                     response = await asyncio.wait_for(
-                        prepared.backend.inference(prepared.artifact, path, payload),
+                        prepared.handler.inference(prepared.artifact, path, payload),
                         timeout=remaining_budget,
                     )
                 except TimeoutError as exc:
@@ -248,7 +220,7 @@ class RequestService:
                 interrupted = _inference_aborted(response)
                 if not interrupted:
                     # A completed response with invalid runtime-load-ID information is a
-                    # backend contract error, not a retryable inference abort.
+                    # handler contract error, not a retryable inference abort.
                     if prepared.surface.inference is not None:
                         prepared.surface.inference.verify_response(prepared.artifact, path, response)
                     self._stamp_durable_runtime_load_id(prepared, payload, response)
@@ -259,10 +231,10 @@ class RequestService:
                         artifact_ref=prepared.artifact.ref,
                     )
                     return client_inference_response(response), item
-                # A backend ``abort`` finish reason makes the attempt unusable.
+                # A handler ``abort`` finish reason makes the attempt unusable.
                 # Restart the request against the latest artifact and never record it.
                 logger.info(
-                    "retrying backend-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
+                    "retrying handler-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
                     "engine reported runtime load ID %r",
                     prepared.parsed.scenario,
                     attempt,
@@ -283,13 +255,13 @@ class RequestService:
         headers: Mapping[str, str],
         payload: dict[str, Any],
         path: str,
-        backend: InferenceBackend | None = None,
+        handler: InferenceHandler | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
-        prepared, payload = await self._prepare_request(headers, payload, path, backend)
+        prepared, payload = await self._prepare_request(headers, payload, path, handler)
         admission = prepared.admission
         lease = prepared.lease
         try:
-            stream = await prepared.backend.inference_stream(prepared.artifact, path, payload)
+            stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
             record_response = getattr(stream, "record_response", None)
             record_response_pending = bool(getattr(stream, "record_response_pending", False))
             if record_response is not None:
@@ -339,7 +311,7 @@ class RequestService:
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
         try:
             payload = dict(pending.item.payload)
-            # A token-native streaming backend fills record_response only when
+            # A token-native streaming handler fills record_response only when
             # the upstream generation finishes. Validate that final capture
             # here, after the route has drained the stream but before it can
             # become a training record. Incomplete/disconnected streams have
@@ -383,10 +355,10 @@ class RequestService:
         headers: Mapping[str, str],
         payload: Mapping[str, Any],
         path: str,
-        backend: InferenceBackend | None,
+        handler: InferenceHandler | None,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
-        (headers, scenario, artifact, backend, surface) and let the surface
+        (headers, scenario, artifact, handler, surface) and let the surface
         transform the request payload."""
         parsed = self._require_inference(headers)
         initial = await asyncio.to_thread(
@@ -401,7 +373,7 @@ class RequestService:
             # Re-resolve after admission: a queued request must freeze the head
             # committed by the weight update that released it, never the head it
             # observed before waiting.
-            prepared = await asyncio.to_thread(self._prepare_inference, parsed, backend, admission)
+            prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission)
             hooks = prepared.surface.inference
             transformed = (
                 dict(payload)
@@ -451,7 +423,7 @@ class RequestService:
     def _prepare_inference(
         self,
         parsed: RequestHeaders,
-        backend: InferenceBackend | None,
+        handler: InferenceHandler | None,
         admission: InferenceAdmissionHandle | None,
     ) -> PreparedInference:
         scenario = self._dispatcher.get_or_create_scenario(
@@ -460,16 +432,16 @@ class RequestService:
         )
         if scenario is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        selected_backend = backend if backend is not None else scenario.inference_backend
-        if selected_backend is None:
-            raise RecipeConfigError("the served recipe has no inference backend")
+        selected_handler = handler if handler is not None else scenario.inference_handler
+        if selected_handler is None:
+            raise RecipeConfigError("the served recipe has no inference handler")
         ref = scenario.current_artifact_ref()
         return PreparedInference(
             parsed=parsed,
             artifact=Artifact(ref, scenario.repository),
-            backend=selected_backend,
+            handler=selected_handler,
             surface=scenario.surface,
-            durable=isinstance(scenario.runtime, TrainingRuntime),
+            durable=scenario.training_runtime is not None,
             admission=admission,
         )
 
@@ -536,7 +508,7 @@ class RequestService:
         """
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         if not isinstance(backend, ProposalGate) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
@@ -590,7 +562,7 @@ class RequestService:
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         if not directory or not isinstance(backend, StepRecords):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
@@ -631,7 +603,7 @@ class RequestService:
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None
-        descriptor = getattr(scenario.trainer.training_backend, "descriptor", None)
+        descriptor = getattr(scenario.trainer.candidate_backend, "descriptor", None)
         return build_release_page(
             step,
             rows,
@@ -648,7 +620,7 @@ class RequestService:
         The record is the ``POST /reef/train`` instruction as stored; the
         catalog row whose ``training_request.id`` names it settles the page.
         Until then the page reads the running step's progress from the
-        scenario's training backend, when the backend reports one, and
+        scenario's candidate backend, when the backend reports one, and
         whether the trainer holds the request in its reserved batch.
         ``link_query`` is carried to the version page link, so a page opened
         through query parameters links one that opens the same way. An
@@ -660,7 +632,7 @@ class RequestService:
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
         rows = list(reversed(scenario.releases()))
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
         reserved = scenario.trainer.pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
@@ -863,7 +835,6 @@ __all__ = [
     "PendingInference",
     "PreparedInference",
     "RequestService",
-    "StepProgressReader",
     "client_inference_response",
     "normalize_request_payload",
     "page_headers",

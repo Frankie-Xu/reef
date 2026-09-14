@@ -21,6 +21,7 @@ from reef.recipe.cordis import CordisRecipe
 from reef.train.cordis_backend import (
     CordisBackend,
     FloorPlugin,
+    FloorPluginFactory,
     Mutation,
     ScoreComparisonPlugin,
     StepProgress,
@@ -30,7 +31,7 @@ from reef.train.cordis_backend.backend import RECORD_TEXT_CAP
 from reef.train.cordis_backend.manifest import FailureObservation, advance
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch
+from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch
 
 MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 PLAIN = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
@@ -196,10 +197,10 @@ def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
         }
 
     floored = CordisRecipe.from_environment({}, config=config(selection="floor"))
-    assert floored.candidate_plugin is FloorPlugin and floored.floor_score == 1.0
+    assert floored.candidate_plugin == FloorPluginFactory(floor_score=1.0) and floored.floor_score == 1.0
     lowered = CordisRecipe.from_environment({}, config=config(selection="floor", floor_score=0.5))
-    assert lowered.floor_score == 0.5
-    plugin = lowered.candidate_plugin(DecideOnlyBackend())
+    assert lowered.floor_score == 0.5 and lowered.candidate_plugin == FloorPluginFactory(floor_score=0.5)
+    plugin = lowered.candidate_plugin.build(DecideOnlyBackend())
     assert isinstance(plugin, FloorPlugin)
     assert plugin.decide(UpdateCandidate("c"), _evaluation((0.5,))).metrics["floor_score"] == 0.5
     with pytest.raises(RecipeConfigError, match="floor_score applies only to the floor selection"):
@@ -290,7 +291,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=person)
     b = backend(tmp_path, extending)
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        result = run_backend_step(b, TraceBatch("demo:instruction:ask-1", (), request=request), b.initial_state())
+        result = run_backend_step(b, TrainingBatch("demo:instruction:ask-1", (), request=request), b.initial_state())
     recorded = result.metrics["training_request"]
     assert recorded["id"] == "ask-1" and result.metrics["published"] is True
     # A prompt rides with its item, and meets the screens a check meets.
@@ -310,7 +311,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
 # -- step progress, for the request page -----------------------------------------------------------
 
 
-def _instruction(text: str = "add a rule", request_id: str = "req-1") -> TraceBatch:
+def _instruction(text: str = "add a rule", request_id: str = "req-1") -> TrainingBatch:
     return replace(batch(), request=TrainingRequest(text=text, session="s", release_id="rel-0", id=request_id))
 
 

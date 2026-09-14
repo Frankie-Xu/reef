@@ -17,7 +17,7 @@ import itertools
 from aiohttp import web
 
 from reef.dispatcher import build_default_dispatcher
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -52,7 +52,7 @@ def merge_sorted(a, b):
 """
 
 
-class CannedSolutionBackend(InferenceBackend):
+class CannedSolutionHandler(InferenceHandler):
     """Cycle canned solutions; the wiring around this stays real."""
 
     def __init__(self) -> None:
@@ -79,7 +79,7 @@ def main() -> None:
     app = create_app(
         build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
         tokens=args.token,
-        inference_backend=CannedSolutionBackend(),
+        inference_handler=CannedSolutionHandler(),
         close_dispatcher=True,
     )
     web.run_app(app, host="127.0.0.1", port=args.port)

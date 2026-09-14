@@ -54,7 +54,6 @@ recipe:
 
               '
     batch-size: 1
-    max-score: 0.0
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual
 

@@ -10,12 +10,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.artifact import ArtifactRef, GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.core import RequestType
 from reef.dispatcher import build_default_dispatcher
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class StubInferenceBackend(InferenceBackend):
+class StubInferenceHandler(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del artifact, path, payload
         return {"ok": True}
@@ -39,7 +39,7 @@ def test_new_scenario_is_created_for_every_request_type(path: str) -> None:
             TestServer(
                 create_app(
                     dispatcher,
-                    inference_backend=StubInferenceBackend(),
+                    inference_handler=StubInferenceHandler(),
                 )
             )
         )
@@ -74,7 +74,7 @@ def test_recipe_header_is_not_part_of_the_protocol(path: str) -> None:
             TestServer(
                 create_app(
                     dispatcher,
-                    inference_backend=StubInferenceBackend(),
+                    inference_handler=StubInferenceHandler(),
                 )
             )
         )
@@ -111,7 +111,7 @@ def test_registered_scenario_keeps_its_binding_for_every_request_type(path: str)
             TestServer(
                 create_app(
                     dispatcher,
-                    inference_backend=StubInferenceBackend(),
+                    inference_handler=StubInferenceHandler(),
                 )
             )
         )

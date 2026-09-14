@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any
 
 from recipes.beta.coral.journal import CallJournal, CallRecord
 
@@ -45,13 +46,31 @@ def _is_api_path(path: str) -> bool:
     return any(path.startswith(p) for p in _API_PREFIXES)
 
 
-class AsgiApp(Protocol):
+class AsgiApp(ABC):
     """The downstream ASGI application (LiteLLM, or another middleware)."""
 
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> Any: ...
+    @abstractmethod
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> Any:
+        """Handle one ASGI connection."""
 
 
-class ReefGatewayMiddleware:
+class ExternalAsgiApp(AsgiApp):
+    """Adapt the ASGI callable supplied by LiteLLM or its middleware stack.
+
+    The external ASGI standard accepts functions and application objects. Keep
+    its dynamic invocation at this boundary; Reef middleware uses AsgiApp.
+    """
+
+    def __init__(self, app: object) -> None:
+        if not callable(app):
+            raise TypeError("downstream ASGI application must be callable")
+        self._app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> Any:
+        return await self._app(scope, receive, send)
+
+
+class ReefGatewayMiddleware(AsgiApp):
     """See module docstring.
 
     ``extra_tags`` lets the launcher attach run-level parent links (e.g.
@@ -60,7 +79,7 @@ class ReefGatewayMiddleware:
 
     def __init__(
         self,
-        app: AsgiApp,
+        app: object,
         *,
         scenario: str,
         journal: CallJournal,
@@ -69,7 +88,7 @@ class ReefGatewayMiddleware:
     ) -> None:
         if not scenario or not scenario.strip():
             raise ValueError("scenario must be a non-empty string")
-        self.app = app
+        self.app = app if isinstance(app, AsgiApp) else ExternalAsgiApp(app)
         self.scenario = scenario.strip()
         self.journal = journal
         self.extra_tags = dict(extra_tags or {})

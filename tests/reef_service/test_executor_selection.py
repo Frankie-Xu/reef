@@ -13,11 +13,7 @@ from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service.deploy.execution import service_executor_config, service_executor_selection
-from reef.train.slime_backend.reef_adapters.executors.config import (
-    DEFAULT_EXECUTOR_BACKEND,
-    DEFAULT_ROLLOUT_EXECUTOR,
-    slime_executor_class,
-)
+from reef.train.slime_backend.reef_adapters.executors.config import DEFAULT_EXECUTOR_BACKEND, slime_executor_class
 
 
 @pytest.mark.parametrize(
@@ -83,26 +79,22 @@ def test_service_resources_auto_select_ray_without_starting_it(tmp_path, monkeyp
     assert config.backend is UniProcExecutor
 
 
-@pytest.mark.parametrize(
-    "role, expected", [("training", DEFAULT_EXECUTOR_BACKEND), ("rollout", DEFAULT_ROLLOUT_EXECUTOR)]
-)
 @pytest.mark.parametrize("backend", [None, "auto", "ray"])
-def test_slime_auto_maps_to_specialized_backend_before_launch(monkeypatch, role, expected, backend):
+def test_slime_auto_maps_to_specialized_backend_before_launch(monkeypatch, backend):
     # Only test class resolution: it must not allocate any GPU resources.
     monkeypatch.setattr(Executor, "get_class", staticmethod(lambda value: value))
-    assert slime_executor_class(backend, role=role) == expected
+    assert slime_executor_class(backend) == DEFAULT_EXECUTOR_BACKEND
 
 
-@pytest.mark.parametrize("role", ["training", "rollout"])
 @pytest.mark.parametrize("backend", ["mp", "uni"])
-def test_slime_rejects_unsupported_builtin_gpu_launchers(role, backend):
+def test_slime_rejects_unsupported_builtin_gpu_launchers(backend):
     with pytest.raises(ValueError, match="not a GPU launcher"):
-        slime_executor_class(backend, role=role)
+        slime_executor_class(backend)
 
 
 def test_driver_auto_and_cli_auto_override_yaml(caplog):
     pytest.importorskip("ray")
-    from reef.service.slime_driver import _configure_executors
+    from reef.train.slime_backend.driver import _configure_executors
 
     args = SimpleNamespace(reef_executor_backend="auto", reef_rollout_executor_backend="auto")
     with caplog.at_level("INFO"):
@@ -123,15 +115,6 @@ def test_train_group_auto_resolves_before_create(gpus):
     group = SlimeTrainGroup(SimpleNamespace(reef_executor_backend="auto"), 1, gpus, pg=None)
     assert group._executor_config.backend is SlimeRayExecutor
     assert group._executor is None
-
-
-def test_rollout_entrypoint_accepts_auto():
-    from reef.train.slime_backend.reef_adapters.executors.rollout import (
-        SlimeRayRolloutExecutor,
-        rollout_executor_class,
-    )
-
-    assert rollout_executor_class(SimpleNamespace(reef_rollout_executor_backend="auto")) is SlimeRayRolloutExecutor
 
 
 def test_unknown_service_backend_does_not_fall_back(tmp_path):

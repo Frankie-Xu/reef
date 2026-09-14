@@ -23,16 +23,16 @@ to train model weights with Slime and SGLang, or improve an agent's harness, inc
 
 </div>
 
-**[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
-[Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
-[Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
-[Join Discord](https://discord.gg/5y8e5f937k) |
-[Join WeChat Group](docs/community/wechat.md)**
+**🚀 [Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
+🗺️ [Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
+📣 [Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
+💬 [Join Discord](https://discord.gg/5y8e5f937k) |
+📱 [Join WeChat Group](docs/community/wechat.md)**
 
 </div>
 
 
-## When to use Reef
+## 🎯 When to use Reef
 
 Use Reef when you want your agent to keep improving simply by learning from how you interact with your agent.
 
@@ -43,7 +43,7 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Scientific discoveries | Test-time training | An execution environment, a correctness checker, and a measurable objective |
 
 
-## How Reef fits your stack
+## 🧩 How Reef fits your stack
 
 | Ability | Inference engine (vLLM, SGLang, …) | RL training framework (Slime, veRL, AReaL, …) | **Reef** |
 |---|:---:|:---:|:---:|
@@ -54,7 +54,7 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Evolves beyond weights (skills, harness) | ❌ | ❌ | ✅ |
 
 
-## How it works
+## 🔄 How it works
 
 <div align="center">
 <picture>
@@ -74,7 +74,7 @@ modules implement each step.
 | **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
-## Installation
+## 📦 Installation
 
 > 💡 **Note**
 >
@@ -106,7 +106,7 @@ python3 -c "import reef; print(reef.__version__)"
 Use the source checkout for development and for the training examples below.
 
 
-## Using Reef
+## 🔧 Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
@@ -243,7 +243,7 @@ See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and
 research demos and the [Reefine guide](docs/user-guide/recipes/reefine.rst) for
 configuration.
 
-## Recipes and examples
+## 📚 Recipes and examples
 
 Pick a recipe by the **task type** of your workload and by **what it should
 evolve**, model weights or the agent harness. Weight recipes need the GPU
@@ -257,7 +257,7 @@ selected by dotted class reference and not shipped in the Reef wheel.
 | Task type | Task shape | Evolves the model | Evolves the harness | Standard benchmarks |
 |---|---|---|---|---|
 | Scientific discovery | Repeated attempts at one hard problem with a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
-| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), [Terminal-Bench 30-task subset](recipes/meta_harness/RESULTS.md). |
+| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), Terminal-Bench ([example](recipes/meta_harness/examples/terminal_bench/README.md), [results](recipes/meta_harness/RESULTS.md)). |
 | Learning from usage | Real interaction where no one reports a score or feedback arrives late | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [simulated student with GSM8K task stream](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
@@ -267,7 +267,7 @@ Each result page documents its task, evaluation setup, measurements, and
 limitations.
 
 
-## Architecture
+## 📐 Architecture
 
 <div align="center">
 <picture>
@@ -276,7 +276,7 @@ limitations.
 </picture>
 </div>
 
-## Learn more
+## 📖 Learn more
 
 The [documentation](https://reefinfra.ai/docs/) is organized in the following order:
 
@@ -290,7 +290,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [The core loop](https://reefinfra.ai/docs/getting-started/core-loop/): The core loop of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 
-## Community & Contributing
+## 🤝 Community & Contributing
 
 Working on continual self-improving agent?
 
@@ -304,7 +304,7 @@ Working on continual self-improving agent?
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
 
 
-## The Team
+## 👥 The Team
 
 Reef brings together people exploring how agents can learn from experience and
 improve over time. The people below help turn that idea into working infrastructure.
@@ -338,7 +338,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Dingyi Zhuang](https://github.com/ZhuangDingyi).
 
 
-## Star History
+## ⭐ Star History
 
 <a href="https://star-history.com/#Human-Agent-Society/reef&Date">
   <picture>
@@ -349,7 +349,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 </a>
 
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 We are particularly grateful to these projects which power important parts of Reef:
 

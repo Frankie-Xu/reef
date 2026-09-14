@@ -10,6 +10,8 @@ from recipes.tttd.examples.tttd.harness.run_controller import (
     ReefTrainingStatusClient,
     ScenarioTrainingFailure,
     ScenarioTrainingStatus,
+    SearchHarness,
+    TrainingStatusReader,
     TTTDRunController,
     TTTDRunIdentity,
     TTTDRunStateError,
@@ -32,7 +34,7 @@ class _Archive:
         return tuple(SimpleNamespace(reward=float(step + 1)) for step in self.steps)
 
 
-class _Harness:
+class _Harness(SearchHarness):
     def __init__(self, events, rollouts_per_step=4) -> None:
         self.archive = _Archive()
         self.events = events
@@ -44,7 +46,7 @@ class _Harness:
         return tuple(f"step-{step}-rollout-{index}" for index in range(self.rollouts_per_step))
 
 
-class _StatusReader:
+class _StatusReader(TrainingStatusReader):
     def __init__(self, statuses, events=None) -> None:
         self.statuses = deque(statuses)
         self.events = events

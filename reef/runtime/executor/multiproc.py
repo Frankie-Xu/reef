@@ -11,16 +11,21 @@ import os
 import pickle
 import signal
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from multiprocessing.connection import Connection, wait
 from time import monotonic
-from typing import Any, Literal, overload
+from typing import Any
 
-from reef.runtime.executor.base import Executor, ExecutorFuture, resolve_class
+from reef.runtime.executor.base import ExecutorFuture, SubmittingExecutor, check_rank, remaining_time, resolve_class
 from reef.runtime.executor.failure import ExecutorFailure, FailureState
-from reef.runtime.executor.uniproc import ConcurrentExecutorFuture
+from reef.runtime.executor.uniproc import ConcurrentExecutorFuture, shutdown_worker
+
+#: How long ranks get to exit on their own before SIGTERM, and after SIGTERM before SIGKILL.
+STOP_GRACE_S = 5.0
+
+# -- Worker process --------------------------------------------------------
 
 
 def _terminate_worker(signum, frame) -> None:
@@ -42,6 +47,20 @@ def _reply(connection: Connection, ok: bool, value: Any) -> None:
     connection.send_bytes(data)
 
 
+def _serve(connection: Connection, worker: Any) -> None:
+    """Answer RPCs until the owner sends the ``None`` stop request."""
+    while True:
+        method, args, kwargs = pickle.loads(connection.recv_bytes())
+        if method is None:
+            return
+        try:
+            result = getattr(worker, method)(*args, **kwargs)
+        except Exception as exc:
+            _reply(connection, False, exc)
+        else:
+            _reply(connection, True, result)
+
+
 def _worker_main(connection: Connection, spec_data: bytes, cuda_visible_devices: str | None) -> None:
     # Set visibility before unpickling/importing the worker or scorer module.
     if cuda_visible_devices is not None:
@@ -53,16 +72,7 @@ def _worker_main(connection: Connection, spec_data: bytes, cuda_visible_devices:
         spec = pickle.loads(spec_data)
         worker = resolve_class(spec.worker_cls)(*spec.args, **dict(spec.kwargs))
         _reply(connection, True, None)
-        while True:
-            method, args, kwargs = pickle.loads(connection.recv_bytes())
-            if method is None:
-                break
-            try:
-                result = getattr(worker, method)(*args, **kwargs)
-            except Exception as exc:
-                _reply(connection, False, exc)
-            else:
-                _reply(connection, True, result)
+        _serve(connection, worker)
     except (EOFError, BrokenPipeError):
         pass
     except Exception as exc:
@@ -71,13 +81,16 @@ def _worker_main(connection: Connection, spec_data: bytes, cuda_visible_devices:
     finally:
         if worker is not None:
             with suppress(Exception):
-                shutdown = getattr(worker, "shutdown", None)
-                if shutdown is not None:
-                    shutdown()
+                shutdown_worker(worker)
         connection.close()
 
 
+# -- Owner side ------------------------------------------------------------
+
+
 class _Rank:
+    """The owner's end of one spawned worker: its process, pipe, and RPC thread."""
+
     def __init__(
         self, context, spec_data: bytes, index: int, failure_state: FailureState, cuda_visible_devices=None
     ) -> None:
@@ -97,12 +110,15 @@ class _Rank:
         finally:
             child.close()
 
+    def _disconnected(self, reason: str, exc: Exception) -> RuntimeError:
+        self.failure_state.fail(ExecutorFailure("MultiprocExecutor", reason, self.index))
+        return RuntimeError(f"worker process {self.process.pid} {reason}")
+
     def receive(self) -> Any:
         try:
             ok, value = pickle.loads(self.connection.recv_bytes())
         except (EOFError, OSError) as exc:
-            self.failure_state.fail(ExecutorFailure("MultiprocExecutor", "worker exited or disconnected", self.index))
-            raise RuntimeError(f"worker process {self.process.pid} exited or disconnected") from exc
+            raise self._disconnected("exited or disconnected", exc) from exc
         if not ok:
             raise value
         return value
@@ -112,8 +128,7 @@ class _Rank:
         try:
             self.connection.send_bytes(data)
         except (BrokenPipeError, OSError) as exc:
-            self.failure_state.fail(ExecutorFailure("MultiprocExecutor", "worker disconnected", self.index))
-            raise RuntimeError(f"worker process {self.process.pid} disconnected") from exc
+            raise self._disconnected("disconnected", exc) from exc
         return self.receive()
 
     def request_stop(self) -> None:
@@ -130,45 +145,41 @@ class _Rank:
             # case no RPC thread still owns the pipe.
             self.request_stop()
 
+    def close(self) -> None:
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        self.connection.close()
+        self.process.close()
 
-class MultiprocExecutor(Executor):
+
+def _join_all(ranks: Iterable[_Rank], grace_s: float) -> None:
+    deadline = monotonic() + grace_s
+    for rank in ranks:
+        rank.process.join(remaining_time(deadline))
+
+
+def _alive(ranks: Iterable[_Rank]) -> list[_Rank]:
+    return [rank for rank in ranks if rank.process.is_alive()]
+
+
+class MultiprocExecutor(SubmittingExecutor):
+    """Spawn one process per worker and monitor them for unexpected exit."""
+
     def _init_executor(self) -> None:
         self._ranks: list[_Rank] = []
-        self._closed = False
         self._monitor_stop = threading.Event()
         self._shutdown_lock = threading.Lock()
         self._shutdown_complete = threading.Event()
         self._monitor_thread: threading.Thread | None = None
-        if self.config.options or any(set(spec.options) - {"cuda_visible_devices"} for spec in self.config.workers):
+        if self.config.options:
             raise ValueError("MultiprocExecutor accepts only per-worker cuda_visible_devices, not cluster options")
-        for spec in self.config.workers:
-            if "cuda_visible_devices" in spec.options and not isinstance(spec.options["cuda_visible_devices"], str):
-                raise ValueError("cuda_visible_devices must be a string")
-        # Serialize every worker before starting any child; no silent fallback
-        # to fork, cloudpickle or shared in-process objects for closures/locks.
-        try:
-            specs = [pickle.dumps(spec) for spec in self.config.workers]
-        except Exception as exc:
-            raise TypeError(
-                "mp workers must be spawn-pickleable; use importable classes/scorers or one uni worker"
-            ) from exc
+        specs = [self._spawn_spec(spec) for spec in self.config.workers]
         context = multiprocessing.get_context("spawn")
-        timeout = self.config.launch_timeout_s
-        deadline = None if timeout is None else monotonic() + timeout
+        deadline = None if self.config.launch_timeout_s is None else monotonic() + self.config.launch_timeout_s
         try:
-            for index, spec_data in enumerate(specs):
-                self._ranks.append(
-                    _Rank(
-                        context,
-                        spec_data,
-                        index,
-                        self._failure_state,
-                        self.config.workers[index].options.get("cuda_visible_devices"),
-                    )
-                )
+            for index, (spec_data, devices) in enumerate(specs):
+                self._ranks.append(_Rank(context, spec_data, index, self._failure_state, devices))
             for rank in self._ranks:
-                remaining = None if deadline is None else max(0.0, deadline - monotonic())
-                if not rank.connection.poll(remaining):
+                if not rank.connection.poll(remaining_time(deadline)):
                     raise TimeoutError("mp worker startup timed out")
                 rank.receive()
             if self._ranks:
@@ -180,10 +191,24 @@ class MultiprocExecutor(Executor):
             self.shutdown()
             raise
 
-    def _ensure_open(self) -> None:
-        self._failure_state.check()
-        if self._closed:
-            raise RuntimeError("executor is shut down")
+    @staticmethod
+    def _spawn_spec(spec: Any) -> tuple[bytes, str | None]:
+        """Validate one worker's options and serialize it before any child starts.
+
+        Every worker is pickled up front: there is no silent fallback to fork,
+        cloudpickle, or shared in-process objects for closures and locks.
+        """
+        if set(spec.options) - {"cuda_visible_devices"}:
+            raise ValueError("MultiprocExecutor accepts only per-worker cuda_visible_devices, not cluster options")
+        devices = spec.options.get("cuda_visible_devices")
+        if devices is not None and not isinstance(devices, str):
+            raise ValueError("cuda_visible_devices must be a string")
+        try:
+            return pickle.dumps(spec), devices
+        except Exception as exc:
+            raise TypeError(
+                "mp workers must be spawn-pickleable; use importable classes/scorers or one uni worker"
+            ) from exc
 
     def _monitor_workers(self) -> None:
         sentinels = [rank.process.sentinel for rank in self._ranks]
@@ -197,72 +222,21 @@ class MultiprocExecutor(Executor):
                 self.shutdown()
                 return
 
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: Literal[False] = False,
-    ) -> list[Any]: ...
+    def _pending(self, rank: _Rank, data: bytes) -> Any:
+        return self._failure_state.track(rank.pool.submit(rank.call, data))
 
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: Literal[True],
-    ) -> ExecutorFuture: ...
+    def _submit(
+        self, rank: int, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        check_rank(rank, len(self._ranks))
+        data = pickle.dumps((method, args, kwargs))
+        return ConcurrentExecutorFuture([self._pending(self._ranks[rank], data)], single=True, timeout=timeout)
 
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool,
-    ) -> list[Any] | ExecutorFuture: ...
-
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool = False,
-    ) -> list[Any] | ExecutorFuture:
-        self._ensure_open()
-        data = pickle.dumps((method, args, dict(kwargs or {})))
-        pending = [self._failure_state.track(rank.pool.submit(rank.call, data)) for rank in self._ranks]
-        future = ConcurrentExecutorFuture(pending, timeout=timeout)
-        return future if non_block else future.result()
-
-    def rpc(
-        self,
-        rank: int,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool = False,
-    ) -> Any:
-        self._ensure_open()
-        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0 or rank >= len(self._ranks):
-            raise IndexError(f"worker rank {rank!r} is outside the executor group")
-        data = pickle.dumps((method, args, dict(kwargs or {})))
-        worker = self._ranks[rank]
-        pending = self._failure_state.track(worker.pool.submit(worker.call, data))
-        future = ConcurrentExecutorFuture([pending], single=True, timeout=timeout)
-        return future if non_block else future.result()
+    def _submit_all(
+        self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        data = pickle.dumps((method, args, kwargs))
+        return ConcurrentExecutorFuture([self._pending(rank, data) for rank in self._ranks], timeout=timeout)
 
     def check_health(self, timeout: float | None = None) -> None:
         self._ensure_open()
@@ -294,21 +268,15 @@ class MultiprocExecutor(Executor):
         for rank in self._ranks:
             rank.enqueue_stop()
         if self.failure is not None:
-            for rank in self._ranks:
-                if rank.process.is_alive():
-                    rank.process.terminate()
-        deadline = monotonic() + 5
-        for rank in self._ranks:
-            rank.process.join(max(0, deadline - monotonic()))
-        for rank in self._ranks:
-            if rank.process.is_alive():
+            # Peers of a dead rank get no grace: the group cannot continue.
+            for rank in _alive(self._ranks):
                 rank.process.terminate()
-        deadline = monotonic() + 5
+        _join_all(self._ranks, STOP_GRACE_S)
+        for rank in _alive(self._ranks):
+            rank.process.terminate()
+        _join_all(self._ranks, STOP_GRACE_S)
         for rank in self._ranks:
-            rank.process.join(max(0, deadline - monotonic()))
             if rank.process.is_alive():
                 rank.process.kill()
                 rank.process.join()
-            rank.pool.shutdown(wait=True, cancel_futures=True)
-            rank.connection.close()
-            rank.process.close()
+            rank.close()

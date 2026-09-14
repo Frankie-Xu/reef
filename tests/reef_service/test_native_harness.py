@@ -13,9 +13,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import ModuleType
 
 import pytest
-from reef_service.test_native_enforce import PROBE, require_nested_jail
+from reef_service._trajectories import recorded_trajectory
+from reef_service.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.executor import SandboxExecutor
@@ -30,6 +32,7 @@ from reef.harness.runners.native import (
     HookModule,
     LoadError,
     ToolModule,
+    ToolRunner,
     _invoke,
     _waterfall,
     enforcer_for,
@@ -46,7 +49,7 @@ from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonPl
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import BackendAlwaysSelectPlugin
-from reef.train.types import TraceBatch, TraceSample
+from reef.train.types import TrainingBatch
 
 TOOL = (
     "native_tool",
@@ -99,6 +102,12 @@ EVENT_HOOKS = (
         },
     ),
 )
+
+
+def _hook_module(name, event, listen):
+    module = ModuleType(name)
+    module.__dict__["listen"] = listen
+    return HookModule(name, event, module)
 
 
 def _reply(content=None, tool_calls=None):
@@ -293,7 +302,7 @@ def test_hooks_form_a_waterfall_where_next_runs_once_and_a_raising_hook_is_skipp
         calls.append("d")
         return next_()
 
-    hooks = [HookModule(name, "pre_step", listen) for name, listen in (("a", a), ("b", b), ("c", c), ("d", d))]
+    hooks = [_hook_module(name, "pre_step", listen) for name, listen in (("a", a), ("b", b), ("c", c), ("d", d))]
     trace: list[dict] = []
     decision = _waterfall(hooks, 0, {"step": 1}, _DEFAULTS["pre_step"], trace)
     assert decision == {"kind": "enter", "messages": ["from c", "from a"]}
@@ -336,7 +345,7 @@ def test_hooks_get_a_copy_so_in_place_edits_are_traced_and_bad_decisions_are_ski
         ("odd_keys", odd_keys),
         ("fresh", fresh),
     )
-    hooks = [HookModule(name, "post_execute", listen) for name, listen in names]
+    hooks = [_hook_module(name, "post_execute", listen) for name, listen in names]
     trace: list[dict] = []
     decision = _waterfall(hooks, 0, {"step": 1}, _DEFAULTS["post_execute"], trace)
     # fresh's non-list contexts read as empty; every hook above edited a copy, so only in_place changed the decision.
@@ -350,12 +359,13 @@ def test_hooks_get_a_copy_so_in_place_edits_are_traced_and_bad_decisions_are_ski
 
 
 def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: Path) -> None:
-    def run(args, workdir):
-        if args.get("text") == "boom":
-            raise RuntimeError("kaboom")
-        return "x" * (MAX_RESULT_CHARS + 5) if args.get("text") == "long" else args["text"].upper()
+    class Shout(ToolRunner):
+        def __call__(self, args, workdir):
+            if args.get("text") == "boom":
+                raise RuntimeError("kaboom")
+            return "x" * (MAX_RESULT_CHARS + 5) if args.get("text") == "long" else args["text"].upper()
 
-    tools = {"shout": ToolModule("shout", "Upper-case a string.", TOOL[1]["parameters"], run)}
+    tools = {"shout": ToolModule("shout", "Upper-case a string.", TOOL[1]["parameters"], Shout())}
     assert _invoke(tools, "nope", "{}", tmp_path)["error"]["code"] == "UNKNOWN_TOOL"
     assert _invoke(tools, "shout", "{}", tmp_path)["error"] == {
         "code": "INVALID_ARGS",
@@ -650,7 +660,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
         binary=_launcher(tmp_path),
         seed=SEED_NODES,
     )
-    batch = TraceBatch("demo:trace:native", (TraceSample("a1", {"messages": []}, 0.0),))
+    batch = TrainingBatch("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_files
@@ -712,7 +722,11 @@ def test_native_tool_capabilities_are_validated_rendered_and_declared_by_the_see
 
 
 def test_invoke_runs_only_what_the_gate_allows(tmp_path: Path) -> None:
-    tool = ToolModule("shout", "", TOOL[1]["parameters"], lambda args, workdir: args["text"].upper(), ["read"])
+    class Shout(ToolRunner):
+        def __call__(self, args, workdir):
+            return args["text"].upper()
+
+    tool = ToolModule("shout", "", TOOL[1]["parameters"], Shout(), ["read"])
     tools = {"shout": tool}
     raw = json.dumps({"text": "hi"})
     assert _invoke(tools, "shout", raw, tmp_path)["content"] == "HI"
@@ -996,7 +1010,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
             binary=_launcher(tmp_path),
             seed=SEED_NODES,
         )
-        batch = TraceBatch("demo:trace:graph", (TraceSample("a1", {"messages": []}, 0.0),))
+        batch = TrainingBatch("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         prepared = backend.prepare_step(batch, backend.initial_state(), 0)
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_files["native/graphs/main.json"]) == SEED_GRAPH
@@ -2073,8 +2087,10 @@ def test_a_tool_whose_top_level_exits_fails_each_call_and_the_turn_ends(tmp_path
 
 def test_a_builtin_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Path) -> None:
     tools = {
-        "harness_inspect": ToolModule("harness_inspect", "reef's own", {}, lambda a, w: "tree", builtin_tool=True),
-        "shout": ToolModule("shout", "the tree's", {}, lambda a, w: "loud"),
+        "harness_inspect": ToolModule(
+            "harness_inspect", "reef's own", {}, _ConstantToolRun("tree"), builtin_tool=True
+        ),
+        "shout": ToolModule("shout", "the tree's", {}, _ConstantToolRun("loud")),
     }
     jailed = BwrapEnforcer()
     assert tools["harness_inspect"].builtin_tool is True and tools["shout"].builtin_tool is False
@@ -2106,7 +2122,7 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
     episode = backend._render_for_episode(SEED_NODES)
     assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
     assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
-    batch = TraceBatch("demo:trace:tree", (TraceSample("a1", {"messages": []}, 0.0),))
+    batch = TrainingBatch("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
     evaluator = BackendAlwaysSelectPlugin(backend)

@@ -1,126 +1,132 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
-from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.core.training_request import TrainingRequest
 
 
 @dataclass(frozen=True)
-class TrainingBatch:
-    """Base type for every batch flowing from a processor to a preparer.
+class TrajectoryItem:
+    """An ATIF document and its batch-local grouping and record references.
 
-    Carries batch identity and an optional explicit training request; each subclass adds its concrete payload
-    (tokenized policy samples, grouped comparison sets, raw recorded traces).
-    Concrete subclasses provide wiring safety between processors and backend
-    algorithms or local artifact backends.
+    The document is the single source of trajectory data. Reef-specific feedback,
+    captured provider records, and exact training tensors live in ``extra.reef``.
+    ``training`` reads its ``training`` object without reconstructing tokens.
+    Full ATIF validation and algorithm-required fields belong to the consumer.
+    """
+
+    trajectory: Mapping[str, Any]
+    group_id: str | None = None
+    source_agent_record_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trajectory, Mapping):
+            raise TypeError("trajectory must be an ATIF document")
+        version = self.trajectory.get("schema_version")
+        if not isinstance(version, str) or not version.startswith("ATIF-v"):
+            raise ValueError("trajectory must have an ATIF schema_version")
+        if not isinstance(self.trajectory.get("agent"), Mapping):
+            raise ValueError("ATIF trajectories must contain an agent object")
+        steps = self.trajectory.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("ATIF trajectories must contain a non-empty steps list")
+        if self.group_id is not None and not isinstance(self.group_id, str):
+            raise TypeError("trajectory group_id must be a string or None")
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        """Reef's JSON metadata within the ATIF extension object."""
+        extra = self.trajectory.get("extra") or {}
+        if not isinstance(extra, Mapping):
+            raise ValueError("ATIF extra must be an object")
+        metadata = extra.get("reef", {})
+        if not isinstance(metadata, Mapping):
+            raise ValueError("ATIF extra.reef must be an object")
+        return metadata
+
+    @property
+    def training(self) -> Mapping[str, Any]:
+        """Captured training fields; absence does not authorize re-tokenization."""
+        training = self.metadata.get("training", {})
+        if not isinstance(training, Mapping):
+            raise ValueError("ATIF extra.reef.training must be an object")
+        return training
+
+    def with_metadata(self, **fields: Any) -> TrajectoryItem:
+        """Return a new document with updated Reef metadata, preserving other extensions."""
+        metadata = {**self.metadata, **fields}
+        extra = {**(self.trajectory.get("extra") or {}), "reef": metadata}
+        return replace(self, trajectory={**self.trajectory, "extra": extra})
+
+    def with_training(self, **fields: Any) -> TrajectoryItem:
+        """Return a new document with updated captured training fields."""
+        return self.with_metadata(training={**self.training, **fields})
+
+
+@dataclass(frozen=True)
+class TaskItem:
+    """A Harbor task directory containing its instruction, environment and verifier.
+
+    The path is resolved in the consuming algorithm's execution environment;
+    constructing a value neither reads files nor launches a rollout. Algorithms
+    that support tasks own task validation, rollout, and conversion to trajectories.
+    """
+
+    task_path: Path
+    source_agent_record_ids: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_path, Path):
+            raise TypeError("task_path must be a pathlib.Path to a Harbor task directory")
+
+
+TrainDataItem = TrajectoryItem | TaskItem
+
+
+@dataclass(frozen=True)
+class TrainingBatch:
+    """One reserved processor output, possibly mixing trajectories and tasks.
+
+    Items stay in processor order. The consuming algorithm decides which item
+    kinds and trajectory representations it supports, and must reject unsupported
+    input explicitly. Empty batches support request-only harness evolution.
     """
 
     batch_id: str
+    items: tuple[TrainDataItem, ...] = ()
     request: TrainingRequest | None = field(default=None, kw_only=True)
 
-
-@dataclass(frozen=True)
-class PolicySample:
-    """One scored rollout, tokenized for policy training.
-
-    A sample normally represents one model call. Shared trajectory shaping may
-    assemble multiple ordered calls into one sample before a training recipe
-    decides whether it supports that representation.
-
-    The first five fields are what every policy objective needs. The rest are
-    optional and stay at their defaults when a method has no use for them:
-
-    * ``action_mask`` — per response token, ``1`` for a model-generated (action)
-      token and ``0`` for an environment/observation token. Methods that
-      propagate advantage over actions only set it; ``loss_mask`` still
-      selects which tokens receive gradient, and for a single-turn response
-      the two masks are identical. Empty means "no observation boundaries
-      declared".
-    * ``rollout_created_at`` — wall-clock time the rollout was recorded, so a
-      backend can report queue age (train time - created at). With
-      ``runtime_load_id`` (the producing version, from the serving
-      ``artifact_ref``) it also gives policy lag.
-    * ``turn_count`` — number of ordered inference calls represented by this
-      sample. Values greater than one mark a multi-turn trajectory. Reef
-      records this count, but excludes it from the Slime training payload.
-    * ``topk_indices`` / ``topk_log_probs`` — the generation-time top-K vocab
-      ids and log-probs per response token, present when the serving backend
-      captures them (``capture_topk``). Objectives that compare the rollout
-      distribution against another model's use them as the index set.
-    * ``extras`` — per-sample channels a method's processor attaches for its
-      own loss family to read in ``shape_sample_row``. Nothing shared reads
-      them.
-
-    ``rollout_log_probs`` are the ``logπrollout`` behaviour proxy; importance
-    ratios ``exp(logπθ - logπrollout)`` are formed from them at train time.
-    """
-
-    source_agent_record_id: str
-    tokens: tuple[int, ...]
-    loss_mask: tuple[int, ...]
-    rollout_log_probs: tuple[float, ...]
-    reward: float
-    runtime_load_id: str | None = None
-    action_mask: tuple[int, ...] = ()
-    rollout_created_at: float | None = None
-    turn_count: int = 1
-    topk_indices: tuple[tuple[int, ...], ...] = ()
-    topk_log_probs: tuple[tuple[float, ...], ...] = ()
-    extras: Mapping[str, Any] = field(default_factory=dict)
-    runtime_load_spans: tuple[RuntimeLoadSpan, ...] = ()
-
-    @property
-    def is_multi_turn(self) -> bool:
-        """Whether shared trajectory assembly joined multiple model calls."""
-        return self.turn_count > 1
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple):
+            raise TypeError("TrainingBatch.items must be a tuple")
+        for index, item in enumerate(self.items):
+            if not isinstance(item, (TrajectoryItem, TaskItem)):
+                raise TypeError(f"TrainingBatch.items[{index}] must be a TrajectoryItem or TaskItem")
 
 
-@dataclass(frozen=True)
-class PolicyBatch(TrainingBatch):
-    samples: tuple[PolicySample, ...]
+def trajectories(batch: TrainingBatch) -> tuple[TrajectoryItem, ...]:
+    """Read ATIF items in batch order; tasks require a rollout-capable algorithm."""
+    items: list[TrajectoryItem] = []
+    for index, item in enumerate(batch.items):
+        if not isinstance(item, TrajectoryItem):
+            raise TypeError(f"this algorithm requires trajectories; unsupported item {index}: {type(item).__name__}")
+        items.append(item)
+    return tuple(items)
 
 
-@dataclass(frozen=True)
-class GroupedPolicyBatch(TrainingBatch):
-    comparison_sets: tuple[tuple[PolicySample, ...], ...]
-
-
-def policy_samples(batch: TrainingBatch) -> tuple[PolicySample, ...]:
-    """Flatten either policy batch shape into its ordered samples.
-
-    Grouped batches are flattened in comparison-set order. Batch types that
-    carry no policy samples (e.g. trace batches) are a caller error.
-    """
-    if isinstance(batch, PolicyBatch):
-        return batch.samples
-    if isinstance(batch, GroupedPolicyBatch):
-        return tuple(sample for group in batch.comparison_sets for sample in group)
-    raise TypeError(f"batch type {type(batch).__name__} carries no policy samples")
-
-
-@dataclass(frozen=True)
-class TraceSample:
-    """One recorded exchange, exactly as served, with its reported score.
-
-    A report referencing one request batches as a sample whose ``payload``
-    is that request. A report referencing several batches as one sample
-    whose ``trajectory`` holds every referenced payload in reference order
-    and whose ``payload`` is the last of them, so single-payload consumers
-    keep seeing the exchange that carries the full conversation.
-    ``feedback`` is the report's feedback field, verbatim. ``score`` is
-    ``None`` for a sample batched from recorded traffic without a report.
-    """
-
-    source_agent_record_id: str
-    payload: Mapping[str, Any]
-    score: float | None
-    feedback: str | Mapping[str, Any] | None = None
-    trajectory: tuple[Mapping[str, Any], ...] = ()
-
-
-@dataclass(frozen=True)
-class TraceBatch(TrainingBatch):
-    samples: tuple[TraceSample, ...]
+def trajectory_groups(batch: TrainingBatch) -> tuple[tuple[TrajectoryItem, ...], ...]:
+    """Read explicit, contiguous comparison groups without reordering trajectory rows."""
+    groups: dict[str, list[TrajectoryItem]] = {}
+    previous: str | None = None
+    for item in trajectories(batch):
+        if item.group_id is None:
+            raise ValueError("group-relative training requires a group_id on every trajectory")
+        if item.group_id in groups and item.group_id != previous:
+            raise ValueError("comparison group trajectories must be contiguous")
+        groups.setdefault(item.group_id, []).append(item)
+        previous = item.group_id
+    return tuple(tuple(group) for group in groups.values())

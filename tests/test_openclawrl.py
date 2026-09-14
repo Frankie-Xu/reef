@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 
 from recipes.openclawrl.prm import (
     append_hint_to_messages,
@@ -18,8 +19,9 @@ from recipes.openclawrl.prm import (
 )
 from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.turns import TurnJob
+from reef.core.trajectories import source_record_id
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import PolicyBatch, PolicySample
+from reef.train.types import TrainingBatch, TrajectoryItem
 
 pytestmark = pytest.mark.unit
 
@@ -73,11 +75,11 @@ def _anchor(tokens: tuple) -> tuple:
     return ({"hint": "", "teacher_tokens": [int(v) for v in tokens]},)
 
 
-def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> PolicySample:
+def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> TrajectoryItem:
     tokens = tuple(range(10, 10 + n + 2))
     if cands is None:
         cands = _anchor(tokens)
-    return PolicySample(
+    return policy_trajectory(
         source_agent_record_id="src",
         tokens=tokens,
         loss_mask=(1,) * n,
@@ -251,11 +253,11 @@ class TestHintJudging:
 class TestTopkPreparer:
     def test_signals_ride_topk_channels(self):
         cand = {"hint": "h", "teacher_tokens": [7, 8, 12, 13, 14]}
-        batch = PolicyBatch(
+        batch = TrainingBatch(
             "s:openclawrl:0",
             (
                 _sample(1.0, cands=(cand,)),
-                _sample(-1.0),  # RL only: the anchor candidate
+                _sample(-1.0),
             ),
         )
         step = prepare_slime_step(batch, "openclawrl", {})
@@ -588,11 +590,13 @@ def test_processor_attaches_topk_and_candidates() -> None:
     worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)))
 
     batch = processor.build_batch()
-    by_source = {sample.source_agent_record_id: sample for sample in batch.samples}
+    by_source = {source_record_id(sample): sample for sample in batch.items}
     sample = by_source["i0"]
-    assert sample.topk_indices == ((1, 2), (3, 4), (5, 6))
-    assert sample.extras["teacher_cands"] == ({"hint": "h", "teacher_tokens": [99, 2, 3, 4]},)
-    assert by_source["i1"].extras["teacher_cands"] == ({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)
+    assert tuple(tuple(row) for row in sample.training.get("topk_indices", [])) == ((1, 2), (3, 4), (5, 6))
+    assert sample.training.get("extras", {})["teacher_cands"] == [{"hint": "h", "teacher_tokens": [99, 2, 3, 4]}]
+    assert by_source["i1"].training.get("extras", {})["teacher_cands"] == [
+        {"hint": "", "teacher_tokens": [1, 2, 3, 4]},
+    ]
 
 
 @pytest.mark.unit
@@ -602,10 +606,9 @@ def test_candidate_validation_checks_the_native_tail_not_widths() -> None:
     # nothing about capture widths (the Megatron teacher gathers at whatever
     # width S^q has).
     from recipes.openclawrl.turns import validate_teacher_cands
-    from reef.train.types import PolicySample
 
     capture = 8
-    sample = PolicySample(
+    sample = policy_trajectory(
         source_agent_record_id="t1",
         tokens=(1, 2, 3),
         loss_mask=(1, 1),

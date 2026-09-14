@@ -139,3 +139,24 @@ def test_promote_route_rejects_non_object_body_with_400() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_report_route_rejects_missing_references_and_eligibility_flags() -> None:
+    async def run() -> None:
+        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            for body, message in (
+                ({"score": 1.0, "references": ["missing"]}, "existing inference"),
+                ({"score": 1.0, "metadata": {"training": {"eligible": False}}}, "eligible"),
+            ):
+                response = await client.post("/reef/report", json=body, headers=HEADERS)
+                assert response.status == 400
+                assert message in await response.text()
+            scenario = dispatcher.get_or_create_scenario(HEADERS["x-reef-scenario"])
+            assert scenario.records.count(scenario.name) == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())

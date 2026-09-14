@@ -130,7 +130,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         scenario="test",
         records=records,
         processor=DataProcessor(ProcessorContext("test")),
-        training_backend=backend,
+        candidate_backend=backend,
         candidate_evaluator=None,
         state=backend.initial_state(),
     )

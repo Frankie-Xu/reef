@@ -144,6 +144,8 @@ export default function versionCheck(pi) {
     if (!Array.isArray(releases)) return;
     // What the installed release needs from this shell, one line per unset variable: a check off records that
     // the variable was set once, and says nothing about the shell that started this session.
+    // A release held for review gets its notice from the requests extension's session-start line, which names
+    // the command that promotes it.
     for (const item of requiredBy(releases, pinned)) {
       if (item.kind !== "env") continue;
       const variable = typeof item.check === "string" && item.check ? item.check : item.name;

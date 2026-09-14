@@ -15,18 +15,20 @@ from typing import Any
 
 import pytest
 import yaml
+from reef_service._trajectories import recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
+from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import BackendAlwaysSelectPlugin
-from reef.train.types import ProcessorContext, TraceSample
+from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
+from reef.train.types import ProcessorContext
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "skillclaw"
 
@@ -169,7 +171,7 @@ def test_propose_maps_the_no_skill_bucket_to_a_create_mutation(skillclaw, exampl
             "skill": {"name": "csv-median", "description": "Median of a csv", "content": "Sort, take the middle."},
         },
     )
-    samples = (TraceSample("a1", PAYLOAD_PLAIN, -1.0),)
+    samples = (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),)
     mutations = skillclaw.propose(NODES, samples, MODEL)
     assert mutations is not None
     (mutation,) = mutations
@@ -197,7 +199,7 @@ def test_propose_maps_a_group_decision_to_an_update_mutation(skillclaw, example,
             }
         },
     )
-    samples = (TraceSample("a1", PAYLOAD_WITH_READ, 0.0),)
+    samples = (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),)
     mutations = skillclaw.propose(NODES, samples, MODEL)
     assert mutations is not None
     (mutation,) = mutations
@@ -217,7 +219,7 @@ def test_propose_optimize_description_keeps_the_body(skillclaw, example, monkeyp
             }
         },
     )
-    mutations = skillclaw.propose(NODES, (TraceSample("a1", PAYLOAD_WITH_READ, 0.0),), MODEL)
+    mutations = skillclaw.propose(NODES, (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),), MODEL)
     assert mutations is not None
     (mutation,) = mutations
     text = mutation.options["config"]["text"]
@@ -227,7 +229,7 @@ def test_propose_optimize_description_keeps_the_body(skillclaw, example, monkeyp
 
 def test_propose_returns_none_when_every_decision_skips(skillclaw, example, monkeypatch) -> None:
     night_llm(example, monkeypatch)
-    assert skillclaw.propose(NODES, (TraceSample("a1", PAYLOAD_WITH_READ, 0.0),), MODEL) is None
+    assert skillclaw.propose(NODES, (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),), MODEL) is None
     audit = json.loads((skillclaw.WORKDIR / "dry" / "round-0" / "night" / "audit.json").read_text())
     assert audit["advanced"] is False
 
@@ -259,7 +261,7 @@ def test_propose_never_proposes_remove(skillclaw, example, monkeypatch) -> None:
             "skill": {"name": "fresh", "description": "d", "content": "body"},
         },
     )
-    samples = (TraceSample("a1", PAYLOAD_WITH_READ, 0.0), TraceSample("a2", PAYLOAD_PLAIN, -1.0))
+    samples = (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0), recorded_trajectory("a2", PAYLOAD_PLAIN, -1.0))
     mutations = skillclaw.propose(NODES, samples, MODEL)
     assert mutations is not None
     assert {mutation.op for mutation in mutations} <= {"create", "update"}
@@ -280,14 +282,14 @@ def test_propose_maps_a_remove_requesting_decision_to_no_remove(skillclaw, examp
             }
         },
     )
-    samples = (TraceSample("a1", PAYLOAD_WITH_READ, 0.0),)
+    samples = (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),)
     mutations = skillclaw.propose(NODES, samples, MODEL)
     assert mutations is not None  # the request still materializes, as an edit
     assert all(mutation.op in ("create", "update") for mutation in mutations)
 
 
 def test_the_day_reports_feed_the_digest_and_the_sentinel_means_unscored(skillclaw) -> None:
-    sample = TraceSample("ref-1", PAYLOAD_PLAIN, -1.0)
+    sample = recorded_trajectory("ref-1", PAYLOAD_PLAIN, -1.0)
     fallback = skillclaw._fallback_meta(sample)
     assert fallback["score"] is None  # -1.0 is the unscored sentinel, not a grade
     assert fallback["success"] is False
@@ -361,9 +363,8 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     built = build_recipe(str(sections["implementation"]), {}, config=sections, runtime=runtime())
     assert type(built).__name__ == "SkillClawRecipe"
     assert built.name == "skillclaw"
-    assert built.candidate_plugin is BackendAlwaysSelectPlugin
+    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
     assert built.batch_size == 60
-    assert built.max_score == float("inf")  # the whole day batches, passes included
     assert [entry["id"] for entry in built.seed] == ["alpha"]
     assert built.seed[0]["config"]["name"] == "alpha"
     assert len(built.tasks) == 3
@@ -435,16 +436,16 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
     processor.ingest(_report("rep-3", 1.0, "inf-3"))
     assert processor.ready()
     batch = processor.build_batch()
-    assert sorted(sample.score for sample in batch.samples) == [0.0, 1.0, 1.0]
+    assert sorted(sample.metadata.get("reward") for sample in batch.items) == [0.0, 1.0, 1.0]
 
 
 # -- the campaign driver, dry: embedded service, faked docker day -----------
 
 
 def _stub_backend() -> Any:
-    from reef.runtime.inference import InferenceBackend
+    from reef.runtime.interfaces import InferenceHandler
 
-    class StubModel(InferenceBackend):
+    class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):
             del artifact, path, payload
             return {"choices": [{"message": {"role": "assistant", "content": "42"}}]}
@@ -460,9 +461,8 @@ def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int)
         ("[sieve] probe",),
         binary=str(make_binary(tmp_path)),
         seed=SEED,
-        candidate_plugin=BackendAlwaysSelectPlugin,
+        candidate_plugin=AlwaysSelectPluginFactory(),
         batch_size=batch_size,
-        max_score=float("inf"),
         runtime=runtime(),
     )
 
@@ -506,7 +506,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_backend=_stub_backend(),
+        inference_handler=_stub_backend(),
     )
     service.start()
     try:
@@ -569,9 +569,11 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         # payload - the batch the night received is those recorded payloads,
         # post-transform.
         catalog_cls = importlib.import_module("harness.catalog").SkillCatalogModule
-        recorded = [sample for sample in night_input["samples"] if "solve one" in json.dumps(dict(sample.payload))]
+        recorded = [
+            sample for sample in night_input["samples"] if "solve one" in json.dumps(dict(recorded_payload(sample)))
+        ]
         assert recorded, "the day's traffic did not reach the night"
-        payload = dict(recorded[-1].payload)
+        payload = dict(recorded_payload(recorded[-1]))
         system = payload["messages"][0]
         assert system["role"] == "system"
         assert "## Skills (mandatory)" in system["content"]
@@ -605,7 +607,7 @@ def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_pat
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_backend=_stub_backend(),
+        inference_handler=_stub_backend(),
     )
     try:
         scenario = service.dispatcher.get_or_create_scenario("dry2")
@@ -688,7 +690,7 @@ def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> Non
             "skill": {"name": "fresh", "description": "d", "content": "body"},
         },
     )
-    mutations = skillclaw.propose(NODES, (TraceSample("a1", PAYLOAD_PLAIN, -1.0),), MODEL)
+    mutations = skillclaw.propose(NODES, (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),), MODEL)
     assert mutations is not None
     assert all(isinstance(mutation, Mutation) for mutation in mutations)
 

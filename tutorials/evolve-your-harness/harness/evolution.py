@@ -25,7 +25,16 @@ API_SKILL_NAME = "reef-pi-extension-api"
 def failures_text(samples):
     """The failing samples as the proposer reads them: one object per sample with the request as served, the
     score its report gave and the report's feedback verbatim (``null`` when the report carried none)."""
-    views = [{"request": sample.payload, "score": sample.score, "feedback": sample.feedback} for sample in samples]
+    from reef.core.trajectories import recorded_payload
+
+    views = [
+        {
+            "request": recorded_payload(sample),
+            "score": sample.metadata.get("reward"),
+            "feedback": sample.metadata.get("feedback"),
+        }
+        for sample in samples
+    ]
     return json.dumps(views, indent=2, default=str)
 
 

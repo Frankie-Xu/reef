@@ -56,8 +56,9 @@ When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
   Prints one line per thing an install needs and exits 0 when they all hold:
   the interpreter behind the wrapper and whether it imports reef and
   reef-client, the service address and whether the token is accepted, the
-  agent binary and its version, the tools the adapter wants on PATH, and the
-  installed release against the served head.
+  agent binary and its version, the tools the adapter wants on PATH, the
+  installed release against the served head, and any release that waits for
+  a person's review with its step page.
 
 When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
 ``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``, ``reef-pi setup --json``,
@@ -155,11 +156,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any
 
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
@@ -484,9 +486,10 @@ RELEASE_HEADER = "x-reef-release-id"
 CAPTURE_PATHS = ("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true")
 
 
-class ReleaseObserver(Protocol):
+class ReleaseObserver(ABC):
     """Where the proxy hands the release id an inference response names."""
 
+    @abstractmethod
     def observe(self, release_id: str) -> None: ...
 
 
@@ -777,6 +780,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
+    # An evolved tool that starts a second agent session finds this harness's own binary first.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -1721,14 +1726,21 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     else:
         rows.append((True, "release", f"{installed[:8]} installed"))
     # A release held for review is not something the install needs, but it is what the person is waiting on.
-    if catalog and upstream is not None:
-        for step, row in enumerate(catalog):
-            if _verdict_of(row, catalog) == "pending":
-                page = _step_page_link(upstream, scenario, token, step)
-                rows.append((True, "review", _verdict_line(adapter, step, catalog, page)))
+    if catalog is not None and upstream is not None:
+        for step, waiting in _waiting_for_review(catalog):
+            page = _step_page_link(upstream, scenario, token, step)
+            rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
     return 0 if all(ok for ok, _, _ in rows) else 1
+
+
+def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Mapping[str, Any]]]:
+    """The pending rows no later promote row names, each with its step: held for a person, served to nobody."""
+    promoted = {row.get("rollback_target_release_id") for row in rows if row.get("operation") == "promote"}
+    return [
+        (step, row) for step, row in enumerate(rows) if row.get("pending") and row.get("release_id") not in promoted
+    ]
 
 
 def _usage(adapter: str) -> str:

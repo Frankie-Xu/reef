@@ -290,6 +290,7 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
     events, stderr = _notice(
         tmp_path, releases, {"release_id": "v1", "setup": [{"name": "TWILIO_SID", "checked_at": 1.0}]}
     )
+    # The pending tail's review notice belongs to the requests extension's session-start line, not to this one.
     assert [event["kind"] for event in events] == ["notify"] and stderr == ""
     assert events[0]["type"] == "warning"
     assert events[0]["message"] == (
@@ -374,8 +375,9 @@ def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup
 def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
     """A release held for review is served to no session, so the head the notice
     offers is the newest row that is not pending: a pending tail behind the
-    pinned head is silence, a newer row that is not pending is still offered,
-    and a trial install of the pending release gets no offer until its promote."""
+    pinned head is silence here (the requests extension's session-start line
+    names it), a newer row that is not pending is still offered, and a trial
+    install of the pending release gets no offer until its promote."""
     release_info = {"release_id": "v1"}
     pending_tail = [{"release_id": "v1"}, {"release_id": "v2", "pending": True}]
     assert _notice(tmp_path, pending_tail, release_info) == ([], "")

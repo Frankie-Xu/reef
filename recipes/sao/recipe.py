@@ -22,7 +22,7 @@ class SAORecipe(WeightTrainingRecipe):
     training the moment its score arrives, with no comparison group or
     slowest-sample barrier. The DIS ratio needs the rollout log-probabilities as
     its behaviour proxy, so SAO requires an inference backend that attaches
-    engine-native tensors (``reef.inference_backend_factory``); reef never
+    engine-native tensors (``reef.inference_handler_factory``); reef never
     re-tokenizes a rollout to reconstruct them.
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
