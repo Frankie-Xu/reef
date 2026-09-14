@@ -12,11 +12,7 @@ bash agent plays the game: `harness/` is that agent, its loop played from
 the host with its prompt, tools, and tool executor taken from the pinned
 checkout, and its model calls served by Reef, so every call is recorded and
 attributable. The two simulator roles (social posts, enterprise customers)
-stay outside Reef, as
-[Guidance-TTT](../../../tttd/examples/guidance_ttt/README.md) keeps its frozen
-executor. This is step 1 of
-[issue #428](https://github.com/Human-Agent-Society/reef/issues/428) with one
-reward-shaping choice made for it (step 2 stays open; see below).
+stay outside Reef.
 
 ```text
 harbor/                one CEO-Bench episode as a Harbor task: the world and the verifier
@@ -137,31 +133,30 @@ can run past it.
 
 ### Simulator roles
 
-By default the simulator roles keep the benchmark's settings, Haiku 4.5 for
-social posts and Sonnet 4.5 for enterprise customers through the Anthropic
-API, read from `ANTHROPIC_API_KEY` in the environment `run.sh` runs in.
-Bedrock works the same way with `AWS_*` credentials and
-`SAAS_BENCH_*_LLM_PROVIDER=bedrock`. No credential lives in the repository.
-
-To run without any customer LLM, set both roles to `none`; the market then
-speaks in the engine's template posts, which carry the same satisfaction and
-virality mechanics but no generated text:
+The two simulator roles (the customers who post on social media, and the
+enterprise buyers) are their own LLM calls inside the engine, outside Reef.
+The episodes recorded below run both on `Qwen3-4B-Instruct-2507`, served by
+SGLang on one spare GPU of the same node as an OpenAI-compatible endpoint,
+so no paid API is involved:
 
 ```bash
-export SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER=none SAAS_BENCH_ENTERPRISE_LLM_PROVIDER=none
+docker run -d --name ceobench-sim --network host --gpus '"device=7"' -v ~/models:/root/models reef \
+  python -m sglang.launch_server --model-path /root/models/Qwen3-4B-Instruct-2507 \
+  --served-model-name Qwen3-4B-Instruct-2507 --host 0.0.0.0 --port 30100 --tp 1 \
+  --mem-fraction-static 0.28 --context-length 32768
+export SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER=openai SAAS_BENCH_SOCIAL_POST_LLM_MODEL=Qwen3-4B-Instruct-2507
+export SAAS_BENCH_ENTERPRISE_LLM_PROVIDER=openai SAAS_BENCH_ENTERPRISE_LLM_MODEL=Qwen3-4B-Instruct-2507
+export OPENAI_BASE_URL=http://<host>:30100/v1 OPENAI_API_KEY=local
 ```
 
-A local OpenAI-compatible server with a Responses endpoint can stand in for
-both roles instead:
-
-```bash
-export SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER=openai SAAS_BENCH_SOCIAL_POST_LLM_MODEL=<served name>
-export SAAS_BENCH_ENTERPRISE_LLM_PROVIDER=openai SAAS_BENCH_ENTERPRISE_LLM_MODEL=<served name>
-export OPENAI_BASE_URL=http://<host>:<port>/v1 OPENAI_API_KEY=local
-```
-
-Both recorded episodes below used one; a result meant to compare with the
-paper must use the benchmark's defaults.
+The benchmark's own setting is Haiku 4.5 for social posts and Sonnet 4.5
+for enterprise customers through the Anthropic API (`ANTHROPIC_API_KEY`;
+Bedrock with `AWS_*` credentials and `SAAS_BENCH_*_LLM_PROVIDER=bedrock`),
+which is what `run.sh` uses when the variables above are unset and what a
+result meant to compare with the paper or the leaderboard needs. Setting
+both roles to `none` runs the market on the engine's template posts, with
+the same satisfaction and virality mechanics but no generated text. No
+credential lives in the repository.
 
 ## Reward shaping
 
@@ -298,8 +293,9 @@ curl -sS -H "Authorization: Bearer $(cat work/token)" \
 
 Seed 42, 500 days (the benchmark rounds it down to 71 whole weeks, 497
 days), the simulator roles as above, one episode each. Neither number is
-comparable with the leaderboard: the simulator roles are local stand-ins,
-and each row is one episode at temperature 1.0. Both episodes were played
+comparable with the leaderboard: both simulator roles are a local
+`Qwen3-4B-Instruct-2507` (see "Simulator roles"), and each row is one
+episode at temperature 1.0. Both episodes were played
 by the previous form of this harness, which ran the benchmark's own runner
 inside the task container with its agent role redirected to Reef; the
 harness above plays the same agent from the host and is to be re-run.
@@ -362,7 +358,7 @@ day 168 ($334,000), all with negative cash flow and payoffs 35 to 380 days
 out. Cash was under $10,000 by week 25 and the company went bankrupt on day
 255. For scale, the leaderboard's Haiku 4.5 finishes at $59,600 and its
 rule-based baseline at $15.8M; this run is not comparable with either
-because the simulator roles are local stand-ins.
+because the simulator roles are a local `Qwen3-4B-Instruct-2507`.
 
 ### Trained episode
 
@@ -431,29 +427,4 @@ which the policy diagnosed its settings and one week (19) whose context a
 12k-token query result pushed past the window contributed no decision turns
 at all (`decisions_reported` in `weeks.csv`).
 
-### Not yet run
 
-- The untrained baseline with the benchmark's Anthropic simulator roles and
-  more seeds (issue #428, acceptance criterion 1); replicates of the trained
-  episode on other seeds.
-- A trained episode with a valuation horizon that covers the weeks left
-  (`CEOBENCH_VALUE_HORIZON_WEEKS=71`), or a per-lever attribution of each
-  spend line's return, so that a week of growth at the simulator's
-  acquisition cost can score positive. Beyond those, a judged turn-level
-  signal.
-
-## Open items
-
-- **License.** `zlab-princeton/ceobench-src` carries no license file. The
-  image clones a pinned commit at build time and the repository ships none of
-  the benchmark's code or fixtures; confirm terms with the authors before a
-  result page cites it.
-- **Sandboxing.** The benchmark sandboxes the agent's shell with `bwrap` when
-  present and falls back to plain execution otherwise. Here the Harbor
-  container is the outer sandbox and the agent's shell runs as an
-  unprivileged user inside it (`CEOBENCH_TOOL_USER`), so it cannot signal
-  the root-owned engine or read the engine's source and host-side bundle.
-  The copy of
-  the `novamind-operation` zipapp in the agent's workspace still embeds the
-  database key, as it does upstream; the benchmark's docs recommend hiding
-  it behind a wrapper.
