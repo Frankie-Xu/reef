@@ -56,15 +56,24 @@ batch sizes, shuffling, epochs, and partial/drop/error remainder policies.
 ``training.options.batch-size`` supplies the configured optimizer batch size.
 Only exact-version samples are admitted: ``max_staleness`` must be zero.
 
-The built-in ``importance_sampling`` loss accepts one trajectory advantage per
-sample and applies the response loss mask. A method may register a
-``TinkerLoss`` using ``register_tinker_loss``. The TTTD recipe registers its own
-adapter in ``recipes/tttd/tinker.py``: its unmasked policy term and masked,
-centered frozen-base KL match the definitions in its existing Slime objective.
-``training.options.kl-coef`` controls that penalty. The base sampler scores the
-original token IDs, and those probabilities never replace the captured
-behavior-policy probabilities. SAO and OpenClaw-RL losses are not implemented
-by this integration; selecting an unregistered loss family fails before training.
+Tinker computes the loss on its side from a built-in loss function and the
+per-sample inputs that function reads. The built-in ``importance_sampling``
+family places the trajectory advantage on every response token the loss mask
+selects. A method registers its own ``TinkerLoss`` with
+``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``,
+next to its Slime reference; the class is imported when the family is first
+resolved. Its ``loss_fn`` names the Tinker built-in it trains with and
+``inputs`` shapes that function's ``loss_fn_inputs``. A ``TinkerCustomLoss``
+instead computes the loss on the Reef host from the token log probabilities
+Tinker returns, through ``forward_backward_custom``; that path needs torch
+locally and no shipped recipe uses it. The TTTD recipe's
+``recipes/tttd/tinker.py`` keeps its unmasked policy term and masked,
+centered frozen-base KL on ``importance_sampling``, matching its Slime
+objective. ``training.options.kl-coef`` controls that penalty. The base
+sampler scores the original token IDs, and those probabilities never replace
+the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
+not implemented by this integration; selecting an unregistered loss family
+fails before training.
 
 ``lora-rank``, ``seed``, and ``learning-rate`` configure adapter initialization
 and Adam updates. Other Adam settings currently use the pinned SDK's defaults

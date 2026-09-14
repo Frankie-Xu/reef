@@ -67,7 +67,7 @@ from reef.service.deploy.service_config import (
     service_config_from_mapping,
     service_override,
 )
-from reef.service.deploy.training import assemble_training_services
+from reef.service.deploy.training import assemble_training_services, local_model_required
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
@@ -488,7 +488,7 @@ def _run_orchestrator(
     settings_changed = normalized_config != config
     config = normalized_config
     services = validate_services(config, resolved_config_path)
-    paths_changed = resolve_model_paths(config)
+    paths_changed = local_model_required(config) and resolve_model_paths(config)
     temp_config_path: Path | None = None
     try:
         if versioned or config_path is None or overrides or paths_changed or settings_changed:

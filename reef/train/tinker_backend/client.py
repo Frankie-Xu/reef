@@ -13,7 +13,7 @@ from typing import Any
 
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.losses import TinkerLoss, TokenRow
+from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
 
 
 @dataclass(frozen=True)
@@ -129,9 +129,12 @@ class TinkerSDKClient(TinkerClient):
                     )
                     for row, value in zip(rows, inputs, strict=True)
                 ]
-                result = trainer.forward_backward(data, loss_fn=loss.loss_fn).result(
-                    timeout=self._config.train_timeout_s
-                )
+                if isinstance(loss, TinkerCustomLoss):
+                    # Tinker returns logprobs; the family computes the loss here and Tinker runs backward.
+                    future = trainer.forward_backward_custom(data, loss.loss)
+                else:
+                    future = trainer.forward_backward(data, loss_fn=loss.loss_fn)
+                result = future.result(timeout=self._config.train_timeout_s)
                 metrics.update(result.metrics)
                 trainer.optim_step(self._sdk.AdamParams(learning_rate=self._config.learning_rate)).result(
                     timeout=self._config.train_timeout_s

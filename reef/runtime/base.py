@@ -301,6 +301,19 @@ class TrainingRuntime(InferenceRuntime, ABC):
         """
         raise ReefError(f"{type(self).__name__} does not support checkpoint restore")
 
+    def activate_checkpoint(self, artifact: Artifact) -> str:
+        """Bind a recovered or republished artifact before the scenario serves it.
+
+        Called once a release is final and before traffic routes to it. The
+        default binds nothing and returns the release ID: for runtimes whose
+        serving update and Reef publication are one operation, the artifact
+        already names what the engine serves. A runtime that serves immutable
+        remote snapshots overrides this to select the sampler and training
+        state the artifact references, and returns the runtime load ID it
+        now serves under.
+        """
+        return artifact.ref.release_id
+
     def reconcile_training_job(
         self,
         scenario_step: int,

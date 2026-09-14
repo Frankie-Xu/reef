@@ -16,7 +16,7 @@ export REEF_TINKER_STATE_DIR="$PWD/work/tinker-smoke"
 python -m reef serve -c tutorials/tinker/serve.yaml
 ```
 
-After `/healthz` is ready, run in another terminal with the same virtual environment and `REEF_TOKEN`:
+Startup creates the initial Tinker checkpoint and fetches tokenizer files before `/healthz` answers, so `serve.yaml` sets `reef.ready-timeout` to 600 seconds. After `/healthz` is ready, run in another terminal with the same virtual environment and `REEF_TOKEN`:
 
 ```bash
 python tutorials/tinker/smoke.py

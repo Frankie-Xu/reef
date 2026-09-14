@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -16,16 +17,16 @@ from reef.core.batches import TrainingBatch
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.base import PreparedTrainingStep, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, ModelCandidate, StaleCandidate
-from reef.runtime.inference import InferenceBackend
-from reef.surface.base import PublishedWeightRuntime
+from reef.runtime.inference import InferenceBackend, InferenceStream, UpstreamStatusError
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.inference import chat_completion, chat_request, chat_stream
 from reef.train.tinker_backend.losses import resolve_tinker_loss, row_from_payload
 from reef.train.tinker_backend.preparation import prepare_tinker_step
 
 
-class TinkerRuntime(TrainingRuntime, PublishedWeightRuntime):
+class TinkerRuntime(TrainingRuntime):
     """One scenario, with immutable remote snapshots and a local publication gate.
 
     Each training attempt branches from the incumbent's weights AND optimizer.
@@ -65,8 +66,6 @@ class TinkerRuntime(TrainingRuntime, PublishedWeightRuntime):
                 self._base.validate_model(base_model, config.lora_rank)
                 self._base.write(base)
             self._active, self._version = self._remember(self._base)
-            from reef.train.tinker_backend.inference import TinkerInferenceBackend
-
             self._inference = TinkerInferenceBackend(self, client, base_model)
         except BaseException:
             self._state_lock.close()
@@ -128,6 +127,7 @@ class TinkerRuntime(TrainingRuntime, PublishedWeightRuntime):
         return self.snapshot(artifact)[1]
 
     def activate_checkpoint(self, artifact: Artifact) -> str:
+        """Bind the recovered or republished artifact's snapshot before the scenario serves it."""
         with self._lock:
             checkpoint, version = self.snapshot(artifact)
             if self._pending is not None:
@@ -241,3 +241,32 @@ class TinkerRuntime(TrainingRuntime, PublishedWeightRuntime):
                 self._client.close()
             finally:
                 self._state_lock.close()
+
+
+class TinkerInferenceBackend(InferenceBackend):
+    """Serve text chat from the immutable sampler the frozen artifact resolves to."""
+
+    def __init__(self, runtime: TinkerRuntime, client: TinkerClient, model: str) -> None:
+        self._runtime = runtime
+        self._client = client
+        self._model = model
+
+    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path != "/v1/chat/completions":
+            raise UpstreamStatusError("Tinker supports /v1/chat/completions", status=400)
+        messages, params = chat_request(payload)
+        return await asyncio.to_thread(self._sample, artifact, messages, params, payload)
+
+    def _sample(
+        self, artifact: Artifact, messages: list[dict[str, str]], params: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        checkpoint, version = self._runtime.snapshot(artifact)
+        prompt = self._client.render(messages, template_kwargs=payload.get("chat_template_kwargs") or {})
+        if not prompt:
+            raise ValueError("Tinker chat template produced an empty prompt")
+        result = self._client.sample(checkpoint, prompt, params)
+        content = self._client.decode(result.tokens)
+        return chat_completion(payload.get("model", self._model), messages, prompt, result, content, version)
+
+    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+        return chat_stream(await self.inference(artifact, path, payload), payload)

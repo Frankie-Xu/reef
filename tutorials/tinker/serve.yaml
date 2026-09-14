@@ -5,6 +5,9 @@ reef:
   port: 8900
   token: ${REEF_TOKEN}
   run-dir: ${REEF_TINKER_STATE_DIR}/stack
+  # The in-process Tinker runtime downloads tokenizer files and saves the initial
+  # checkpoint before /healthz answers; the 30s default is too short on a cold cache.
+  ready-timeout: 600
 inference:
   model-path: Qwen/Qwen3-8B
   timeout-s: 300
