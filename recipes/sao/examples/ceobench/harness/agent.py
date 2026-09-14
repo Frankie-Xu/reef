@@ -122,10 +122,29 @@ ENGINE_READ_TIMEOUT_S = 120.0
 #: subscription at its per-seat price times seats) and the week's ledger by
 #: category. Prints one JSON line; ``error`` when the engine cannot answer.
 ENGINE_READ = """
-import json, re, urllib.request
+import glob, json, re, urllib.request
 try:
-    log = open("/workspace/ceobench-runs/runner.log", errors="replace").read()
-    port = re.findall(r"Server started: port=(\\d+)", log)[-1]
+    def alive(candidate):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{candidate}/health", timeout=5) as response:
+                return response.status == 200
+        except Exception:
+            return False
+    ports = []
+    for path in glob.glob("/workspace/ceobench-runs/run_*/checkpoint.json"):
+        try:
+            ports.append(int(json.load(open(path)).get("api_server_port") or 0))
+        except Exception:
+            pass
+    try:  # the runner prints the port at start, but its log is block-buffered
+        ports += [int(p) for p in re.findall(r"Server started: port=(\\d+)", open("/workspace/ceobench-runs/runner.log", errors="replace").read())]
+    except Exception:
+        pass
+    for line in open("/proc/net/tcp").read().splitlines()[1:]:  # every loopback listener, engine included
+        fields = line.split()
+        if len(fields) > 3 and fields[3] == "0A" and fields[1].startswith("0100007F:"):
+            ports.append(int(fields[1].split(":")[1], 16))
+    port = next(candidate for candidate in dict.fromkeys(ports) if candidate and alive(candidate))
     def query(sql):
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/query", data=json.dumps({"sql": sql}).encode(),
