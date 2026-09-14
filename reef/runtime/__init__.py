@@ -21,7 +21,9 @@ Boundaries this package holds:
 - Malformed results and missing capabilities surface as contract errors
   (``RuntimeContractError``, ``TrainingRuntimeError``), never as silent fallbacks.
   The default ``restore_checkpoint`` refuses rather than moving the artifact
-  head under an engine that kept newer weights.
+  head under an engine that kept newer weights; the default
+  ``activate_checkpoint`` binds nothing, since a local engine already serves
+  what a final release names.
 - Surfaces see runtimes only structurally, through ``ServingRuntime`` and
   ``WeightRuntime`` in ``surface/base.py``; nothing in ``surface/`` imports
   this package.

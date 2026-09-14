@@ -7,7 +7,7 @@ import pytest
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
+from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow
 
 
 class Future:
@@ -26,6 +26,11 @@ class Trainer:
     def forward_backward(self, data, loss_fn):
         self.events.append(("forward_backward", data, loss_fn))
         return Future(SimpleNamespace(metrics={"loss:sum": -2.0}))
+
+    def forward_backward_custom(self, data, loss_fn):
+        value, metrics = loss_fn(data, [[-0.1] * len(datum.model_input) for datum in data])
+        self.events.append(("forward_backward_custom", data, value))
+        return Future(SimpleNamespace(metrics=metrics))
 
     def optim_step(self, adam_params):
         self.events.append(("optim_step", adam_params))
@@ -165,6 +170,26 @@ def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client)
     assert [event[1] for event in client._sdk.events if event[0] == "restore_with_optimizer"] == [base.state_path] * 2
 
 
+def test_custom_loss_routes_to_forward_backward_custom(client):
+    class Custom(TinkerCustomLoss):
+        def inputs(self, rows, base_logprobs, *, kl_coef):
+            return [row.inputs([row.advantage] * len(row.mask)) for row in rows]
+
+        def loss(self, data, logprobs):
+            return sum(sum(values) for values in logprobs), {"custom:samples": float(len(data))}
+
+    base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
+    row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
+    _, metrics = client.train(base, [[row]], Custom())
+    names = [event[0] for event in client._sdk.events]
+    assert "forward_backward_custom" in names and "forward_backward" not in names
+    assert next(event for event in client._sdk.events if event[0] == "forward_backward_custom")[2] == pytest.approx(
+        -0.3
+    )
+    assert metrics["custom:samples"] == 1.0
+    assert metrics["optimizer_steps"] == 1
+
+
 def test_initial_checkpoint_failure_closes_session_as_errored(client, monkeypatch):
     def fail_save(self, name, ttl_seconds):
         raise TimeoutError("checkpoint export timed out")
@@ -249,6 +274,7 @@ def test_installed_sdk_call_signatures_and_datum_without_network():
         (tinker.ServiceClient.create_sampling_client, (), {"model_path": "tinker://base/sampler"}),
         (RestClient.get_weights_info_by_tinker_path, ("tinker://base/state",), {}),
         (tinker.TrainingClient.forward_backward, ([],), {"loss_fn": "importance_sampling"}),
+        (tinker.TrainingClient.forward_backward_custom, ([],), {"loss_fn": lambda data, logprobs: (None, {})}),
         (tinker.TrainingClient.optim_step, (tinker.AdamParams(learning_rate=1e-4),), {}),
         (tinker.TrainingClient.save_state, ("checkpoint",), {"ttl_seconds": None}),
         (tinker.TrainingClient.save_weights_for_sampler, ("checkpoint",), {"ttl_seconds": None}),

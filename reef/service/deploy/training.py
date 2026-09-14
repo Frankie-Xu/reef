@@ -42,6 +42,18 @@ def training_deployment_for(name: str | None) -> TrainingDeployment:
     return definition()
 
 
+def local_model_required(config: dict[str, Any]) -> bool:
+    """Whether the selected training backend executes the model on this host.
+
+    Provider deployments and local backends need the resolved snapshot on disk;
+    a hosted backend keeps the remote model identifier as written.
+    """
+    backend = config.get("reef", {}).get("training_backend")
+    if not backend:
+        return True
+    return training_deployment_for(backend).requires_local_model
+
+
 def assemble_training_services(config: dict[str, Any]) -> None:
     """Validate common inputs; integrations own process topology and connections."""
     settings = service_config_from_mapping(config)

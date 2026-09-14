@@ -440,6 +440,9 @@ class _StubTrainingRuntime:
     def restore_checkpoint(self, artifact) -> str:
         raise AssertionError("recover must not restore a checkpoint")
 
+    def activate_checkpoint(self, artifact) -> str:
+        return artifact.ref.release_id
+
 
 def _checkpoint_ref(version: str = "checkpoint:step-7"):
     from reef.artifact import ArtifactRef

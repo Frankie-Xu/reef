@@ -5,18 +5,22 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
+import yaml
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
+from reef.cli import main
 from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
 from reef.runtime.inference import UpstreamStatusError
 from reef.runtime.registry import RuntimeConfigError
-from reef.service.deploy import inference
+from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.service.deploy.training import local_model_required
 from reef.surface.weights import WeightLoader
 from reef.train.algos.base import StepPreparer
 from reef.train.algos.registry import register_preparer, unregister_preparer
@@ -313,11 +317,15 @@ def test_loss_alignment_mask_and_ttdd_centered_kl():
     rows = [TokenRow((10, 11, 20, 21), (1, 0), (-0.2, -0.4), 2.0), TokenRow((10, 30), (1,), (-0.6,), -1.0)]
     inputs = ImportanceSamplingLoss().inputs(rows, [], kl_coef=0)
     assert inputs[0] == {"target_tokens": [11, 20, 21], "logprobs": [0, -0.2, -0.4], "advantages": [0, 2, 0]}
+    assert inputs[1]["advantages"] == [-1]
+    with pytest.raises(ValueError, match="every response token"):
+        rows[0].inputs([2.0])
     # Differences are .3 and .1 on selected tokens, mean .2.
     inputs = TttdTinkerLoss().inputs(rows, [[-0.5, -0.8], [-0.7]], kl_coef=0.1)
     assert inputs[0]["advantages"] == pytest.approx([0, 1.99, 2.0])
     assert inputs[1]["advantages"] == pytest.approx([-0.99])
     assert resolve_tinker_loss("tttd").needs_base_logprobs
+    assert isinstance(resolve_tinker_loss("tttd"), TttdTinkerLoss)
 
 
 @pytest.mark.parametrize(
@@ -329,7 +337,7 @@ def test_malformed_training_rows_are_rejected(field, value):
         TokenRow.from_item(item("v").with_training(**{field: value}), 1.0)
 
 
-def test_deployment_preserves_remote_model_and_discovers_without_sdk(tmp_path, monkeypatch):
+def test_deployment_preserves_remote_model_and_discovers_without_sdk(tmp_path):
     raw = {
         "schema-version": 2,
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
@@ -337,8 +345,8 @@ def test_deployment_preserves_remote_model_and_discovers_without_sdk(tmp_path, m
         "training": {"backend": "tinker", "options": {"state-dir": str(tmp_path / "state")}},
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    monkeypatch.setattr(inference, "resolve_hf_snapshot", lambda _: pytest.fail("downloaded remote model"))
-    assert inference.resolve_model_paths(config) is False
+    assert not local_model_required(config)
+    assert config["reef"]["model_path"] == "Qwen/Qwen3-8B"
     assert [service["name"] for service in config["services"]] == ["reef"]
     assert not TinkerDeployment.requires_local_model
     result = subprocess.run(
@@ -346,14 +354,55 @@ def test_deployment_preserves_remote_model_and_discovers_without_sdk(tmp_path, m
             sys.executable,
             "-c",
             (
-                "import sys; import reef.train.tinker_backend.launch; "
-                "assert 'tinker' not in sys.modules; assert 'torch' not in sys.modules"
+                "import sys; import reef.train.tinker_backend.launch; import recipes.tttd; "
+                "assert 'tinker' not in sys.modules; assert 'torch' not in sys.modules; "
+                "assert 'reef.train.tinker_backend.losses' not in sys.modules"
             ),
         ],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_serve_skips_the_model_download_for_a_hosted_backend(tmp_path, monkeypatch):
+    path = tmp_path / "serve.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema-version": 2,
+                "reef": {"run-dir": str(tmp_path / "stack")},
+                "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
+                "inference": {"model-path": "Qwen/Qwen3-8B"},
+                "training": {"backend": "tinker", "options": {"state-dir": str(tmp_path / "state")}},
+            }
+        )
+    )
+    started = []
+
+    class Stack:
+        def __init__(self, config, *args, **kwargs):
+            started.append(config)
+            self._stopping = threading.Event()
+            self.exit_code = 0
+
+        def start(self):
+            return None
+
+        def block(self):
+            return None
+
+        def shutdown(self):
+            return None
+
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: pytest.fail("downloaded remote model"))
+    monkeypatch.setattr(orchestrator, "_Stack", Stack)
+    with pytest.raises(SystemExit) as result:
+        main(["serve", "-c", str(path)])
+    assert result.value.code == 0
+    assert started[0]["reef"]["model_path"] == "Qwen/Qwen3-8B"
+    assert local_model_required({"reef": {"training_backend": "slime"}})
+    assert local_model_required({"reef": {}})
 
 
 @pytest.mark.parametrize(
