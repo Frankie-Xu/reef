@@ -339,6 +339,14 @@ def _training_inference_values(**options):
     )
 
 
+def test_training_inference_forces_the_flags_reef_serving_relies_on():
+    # Slime's parser defaults --sglang-disable-radix-cache to off; the config
+    # validation rejects that, so the translation must set the flags itself.
+    config = _training_inference_config(sglang_disable_radix_cache=False)
+    assert config.options["disable_radix_cache"] is True
+    assert config.options["incremental_streaming_output"] is True
+
+
 def test_inference_engine_does_not_inherit_or_patch_slime(monkeypatch):
     module = _load_sglang_engine_module(monkeypatch)
     assert module.ReefSGLangEngine.__bases__ == (object,)

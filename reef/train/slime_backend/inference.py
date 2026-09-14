@@ -63,6 +63,11 @@ def _engine_options(args: Any) -> dict[str, Any]:
         enable_draft_weights_cpu_backup=True,
         skip_server_warmup=True,
         enable_metrics=True,
+        # Reef serving relies on both (per-request training tensors, no
+        # prefix reuse across adapter versions); Slime's parser defaults the
+        # radix flag to off, so the translation sets them itself.
+        disable_radix_cache=True,
+        incremental_streaming_output=True,
     )
     if getattr(args, "fp16", False):
         options["dtype"] = "float16"
