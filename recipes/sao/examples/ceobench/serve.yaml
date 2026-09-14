@@ -10,7 +10,7 @@
 # finished week's turns are reported together with the week's credit: its
 # change in company value (cash plus the subscription run-rate over the weeks
 # left) and the discounted changes of the weeks after it, scaled against the
-# weeks before (harness/report.py). batch_size 16 trains about a week of turns per step
+# weeks before (harness/report.py). batch_size 8 trains about a week of decision turns per step
 # (the SAO example trains one rollout per step; the paper trains 128), and
 # max_staleness admits the turns of a week that earlier steps have aged.
 #
@@ -31,8 +31,9 @@
 # rollout engine (TP2), the devices docker-compose.yaml hands the container.
 # The actor and the critic stay resident (no offload between their steps:
 # two frozen 27B bases at TP4 fit beside one step's activations), the critic
-# checkpoints every eighth commit, and a step trains 16 turns, so training
-# keeps pace with the game (about a week of play per step). Paths are the
+# checkpoints every eighth commit, and a step trains 8 decision turns (the
+# harness reports only the turns that changed the company, a few per week),
+# so training keeps pace with the game (about a week of play per step). Paths are the
 # container's; run.sh mounts the model directory and the run directory.
 
 schema-version: 2
@@ -57,7 +58,7 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: 16                     # MUST equal training.config.global_batch_size
+    batch-size: 8                      # MUST equal training.config.global_batch_size
     max-staleness: 64
     checkpoint-every-n-versions: 20
 training:
@@ -75,7 +76,7 @@ training:
       max_storage_fraction: 0.80
       min_free_space_fraction: 0.10
       policy: latest
-    global_batch_size: 16
+    global_batch_size: 8
   # SAO objective as slime flags: --use-critic creates the value-model group;
   # the algorithm spec sets the skip-observation GAE and hard-masked DIS hook
   # paths. Value-model settings are the paper's (critic lr 5e-6 against the

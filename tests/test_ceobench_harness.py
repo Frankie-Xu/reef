@@ -76,15 +76,38 @@ def _start(agent_module, week: int, day: int, cash: float, *, subscribers=0, sea
     return agent_module.WeekStart(week, day, cash, subscribers, seats, prices)
 
 
-def _turn(receipt: str, dashboard: str | None, prompt_tokens: int, completion_tokens: int) -> dict:
+def _turn(
+    receipt: str,
+    dashboard: str | None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    command: str | None = "./novamind-operation next-week 'rationale'",
+    tool: tuple[str, dict] | None = None,
+) -> dict:
+    """A captured turn; by default its response calls ``next-week``, a decision."""
     messages = [{"role": "system", "content": "You are the CEO."}]
     if dashboard is not None:
         messages.append({"role": "user", "content": dashboard})
+    if tool is not None:
+        name, arguments = tool
+    elif command is not None:
+        name, arguments = "bash", {"command": command}
+    else:
+        name = None
+    message: dict = {"role": "assistant", "content": "" if name else "Thinking out loud."}
+    if name:
+        message["tool_calls"] = [
+            {"id": "call-1", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+        ]
     return {
         "status": 200,
         "receipt": receipt,
         "request": {"messages": messages},
-        "response": {"usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}},
+        "response": {
+            "choices": [{"message": message}],
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+        },
     }
 
 
@@ -105,6 +128,7 @@ def _agent(agent_module, monkeypatch, turns: list[dict], *, service_url="http://
     # so the scores below read as the value changes they come from.
     agent._ledger = agent_module.WeekLedger(total_weeks=2, credit_weeks=1)
     agent._scale = agent_module.ScoreScale(clip=10.0, floor=1.0)
+    agent._engine_reads = False
     agent._ledger_lock = threading.Lock()
     agent._max_tokens = 0
     sidecar = _Sidecar()
@@ -276,9 +300,9 @@ def test_week_ledger_groups_turns_and_closes_weeks_with_the_next_dashboard(monke
         ("r-3", 37, 1),
         ("r-4", 49, 1),
     ]
-    assert ledger.weeks[0]["turns"] == [("r-1", 13), ("r-2", 25)]
+    assert ledger.weeks[0]["turns"] == [("r-1", 13, "next_week"), ("r-2", 25, "next_week")]
     week_1 = _start(agent_module, 1, 7, 982_311.0, subscribers=30, prices=(10.0, 39.0, 99.0))
-    assert ledger.weeks[1] == {"start": week_1, "turns": [("r-3", 37), ("r-4", 49)]}
+    assert ledger.weeks[1] == {"start": week_1, "turns": [("r-3", 37, "next_week"), ("r-4", 49, "next_week")]}
     # Week 1 opens worth its cash plus the one week left of 30 subscribers at the $10 plan.
     assert ledger.value(week_1) == 982_381.0
     # Week 0 closed when week 1's dashboard appeared; week 1 waits for the final cash, valued as cash.
@@ -363,8 +387,10 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         "value_start": 1_000_000.0,
         "value_end": 982_318.0,
         "credit": credit,
+        "decision": "next_week",
         "turn": 1,
         "turns": 2,
+        "decisions": 2,
     }
     assert len({payload["agent_record_id"] for payload in payloads}) == 2
 
@@ -372,6 +398,7 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         "agent_record_ids": ["r-1", "r-2", "r-3"],
         "agent_record_tokens": [13, 25, 37],
         "agent_record_weeks": [0, 0, 1],
+        "agent_record_decisions": ["next_week", "next_week", "next_week"],
     }
     assert context.metadata["ceobench"] == {
         "seed": 7,
@@ -381,6 +408,7 @@ def test_harness_reports_a_week_as_soon_as_the_next_one_starts(monkeypatch) -> N
         "discount": 0.8,
         "score_clip": 10.0,
         "score_floor": 1.0,
+        "engine_reads": False,
         "turns": 4,
         "exit_code": 0,
         "weeks": [
@@ -561,6 +589,7 @@ def test_harness_fails_the_trial_when_the_runner_exits_nonzero(monkeypatch) -> N
         "agent_record_ids": ["r-1"],
         "agent_record_tokens": [0],
         "agent_record_weeks": [None],
+        "agent_record_decisions": [None],
     }
     assert context.metadata["ceobench"]["weeks"] == []
     assert environment.downloads
@@ -582,22 +611,30 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
         value_end=910_000.0,
         credit=0.0125,
         score=1.25,
-        turns=[("r-1", 9000), ("r-2", 50000), ("r-3", 48000)],
+        turns=[
+            ("r-1", 9000, "set_prices"),
+            ("r-2", 50000, "next_week"),
+            ("r-3", 48000, "next_week"),
+            ("r-4", 100, None),
+        ],
         max_tokens=49152,
     )
 
-    # The 50k-token turn was served and recorded but cannot be trained on.
+    # The 50k-token turn was served and recorded but cannot be trained on;
+    # the read-only turn is recorded and not trained on either.
     assert posted == [{"accepted": True}] * 2
     payloads = [payload for _, payload in client.calls]
     assert [payload["references"] for payload in payloads] == [["r-1"], ["r-3"]]
     assert [payload["metadata"]["ceobench"]["turn"] for payload in payloads] == [0, 2]
+    assert [payload["metadata"]["ceobench"]["decision"] for payload in payloads] == ["set_prices", "next_week"]
+    assert payloads[0]["metadata"]["ceobench"]["decisions"] == 3 and payloads[0]["metadata"]["ceobench"]["turns"] == 4
     # The scaled credit is the score; the credit and the values travel along.
     assert {payload["score"] for payload in payloads} == {1.25}
     assert {payload["metadata"]["ceobench"]["credit"] for payload in payloads} == {0.0125}
     feedback = payloads[0]["feedback"]
-    assert "week 3" in feedback and "credit 0.0125, score 1.25" in feedback
+    assert "week 3" in feedback and "credit 0.0125, score 1.25" in feedback and "3 decision turns of 4" in feedback
     assert "value 900000 -> 910000" in feedback and "cash 900000 -> 905000" in feedback
-    # No limit reports every turn.
+    # No limit reports every decision turn.
     client.calls.clear()
     report_module.post_week_reports(
         client,
@@ -610,9 +647,80 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> 
         value_end=910_000.0,
         credit=0.0125,
         score=1.25,
-        turns=[("r-1", 1), ("r-2", 2), ("r-3", 3)],
+        turns=[("r-1", 1, "set_prices"), ("r-2", 2, "next_week"), ("r-3", 3, "next_week")],
     )
     assert len(client.calls) == 3
+
+
+@pytest.mark.unit
+def test_turn_decision_tells_company_changing_calls_from_reads(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    scripts: dict[str, str] = {}
+
+    def decision(**fields):
+        return agent_module.turn_decision(_turn("r", None, 1, 1, **fields), scripts)
+
+    assert decision() == "next_week"
+    assert (
+        decision(command='./novamind-operation python-c "import novamind_api as nm; nm.pricing.set_prices(A=12)"')
+        == "set_prices"
+    )
+    assert decision(command='./novamind-operation query "SELECT * FROM ledger ORDER BY day DESC LIMIT 5"') is None
+    assert (
+        decision(command='./novamind-operation python-c "import novamind_api as nm; print(nm.get_cost_info())"')
+        is None
+    )
+    assert decision(command=None) is None  # a reply without a tool call
+    # Workspace files are reads; a script the agent wrote is judged by its content when run.
+    assert (
+        decision(
+            tool=(
+                "write_file",
+                {"path": "daily_scripts/setup.py", "content": "nm.marketing.set_targeted_ad_spend({})"},
+            )
+        )
+        is None
+    )
+    assert decision(tool=("read_file", {"path": "docs/cli-reference.md"})) is None
+    assert decision(command="cd /workspace && python daily_scripts/setup.py") == "set_targeted_ad_spend"
+    assert (
+        decision(tool=("edit_file", {"path": "daily_scripts/setup.py", "old_string": "x", "new_string": "print(1)"}))
+        is None
+    )
+    assert decision(command="python analysis.py") == "script"  # not written this episode: taken to act
+    assert (
+        decision(command="cat << EOF > run.py\nnm.research.start_research_project(1)\nEOF\npython run.py")
+        == "start_research_project"
+    )
+
+
+@pytest.mark.unit
+def test_week_start_prefers_the_engine_mrr_over_the_listed_price_estimate(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    estimate = _start(agent_module, 3, 21, 0.0, subscribers=100, prices=(10.0, 39.0, 99.0))
+    assert estimate.run_rate == 1000.0
+    assert estimate._replace(mrr=1830.5).run_rate == 1830.5
+
+
+@pytest.mark.unit
+def test_gate_reads_the_engine_books_for_a_new_week(monkeypatch) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "ceobench")
+    turns = [_turn("r-1", _dashboard(0, 0, 1_000_000), 10, 3)]
+    agent, _sidecar = _agent(agent_module, monkeypatch, turns)
+    agent._capture = _Capture(turns)
+    agent._engine_reads = True
+    reads = iter([{"mrr": 1500.0, "basis": "engine"}, None])
+    monkeypatch.setattr(agent, "_read_engine", lambda: next(reads))
+    agent._pacer = SimpleNamespace(wait=lambda week, posted: 0.0)
+    agent._gated_week = None
+
+    # Week 1 opens with 30 subscribers at a $10 floor but $1,500 of MRR on the books.
+    agent._gate_week(_start(agent_module, 1, 7, 982_311.0, subscribers=30, prices=(10.0, 39.0, 99.0)))
+    assert agent._ledger.announced[1].mrr == 1500.0
+    assert agent._ledger.value(agent._ledger.announced[1]) == 982_311.0 + 1500 * 7 * 1 / 30
+    # A failed read falls back to the estimate.
+    agent._gate_week(_start(agent_module, 2, 14, 980_000.0, subscribers=30, prices=(10.0, 39.0, 99.0)))
+    assert agent._ledger.announced[2].mrr is None and agent._ledger.announced[2].run_rate == 300.0
 
 
 @pytest.mark.unit

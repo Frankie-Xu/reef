@@ -43,7 +43,10 @@ export SAAS_BENCH_LLM_TIMEOUT="${SAAS_BENCH_LLM_TIMEOUT:-1800}"
 export SAAS_BENCH_SIMULATOR_TIMEOUT_S="${SAAS_BENCH_SIMULATOR_TIMEOUT_S:-300}"
 # Pace the game to the trainer: the recipe's batch size (serve.yaml), so each
 # new week starts only after the reported weeks' batches have committed.
-export CEOBENCH_PACE_BATCH="${CEOBENCH_PACE_BATCH:-16}"
+export CEOBENCH_PACE_BATCH="${CEOBENCH_PACE_BATCH:-8}"
+# The week gate reads the engine's own MRR through the task container, so the
+# valuation uses the books instead of the listed-price estimate; 0 turns it off.
+export CEOBENCH_ENGINE_READS="${CEOBENCH_ENGINE_READS:-1}"
 # A week waits at most this long for its batch (a step takes about five
 # minutes) before the game goes on without it.
 export CEOBENCH_PACE_TIMEOUT_S="${CEOBENCH_PACE_TIMEOUT_S:-1200}"

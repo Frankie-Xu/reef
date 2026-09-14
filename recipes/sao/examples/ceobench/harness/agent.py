@@ -49,6 +49,17 @@ opened after it. ``CEOBENCH_SCORE_CLIP`` (default 0.05) and
 ``CEOBENCH_SCORE_FLOOR`` (default 0.003) clip a week's credit and floor the
 running scale it is divided by before it is posted.
 
+Only a week's decision turns are reported: the turns whose tool call changed
+the company (prices, spend, targeting, research, deals, posts, or the week
+advanced; ``DECISION_CALLS``). Turns that only queried the books, read docs,
+or wrote workspace files are recorded but not trained on, so a bad week does
+not teach the policy to stop looking before it acts.
+
+``CEOBENCH_ENGINE_READS`` (default on; ``0`` turns it off) has the week gate
+read the engine's own monthly recurring revenue through the task container
+at each week start, so the valuation uses the books rather than the
+listed-price estimate; the agent's observation is untouched.
+
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
 to the recipe's batch size, the sidecar holds a request until every batch
 the reported weeks filled has committed a training release, so a week is
@@ -58,6 +69,7 @@ no turn is generated while a step publishes its adapter.
 recipe declined would otherwise hold the game forever.
 """
 
+import asyncio
 import atexit
 import io
 import json
@@ -102,6 +114,57 @@ FORWARDED_ENV_PREFIXES = ("SAAS_BENCH_", "OPENAI_", "ANTHROPIC_", "AWS_")
 WEEK_POLL_S = 5.0
 #: How often the pacer re-reads the scenario's releases while it holds a week.
 PACE_POLL_S = 10.0
+#: How long one read of the engine's books may take (a docker exec and one SQL query).
+ENGINE_READ_TIMEOUT_S = 120.0
+#: Runs inside the task container: asks the runner's engine for the monthly
+#: recurring revenue of the subscribed base (the engine's own definition:
+#: each individual subscription at its effective price, each enterprise
+#: subscription at its per-seat price times seats) and the week's ledger by
+#: category. Prints one JSON line; ``error`` when the engine cannot answer.
+ENGINE_READ = """
+import json, re, urllib.request
+try:
+    log = open("/workspace/ceobench-runs/runner.log", errors="replace").read()
+    port = re.findall(r"Server started: port=(\\d+)", log)[-1]
+    def query(sql):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/query", data=json.dumps({"sql": sql}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(response.read())
+        if isinstance(result, dict) and result.get("success") is False:
+            raise RuntimeError(result.get("error") or "query failed")
+        data = result.get("data", result) if isinstance(result, dict) else result
+        return data.get("rows") or []
+    # Live subscriptions at their effective price times seats: the engine's own
+    # MRR definition. seat_count is exposed on subscriptions (an integer; 1 for
+    # an individual), so no join with the customers table is needed.
+    subscribed = "status = 'subscribed' AND end_day IS NULL"
+    try:
+        rows = query(
+            "SELECT COALESCE(SUM(effective_price * COALESCE(seat_count, 1)), 0) AS mrr"
+            " FROM subscriptions WHERE " + subscribed
+        )
+        basis = "engine"
+    except Exception:
+        rows = query("SELECT COALESCE(SUM(effective_price), 0) AS mrr FROM subscriptions WHERE " + subscribed)
+        basis = "effective_price"
+    mrr = float(list(rows[0].values())[0]) if rows else 0.0
+    ledger = {}
+    try:
+        for row in query(
+            "SELECT category, COALESCE(SUM(amount), 0) AS total FROM ledger"
+            " WHERE day > (SELECT COALESCE(MAX(day), 0) - 7 FROM ledger) GROUP BY category"
+        ):
+            values = list(row.values())
+            ledger[str(values[0])] = float(values[1])
+    except Exception:
+        pass
+    print(json.dumps({"mrr": mrr, "basis": basis, "ledger_week": ledger}))
+except Exception as error:
+    print(json.dumps({"error": f"{type(error).__name__}: {error}"}))
+"""
 #: The weekly dashboard header the benchmark's engine returns, with the
 #: week's opening cash, individual subscribers, and enterprise seats on the
 #: lines after it.
@@ -117,7 +180,7 @@ PRICES_RE = re.compile(r"--- Current Config ---\s*\nPrices: A=\$(\d+), B=\$(\d+)
 
 
 class WeekStart(NamedTuple):
-    """A week's opening state as its dashboard shows it."""
+    """A week's opening state as its dashboard shows it, plus the engine's own MRR when read."""
 
     week: int
     day: int
@@ -125,17 +188,102 @@ class WeekStart(NamedTuple):
     subscribers: int
     seats: int
     prices: tuple[float, float, float]  # plans A, B, C as listed, monthly
+    mrr: float | None = None  # the engine's monthly recurring revenue, when the harness read it
 
     @property
     def run_rate(self) -> float:
-        """Monthly revenue at the listed prices.
+        """Monthly subscription revenue: the engine's MRR when read, else an estimate from the dashboard.
 
-        Each individual subscriber counts at the lowest nonzero price, each
-        enterprise seat at plan C's: the dashboard shows neither the plan mix
-        nor negotiated seat prices, so this is a floor, not the books.
+        The estimate counts each individual subscriber at the lowest nonzero
+        listed price and each enterprise seat at plan C's: the dashboard
+        shows neither the plan mix nor negotiated seat prices, so it is a
+        floor, not the books.
         """
+        if self.mrr is not None:
+            return self.mrr
         listed = [price for price in self.prices if price > 0]
         return self.subscribers * (min(listed) if listed else 0.0) + self.seats * self.prices[2]
+
+
+#: SDK calls and CLI commands that change the company: money spent, prices,
+#: targeting, research, deals, posts, and the week advanced. Everything else
+#: the agent can do (queries, status, reading docs, files in its workspace)
+#: only reads, and such turns are recorded but not trained on: a week's
+#: outcome is credited to the decisions in it, not to looking at the books.
+DECISION_CALLS = (
+    "next-week",
+    "next_week",
+    "set_prices",
+    "set_promotion",
+    "set_lead_promotion",
+    "set_model_tiers",
+    "set_usage_quotas",
+    "set_capacity_tier",
+    "set_daily_spend",
+    "set_targeted_ad_spend",
+    "set_targeted_dev_spend",
+    "set_targeted_ops_spend",
+    "set_ads_strength",
+    "start_research_project",
+    "research_market",
+    "research_group",
+    "send_enterprise_deal",
+    "reject_enterprise_deal",
+    "post_social_media",
+)
+DECISION_RE = re.compile(r"\b(" + "|".join(re.escape(call) for call in DECISION_CALLS) + r")\b")
+#: A bash command that runs a Python script file (not inline ``python-c`` code).
+SCRIPT_RUN_RE = re.compile(r"\bpython3?\s+(?!-c\b)(\S+\.py)\b")
+
+
+def tool_calls(turn: dict) -> list[tuple[str, dict]]:
+    """``(tool name, arguments)`` of every tool call in a captured turn's response."""
+    calls = []
+    for choice in (turn.get("response") or {}).get("choices") or []:
+        message = choice.get("message") if isinstance(choice, dict) else None
+        for call in (message or {}).get("tool_calls") or []:
+            function = call.get("function") or {}
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {"raw": arguments}
+            calls.append((str(function.get("name") or ""), arguments if isinstance(arguments, dict) else {}))
+    return calls
+
+
+def turn_decision(turn: dict, scripts: dict[str, str]) -> str | None:
+    """The company-changing call a turn made, or ``None`` for a turn that only read.
+
+    ``scripts`` holds the files the agent has written so far (path to
+    content), updated here as ``write_file``/``edit_file`` calls pass, so a
+    bash command that runs one of them is judged by what it contains; a
+    script this episode did not write is taken to act.
+    """
+    for name, arguments in tool_calls(turn):
+        if name in ("write_file", "edit_file"):
+            path = str(arguments.get("path") or "")
+            content = str(arguments.get("content") or arguments.get("new_string") or "")
+            if path:
+                scripts[path] = content if name == "write_file" else scripts.get(path, "") + "\n" + content
+            continue
+        if name != "bash":
+            continue
+        command = str(arguments.get("command") or "")
+        found = DECISION_RE.search(command)
+        if found:
+            return found.group(1).replace("-", "_")
+        for match in SCRIPT_RUN_RE.finditer(command):
+            script = match.group(1)
+            basename = script.rsplit("/", 1)[-1]
+            content = next((body for path, body in scripts.items() if path.rsplit("/", 1)[-1] == basename), None)
+            if content is None:
+                return "script"
+            found = DECISION_RE.search(content)
+            if found:
+                return found.group(1).replace("-", "_")
+    return None
 
 
 def runner_command(base_url: str, model: str, seed: int, days: int) -> str:
@@ -265,6 +413,7 @@ class WeekLedger:
 
     def observe(self, captured: list[dict]) -> None:
         current: int | None = None
+        scripts: dict[str, str] = {}
         self.weeks = {week: {"start": start, "turns": []} for week, start in self.announced.items()}
         self.turns = []
         for turn in captured:
@@ -274,10 +423,15 @@ class WeekLedger:
             if seen is not None:
                 self.weeks.setdefault(seen.week, {"start": seen, "turns": []})
                 current = seen.week
-            record = {"receipt": turn["receipt"], "tokens": turn_tokens(turn), "week": current}
+            record = {
+                "receipt": turn["receipt"],
+                "tokens": turn_tokens(turn),
+                "week": current,
+                "decision": turn_decision(turn, scripts),
+            }
             self.turns.append(record)
             if current is not None:
-                self.weeks[current]["turns"].append((record["receipt"], record["tokens"]))
+                self.weeks[current]["turns"].append((record["receipt"], record["tokens"], record["decision"]))
 
     def value(self, start: WeekStart) -> float:
         """What a week's opening state is worth, given the weeks left after it."""
@@ -458,6 +612,7 @@ class HarborAgent(BaseAgent):
             clip=float(environ.get("CEOBENCH_SCORE_CLIP", "") or DEFAULT_SCORE_CLIP),
             floor=float(environ.get("CEOBENCH_SCORE_FLOOR", "") or DEFAULT_SCORE_FLOOR),
         )
+        self._engine_reads = (environ.get("CEOBENCH_ENGINE_READS", "1") or "1") != "0"
         self._ledger_lock = threading.Lock()
         self._max_tokens = int(os.environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
         batch = int(os.environ.get("CEOBENCH_PACE_BATCH", "0") or 0)
@@ -484,6 +639,10 @@ class HarborAgent(BaseAgent):
         """Nothing to install: the image carries the pinned checkout."""
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+        # The week gate reads the engine's books through the task container
+        # from the sidecar's thread, so it needs this loop and environment.
+        self._environment = environment
+        self._loop = asyncio.get_running_loop()
         server = self._start_sidecar()
         episode_over = threading.Event()
         weekly = threading.Thread(target=self._report_weeks_online, args=(episode_over,), daemon=True)
@@ -511,6 +670,7 @@ class HarborAgent(BaseAgent):
                 "agent_record_ids": [turn["receipt"] for turn in ledger_turns],
                 "agent_record_tokens": [turn["tokens"] for turn in ledger_turns],
                 "agent_record_weeks": [turn["week"] for turn in ledger_turns],
+                "agent_record_decisions": [turn["decision"] for turn in ledger_turns],
             },
             "ceobench": {
                 "seed": self._seed,
@@ -520,6 +680,7 @@ class HarborAgent(BaseAgent):
                 "discount": self._ledger.discount,
                 "score_clip": self._scale.clip,
                 "score_floor": self._scale.floor,
+                "engine_reads": self._engine_reads,
                 "turns": len(turns),
                 "exit_code": result.return_code,
                 "weeks": weeks,
@@ -562,14 +723,18 @@ class HarborAgent(BaseAgent):
         week = start.week
         if self._gated_week is None or week > self._gated_week:
             self._gated_week = week
+            books = self._read_engine() if self._engine_reads else None
+            if books is not None and books.get("mrr") is not None:
+                start = start._replace(mrr=float(books["mrr"]))
             self.logger.info(
-                "week %d starts (day %d): cash %.0f, %d subscribers, %d seats, run-rate %.0f/month",
+                "week %d starts (day %d): cash %.0f, %d subscribers, %d seats, run-rate %.0f/month (%s)",
                 week,
                 start.day,
                 start.cash,
                 start.subscribers,
                 start.seats,
                 start.run_rate,
+                "engine MRR" if start.mrr is not None else "listed-price estimate",
             )
             with self._ledger_lock:
                 self._ledger.announce(start)
@@ -585,7 +750,39 @@ class HarborAgent(BaseAgent):
             self.logger.info("week %d held %.0fs for training", week, waited)
 
     def _reportable(self, turns) -> int:
-        return sum(1 for _receipt, tokens in turns if not self._max_tokens or tokens <= self._max_tokens)
+        return sum(
+            1
+            for _receipt, tokens, decision in turns
+            if decision is not None and (not self._max_tokens or tokens <= self._max_tokens)
+        )
+
+    def _read_engine(self) -> dict | None:
+        """The engine's own books at this moment, read through the task container.
+
+        The runner's engine keeps the live world in memory and answers SQL on
+        ``/query``; its port is in the runner's log. The read runs as the
+        container's root, outside the agent's shell, and changes nothing the
+        agent sees. ``None`` when the read fails; the caller then falls back
+        to the dashboard estimate.
+        """
+        environment, loop = getattr(self, "_environment", None), getattr(self, "_loop", None)
+        if environment is None or loop is None:
+            return None
+        command = f"python3 - <<'PY'\n{ENGINE_READ}\nPY"
+        try:
+            future = asyncio.run_coroutine_threadsafe(environment.exec(command), loop)
+            result = future.result(timeout=ENGINE_READ_TIMEOUT_S)
+            line = (result.stdout or "").strip().splitlines()[-1]
+            books = json.loads(line)
+        except Exception as error:
+            self.logger.warning("engine read failed; using the dashboard estimate: %s", error)
+            return None
+        if not isinstance(books, dict):
+            return None
+        if books.get("error"):
+            self.logger.warning("engine read failed; using the dashboard estimate: %s", books["error"])
+            return None
+        return books
 
     def _count_training_releases(self) -> int | None:
         request = urllib.request.Request(
@@ -632,7 +829,7 @@ class HarborAgent(BaseAgent):
                 self._ledger.scores[week] = score
                 self.logger.info(
                     "reported week %d (credit %.4f, score %.2f; value %.0f -> %.0f, cash %.0f -> %.0f)"
-                    " against %d of %d turns",
+                    " against %d of %d decision turns (%d turns)",
                     week,
                     credit,
                     score,
@@ -641,6 +838,7 @@ class HarborAgent(BaseAgent):
                     start.cash,
                     cash_end,
                     len(posted),
+                    sum(1 for _receipt, _tokens, decision in entry["turns"] if decision is not None),
                     len(entry["turns"]),
                 )
         return len(finished)

@@ -26,9 +26,12 @@ outliers (the benchmark's six-figure R&D purchases) and divides by the
 running median magnitude, so an ordinary week's difference from the one
 before it keeps a gradient instead of vanishing next to the outliers.
 
-A turn longer than the trainer's window (``max_tokens``, prompt and
-completion together) is skipped: the engine served it and Reef recorded it,
-but the trainer could not hold it, so it stays evaluation-only.
+Only a week's decision turns are reported, the ones whose tool call changed
+the company; a turn that only read is recorded and left out, so the week's
+outcome lands on the decisions in it. A turn longer than the trainer's
+window (``max_tokens``, prompt and completion together) is skipped too: the
+engine served it and Reef recorded it, but the trainer could not hold it,
+so it stays evaluation-only.
 """
 
 import statistics
@@ -105,23 +108,25 @@ def post_week_reports(
     value_end: float,
     credit: float,
     score: float,
-    turns: Sequence[tuple[str, int]],
+    turns: Sequence[tuple[str, int, str | None]],
     max_tokens: int = 0,
 ) -> list[dict]:
-    """Report one finished week against each of its turns' receipts.
+    """Report one finished week against the receipts of its decision turns.
 
-    ``turns`` are ``(receipt, tokens)`` pairs in call order; ``score`` is the
-    scaled ``credit`` and is what Reef trains on, the rest travels along for
-    the record.
+    ``turns`` are ``(receipt, tokens, decision)`` triples in call order, the
+    decision being the company-changing call the turn made or ``None`` when
+    it only read; ``score`` is the scaled ``credit`` and is what Reef trains
+    on, the rest travels along for the record.
     """
+    decisions = sum(1 for _receipt, _tokens, decision in turns if decision is not None)
     feedback = (
         f"ceobench week {week} (from day {day}): credit {credit:.4f}, score {score:.2f};"
         f" value {value_start:.0f} -> {value_end:.0f} (cash {cash_start:.0f} -> {cash_end:.0f})"
-        f" over {len(turns)} turns"
+        f" over {decisions} decision turns of {len(turns)}"
     )
     posted = []
-    for index, (receipt, tokens) in enumerate(turns):
-        if max_tokens and tokens > max_tokens:
+    for index, (receipt, tokens, decision) in enumerate(turns):
+        if decision is None or (max_tokens and tokens > max_tokens):
             continue
         payload = {
             # A report id derived from the receipt makes a duplicate post a
@@ -139,8 +144,10 @@ def post_week_reports(
                     "value_start": value_start,
                     "value_end": value_end,
                     "credit": credit,
+                    "decision": decision,
                     "turn": index,
                     "turns": len(turns),
+                    "decisions": decisions,
                 }
             },
         }

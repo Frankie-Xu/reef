@@ -166,9 +166,11 @@ subscribers, and enterprise seats, and further down the listed plan prices),
 and the sidecar's captures let the harness group turns by week without
 touching the benchmark. A reporter thread polls those captures while the
 episode runs; when week N+1's dashboard appears, week N is over and each of
-its turns is reported with the week's change in company value:
+its decision turns is reported with the week's change in company value:
 
-    run_rate_N = subscribers_N x lowest nonzero listed price_N + seats_N x plan C price_N   (monthly)
+    run_rate_N = the engine's MRR at the week's start (live subscriptions at their effective
+                 price times seats), read through the task container; when that read fails,
+                 subscribers_N x lowest nonzero listed price_N + seats_N x plan C price_N
     V_N        = cash_N + run_rate_N x 7/30 x min(weeks left after week N, H)
     credit_N   = sum over j < K of gamma^j x (V_{N+j+1} - V_{N+j}) / $1,000,000
     score_N    = clip(credit_N, +-C) / max(median |credit| so far, F), capped at +-3
@@ -178,9 +180,24 @@ while the agent is already playing later weeks and the engine serves the
 updated adapter from then on. `H` is `CEOBENCH_VALUE_HORIZON_WEEKS` (26 in
 `run.sh`, about six months of a subscription, which stands in for retention);
 the weeks left are `days // 7 - N`, so the valuation converges on cash as the
-episode ends. The estimate uses what the dashboard shows: the plan mix,
-promotions, and negotiated enterprise seat prices are not visible, so it is a
-floor on the subscription revenue, not the books.
+episode ends. The run-rate is the engine's own MRR: at each week start the
+week gate runs one SQL query against the runner's engine (`/query`, the
+same read-only endpoint the agent's `query` tool uses) through the task
+container, as root and outside the agent's shell, so the agent's
+observation and tools are untouched (`CEOBENCH_ENGINE_READS=0` turns the
+read off). The dashboard estimate remains the fallback; it sees neither the
+plan mix nor promotions nor negotiated seat prices, so it is a floor.
+
+Only a week's decision turns are reported: the ones whose tool call changed
+the company (prices, promotions, tiers, quotas, capacity, spend, targeting,
+research, enterprise deals, social posts, or `next-week`;
+`DECISION_CALLS` in `harness/agent.py`, matched in the bash command or in a
+script the agent wrote and ran). Turns that only queried the books, read
+docs, or wrote workspace files are recorded but not trained on. Under the
+earlier scheme every turn of a bad week carried the same negative score, so
+looking at the data was punished as much as the purchase it preceded, and
+the policy learned to skip the looking; the week's outcome now lands on the
+decisions in it. With a few decision turns a week the recipe's batch is 8.
 
 The credit spans `K = CEOBENCH_CREDIT_WEEKS` weeks (4) discounted by
 `gamma = CEOBENCH_CREDIT_DISCOUNT` (0.8) per week, so the week that pays for
@@ -562,9 +579,14 @@ signal is the next experiment, not a larger run of this one.
 - The untrained baseline with the benchmark's Anthropic simulator roles and
   more seeds (issue #428, acceptance criterion 1); replicates of the trained
   episode on other seeds.
-- A trained episode under the credit window, the score scaling, and the
-  critic warm-start (reward shaping above); attempt 3 tried the valuation
-  alone. Beyond those, a judged turn-level signal.
+- A trained episode under the full scheme above: decision-turn credit
+  over a four-week window, scaled, the engine's MRR in the valuation, and
+  the critic warm-started. Attempt 4 (`results/2026-09-14-...-attempt4-credit-window-partial/`,
+  trial log only) ran the credit window, the scaling, and the warm-start
+  without the decision-turn and MRR changes and was stopped at day 119 to
+  add them: cash $402,330 with 122 subscribers, every week's credit negative,
+  the actor updated from release 3 (day 49) on, and the same drift into
+  cost-cutting from week 13. Beyond those, a judged turn-level signal.
 - The engine stall: twice in attempt 1 and 3 (never in attempt 2) a
   `next-week` hung inside the engine's `step_week` after the last simulator
   call of the week returned, late in the game with no subscribers left. The
