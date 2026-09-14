@@ -175,7 +175,8 @@ class TinkerSDKClient(TinkerClient):
             from tinker_cookbook import weights
         except ImportError as exc:
             raise RuntimeError(
-                "serving Tinker checkpoints on a local engine needs tinker-cookbook: pip install tinker-cookbook"
+                "serving Tinker checkpoints on a local engine needs tinker-cookbook: "
+                "uv pip install 'reef-infra[tinker]'"
             ) from exc
         response = (
             self._service.create_rest_client()

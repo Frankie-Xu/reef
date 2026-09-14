@@ -155,8 +155,9 @@ every engine to load that directory under the adapter name it records for
 the scenario; the trainer itself never talks to the engines. Requests are addressed to that adapter by the weight surface, and
 the engines capture the sampled tokens and log probabilities exactly as they
 do for Slime. Rejected candidates load nothing; a restart reloads each
-scenario's committed adapter from disk before serving. Install the converter
-with ``pip install tinker-cookbook`` on the driver host.
+scenario's committed adapter from disk before serving. The converter is
+``tinker-cookbook``, pinned in the ``tinker`` extra; it brings torch and
+transformers, which the driver host running the engines already has.
 
 The trajectories then come from the local engine while Tinker computes the
 loss, so the base model and tokenizer on both sides must match, and the
