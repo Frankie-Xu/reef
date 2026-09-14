@@ -379,7 +379,12 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
                 "text": "caf\u00e9 <script>alert(1)</script>",
                 "requires": [
                     {"name": "SLACK_WEBHOOK", "kind": "env", "check": "SLACK_WEBHOOK"},
-                    {"name": "notifications", "kind": "permission", "check": "osascript -e '1 < 2'"},
+                    {
+                        "name": "notifications",
+                        "kind": "permission",
+                        "check": "osascript -e '1 < 2'",
+                        "prompt": 'Allow <notifications> & "more"',
+                    },
                     {"name": "calendar", "kind": "service"},
                 ],
             },
@@ -399,12 +404,13 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "<th>gate tokens</th><td>950 in, 75 out</td>" in verdict
     assert '<td class="id">/srv/reef/steps/agents/1</td>' in verdict and "candidate won 2 of 3" in verdict
     setup = _section(page, "Setup")
-    assert '<tr><td>SLACK_WEBHOOK</td><td>env</td><td class="id">SLACK_WEBHOOK</td></tr>' in setup
+    assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th></tr></thead>" in setup
+    assert '<tr><td>SLACK_WEBHOOK</td><td>env</td><td class="id">SLACK_WEBHOOK</td><td></td></tr>' in setup
     assert (
-        '<tr><td>notifications</td><td>permission</td><td class="id">osascript -e &#x27;1 &lt; 2&#x27;</td></tr>'
-        in setup
+        '<tr><td>notifications</td><td>permission</td><td class="id">osascript -e &#x27;1 &lt; 2&#x27;</td>'
+        "<td>Allow &lt;notifications&gt; &amp; &quot;more&quot;</td></tr>" in setup
     )
-    assert '<tr><td>calendar</td><td>service</td><td class="id"></td></tr>' in setup
+    assert '<tr><td>calendar</td><td>service</td><td class="id"></td><td></td></tr>' in setup
     assert "reef-pi setup" in setup and "carried from earlier steps" not in setup
     assert "refused by the step" not in setup
     # No proposal notes on the row: no Design and no Review section.
@@ -418,7 +424,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
 def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carries() -> None:
     """The same union the install script reads (required_by), shown by the step that named each item."""
     twilio = {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}
-    notify = {"name": "notify", "kind": "permission", "check": "test -d /"}
+    notify = {"name": "notify", "kind": "permission", "check": "test -d /", "prompt": "Allow notifications"}
     never = {"name": "never", "kind": "service"}
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     first = {
@@ -448,14 +454,14 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
         "rollback_target_release_id": "rel-2",
     }
     rows = [creation, first, rejected, second, promote]
-    twilio_row = '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td></tr>'
-    notify_row = '<tr><td>notify</td><td>permission</td><td class="id">test -d /</td></tr>'
+    twilio_row = '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>'
+    notify_row = '<tr><td>notify</td><td>permission</td><td class="id">test -d /</td><td>Allow notifications</td></tr>'
 
     assert "nothing to set up" in _section(build_release_page(0, rows), "Setup")
     own_only = _section(build_release_page(1, rows), "Setup")
     assert twilio_row in own_only and "carried from earlier steps" not in own_only
     candidate = _section(build_release_page(2, rows), "Setup")
-    assert '<tr><td>never</td><td>service</td><td class="id"></td></tr>' in candidate
+    assert '<tr><td>never</td><td>service</td><td class="id"></td><td></td></tr>' in candidate
     assert "TWILIO_SID" not in candidate and "carried from earlier steps" not in candidate
     pending = _section(build_release_page(3, rows), "Setup")
     own, _, carried = pending.partition("<h3>carried from earlier steps</h3>")
@@ -746,7 +752,10 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
         {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
     ]
     by_method = [
-        {"item": {"name": "phone", "kind": "sms"}, "reason": "kind must be one of ('permission', 'env', 'service')"}
+        {
+            "item": {"name": "phone", "kind": "sms", "prompt": "The number to text, with the <country> code"},
+            "reason": "kind must be one of ('permission', 'env', 'service')",
+        }
     ]
     row = {
         "release_id": "rel-1",
@@ -767,18 +776,19 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
     page.encode("ascii")
     setup = _section(page, "Setup")
     own, _, refused = setup.partition("<h3>refused by the step</h3>")
-    assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td></tr>' in own and "reef-pi setup" in own
-    assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>reason</th></tr></thead>" in refused
+    assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>' in own
+    assert "reef-pi setup" in own
+    assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>" in refused
     assert (
-        '<tr><td>bad name</td><td>env</td><td class="id">test -n &quot;$X&quot; &amp;&amp; echo 1 &lt; 2</td>'
+        '<tr><td>bad name</td><td>env</td><td class="id">test -n &quot;$X&quot; &amp;&amp; echo 1 &lt; 2</td><td></td>'
         "<td>requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$</td></tr>" in refused
     )
     assert (
-        '<tr><td>&quot;SLACK_WEBHOOK&quot;</td><td></td><td class="id"></td>'
+        '<tr><td>&quot;SLACK_WEBHOOK&quot;</td><td></td><td class="id"></td><td></td>'
         "<td>requires[0] must be an object with a name and a kind</td></tr>" in refused
     )
     assert (
-        '<tr><td>phone</td><td>sms</td><td class="id"></td>'
+        '<tr><td>phone</td><td>sms</td><td class="id"></td><td>The number to text, with the &lt;country&gt; code</td>'
         "<td>kind must be one of (&#x27;permission&#x27;, &#x27;env&#x27;, &#x27;service&#x27;)</td></tr>" in refused
     )
     # The backend's records first, then the method's.

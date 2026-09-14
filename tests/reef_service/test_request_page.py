@@ -232,7 +232,10 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
 def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_and_the_link() -> None:
     MODULE.read_text(encoding="utf-8").encode("ascii")
     text = 'text me <script>alert(1)</script> & "quote" café'
-    requires = [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}, {"name": "<x>", "kind": "service"}]
+    requires = [
+        {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
+        {"name": "<x>", "kind": "service", "prompt": "Sign in to <x>"},
+    ]
     notes = {"failure": "<b>failed</b>", "review": {"verdict": "partial", "covered": [], "uncovered": ["<i>off</i>"]}}
     row = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
     page = build_request_page(
@@ -244,7 +247,13 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     page.encode("ascii")
     assert "<script>" not in page and "<b>" not in page and "<i>" not in page
     assert "text me &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quote&quot; caf&#233;" in page
-    assert "needs from your machine: TWILIO_SID (env), &lt;x&gt; (service)" in page
+    # The person's own items, as the version page tables them: name, kind, check and the prompt setup shows.
+    request = _section(page, "Request")
+    assert "<p>needs from your machine:</p>" in request
+    assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th></tr></thead>" in request
+    assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>' in request
+    assert '<tr><td>&lt;x&gt;</td><td>service</td><td class="id"></td><td>Sign in to &lt;x&gt;</td></tr>' in request
+    assert "needs from your machine" not in build_request_page(_record(text=text), [CREATION], now=1_100.0)
     assert "&lt;b&gt;failed&lt;/b&gt;" in page and "<li>&lt;i&gt;off&lt;/i&gt;</li>" in page
     assert 'href="/reef/harness/releases/1/page?scenario=a+b&amp;token=t%26%3C"' in page
     queued = build_request_page(_record(text=text), [CREATION], now=1_100.0)

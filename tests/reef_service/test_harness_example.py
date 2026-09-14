@@ -342,18 +342,18 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 120 s and 16384 tokens and reviews with 60 s and 8192, the failure path asks
-    with 60 s and 4096 (a thinking model spends part of each budget on its reasoning before the JSON), unless
+    """The request path asks with 120 s and 16384 tokens and reviews with 60 s and 16384, the failure path asks
+    with 60 s and 8192 (a thinking model spends part of each budget on its reasoning before the JSON), unless
     REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is ignored
     rather than turning the step into an error."""
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 8192}]
+    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 16384}]
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
-    assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 4096}]
+    assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 8192}]
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", "900")
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
@@ -362,7 +362,7 @@ def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evoluti
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}, {"timeout_s": 900.0, "max_tokens": 8192}]
+    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 16384}] * 2
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
@@ -463,15 +463,36 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     assert "turn it on and off" in request_prompt and "never a rule that assumes the state holds" in request_prompt
     assert "4. Then write the entries: complete for what the request implies" in request_prompt
     assert "nothing the request did not ask for" in request_prompt and "smallest change" not in request_prompt
-    assert '{"name": "TWILIO_AUTH_TOKEN", "kind": "env"}' in request_prompt
-    assert '"kind": "permission", "check": "ls ~/Library/Mail"' in request_prompt
-    assert '"kind": "service", "check": "gh auth status"' in request_prompt
+    # What only the user can provide is declared, with a prompt for setup: the extension never asks for it,
+    # stores it or hardcodes it, and reads an env item's value from the environment at run time.
+    assert "3. List what only the user can provide (a phone number, a credential, a permission, an account)" in (
+        request_prompt
+    )
+    assert "read at run time from process.env.NAME" in request_prompt
+    assert "never asks the user for it, never stores it in a file of its own and never hardcodes it" in request_prompt
+    assert "the extension itself never asks" in request_prompt and "once, at install time" in request_prompt
+    assert (
+        '{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}'
+        in request_prompt
+    )
+    assert (
+        '{"name": "messages-automation", "kind": "permission", "check": "osascript -e \'tell application '
+        '\\"Messages\\" to get name\'", "prompt": "Allow the agent to control Messages when macOS asks"}'
+        in request_prompt
+    )
+    assert (
+        '{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to the GitHub CLI"}'
+        in request_prompt
+    )
     assert '{"design": "<the design>"}' in request_prompt and "null" not in request_prompt
     # The review reads the request, fenced as data, the design and the entries as written.
     assert REQUEST["text"] in review_prompt and "[BEGIN user request" in review_prompt
     assert DESIGN in review_prompt and '"id": "run-tests"' in review_prompt and "# improved" in review_prompt
     assert '"verdict": "complete" or "partial"' in review_prompt
-    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 8192}]
+    assert "a value the user must provide that the extension asks for or stores itself instead of declaring" in (
+        review_prompt
+    )
+    assert model.params_of == [{"timeout_s": 120.0, "max_tokens": 16384}, {"timeout_s": 60.0, "max_tokens": 16384}]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
     model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
@@ -585,6 +606,52 @@ def test_propose_brings_an_env_check_to_its_variable_before_the_shape_check(evol
     assert "refused_requires" not in proposal.notes
     # The review sees the requires items beside the entries.
     assert '"check": "gh auth status"' in model.prompts[1] and '"name": "SMS_TO"' in model.prompts[1]
+
+
+def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> None:
+    """A prompt is the sentence setup shows when it asks for the item: kept on the request mapping stripped and
+    cut at 200 characters, dropped when empty; the env normalization runs on the same item first."""
+    check = "osascript -e 'tell application \"Messages\" to get name'"
+    requires = [
+        {"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "  The phone number to text, with the country code "},
+        {"name": "messages-automation", "kind": "permission", "check": check, "prompt": "Allow " + "x" * 250},
+        {"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "   "},
+        {"name": "SMS_FROM", "kind": "env", "check": 'test -n "$SMS_FROM"', "prompt": "The number to text from"},
+    ]
+    request = dict(REQUEST)
+    model = Model(designed(skill("sms"), requires=requires), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    assert request["requires"] == [
+        {"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"},
+        {"name": "messages-automation", "kind": "permission", "check": check, "prompt": ("Allow " + "x" * 250)[:200]},
+        {"name": "github-cli", "kind": "service", "check": "gh auth status"},
+        {"name": "SMS_FROM", "kind": "env", "check": "SMS_FROM", "prompt": "The number to text from"},
+    ]
+    assert "refused_requires" not in proposal.notes and "undeclared_env" not in proposal.notes
+    # The review sees the prompts beside the items.
+    assert '"prompt": "The number to text from"' in model.prompts[1]
+    # A refused item is recorded as written, its prompt included.
+    refused = [{"name": "phone", "kind": "sms", "prompt": "The number to text"}]
+    model = Model(designed(skill("sms"), requires=refused), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
+    assert proposal.notes["refused_requires"] == [
+        {"item": refused[0], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"}
+    ]
+
+
+def test_the_request_prompts_requires_examples_are_items_the_step_keeps_with_their_prompts(evolution) -> None:
+    """The worked example of each kind in the prompt is JSON the shape check admits, and a reply that copies it
+    lands on the request mapping as written, prompt included."""
+    model = Model(designed(skill("run-tests")), json.dumps(REVIEW))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    lines = [line for line in model.prompt.splitlines() if line.startswith(("- env,", "- permission,", "- service,"))]
+    examples = [json.loads(line[line.index("{") :]) for line in lines]
+    assert [item["kind"] for item in examples] == ["env", "permission", "service"]
+    assert all(item["prompt"] for item in examples) and "check" not in examples[0]
+    request = dict(REQUEST)
+    model = Model(designed(skill("run-tests"), requires=examples), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    assert request["requires"] == examples and "refused_requires" not in proposal.notes
 
 
 def test_propose_records_the_requires_items_it_could_not_honor_with_the_reason(evolution) -> None:

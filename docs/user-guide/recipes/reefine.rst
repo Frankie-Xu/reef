@@ -21,41 +21,47 @@ state under ``.reef/reefine/``. For custom deployments, copy
 `Reefine tutorial <https://github.com/Human-Agent-Society/reef/tree/main/tutorials/reefine>`__
 includes installation, bug-fix and research demos, and recorded measurements.
 
-From the ask to the install
----------------------------
+How it works
+------------
 
 1. Ask. In a ``reef-pi`` session, ``/reef-harness <what it should do>`` has
    the model think the change through before anything is filed: when it
-   triggers, what state the harness must know and how it learns it, what you
-   must set up. When an open point would change what gets built, it asks you
-   up to three questions, each with concrete options, then files your
-   original words with the answers as clarifications; ``--direct`` as the
-   first word files at once. From the shell, ``reef-pi harness "<text>"``
-   posts the same training instruction to ``POST /reef/train``; add
+   triggers, what state the harness must know and how it learns it, what
+   you must provide. When an open point would change what gets built, it
+   asks you up to three questions, each with concrete options, then files
+   your original words with the answers as clarifications (``--direct`` as
+   the first word files at once). From the shell, ``reef-pi harness
+   "<text>"`` posts the same instruction to ``POST /reef/train``; add
    ``--wait`` to stay until the step settles. Either ask prints the
-   request's page link (``GET /reef/harness/requests/<id>/page`` with the
-   scenario and the token as query parameters): open it in a browser and it
-   reloads every five seconds, naming the step's state, until the verdict is
-   on it.
-2. Step. In ``training-mode: manual`` the deployment runs one evolve step
-   for each accepted instruction. The served model designs the change first
-   (it restates the request, names what triggers the behavior and what state
-   the harness must know and where each comes from, and lists what only you
-   can provide), writes the entries, and reviews them against the request in
-   a second call. The gate then runs the candidate on the health task.
-3. Verdict. The session that asked reports the verdict when the step
-   settles, and ``reef-pi harness ... --wait`` prints the same line: published
-   as a release, ready but waiting for your review because it changes an
-   extension, rejected by the gate, or skipped with the reason. Each names
-   the next action, and the points the review left uncovered follow it.
-   ``/reef-versions <step>`` and ``reef-pi page <step>`` show the step's page.
-4. Promote and set up. A release that touches a ``code_extension`` waits as
-   pending until ``/reef-versions <step> promote`` (or
-   ``POST /reef/scenarios/{scenario}/promote``). When the release needs
-   something from your machine, ``reef-pi setup`` lists the ``requires``
-   items and runs a check only after you confirm it.
-5. Install. Restart ``reef-pi``: the update notice offers the new head, and
-   the install refuses a release whose requirements are not checked off.
+   request's page link (``GET /reef/harness/requests/<id>/page``), which
+   reloads every five seconds, naming the step's state, until the verdict
+   is on it.
+2. Step. In ``training-mode: manual`` the service runs one evolve step for
+   each accepted instruction. The served model writes a design first (the
+   request in one sentence, what triggers the behavior, what state the
+   harness must know and where it comes from, what only you can provide as
+   ``requires`` items with a ``prompt`` each), then the entries, and a
+   second call reviews them against the request. The gate runs the
+   candidate on the health task: it publishes when the tree still works,
+   and the step's page carries the design and the review either way.
+3. Verdict. The session that asked reports it in the chat when the step
+   settles, and ``reef-pi harness ... --wait`` prints the same line:
+   published as a release, ready but waiting for your review because it
+   changes an extension, rejected by the gate, or skipped with the reason,
+   followed by the points the review left uncovered.
+4. Promote. A release that touches a ``code_extension`` waits as pending.
+   The session links its page (``/reef-versions <step>``, ``reef-pi page
+   <step>``) and offers to promote it once you have read it;
+   ``/reef-versions <step> promote`` does the same by hand.
+5. Install and set up. The session offers to install a published or
+   promoted release (``reef-pi update`` from the shell), then collects what
+   the change needs: for each unmet ``requires`` item it shows the item's
+   ``prompt`` and asks for the value of an ``env`` item, kept in
+   ``.reef-harness-env`` beside the install, or for a confirmation before a
+   ``permission`` or ``service`` check runs (``reef-pi setup`` asks the
+   same from the shell). A release with an unmet item is never installed.
+6. Reload. Type ``/reload`` in the session, or restart ``reef-pi``, and the
+   new release is the harness you are talking to.
 
 Behavior and configuration
 --------------------------
@@ -70,6 +76,15 @@ Behavior and configuration
   alone and publishes it when every task scores at least
   ``evolution.floor_score`` (``1.0``). The current release is not run, and an
   episode that could not run misses the floor.
+* What only you can provide (a phone number, a credential, a permission, an
+  account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
+  ``prompt`` is one sentence of at most 200 characters that setup shows when
+  it asks for the item; the Setup table of the step's page has a prompt
+  column. An ``env`` item's value is read at run time from
+  ``process.env.NAME``: the proposer is told that an extension never asks
+  you for it in the session, never stores it in a file of its own and never
+  hardcodes it, and its review lists a value the extension asks for or
+  stores itself as uncovered.
 
 The health floor
 ----------------
@@ -128,11 +143,12 @@ proposers, seeds, execution settings, and publication policies.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
 call budgets. Defaults are 120 seconds and 16384 reply tokens for an
-instruction, 60 seconds and 8192 tokens for its review, and 60 seconds and
-4096 tokens for failure-driven proposals; the reply budgets are sized for a
+instruction, 60 seconds and 16384 tokens for its review, and 60 seconds and
+8192 tokens for failure-driven proposals; the reply budgets are sized for a
 thinking model, which spends part of the budget on its reasoning before the
-JSON. The tutorial's ``run.sh`` raises the timeout to 900 seconds for its
-local model and pins the 16384 token budget.
+JSON (a review budget of 8192 came back empty on one). The tutorial's
+``run.sh`` raises the timeout to 900 seconds for its local model and pins
+the 16384 token budget.
 
 Migration
 ---------

@@ -3,9 +3,11 @@
 A request is answered design first: the served model restates it, names what
 triggers the behavior, what state the harness must know and what only the
 user can provide, then writes the entries; a second call reviews the entries
-against the request. Without an instruction the proposer learns from failing
-reports. The shared backend owns admission, evaluation, publication, and
-extension review.
+against the request. What only the user can provide is declared as a
+``requires`` item with a prompt sentence for setup, never asked for by the
+extension at run time. Without an instruction the proposer learns from
+failing reports. The shared backend owns admission, evaluation, publication,
+and extension review.
 """
 
 from __future__ import annotations
@@ -61,6 +63,9 @@ REVIEW_VERDICTS = ("complete", "partial")
 #: How many covered or uncovered points a review keeps: the record is a summary, not a transcript.
 _REVIEW_ITEMS = 20
 
+#: How much of a requires item's prompt the step keeps: one sentence, the cap the wire contract puts on it.
+_PROMPT_CHARS = 200
+
 #: A shell variable name: what an env item's check (else its name) must be, and what an extension reads.
 _VARIABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -87,8 +92,10 @@ REQUEST_PROMPT = (
     "a command the user runs, a session event, an environment variable, a check. A request that names a "
     "state (away, busy, offline, focused, ...) needs an explicit way for the user to turn it on and off, "
     "an agent_command or a tool; never a rule that assumes the state holds.\n"
-    "3. List what only the user can provide (a credential, a service, a phone number); those become the "
-    "requires items described below.\n"
+    "3. List what only the user can provide (a phone number, a credential, a permission, an account): each "
+    "is a requires item, described below, with a prompt sentence that tells the user what to enter or "
+    "grant. The value of an env item is read at run time from process.env.NAME; an extension never asks "
+    "the user for it, never stores it in a file of its own and never hardcodes it.\n"
     "4. Then write the entries: complete for what the request implies, and nothing the request did not "
     "ask for.\n\n"
     "Current harness entries (id, kind, and the start of each body):\n{entries}\n\n"
@@ -109,14 +116,19 @@ REQUEST_PROMPT = (
     "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
     "The id of a named kind must equal its config name. Give every entry you write an id of its own, "
     "a lowercase name, a rules entry too.\n"
-    "When the change needs something only the user can set up on their machine, end the array with one "
-    'more object, {{"requires": [...]}}, one item per need. The kinds, each with an example:\n'
+    "When the change needs something only the user can provide or set up on their machine, end the array "
+    'with one more object, {{"requires": [...]}}, one item per need. Each item carries a prompt: one '
+    "sentence, under 200 characters, that reef-pi setup shows when it asks the user for the value or the "
+    "permission, once, at install time; the extension itself never asks. The kinds, each with an example:\n"
+    "- env, a value the user enters, which the extension reads at run time from process.env.NAME; name is "
+    "the variable name, there is no check, and the value is never written into the tree: "
+    '{{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}}\n'
     "- permission, an OS permission the user grants; check is a shell command that exits 0 once granted: "
-    '{{"name": "full-disk-access", "kind": "permission", "check": "ls ~/Library/Mail"}}\n'
-    "- env, a variable the extension reads from process.env; name is the variable name, there is no "
-    'check, and its value is never written anywhere: {{"name": "TWILIO_AUTH_TOKEN", "kind": "env"}}\n'
+    '{{"name": "messages-automation", "kind": "permission", "check": "osascript -e \'tell application '
+    '\\"Messages\\" to get name\'", "prompt": "Allow the agent to control Messages when macOS asks"}}\n'
     "- service, an account or endpoint the user connects; check is a shell command that exits 0 once "
-    'connected: {{"name": "github-cli", "kind": "service", "check": "gh auth status"}}\n'
+    'connected: {{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to '
+    'the GitHub CLI"}}\n'
     "Omit the object when the change needs nothing."
 )
 
@@ -130,7 +142,8 @@ REVIEW_PROMPT = (
     "List what the request asks for or implies that the entries cover, and what they leave uncovered: "
     "a trigger with no source, a state the user has no way to turn on and off, a step the request names "
     "that no entry performs, a variable an extension reads that no requires item names (PI_OFFLINE, "
-    "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none). "
+    "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none), a value the user must "
+    "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
     "Respond with one JSON object and nothing else:\n"
     '{{"verdict": "complete" or "partial", "covered": ["<one point per item>"], '
     '"uncovered": ["<one point per item>"]}}\n'
@@ -201,7 +214,7 @@ def propose(
         "use a new lowercase name to add one."
     )
     # The failure path keeps its contract: a failed call is a skipped step, with the reason in the log alone.
-    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(4096), timeout_s=_timeout_s(60.0))
+    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(8192), timeout_s=_timeout_s(60.0))
     if reply is None:
         return None
     proposals = _without_reefs_own(_parse_proposal(reply) or ())
@@ -233,7 +246,7 @@ def _answer_request(
     and its notes carry the reason under ``failure``."""
     prompt = _request_prompt(nodes, request, samples, entries)
     # An extension is longer than a skill, and a thinking model spends part of the budget on its reasoning: a
-    # request gets four times the failure path's reply budget and twice its wait.
+    # request gets twice the failure path's reply budget and twice its wait.
     reply, failure = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
     if reply is None:
         return StepProposal((), {"failure": failure})
@@ -359,8 +372,8 @@ def _review(
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2),
     )
-    # A reasoning model spends the budget on its reasoning first; 2048 came back with no text live.
-    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(8192), timeout_s=_timeout_s(60.0))
+    # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live.
+    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(60.0))
     return None if reply is None else _parse_review(reply)
 
 
@@ -439,8 +452,8 @@ def _max_tokens(default: int) -> int:
     """The reply budget of one proposer call: ``REEF_PROPOSER_MAX_TOKENS`` when set, else the caller's default.
 
     A thinking model spends the budget on its reasoning first, and a reply cut
-    there has no text: the request path's default is sized for that, and a
-    local model may still need more."""
+    there has no text: the defaults are sized for that, and a local model may
+    still need more."""
     raw = os.environ.get("REEF_PROPOSER_MAX_TOKENS", "").strip()
     try:
         return int(raw) if raw else default
@@ -519,7 +532,8 @@ def _parse_proposal(reply: str, kinds: Sequence[str] = ("skill",)) -> list[Propo
 
 def _parse_requires(reply: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The items of every ``{"requires": [...]}`` object in the reply: the ones the shape check admission runs
-    takes, an env check brought to its variable name first, and the ones it refuses, each with the reason."""
+    takes, an env check brought to its variable name and the prompt to one sentence first, and the ones it
+    refuses, each with the reason."""
     kept: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
     for value in _items_in(reply):
@@ -535,13 +549,31 @@ def _parse_requires(reply: str) -> tuple[list[dict[str, Any]], list[dict[str, An
 
 
 def _screened_requires_item(item: Any) -> tuple[dict[str, Any] | None, str | None]:
-    """One requires item through the shape check admission runs, an env check brought to its variable name
-    first: the parsed item and no reason, or ``None`` and the reason it was refused."""
+    """One requires item through the shape check admission runs, an env check brought to its variable name and
+    the prompt to what the record keeps first: the parsed item with its prompt and no reason, or ``None`` and
+    the reason it was refused."""
+    shaped = _trimmed_prompt(_named_env_check(item))
     try:
-        (parsed,) = parse_requires([_named_env_check(item)])
+        (parsed,) = parse_requires([shaped])
     except ValueError as error:
         return None, str(error)
+    # The shape check drops the keys it does not know: the prompt rides beside its output until it keeps it.
+    if isinstance(shaped, dict) and "prompt" in shaped and "prompt" not in parsed:
+        parsed["prompt"] = shaped["prompt"]
     return parsed, None
+
+
+def _trimmed_prompt(item: Any) -> Any:
+    """An item's prompt brought to what setup shows: stripped, cut at ``_PROMPT_CHARS``, dropped when empty.
+
+    Only a text prompt is trimmed; anything else stays as written, for
+    :func:`parse_requires` to refuse or drop by its own rule."""
+    if not isinstance(item, dict) or not isinstance(item.get("prompt"), str):
+        return item
+    prompt = item["prompt"].strip()[:_PROMPT_CHARS].strip()
+    if not prompt:
+        return {key: value for key, value in item.items() if key != "prompt"}
+    return {**item, "prompt": prompt}
 
 
 def _named_env_check(item: Any) -> Any:
