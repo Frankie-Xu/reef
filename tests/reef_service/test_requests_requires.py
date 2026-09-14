@@ -28,12 +28,15 @@ def test_the_request_prompt_says_how_to_name_what_the_change_needs(evolution) ->
     model = canned(request_reply(RULES))
     evolution.propose(NODES, (), model, requests=(dict(REQUEST),))
     prompt = model.prompt
-    # One worked example per kind; an env item is the variable name alone, its value never written.
+    # One worked example per kind, each with a prompt; an env item is the variable name alone, its value never
+    # written into the tree.
     assert '{"requires": [...]}' in prompt
     for kind in ("permission", "env", "service"):
         assert f'"kind": "{kind}"' in prompt
+    assert prompt.count('"prompt": "') == 3 and "Each item carries a prompt" in prompt
     assert (
-        "its value is never written anywhere" in prompt and "Omit the object when the change needs nothing" in prompt
+        "the value is never written into the tree" in prompt
+        and "Omit the object when the change needs nothing" in prompt
     )
 
 

@@ -669,12 +669,12 @@ which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
 and no ``current_score``, ``proposal_notes.failure`` as ``proposer failure``
 when the step recorded one, and the step record directory when
 ``evolution.step_record_dir`` is set), Setup (the request's ``requires`` with
-name, kind and check, then the items the release carries from earlier steps
-in its chain, the same union the install script and ``reef-<adapter> setup``
-read; a rejected or skipped row lists only its own items, since its release
-id is the head's; then, under "refused by the step", the items the step
-dropped from ``training_request.refused_requires`` and
-``proposal_notes.refused_requires``, each as written with its reason;
+name, kind, check and prompt, then the items the release carries from
+earlier steps in its chain, the same union the install script and
+``reef-<adapter> setup`` read; a rejected or skipped row lists only its own
+items, since its release id is the head's; then, under "refused by the
+step", the items the step dropped from ``training_request.refused_requires``
+and ``proposal_notes.refused_requires``, each as written with its reason;
 nothing when all are empty) and Chain (the parent release, this release,
 and its children: the steps gated on it, won, lost or pending, and a promote
 or rollback made on it; a rejected or skipped step published nothing, so its

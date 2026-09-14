@@ -365,31 +365,35 @@ def _verdict(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[
 
 
 def _requires_table(items: Sequence[Mapping[str, Any]]) -> str:
+    """The ``requires`` items as setup reads them: name, kind, the check as written and the prompt setup shows."""
     rows = "".join(
         f"<tr><td>{_esc(item.get('name'))}</td><td>{_esc(item.get('kind'))}</td>"
-        f"<td class=\"id\">{_esc(item.get('check') or '')}</td></tr>"
+        f"<td class=\"id\">{_esc(item.get('check') or '')}</td><td>{_esc(item.get('prompt') or '')}</td></tr>"
         for item in items
     )
-    return f"<table><thead><tr><th>name</th><th>kind</th><th>check</th></tr></thead><tbody>{rows}</tbody></table>"
+    return (
+        "<table><thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
 
 
 def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
-    """The ``refused_requires`` records: each item as it was written (name, kind, check) and why it was dropped."""
+    """The ``refused_requires`` records: each item as written (name, kind, check, prompt) and why it was dropped."""
     rows = []
     for entry in entries:
         # The backend and the method record {item, reason}; a record without "item" is read as the item itself.
         item = entry.get("item", entry)
         if isinstance(item, Mapping):
-            cells = (item.get("name"), item.get("kind"), item.get("check") or "")
+            cells = (item.get("name"), item.get("kind"), item.get("check") or "", item.get("prompt") or "")
         else:
             # A malformed item need not be an object at all; its JSON stands where the name would.
-            cells = (json.dumps(item, sort_keys=True), "", "")
+            cells = (json.dumps(item, sort_keys=True), "", "", "")
         rows.append(
             f'<tr><td>{_esc(cells[0])}</td><td>{_esc(cells[1])}</td><td class="id">{_esc(cells[2])}</td>'
-            f"<td>{_esc(entry.get('reason'))}</td></tr>"
+            f"<td>{_esc(cells[3])}</td><td>{_esc(entry.get('reason'))}</td></tr>"
         )
     return (
-        "<table><thead><tr><th>name</th><th>kind</th><th>check</th><th>reason</th></tr></thead>"
+        "<table><thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 

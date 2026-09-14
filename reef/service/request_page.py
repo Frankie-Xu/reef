@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlencode
 
-from reef.service.release_page import STYLE, _esc, mutations_of, verdict_of
+from reef.service.release_page import STYLE, _esc, _requires_table, mutations_of, verdict_of
 from reef.train.cordis_backend.backend import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -93,8 +93,8 @@ def _request(record: Mapping[str, Any]) -> str:
     requires = payload.get("requires")
     items = [item for item in requires if isinstance(item, Mapping)] if isinstance(requires, Sequence) else []
     if items:
-        named = ", ".join(f"{item.get('name')} ({item.get('kind')})" for item in items)
-        parts.append(f"<p>needs from your machine: {_esc(named)}</p>")
+        # The person's own items, in the version page's table: name, kind, check and the prompt setup shows.
+        parts.append(f"<p>needs from your machine:</p>\n{_requires_table(items)}")
     return "\n".join(parts)
 
 
