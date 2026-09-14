@@ -51,9 +51,13 @@ chat template. Sampled IDs and log probabilities come directly from Tinker;
 the backend never recovers training tokens by tokenizing decoded output.
 
 Reef's normal ``WeightTrainingRecipe`` and ``RuntimeCandidateBackend`` drive the
-integration. The backend is one training runtime and one inference runtime
-over a shared checkpoint store, like every other pair Reef schedules; the
-store is what ``state-dir`` holds. Backend-neutral step scheduling retains comparison sets, explicit
+integration. The backend is one training runtime (``reef.train.tinker_backend``)
+and one inference runtime (``reef.inference.tinker``), like every other pair
+Reef schedules. They share nothing in process: each candidate's artifact
+carries a ``tinker-checkpoint.json`` manifest naming its remote training
+state and sampler, the inference side serves the sampler an artifact names,
+and the training side branches from the checkpoint Reef last committed,
+which ``state-dir`` remembers across restarts. Backend-neutral step scheduling retains comparison sets, explicit
 batch sizes, shuffling, epochs, and partial/drop/error remainder policies.
 ``training.options.batch-size`` supplies the configured optimizer batch size.
 Only exact-version samples are admitted: ``max_staleness`` must be zero.

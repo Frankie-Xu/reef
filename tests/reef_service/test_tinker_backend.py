@@ -17,6 +17,7 @@ from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
 from reef.cli import main
 from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
+from reef.inference.tinker import SampleResult, TinkerInferenceRuntime, TinkerSampler
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import TrainingRuntimeError, UpstreamStatusError
 from reef.service.deploy import orchestrator
@@ -28,16 +29,17 @@ from reef.train.algos.registry import register_preparer, unregister_preparer
 from reef.train.algos.signals import StepScheduling, StepSignal
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
-from reef.train.tinker_backend.client import SampleResult, TinkerClient
+from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.inference import TinkerInferenceRuntime
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_step
-from reef.train.tinker_backend.runtime import TinkerCheckpointStore, TinkerTrainingRuntime
+from reef.train.tinker_backend.runtime import TinkerTrainingRuntime
 
 
-class RemoteClient(TinkerClient):
+class RemoteClient(TinkerClient, TinkerSampler):
+    """One offline double for both SDK boundaries: the trainer's and the sampler's."""
+
     def __init__(self):
         self.initializations = 0
         self.calls = []
@@ -66,8 +68,8 @@ class RemoteClient(TinkerClient):
     def decode(self, tokens):
         return "hello"
 
-    def sample(self, checkpoint, prompt, params):
-        self.sampled.append((checkpoint, prompt, params))
+    def sample(self, sampler_path, prompt, params):
+        self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
 
     def download(self, checkpoint, directory):
@@ -107,12 +109,12 @@ def preparer():
 
 
 class Deployment:
-    """The training runtime, inference runtime and the store they share, as the factory builds them."""
+    """The training and inference runtimes as the factory builds them: two SDK boundaries, no shared object."""
 
     def __init__(self, config, client):
-        self.store = TinkerCheckpointStore("Qwen/Qwen3-8B", config, client)
-        self.training = TinkerTrainingRuntime(self.store)
-        self.inference = TinkerInferenceRuntime(self.store)
+        self.config = config
+        self.training = TinkerTrainingRuntime("Qwen/Qwen3-8B", config, client)
+        self.inference = TinkerInferenceRuntime(client, base_model="Qwen/Qwen3-8B")
 
     def backend(self, preparer):
         return RuntimeCandidateBackend(self.training, preparer.name, inference_runtime=self.inference)
@@ -176,12 +178,12 @@ def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, pr
     batch = TrainingBatch("batch", (item(original),))
     step = backend.prepare_step(batch, {}, 0)
     assert value.inference.current_runtime_load_id() == original
-    assert value.store.snapshot(base)[1] == original
+    assert value.inference.snapshot(base)[1] == original
     result = backend.settle_step(step, decision(True))
     assert value.inference.current_runtime_load_id() == original
     assert value.inference.serving_runtime_load_id() == result.runtime_load_id != original
     assert not value.inference.inference_admission_status["open"]
-    assert value.store.snapshot(base)[1] == original
+    assert value.inference.snapshot(base)[1] == original
     published = Artifact.local(Path(result.checkpoint_path))
     WeightLoader().activate(published, value.inference)
     assert not value.inference.inference_admission_status["open"]
@@ -190,6 +192,7 @@ def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, pr
     backend.acknowledge_commit(1, result.training_job_id)
     assert value.inference.current_runtime_load_id() == result.runtime_load_id
     assert value.inference.inference_admission_status["open"]
+    assert value.training.incumbent.state_path == "tinker://update-1/state"
     assert len(client.calls) == 1
 
 
@@ -215,12 +218,12 @@ def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime,
     value, client = runtime
     candidate = value.training.train_candidate(prepared(value, preparer).payload)
     value.inference.activate_candidate(candidate)
-    assert value.store.pending is not None
+    assert value.inference.pending_training_job_id == candidate.training_job_id
     # Reloading a different head after a failed publication drops the pending candidate.
     value.inference.activate_checkpoint(empty_artifact(tmp_path))
-    assert value.store.pending is None
+    assert value.inference.pending_training_job_id is None
     value.shutdown()
-    restored = Deployment(value.store.config, client)
+    restored = Deployment(value.config, client)
     try:
         restored.inference.activate_checkpoint(Artifact.local(Path(candidate.checkpoint_path)))
         restored.backend(preparer).acknowledge_commit(1, candidate.training_job_id)
@@ -238,28 +241,35 @@ def test_live_versions_and_rollback_bind_exact_snapshots(runtime, preparer, tmp_
     activated = value.inference.activate_candidate(candidate)
     value.backend(preparer).acknowledge_commit(1, candidate.training_job_id)
     live = Artifact(LiveWeightArtifactRef("live", "release", "parent", activated.runtime_load_id), None)
-    assert value.store.snapshot(live)[0].state_path == "tinker://update-1/state"
+    assert value.inference.snapshot(live)[0] == "tinker://update-1/sampler"
+    assert value.training.incumbent.state_path == "tinker://update-1/state"
     base = empty_artifact(tmp_path)
+    value.training.restore_checkpoint(base)
     WeightLoader().load(base, value.inference)
     WeightLoader().activate(base, value.inference, source=base)
-    assert value.store.snapshot(live)[1] == activated.runtime_load_id
+    assert value.training.incumbent.state_path == "tinker://base/state"
+    assert value.inference.snapshot(live)[1] == activated.runtime_load_id
     assert value.inference.current_runtime_load_id() != activated.runtime_load_id
     with pytest.raises(ValueError, match="incarnation"):
-        value.store.snapshot(Artifact(LiveWeightArtifactRef("live", "x", None, "old:0"), None))
+        value.inference.snapshot(Artifact(LiveWeightArtifactRef("live", "x", None, "old:0"), None))
 
 
 def test_exclusive_state_dir_and_model_validation(runtime, tmp_path):
     value, _ = runtime
     with pytest.raises(ValueError, match="already owned"):
-        TinkerCheckpointStore("Qwen/Qwen3-8B", value.store.config, RemoteClient())
+        TinkerTrainingRuntime("Qwen/Qwen3-8B", value.config, RemoteClient())
     other = TinkerCheckpoint("other/model", 32, "tinker://other/state", "tinker://other/sampler")
     other.write(tmp_path / "other")
-    with pytest.raises(ValueError, match="model/rank"):
+    with pytest.raises(ValueError, match="base model"):
         value.inference.activate_checkpoint(Artifact.local(tmp_path / "other"))
+    with pytest.raises(ValueError, match="model/rank"):
+        value.training.restore_checkpoint(Artifact.local(tmp_path / "other"))
     (tmp_path / "other" / "tinker-checkpoint.json").unlink()
     (tmp_path / "other" / "weights.bin").write_bytes(b"not a manifest")
     with pytest.raises(ValueError, match="missing"):
-        value.store.snapshot(Artifact.local(tmp_path / "other"))
+        value.inference.snapshot(Artifact.local(tmp_path / "other"))
+    with pytest.raises(ValueError, match="missing"):
+        value.training.restore_checkpoint(Artifact.local(tmp_path / "other"))
 
 
 def test_exact_chat_tokens_and_buffered_sse(runtime, tmp_path):
@@ -516,9 +526,10 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
         assert scenario.committed_training_job_id
         assert runtime.inference.inference_admission_status["open"]
         assert (
-            runtime.store.snapshot(scenario.artifact_for_version(published.release_id))[0].state_path
-            == "tinker://update-1/state"
+            runtime.inference.snapshot(scenario.artifact_for_version(published.release_id))[0]
+            == "tinker://update-1/sampler"
         )
+        assert runtime.training.incumbent.state_path == "tinker://update-1/state"
     finally:
         first.close()
 
@@ -529,13 +540,15 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
         assert scenario.scenario_step == 1
         assert scenario.trainer.state == {"steps": 1}
         assert (
-            restored.store.snapshot(scenario.artifact_for_version(published.release_id))[1]
+            restored.inference.snapshot(scenario.artifact_for_version(published.release_id))[1]
             == restored.inference.current_runtime_load_id()
         )
+        assert restored.training.incumbent.state_path == "tinker://update-1/state"
         scenario.rollback(base)
         assert scenario.scenario_step == 2
         current = scenario.artifact_for_version(scenario.current_artifact_ref().release_id)
-        assert restored.store.snapshot(current)[0].state_path == "tinker://base/state"
+        assert restored.inference.snapshot(current)[0] is None
+        assert restored.training.incumbent.state_path == "tinker://base/state"
     finally:
         second.close()
 
@@ -592,9 +605,9 @@ def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, pr
     rollback = Artifact.local(base.local_path)
     latest = inference.activate_checkpoint(rollback)
     assert int(first.split(":")[-1]) < int(selected.runtime_load_id.split(":")[-1]) < int(latest.split(":")[-1])
-    assert value.store.snapshot(base)[1] == first
-    assert value.store.snapshot(published)[1] == selected.runtime_load_id
-    assert value.store.snapshot(rollback)[1] == latest
+    assert inference.snapshot(base)[1] == first
+    assert inference.snapshot(published)[1] == selected.runtime_load_id
+    assert inference.snapshot(rollback)[1] == latest
     assert inference.activate_checkpoint(rollback) == latest
 
 

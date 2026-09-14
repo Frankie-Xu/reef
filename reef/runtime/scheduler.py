@@ -722,6 +722,7 @@ class RuntimeScheduler:
 
     def _finish_committed_training_job(self, training_job_id: str) -> None:
         self.inference_runtime.acknowledge_publication(training_job_id)
+        self.training_runtime.commit_candidate(training_job_id)
         self.inference_runtime.mark_published()
         self.inference_runtime.resume_admission()
 

@@ -454,6 +454,7 @@ _BUILTIN_FACTORIES = {
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
+    "tinker": "reef.inference.tinker:TinkerInferenceRuntimeFactory",
 }
 
 #: Explicitly registered extensions, plus cached instances of resolved builtins.

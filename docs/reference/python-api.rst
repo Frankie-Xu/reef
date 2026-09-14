@@ -1021,19 +1021,20 @@ Tinker integration
 
 ``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
 ``tinker`` backend. Its ``runtime_factory`` builds, from ``TinkerConfig`` and only
-after deployment selection, a ``TinkerTrainingRuntime`` and a
-``TinkerInferenceRuntime`` that share one ``TinkerCheckpointStore``: the local
-manifests under ``state-dir`` and the remote snapshots they reference. The
-training runtime branches candidates from the store's active checkpoint; the
-inference runtime samples from the snapshot a frozen artifact resolves to,
-activates selected candidates and binds the head Reef publishes through
-``activate_checkpoint``. Neither runtime holds the other. With a local
-inference engine the same deployment instead returns a model-driver plan:
-``TinkerTrainingService`` supplies ``TinkerTrainingBackend``, a
-``reef.runtime.interfaces.TrainingBackend`` whose weight transfer loads the
-downloaded PEFT adapter into the engines through the SGLang control
-connection, and the HTTP service connects through the ``coordinator_training``
-runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
+after deployment selection, a ``TinkerTrainingRuntime`` and, through the
+``tinker`` inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``.
+The two hold no shared object: the training runtime branches every candidate
+from the incumbent it remembers on disk, learning commits through
+``TrainingRuntime.commit_candidate`` and rollbacks through
+``restore_checkpoint``; the inference runtime reads each candidate's or
+artifact's ``tinker-checkpoint.json`` manifest, samples from the immutable
+sampler it names, activates selected candidates and binds the head Reef
+publishes through ``activate_checkpoint``. With a local inference engine the
+same deployment instead returns a model-driver plan: ``TinkerTrainingService``
+supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
+whose weight transfer loads the downloaded PEFT adapter into the engines
+through the SGLang control connection, and the HTTP service connects through
+the ``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.
 

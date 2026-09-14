@@ -635,6 +635,16 @@ class TrainingRuntime(ABC):
         """Restore training weights and optimizer state, without touching inference."""
         raise ReefError(f"{type(self).__name__} does not support training checkpoint restore")
 
+    def commit_candidate(self, training_job_id: str) -> None:
+        """Learn that Reef committed the candidate ``training_job_id`` trained here.
+
+        Called after the durable commit, including once at startup for the
+        head's job. The default does nothing: a trainer whose weights advance
+        in place already holds them. A trainer that branches every candidate
+        from an immutable incumbent makes that candidate the incumbent here.
+        """
+        return
+
     def shutdown(self) -> None:
         """Release only owned training resources."""
         return

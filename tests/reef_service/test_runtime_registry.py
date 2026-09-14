@@ -32,6 +32,7 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
         "ray_training",
         "sglang",
         "slime_training",
+        "tinker",
     )
 
 

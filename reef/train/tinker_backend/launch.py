@@ -15,7 +15,7 @@ from typing import Any
 
 from reef.core.config import config_value
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import CoordinatorConfig, RuntimeFactory
+from reef.runtime.deployment import CoordinatorConfig, RuntimeConfigError, RuntimeFactory, RuntimeRegistry
 from reef.runtime.executor.arguments import normalize_native_options
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.executor.placement import ModelGpuLayout
@@ -142,7 +142,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
 
 
 class TinkerRuntimeFactory(RuntimeFactory):
-    """Build the in-process training and inference runtimes over one checkpoint store and SDK client."""
+    """Build the in-process trainer and the separately registered Tinker sampling runtime."""
 
     kind = TinkerDeployment.runtime_type
 
@@ -153,8 +153,7 @@ class TinkerRuntimeFactory(RuntimeFactory):
         self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
     ) -> tuple[TrainingRuntime, InferenceRuntime]:
         from reef.train.tinker_backend.client import TinkerSDKClient
-        from reef.train.tinker_backend.inference import TinkerInferenceRuntime
-        from reef.train.tinker_backend.runtime import TinkerCheckpointStore, TinkerTrainingRuntime
+        from reef.train.tinker_backend.runtime import TinkerTrainingRuntime
 
         settings = TinkerConfig(**{key: value for key, value in config.items() if key != "type"})
         key = environ.get(settings.api_key_env)
@@ -162,11 +161,28 @@ class TinkerRuntimeFactory(RuntimeFactory):
             raise ValueError(f"Tinker requires the environment variable {settings.api_key_env}")
         client = TinkerSDKClient(model_path, settings, key)
         try:
-            store = TinkerCheckpointStore(model_path, settings, client)
+            training = TinkerTrainingRuntime(model_path, settings, client)
         except BaseException:
             client.close()
             raise
-        return TinkerTrainingRuntime(store), TinkerInferenceRuntime(store)
+        try:
+            inference = RuntimeRegistry().build(
+                {
+                    "type": "tinker",
+                    "api_key_env": settings.api_key_env,
+                    "project_id": settings.project_id,
+                    "timeout_s": settings.inference_timeout_s,
+                },
+                model_path=model_path,
+                recipe_config=recipe_config,
+                environ=environ,
+            )
+            if not isinstance(inference, InferenceRuntime):
+                raise RuntimeConfigError("the Tinker sampling factory must return an InferenceRuntime")
+        except BaseException:
+            training.shutdown()
+            raise
+        return training, inference
 
 
 runtime_factory = TinkerRuntimeFactory()

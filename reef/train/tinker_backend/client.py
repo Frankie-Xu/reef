@@ -11,7 +11,6 @@ import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,15 +19,8 @@ from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
 
 
-@dataclass(frozen=True)
-class SampleResult:
-    tokens: tuple[int, ...]
-    logprobs: tuple[float, ...]
-    stop_reason: str
-
-
 class TinkerClient(ABC):
-    """Remote operations used by the runtime, also implementable by offline tests."""
+    """Remote training operations, also implementable by offline tests; sampling lives in ``reef.inference.tinker``."""
 
     @abstractmethod
     def initialize(self) -> TinkerCheckpoint: ...
@@ -37,15 +29,6 @@ class TinkerClient(ABC):
     def train(
         self, checkpoint: TinkerCheckpoint, batches: Sequence[Sequence[TokenRow]], loss: TinkerLoss
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]: ...
-
-    @abstractmethod
-    def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]: ...
-
-    @abstractmethod
-    def decode(self, tokens: Sequence[int]) -> str: ...
-
-    @abstractmethod
-    def sample(self, checkpoint: TinkerCheckpoint, prompt: list[int], params: Mapping[str, Any]) -> SampleResult: ...
 
     @abstractmethod
     def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
@@ -76,7 +59,6 @@ class TinkerSDKClient(TinkerClient):
     _api_key: str
     _service: Any
     _base_sampler: Any
-    _tokenizer: Any
 
     def __init__(self, base_model: str, config: TinkerConfig, api_key: str) -> None:
         if sys.version_info < (3, 11):
@@ -90,8 +72,8 @@ class TinkerSDKClient(TinkerClient):
         self._api_key = api_key
         self._service = self._new_service()
         try:
+            # The frozen base scores KL terms; sampling for requests is the inference runtime's.
             self._base_sampler = self._service.create_sampling_client(base_model=base_model)
-            self._tokenizer = self._base_sampler.get_tokenizer()
         except BaseException:
             self._service.close("errored").result(timeout=self._config.train_timeout_s)
             raise
@@ -181,41 +163,6 @@ class TinkerSDKClient(TinkerClient):
                 raise ValueError("Tinker base log probabilities must be finite for every response token")
             result.append([float(value) for value in response])
         return result
-
-    def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]:
-        prefill = messages[-1]["role"] == "assistant"
-        return list(
-            self._tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                return_dict=False,
-                add_generation_prompt=not prefill,
-                continue_final_message=prefill,
-                **template_kwargs,
-            )
-        )
-
-    def decode(self, tokens: Sequence[int]) -> str:
-        return str(self._tokenizer.decode(list(tokens), skip_special_tokens=True))
-
-    def sample(self, checkpoint: TinkerCheckpoint, prompt: list[int], params: Mapping[str, Any]) -> SampleResult:
-        # Each request binds an immutable sampler path, never a mutable model ID.
-        sampler = self._service.create_sampling_client(model_path=checkpoint.sampler_path)
-        if sampler.get_base_model() != self._model:
-            raise ValueError("remote Tinker sampler checkpoint does not match the configured model")
-        result = sampler.sample(
-            prompt=self._sdk.ModelInput.from_ints(prompt),
-            num_samples=1,
-            sampling_params=self._sdk.SamplingParams(**params),
-        ).result(timeout=self._config.inference_timeout_s)
-        if len(result.sequences) != 1:
-            raise ValueError("Tinker returned an unexpected number of sequences")
-        sequence = result.sequences[0]
-        if sequence.logprobs is None or len(sequence.tokens) != len(sequence.logprobs):
-            raise ValueError("Tinker must return exact log probabilities for every sampled token")
-        if any(not math.isfinite(value) for value in sequence.logprobs):
-            raise ValueError("Tinker returned non-finite sampled log probabilities")
-        return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
 
     def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
         """Fetch the sampler archive, then convert it with the cookbook into PEFT layout.
