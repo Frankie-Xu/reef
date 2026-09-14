@@ -3,7 +3,6 @@
     "policy": "Qwen3.6-27B + LoRA (SAO, test-time training)",
     "seed": 42,
     "days_requested": 500,
-    "attempt": 5,
     "reward": "decision turns of week N scored by the discounted valuation change over weeks N..N+3 (valuation = cash + engine MRR x 7/30 x min(weeks left, 26)), clipped at +-0.05 and divided by the running median magnitude (floor 0.003), capped at +-3",
     "horizon_weeks": 26,
     "credit_weeks": 4,
@@ -12,7 +11,7 @@
     "score_floor": 0.003,
     "engine_reads": true,
     "train_max_tokens": 24576,
-    "stack": "reef13 (resident actor+critic, 16k micro-batches, 24k train window, pacer batch 8 / 1200 s, critic warm-started from reef11 iter 7)"
+    "stack": "resident actor+critic, 16k micro-batches, 24k train window, pacer batch 8 / 1200 s, critic warm-started from an earlier episode's critic"
   },
   "trials": [
     {

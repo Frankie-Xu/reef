@@ -29,13 +29,13 @@ harbor/                one CEO-Bench episode as a Harbor task
 harness/               agent harness (imports reef_client, not reef)
   __init__.py            lazily exports HarborAgent
   agent.py               HarborAgent: sidecar on the host, the benchmark runner in the container
-  report.py              values a week and posts its score against every turn's receipt
+  report.py              values a week and posts its credit against its decision turns' receipts
 serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic colocated
 docker-compose.yaml    the stack in the reef image, host networking, six GPUs
 run.py                 one episode, trained while it is played
 run.sh                 brings the stack up, then runs run.py through reef-eval
 pyproject.toml         makes the harness importable
-results/               the smoke run's manifest
+results/               the untrained baseline and the trained episode: weeks.csv, holds.csv, manifest.json
 ```
 
 ## The harness
@@ -152,8 +152,8 @@ export SAAS_BENCH_ENTERPRISE_LLM_PROVIDER=openai SAAS_BENCH_ENTERPRISE_LLM_MODEL
 export OPENAI_BASE_URL=http://<host>:<port>/v1 OPENAI_API_KEY=local
 ```
 
-The smoke run below used one; a result meant to compare with the paper must
-use the benchmark's defaults.
+Both recorded episodes below used one; a result meant to compare with the
+paper must use the benchmark's defaults.
 
 ## Reward shaping
 
@@ -215,17 +215,17 @@ the one before it keeps a gradient. The Harbor reward itself stays the
 benchmark's terminal metric (final cash over the starting balance); it is
 evaluation only.
 
-The first two trained episodes (results below) scored the week's cash change
-alone. Under that signal every purchase is a loss and the emptiest week is
-the safest, and both policies converged on a company with no customers. The
-third scored the valuation change of one week at a time: the growth weeks
-were the first with a positive reward, but they were played by the untrained
-policy during the ten critic-only warm-up commits, and the two R&D
-purchases of the warm-up (-0.17 and -0.34) set the critic's scale for the
-rest of the episode. The credit window, the scaling, and a value model that
-starts from an earlier episode's critic with two warm-up commits
-(`--critic-init`, `num-critic-only-steps`) answer those three findings.
-The fifth episode ran this full scheme (results below).
+Each piece answers something an earlier reward on this harness got wrong.
+Scoring the week's cash change alone made every purchase a loss and the
+emptiest week the safest, and the policy converged on a company with no
+customers; the valuation term is what lets a week that buys subscribers
+score. Scoring one week at a time left acquisition uncredited with what it
+brought, so the credit spans four weeks. Two six-figure R&D purchases early
+in an episode set the critic's scale for everything after them, so the
+credit is clipped and scaled. Ten critic-only warm-up commits spent the
+growth weeks on the critic alone, so the value model starts from an earlier
+episode's critic with two warm-up commits (`--critic-init`,
+`num-critic-only-steps`). The recorded episode below runs the full scheme.
 
 The game is paced to the trainer (`CEOBENCH_PACE_BATCH`, set by `run.sh` to
 the recipe's batch size). The sidecar peeks at each request's dashboard;
@@ -249,6 +249,57 @@ decision period. It is still myopic about anything the run-rate does not
 see inside the window: R&D raises quality and pays through retention and
 upgrades weeks later. A judged turn-level signal of the kind single-stream
 PPO wants (`recipes/openclawrl/`) is the extension left open.
+
+## Policy choices on one 8-GPU node
+
+- **Qwen3-4B-Thinking-2507** (the OpenClaw-RL example's policy): runs, but
+  cannot operate the benchmark's CLI. In a 14-day trial it never produced a
+  valid `next-week` call, wrote a stub `next_week.py` and looped on it, and
+  was stopped after 400 turns at day 0.
+- **Qwen3-30B-A3B-Thinking-2507** (the SAO example's paper-scale policy):
+  not trainable here with the critic. With six actor GPUs the expert weights
+  force either expert tensor parallelism, which the Megatron bridge does not
+  shard (`Shape mismatch loading ...experts.linear_fc1.weight0: HuggingFace
+  (1536, 2048), Megatron (768, 2048)` at TP2, ETP2), or TP1, where the
+  trainer's fp32 full-vocabulary logits and their gradient cap the sequence
+  near 32k tokens. A rollout-only Reef stack (no training) has neither limit,
+  so the untrained baseline can still use it.
+- **Qwen3-8B** at TP4, full parameters, inside its native 40960-token
+  window (its 128k needs YaRN, which the trainer's rotary embedding does not
+  apply): runs and operates the CLI, but in a 14-day episode made one
+  configuration change and never set a price. Its per-commit Megatron
+  checkpoint also failed with the CPU-offloaded optimizer
+  (`KeyError: 'master_param'`), which `no-save-optim` works around.
+- **Qwen3.6-27B through LoRA** is the configuration shipped: frozen base
+  weights in both the actor and the critic, rank-32 adapters on the
+  attention and MLP projections, the critic's value head trainable. This is
+  the first critic-bearing recipe to use Reef's Megatron LoRA, which until
+  now applied to the actor only (`prepare_critic_args` now keeps the adapters
+  for the critic). Two frozen bases fit beside one step's activations, so
+  the stack passes `--no-offload-train` (Reef otherwise offloads whichever
+  model is idle between critic and actor steps, a cycle that cost about
+  three minutes of a five-minute step), checkpoints the critic every eighth
+  commit (`--critic-save-interval`) instead of at every one, and trains 8
+  decision turns per step (`batch-size: 8`), about a week of play, so
+  training keeps pace with the game. Full-parameter training of
+  the 27B pair would need about 216 GB for weights and gradients alone.
+
+  The memory budget with both bases resident: 47 GB per GPU idle, and a
+  step adds about 1 GB per thousand tokens of its largest micro-batch (the
+  fp32 full-vocabulary logits, 248k entries per token, with their softmax
+  and gradient). Micro-batches are capped at 16k tokens
+  (`--max-tokens-per-gpu`; 48k ones killed a critic rank, and the other
+  three then waited in a collective for good), a resident model returns
+  its cached blocks after each step so the other model's step can use
+  them, and the container sets
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against fragmentation.
+  A step over turns of up to 32k tokens peaked at 78 GB of the H100's 81 GB,
+  so the harness reports only turns of up to 24k tokens
+  (`CEOBENCH_TRAIN_MAX_TOKENS` in `run.sh`); the engine still serves a 128k
+  window. In the recorded episode the cut dropped 39 of 493 turns (median
+  13k tokens, longest 34k): a week's context starts near 10k tokens and
+  grows with its tool outputs, so the dropped turns are the long
+  doc-reading and diagnosis turns and any turn after a large query result.
 
 ## Run
 
@@ -299,90 +350,32 @@ curl -sS -H "Authorization: Bearer $(cat work/token)" \
 
 ## Results
 
-### Smoke run
+Seed 42, 500 days (the benchmark rounds it down to 71 whole weeks, 497
+days), the simulator roles as above, one episode each. Neither number is
+comparable with the leaderboard: the simulator roles are local stand-ins,
+and each row is one episode at temperature 1.0.
 
-`results/2026-09-13-smoke-qwen3.6-27b-lora/manifest.json` holds the lab row,
-the trial result, and the run configuration. One seed, 14 simulated days,
-the stack in `serve.yaml`, and a local `Qwen3-4B-Instruct-2507` on SGLang
-standing in for both simulator roles, so the score is not comparable with
-the paper's.
+| Policy | Reward | Outcome | Final cash | `reward` |
+| --- | --- | --- | ---: | ---: |
+| `Qwen3.6-27B`, untrained (`serve-baseline.yaml`) | none | bankrupt on day 255 (week 37) | -$66 | -0.00007 |
+| `Qwen3.6-27B`, trained in the episode (`serve.yaml`) | the weekly credit above | completed, day 497 | $257,682 | 0.258 |
 
-| | |
-| --- | --- |
-| Policy | `Qwen3.6-27B`, LoRA rank 32 on actor and critic, TP4; rollout TP2, 128k window |
-| Episode | seed 42, 14 days, completed in 35 turns (10m46s), no bankruptcy |
-| Final cash | $793,047 (`reward` 0.793) |
-| Tokens | 501,917 in / 40,700 out; longest turn 27,673, so every turn fit the 48k trainer window |
-| Reports | 35, one per turn, all accepted |
-| Training | one SAO release committed per accepted report; the first critic steps brought the value loss from 10.5 to 3.3, the adapter was exported to `checkpoints/hf/<step>/adapter_model.safetensors` and loaded into the engine (`load_lora_adapter_from_distributed`) |
-
-The agent read `docs/simulator-instructions.md`, the CLI reference, and the
-SDK source, wrote `daily_scripts/week0_setup.py` (prices A/B/C at $15/$49/$149,
-model tiers 1/2/3, quotas, $1,500/day development, targeted ad spend by
-segment), called `next-week` with its rationale and twelve forecasts on the
-first try, then spent week two querying the tables, cutting prices to
-$9/$39/$99, moving ad spend to one channel, doubling development spend,
-starting R&D tier 1 ($166,667), and writing a `MEMORY.md` for the next week.
-Week 2 ended with 10 subscribers; the cash drop is that R&D start plus
-$3,000/day of development spend, an investment the 14-day horizon cannot
-repay.
-
-Earlier attempts, same harness:
-
-- `Qwen3-4B-Thinking-2507` (full parameters): never produced a valid
-  `next-week` call, wrote a stub `next_week.py` and looped on it; stopped
-  after 400 turns at day 0.
-- `Qwen3-8B` (full parameters, 40k window): completed 14 days in 11 turns
-  with one configuration change and no prices set (final cash $997,900);
-  the per-commit Megatron checkpoint then failed with the CPU-offloaded
-  optimizer.
-
-### Policy choices on one 8-GPU node
-
-- **Qwen3-4B-Thinking-2507** (the OpenClaw-RL example's policy): runs, but
-  cannot operate the benchmark's CLI; see the smoke run above.
-- **Qwen3-30B-A3B-Thinking-2507** (the SAO example's paper-scale policy):
-  not trainable here with the critic. With six actor GPUs the expert weights
-  force either expert tensor parallelism, which the Megatron bridge does not
-  shard (`Shape mismatch loading ...experts.linear_fc1.weight0: HuggingFace
-  (1536, 2048), Megatron (768, 2048)` at TP2, ETP2), or TP1, where the
-  trainer's fp32 full-vocabulary logits and their gradient cap the sequence
-  near 32k tokens. A rollout-only Reef stack (no training) has neither limit,
-  so the untrained baseline can still use it.
-- **Qwen3-8B** at TP4, full parameters, inside its native 40960-token
-  window (its 128k needs YaRN, which the trainer's rotary embedding does not
-  apply): runs and operates the CLI, but in a 14-day episode made one
-  configuration change and never set a price. Its per-commit Megatron
-  checkpoint also failed with the CPU-offloaded optimizer
-  (`KeyError: 'master_param'`), which `no-save-optim` works around.
-- **Qwen3.6-27B through LoRA** is the configuration shipped: frozen base
-  weights in both the actor and the critic, rank-32 adapters on the
-  attention and MLP projections, the critic's value head trainable. This is
-  the first critic-bearing recipe to use Reef's Megatron LoRA, which until
-  now applied to the actor only (`prepare_critic_args` now keeps the adapters
-  for the critic). Two frozen bases fit beside one step's activations, so
-  the stack passes `--no-offload-train` (Reef otherwise offloads whichever
-  model is idle between critic and actor steps, a cycle that cost about
-  three minutes of a five-minute step in the smoke run), checkpoints the
-  critic every eighth commit (`--critic-save-interval`) instead of at every
-  one, and trains 16 turns per step (`batch-size: 16`), about a week of
-  play, so training keeps pace with the game. Full-parameter training of
-  the 27B pair would need about 216 GB for weights and gradients alone.
-
-  The memory budget with both bases resident: 47 GB per GPU idle, and a
-  step adds about 1 GB per thousand tokens of its largest micro-batch (the
-  fp32 full-vocabulary logits, 248k entries per token, with their softmax
-  and gradient). Micro-batches are capped at 16k tokens
-  (`--max-tokens-per-gpu`; the 48k ones of the first resident attempt
-  killed a critic rank, and the other three then waited in a collective
-  for good), a resident model returns its cached blocks after each step so
-  the other model's step can use them, and the container sets
-  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against fragmentation.
-  A step over turns of up to 32k tokens peaked at 78 GB of the H100's 81 GB,
-  so the harness reports only turns of up to 24k tokens
-  (`CEOBENCH_TRAIN_MAX_TOKENS` in `run.sh`); the engine still serves a 128k
-  window. Across 95 recorded turns the cut drops 14, all doc-reading turns
-  of 36k to 41k tokens, and the rest sit under 20k.
+| Week | Day | Untrained cash | Subscribers | Trained cash | Subscribers | Engine MRR / month |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 7 | $977,614 | 19 | $821,930 | 23 | $207 |
+| 5 | 35 | $934,244 | 194 | $789,541 | 198 | $2,692 |
+| 7 | 49 | $918,908 | 374 | $752,089 | 314 | $4,896 |
+| 10 | 70 | $905,911 | 658 | $725,410 | 586 | $10,089 |
+| 12 | 84 | $897,818 | 670 | $698,655 | 647 | $11,626 |
+| 15 | 105 | $882,751 | 559 | $649,008 | 639 | $11,858 |
+| 17 | 119 | $877,846 | 466 | $295,903 | 327 | $5,422 |
+| 20 | 140 | $364,051 | 310 | $289,548 | 183 | $776 |
+| 22 | 154 | $352,430 | 227 | $286,912 | 38 | $0 |
+| 25 | 175 | $8,343 | 208 | $285,052 | 0 | $0 |
+| 30 | 210 | $3,899 | 10 | $282,077 | 0 | $0 |
+| 37 | 259 | -$66 (bankrupt on day 255) | 1 | $277,912 | 0 | $0 |
+| 50 | 350 | bankrupt | | $270,177 | 0 | $0 |
+| 70 | 490 | bankrupt | | $258,277 | 0 | $0 |
 
 ### Untrained baseline
 
@@ -400,30 +393,15 @@ docker run -d --name reef-ceobench-baseline --network host --ipc host --shm-size
   reef serve -c /workspace/Reef/recipes/sao/examples/ceobench/serve-baseline.yaml
 ```
 
-### Untrained baseline, seed 42
-
 `results/2026-09-13-baseline-qwen3.6-27b-seed42/` holds the manifest, the
 run configuration, and `weeks.csv` (cash, individual subscribers, and
-enterprise seats at every weekly dashboard). The benchmark rounds 500 days
-down to 71 whole weeks (497 days).
+enterprise seats at every weekly dashboard).
 
 | | |
 | --- | --- |
-| Policy | `Qwen3.6-27B`, no training (`serve-baseline.yaml`), simulator roles as above |
 | Outcome | bankrupt on day 255 (week 37); final cash -$66, `reward` -0.00007 |
-| Turns | 695 in 35 minutes, 11.5M input / 228k output tokens; every turn recorded, 36 weeks reported online |
+| Turns | 695 in 35 minutes, 11.5M input / 228k output tokens; every turn recorded |
 | Engine | no errors; the agent's shell ran as the unprivileged user throughout |
-
-| Week | Day | Cash | Subscribers |
-| ---: | ---: | ---: | ---: |
-| 1 | 7 | $977,614 | 19 |
-| 11 | 77 | $902,073 | 671 |
-| 17 | 119 | $877,846 | 466 |
-| 18 | 126 | $707,937 | 404 |
-| 20 | 140 | $364,051 | 310 |
-| 25 | 175 | $8,343 | 208 |
-| 30 | 210 | $3,900 | 28 |
-| 37 | 255 | -$66 | 0 |
 
 The agent priced low from the start (A/B/C at $15/$49/$99, then $15/$29/$69,
 $9/$19/$39, and $4/$24/$49 by day 161), grew to 671 subscribers by week 11
@@ -436,230 +414,72 @@ out. Cash was under $10,000 by week 25 and the company went bankrupt on day
 rule-based baseline at $15.8M; this run is not comparable with either
 because the simulator roles are local stand-ins.
 
-### Trained episode, seed 42, attempt 1
+### Trained episode
 
-`results/2026-09-13-ttt-qwen3.6-27b-seed42-attempt1/` holds the manifest,
-`weeks.csv` (every reported week: cash at both ends, score, turns reported
-of turns played) and `holds.csv` (the pacer's wait at each week start).
-Same seed and simulator roles as the baseline, the stack in `serve.yaml`,
-training on while the episode played.
-
-| | |
-| --- | --- |
-| Policy | `Qwen3.6-27B`, LoRA rank 32 on actor and critic, resident, 24k training window |
-| Outcome | ended at day 385 (week 55) by the runner's 1200 s limit on `next-week` (the engine stalled with no simulator request in flight); not bankrupt; final cash $252,634, `reward` 0.253 |
-| Turns | 456 in 4h49m; 423 (93%) fit the 24k window and were reported |
-| Training | 26 releases: 10 critic-only warm-up steps, then 16 actor updates, the first served from week 15 (day 105). A step took 4 to 6 minutes; the pacer held 26 week starts for 106 minutes in all, 9 minutes at most |
-| Actor step | peak 70 to 78 GB per GPU, idle 62 GB; first update: clip fraction 0.002, KL 0.0014 |
-
-| Week | Day | Cash | Subscribers |
-| ---: | ---: | ---: | ---: |
-| 1 | 7 | $814,290 | 39 |
-| 5 | 35 | $798,311 | 135 |
-| 10 | 70 | $791,183 | 192 |
-| 11 | 77 | $289,922 | 187 |
-| 15 | 105 | $287,260 | 171 |
-| 20 | 140 | $278,352 | 164 |
-| 30 | 210 | $267,377 | 10 |
-| 37 | 259 | $263,332 | 6 |
-| 45 | 315 | $258,584 | 0 |
-| 55 | 385 | $252,634 | 0 |
-
-Two decisions before any actor update set the trajectory: week 0's setup
-spend (-$185,710) and week 10's R&D start, tiers 1 and 2 for $500,000 in
-one day (-$501,261 for the week, scored -0.50). From week 15 the trained
-policy lost $600 to $2,300 a week, let the subscriber base lapse, and by
-week 45 ran a company with no customers and no revenue, calling `next-week`
-after two to five turns with "cash preservation" as its rationale. It
-outlived the untrained baseline (bankrupt on day 255) with $252k in hand,
-which is the number the weekly cash-delta reward asks for and a reading of
-what it rewards: doing nothing is a small negative every week, and growth
-is a large negative now for an uncertain positive later. One episode each
-at temperature 1.0, so the comparison is indicative, not a measurement.
-
-### Trained episode, seed 42, attempt 2 (complete)
-
-`results/2026-09-13-ttt-qwen3.6-27b-seed42-attempt2/` holds the same files
-as attempt 1. Same seed, simulator roles and stack; the runner's limits
-widened as above; a fresh stack, so the adapter again started from the
-base model.
+`results/2026-09-14-trained-qwen3.6-27b-seed42/` holds the same files plus
+`holds.csv` (the pacer's holds) and, in `weeks.csv`, `run_rate` (the
+engine's MRR), `value_start` and `value_end`, `credit` (the discounted
+four-week valuation change), `score` (as posted, clipped and scaled),
+`decisions` (the week's decision turns), and `decisions_reported` (those
+inside the 24k training window). The stack is `serve.yaml` as shipped:
+batch 8, the critic started from an earlier episode's critic with two
+critic-only steps, and the pacer holding every request while a filled
+batch trains.
 
 | | |
 | --- | --- |
-| Outcome | completed all 71 weeks (day 497); not bankrupt; final cash $358,251, `reward` 0.358 |
-| Turns | 377 in 3h23m; 357 (95%) fit the 24k window and were reported |
-| Training | 22 releases: 10 critic-only warm-up steps, then 12 actor updates, the first served from week 19 (day 133). The pacer held 22 week starts for 84 minutes in all, 8.8 minutes at most |
-| Trainer | peak 69 to 74 GB per GPU; no engine errors, no runner timeouts |
-
-| Week | Day | Cash | Subscribers |
-| ---: | ---: | ---: | ---: |
-| 1 | 7 | $989,758 | 3 |
-| 3 | 21 | $788,503 | 10 |
-| 7 | 49 | $419,478 | 22 |
-| 10 | 70 | $406,573 | 47 |
-| 15 | 105 | $399,276 | 44 |
-| 20 | 140 | $392,321 | 37 |
-| 30 | 210 | $382,758 | 6 |
-| 37 | 259 | $378,485 | 1 |
-| 45 | 315 | $373,721 | 0 |
-| 55 | 385 | $367,771 | 0 |
-| 71 | 497 | $358,251 | 0 |
-
-The shape repeats attempt 1: two R&D purchases while the critic was still
-warming up (week 2, -$191,675; week 6, -$336,888) set the cash level, and
-from the first actor update on the policy spent between $587 and $1,426 a
-week (median $595), let the subscriber base run off, and finished as a
-company with no customers.
-
-### Trained episode, seed 42, attempt 3 (valuation reward)
-
-`results/2026-09-13-ttt-qwen3.6-27b-seed42-attempt3-valuation/` holds the
-same files, with `subscribers`, `run_rate`, `value_start`, `value_end`, and
-`score` columns in `weeks.csv`. Same seed, simulator roles, and stack; the
-reward was the valuation change of one week at a time, unscaled (the credit
-window, the scaling, and the critic warm-start came after this run).
-
-| | |
-| --- | --- |
-| Outcome | ended at day 454 (week 65) by the engine: a `next-week` hung inside `step_week` past the engine's 4200 s limit with no simulator request in flight, the run's second such stall (the first, at day 343, the runner survived through the CLI's 1800 s timeout); not bankrupt; final cash $365,613, `reward` 0.366 |
-| Turns | 442 in 5h45m, two stalls included; 432 (98%) fit the 24k window and were reported |
-| Training | 26 releases: 10 critic-only warm-up steps, then the actor's updates, the first served from week 14 (day 98). The pacer held 26 week starts for 106 minutes in all, 10.7 minutes at most (week 1, behind the first step's warm-up) |
-| Rewards | six positive weeks (3 and 5 to 9, +0.001 to +0.021), the first of any run; every other week negative |
-
-| Week | Day | Cash | Subscribers | Run-rate / month |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 7 | $829,548 | 0 | $0 |
-| 3 | 21 | $481,751 | 71 | $852 |
-| 5 | 35 | $472,300 | 137 | $2,466 |
-| 7 | 49 | $462,365 | 381 | $7,620 |
-| 10 | 70 | $444,415 | 978 | $19,560 |
-| 15 | 105 | $423,292 | 952 | $14,280 |
-| 20 | 140 | $412,584 | 905 | $13,575 |
-| 30 | 210 | $395,280 | 777 | $11,655 |
-| 37 | 259 | $384,733 | 538 | $8,070 |
-| 45 | 315 | $377,456 | 95 | $1,425 |
-| 55 | 384 | $371,563 | 0 | $0 |
-| 64 | 447 | $366,208 | 0 | $0 |
-
-The transient changed, the attractor did not. Weeks 0 and 1 bought R&D
-(-$170,452 and -$340,728) as before. Weeks 2 to 9 then grew the base from
-16 to 978 subscribers at about $5,000 of cash a week, and the run-rate term
-turned those weeks positive; but they were played by the untrained policy,
-since the actor's first update came at week 14, and the two purchases had
-already set the critic's scale (-0.17 and -0.34 against weeks of +-0.005).
-From week 10 the base plateaued, a price cut at week 11 cost -0.036 in one
-week (the estimate values the whole base at the lowest listed price), and
-once the actor's updates began the policy drifted back to short weeks with no
-acquisition spend: the base ran off at 7 to 70 subscribers a week and was gone
-by week 47, at $600 to $3,000 of cash a week. The end state matches attempt 2
-(no customers, $366k against $358k). Those three findings, the warm-up
-spending the growth weeks, the scale set by two outliers, and acquisition
-never credited with what it brought, are what the credit window, the score
-scaling, and the critic warm-start address (reward shaping above).
-
-### Trained episode, seed 42, attempt 5 (decision-turn credit, engine MRR)
-
-`results/2026-09-14-ttt-qwen3.6-27b-seed42-attempt5-decision-credit/` holds
-the same files; `weeks.csv` adds `credit` (the discounted four-week valuation
-change), `score` (as posted, clipped and scaled), `decisions` (the week's
-decision turns), and `decisions_reported` (those inside the 24k training
-window). This is the full scheme of "Reward shaping": the engine's MRR in
-the valuation, credit on decision turns only over a four-week window, the
-clip and median scaling, batch 8, the critic started from attempt 4's after
-its seventh commit with two critic-only steps, and the pacer holding every
-request while a filled batch trains. Same seed, simulator roles, and
-policy. Attempt 4 (`results/2026-09-14-...-attempt4-credit-window-partial/`,
-trial log only) had run the window, the scaling, and the warm-start without
-the decision-turn and MRR changes and was stopped at day 119 to add them:
-cash $402,330 with 122 subscribers, every week's credit negative, and the
-same drift into cost-cutting from week 13.
-
-| | |
-| --- | --- |
-| Outcome | completed, day 497 (week 71); not bankrupt; final cash $257,682, `reward` 0.258; no engine stall (the stack-dump watch never fired) |
+| Outcome | completed, day 497 (week 71); not bankrupt; final cash $257,682, `reward` 0.258; no engine stall |
 | Turns | 493 in 3h52m; 144 decision turns, 125 of them (87%) inside the 24k window and reported; 349 read-only turns recorded, not trained on |
 | Training | 15 releases: 2 critic-only steps, then 13 actor updates, the first served from week 9 (day 63). The pacer held 15 week starts for 51 minutes in all, 370 s at most (week 4); no publish met a request in flight |
 | Rewards | one positive week (6, +0.006); every other week negative, weeks 12 to 16 at the clip (-0.05 to -0.41 before it) |
 
-| Week | Day | Cash | Subscribers | Engine MRR / month |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 7 | $821,930 | 23 | $207 |
-| 3 | 21 | $804,817 | 110 | $1,450 |
-| 5 | 35 | $789,541 | 198 | $2,692 |
-| 7 | 49 | $752,089 | 314 | $4,896 |
-| 10 | 70 | $725,410 | 586 | $10,089 |
-| 12 | 84 | $698,655 | 647 | $11,626 |
-| 15 | 105 | $649,008 | 639 | $11,858 |
-| 17 | 119 | $295,903 | 327 | $5,422 |
-| 20 | 140 | $289,548 | 183 | $776 |
-| 22 | 154 | $286,912 | 38 | $0 |
-| 30 | 210 | $282,077 | 0 | $0 |
-| 50 | 350 | $270,177 | 0 | $0 |
-| 70 | 490 | $258,277 | 0 | $0 |
-
 The decision turns of a week are what the scheme credits, and the record
-shows what those decisions were. Week 0 bought R&D as in every run
-(-$178,070). Weeks 1 to 9 then grew the base from 0 to 499 subscribers at
-$6,000 to $10,000 of cash a week, about $80 to $170 per subscriber; the
-engine's MRR reached $8,367 a month. Those weeks were credited between
--0.002 and -0.023, with week 6 the only positive one: under a 26-week horizon a
-$14 subscriber is worth about $85, less than it cost, so the valuation
-read the growth as a small loss even with the exact MRR in it. The actor's
-first update was served at week 9. From week 10 the base plateaued between
-580 and 710: usage passed the tier-1 capacity cap and an outage cost the
-week (-0.031), open issues climbed from 37 to 92, and conversion fell from
-22% to 17% and then to 5% as competitor launches hit. The policy answered
-with more spending, ops to $1,200 a day, ads to $800, higher model tiers, a
-25% lead promotion, and in week 15 a $333,000 R&D Tier 2 purchase in the
-same week as 76 cancellations (-$347,005). Weeks 16 to 22 unwound the base
-at 60 to 170 subscribers a week while the promotions the policy set to
-recover conversion (a $50 lead promotion against an $18 plan, corrected the
-next turn) took the effective price to zero; the MRR was $0 by week 22.
-From week 23 the policy held the empty company at $595 a week to the end,
-the attractor of every trained episode, and the second R&D purchase left it
-$108,000 below attempt 3's final cash.
+shows what those decisions were. Week 0 bought R&D (-$178,070), as the
+untrained agent also does later in its episode. Weeks 1 to 9 then grew the
+base from 0 to 499 subscribers at $6,000 to $10,000 of cash a week, about
+$80 to $170 per subscriber; the engine's MRR reached $8,367 a month. Those
+weeks were credited between -0.002 and -0.023, with week 6 the only
+positive one: under a 26-week horizon a $14 subscriber is worth about $85,
+less than it cost, so the valuation read the growth as a small loss even
+with the exact MRR in it. The actor's first update was served at week 9.
+From week 10 the base plateaued between 580 and 710: usage passed the
+tier-1 capacity cap and an outage cost the week (-0.031), open issues
+climbed from 37 to 92, and conversion fell from 22% to 17% and then to 5%
+as competitor launches hit. The policy answered with more spending, ops to
+$1,200 a day, ads to $800, higher model tiers, a 25% lead promotion, and in
+week 15 a $333,000 R&D Tier 2 purchase in the same week as 76
+cancellations (-$347,005). Weeks 16 to 22 unwound the base at 60 to 170
+subscribers a week while the promotions the policy set to recover
+conversion (a $50 lead promotion against an $18 plan, corrected the next
+turn) took the effective price to zero; the MRR was $0 by week 22. From
+week 23 the policy held the empty company at $595 a week to the end.
 
-What the scheme changed is visible and what it did not is the finding.
-Crediting decisions only removed the penalty on analysis (the read-only
-turns went from most of each batch to none of it), the engine's MRR
-removed the price-cut artifact (week 5's price rise and week 13's promotion
-cut were valued at their real effect), the scaling kept every score inside
-+-3 with the clip absorbing the two purchases, and the warm-started critic
-let the actor update from week 9 rather than week 14. But the credit itself
+### What the comparison shows
+
+The trained episode ends with cash and the untrained one does not, which is
+what the benchmark scores. How each got there matters as much as the
+number. The untrained agent priced low, grew to 670 subscribers by week 12
+at a loss every week, then bought five R&D tiers on the way down and went
+bankrupt on day 255. The trained policy grew faster in revenue (an MRR of
+$11,858 a month by week 15 against a base priced at $4 to $9), but its one
+large purchase and its promotions emptied the base by week 22, and the
+remaining 49 weeks were the cost-cutting the reward makes safe: a policy
+whose every action is credited negative learns to act less. The scheme did
+what it was designed to do, crediting decisions only (the read-only turns
+went from most of each batch to none of it), valuing the base at the
+engine's MRR, keeping every score inside +-3 with the clip absorbing the
+two purchases, and updating the actor from week 9, but the credit itself
 was negative in 70 of 71 weeks: with acquisition at $80 to $170 a
 subscriber against $85 of horizon value, no week of growth at this
-simulator's prices scores positive, and a policy whose every action is
-punished has no direction to move but toward fewer actions. The horizon
-(`CEOBENCH_VALUE_HORIZON_WEEKS`) is the lever that decides whether growth
-can ever be credited: at 26 weeks the benchmark's own growth strategy
-loses, and a horizon matching the weeks left (up to 71) or a per-lever
-attribution of what each spend line brought are the two candidates before
-another full run. The 24k window is a second limit: the two long turns of
-week 11 in which the policy diagnosed its settings and one week (19) whose
-context a 12k-token query result pushed past the window contributed no
-decision turns at all (`decisions_reported` in `weeks.csv`).
-
-Seed 42, same simulator roles, one episode each:
-
-| Policy | Reward | Outcome | Final cash |
-| --- | --- | --- | ---: |
-| `Qwen3.6-27B`, untrained | none | bankrupt on day 255 | -$66 |
-| trained in the episode, attempt 1 | weekly cash change | runner timeout at day 385 | $252,634 |
-| trained in the episode, attempt 2 | weekly cash change | completed, day 497 | $358,251 |
-| trained in the episode, attempt 3 | weekly valuation change | engine stall at day 454 | $365,613 |
-| trained in the episode, attempt 5 | decision turns, four-week valuation credit, engine MRR | completed, day 497 | $257,682 |
-
-The trained episodes end with cash and the untrained one does not, which
-is what the benchmark scores and what the weekly cash-delta reward asks
-for. What the policy learned to reach it is worth as much as the number:
-under a reward that scores each week's cash change, the safest week is one
-where nothing is bought and nothing is built, and the untrained agent's
-growth strategy (671 subscribers by week 11 in the baseline, then a cash
-collapse) is exactly what the critic learns to discount. Attempt 5 scored
-the decisions on a four-week valuation credit with the engine's MRR and
-still credited 70 of 71 weeks negative: at this simulator's acquisition
-cost a 26-week horizon never pays for growth, so the horizon, not another
-run of this one, is the next change.
+simulator's prices scores positive. The horizon
+(`CEOBENCH_VALUE_HORIZON_WEEKS`) decides whether growth can ever be
+credited; at 26 weeks the untrained agent's own growth strategy loses, and
+a horizon matching the weeks left (up to 71) or a per-lever attribution of
+what each spend line brought are the two candidates before another full
+run. The 24k window is a second limit: the two long turns of week 11 in
+which the policy diagnosed its settings and one week (19) whose context a
+12k-token query result pushed past the window contributed no decision turns
+at all (`decisions_reported` in `weeks.csv`).
 
 ### Not yet run
 
@@ -669,14 +489,15 @@ run of this one, is the next change.
 - A trained episode with a valuation horizon that covers the weeks left
   (`CEOBENCH_VALUE_HORIZON_WEEKS=71`), or a per-lever attribution of each
   spend line's return, so that a week of growth at the simulator's
-  acquisition cost can score positive (attempt 5 above). Beyond those, a
-  judged turn-level signal.
-- The engine stall: twice in attempts 1 and 3 (never in attempts 2 and 5) a
-  `next-week` hung inside the engine's `step_week` after the last simulator
-  call of the week returned, late in the game with no subscribers left. The
-  runner's timeouts do not recover it cleanly (the second call advanced the
-  day while the first was still running). Its cause is not known; a stack
-  dump of the engine at the next stall is the next step.
+  acquisition cost can score positive. Beyond those, a judged turn-level
+  signal.
+- The engine stall: in earlier runs on this harness a `next-week` twice
+  hung inside the engine's `step_week` after the last simulator call of the
+  week returned, late in the game with no subscribers left; the recorded
+  episode had none. The runner's timeouts do not recover it cleanly (the
+  second call advanced the day while the first was still running). Its
+  cause is not known; a stack dump of the engine at the next stall is the
+  next step.
 
 ## Open items
 
