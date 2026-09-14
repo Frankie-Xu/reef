@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 import threading
@@ -41,6 +42,7 @@ class RemoteClient(TinkerClient):
         self.initializations = 0
         self.calls = []
         self.sampled = []
+        self.downloads = []
         self.closed = False
         self.fail = False
 
@@ -67,6 +69,12 @@ class RemoteClient(TinkerClient):
     def sample(self, checkpoint, prompt, params):
         self.sampled.append((checkpoint, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
+
+    def download(self, checkpoint, directory):
+        self.downloads.append((checkpoint, directory))
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 32}))
+        (directory / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def close(self):
         self.closed = True
@@ -310,7 +318,7 @@ def test_unsupported_chat_options_fail_explicitly(runtime, tmp_path, extra):
 def test_schedule_keeps_comparison_sets_and_handles_epochs(preparer):
     preparer.scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_step(batch, preparer.name, {}, 0, runtime_load_id="v", batch_size=1)
+    step = prepare_tinker_step(batch, preparer.name, {}, runtime_load_id="v", batch_size=1)
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -593,6 +601,4 @@ def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, pr
 def test_configured_batch_size_respects_error_remainder(preparer):
     preparer.scheduling = StepScheduling(batch_size="configured", remainder="error")
     with pytest.raises(ValueError, match="configured batch_size"):
-        prepare_tinker_step(
-            TrainingBatch("batch", (item("v"),)), preparer.name, {}, 0, runtime_load_id="v", batch_size=2
-        )
+        prepare_tinker_step(TrainingBatch("batch", (item("v"),)), preparer.name, {}, runtime_load_id="v", batch_size=2)

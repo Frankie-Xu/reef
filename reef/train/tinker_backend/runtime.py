@@ -172,13 +172,16 @@ class TinkerTrainingRuntime(TrainingRuntime):
     ) -> PreparedTrainingStep:
         with self._store.lock:
             version = serving_runtime_load_id or self._store.version
-        return prepare_tinker_step(
-            batch,
-            step_preparer,
-            algorithm_state,
-            scenario_step,
-            runtime_load_id=version,
-            batch_size=self._store.config.batch_size,
+        prepared = prepare_tinker_step(
+            batch, step_preparer, algorithm_state, batch_size=self._store.config.batch_size, runtime_load_id=version
+        )
+        if prepared.payload is None:
+            return prepared
+        return PreparedTrainingStep(
+            prepared.action,
+            prepared.next_algorithm_state,
+            prepared.metrics,
+            {**prepared.payload, "scenario_step": scenario_step},
         )
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:

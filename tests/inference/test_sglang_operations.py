@@ -153,3 +153,41 @@ def test_adapter_eviction_requires_every_engine_acknowledgement(monkeypatch, las
     else:
         operations.unload_adapter("scenario/weights:2")
     assert unloaded == ["scenario/weights:2", "scenario/weights:2"]
+
+
+def test_worker_loads_an_adapter_directory_into_every_engine_then_stamps_the_version(monkeypatch):
+    from reef.inference.sglang import worker as worker_module
+
+    calls = []
+
+    class Remote:
+        def __init__(self, name, result=None):
+            self.name, self.result = name, result
+
+        def remote(self, *args, **kwargs):
+            calls.append((self.name, args, kwargs))
+            return self.result
+
+    def engine(result=None):
+        return SimpleNamespace(
+            load_lora_adapter_from_disk=Remote("load", result), set_runtime_load_id=Remote("version")
+        )
+
+    monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
+    worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
+    worker.servers = {"default": SimpleNamespace(update_weights=True, engines=[engine(), engine()])}
+    worker.load_adapter_from_disk("reef-adapter-math.v1", "/ckpt/adapter", "inc:1")
+    assert [name for name, _, _ in calls] == ["load", "load", "version", "version"]
+    assert calls[0][2] == {"lora_name": "reef-adapter-math.v1", "lora_path": "/ckpt/adapter"}
+    assert calls[2][1] == ("inc:1",)
+    calls.clear()
+    worker.load_adapter_from_disk("reef-adapter-math.v1", "/ckpt/adapter")
+    assert [name for name, _, _ in calls] == ["load", "load"]
+    worker.servers = {
+        "default": SimpleNamespace(update_weights=True, engines=[engine({"success": False, "message": "rank"})])
+    }
+    with pytest.raises(RuntimeError, match="refused adapter"):
+        worker.load_adapter_from_disk("x", "/p", "inc:2")
+    worker.servers = {}
+    with pytest.raises(RuntimeError, match="no updatable"):
+        worker.load_adapter_from_disk("x", "/p", "inc:2")

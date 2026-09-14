@@ -448,6 +448,7 @@ class _CallableRuntimeFactory(RuntimeFactory):
 
 #: Bundled kinds, resolved on first use so importing contracts loads no integration.
 _BUILTIN_FACTORIES = {
+    "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",

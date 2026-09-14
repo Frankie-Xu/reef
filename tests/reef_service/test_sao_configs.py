@@ -383,14 +383,14 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.service_config import service_config_from_mapping
-    from reef.train.slime_backend.launch import _configured_inference_handler_factory
+    from reef.train.deployment import inference_handler_factory_for
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
 
     settings = service_config_from_mapping(config)
     if settings.inference_handler_factory is not None:
-        assert callable(_configured_inference_handler_factory(settings.inference_handler_factory))
+        assert callable(inference_handler_factory_for(settings.inference_handler_factory))
     services = validate_services(config, config_path)
     names = [service.get("name") for service in services]
     assert all(isinstance(name, str) and name for name in names)

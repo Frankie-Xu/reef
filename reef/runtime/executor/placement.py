@@ -49,8 +49,11 @@ class ModelGpuLayout:
     external_inference: bool = False
 
     def __post_init__(self) -> None:
-        if isinstance(self.training_gpus, bool) or not isinstance(self.training_gpus, int) or self.training_gpus <= 0:
-            raise ValueError("a model deployment needs a positive number of training GPUs")
+        # Zero training GPUs is a hosted trainer: the reservation then holds inference alone.
+        if isinstance(self.training_gpus, bool) or not isinstance(self.training_gpus, int) or self.training_gpus < 0:
+            raise ValueError("a model deployment needs a non-negative number of training GPUs")
+        if self.training_gpus == 0 and (self.colocate or self.external_inference):
+            raise ValueError("a hosted trainer has no training GPUs to colocate or to pair with external engines")
         if (
             isinstance(self.inference_gpus, bool)
             or not isinstance(self.inference_gpus, int)

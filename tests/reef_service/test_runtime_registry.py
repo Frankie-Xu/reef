@@ -25,7 +25,14 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
     )
 
     assert isinstance(proxy, InferenceProxyRuntime)
-    assert repository.names == ("executor_training", "inference_proxy", "ray_training", "sglang", "slime_training")
+    assert repository.names == (
+        "coordinator_training",
+        "executor_training",
+        "inference_proxy",
+        "ray_training",
+        "sglang",
+        "slime_training",
+    )
 
 
 @pytest.mark.unit

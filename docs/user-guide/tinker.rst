@@ -116,11 +116,57 @@ recommended: non-checkpoint live releases can only be served during their
 original runtime incarnation and fall back to the last durable checkpoint on
 restart, following Reef's normal weight recovery contract.
 
+Serve with a local SGLang engine
+--------------------------------
+
+Tinker can also be the trainer behind Reef's own inference engines. Select
+``inference.backend: sglang`` with a local ``inference.model-path`` (the same
+base model Tinker trains), ``inference.num-gpus`` and, for tensor-parallel
+engines, ``inference.tensor-parallel-size``:
+
+.. code:: yaml
+
+   schema-version: 2
+   inference:
+     model-path: /models/Qwen3-8B
+     backend: sglang
+     num-gpus: 2
+   training:
+     backend: tinker
+     options:
+       state-dir: /var/lib/reef/tinker
+       lora-rank: 32
+       max-loaded-adapters: 2
+
+Reef then runs its model driver: it reserves the inference GPUs in Ray,
+starts the SGLang engines with LoRA serving enabled (``max-lora-rank`` from
+``lora-rank``, ``max-loaded-loras`` and ``max-loras-per-batch`` from
+``max-loaded-adapters``, ``lora-target-modules`` defaulting to ``all``), and
+runs Reef's training coordinator with Tinker as its training backend. The
+trainer reserves no GPU. Each scenario trains its own adapter: a training job
+runs one optimizer step on Tinker from the scenario's published checkpoint,
+downloads the result and converts it with ``tinker-cookbook`` into a PEFT
+adapter directory under the job's checkpoint, and publication asks every
+engine to load that directory under the adapter name Reef records for the
+scenario. Requests are addressed to that adapter by the weight surface, and
+the engines capture the sampled tokens and log probabilities exactly as they
+do for Slime. Rejected candidates load nothing; a restart reloads each
+scenario's committed adapter from disk before serving. Install the converter
+with ``pip install tinker-cookbook`` on the driver host.
+
+The trajectories then come from the local engine while Tinker computes the
+loss, so the base model and tokenizer on both sides must match, and the
+importance-sampling ratio carries the numerical difference between the two
+engines' log probabilities. ``training.colocate`` does not apply: there are
+no training GPUs to share.
+
 Verification scope
 -------------------
 
 CPU tests exercise data alignment and loss math, SDK call ordering, rejected and
 uncertain candidates, commit admission, request capture and SSE, deployment,
-and scenario commit/restart/rollback. A live Tinker run is additionally needed
+scenario commit/restart/rollback, and the coordinator path with a local engine
+(publication, rejection, restart recovery, adapter reload) against engine and
+SDK doubles. A live Tinker run is additionally needed
 to verify account model availability, remote persistence, and training quality.
 No live training or performance result is claimed by this implementation.

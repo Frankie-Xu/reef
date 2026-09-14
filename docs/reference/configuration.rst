@@ -118,7 +118,8 @@ The same path supports CLI-only training with
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
 ``training.backend`` defaults to ``slime`` for compatibility. The optional
 ``tinker`` backend provides remote LoRA training and immutable sampling without
-local GPUs; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
+local GPUs, or trains behind Reef's coordinator for a local SGLang engine when
+``inference.backend: sglang`` is selected; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
 installed ``reef.training_backends`` entry-point name or an importable
 ``package.module:Deployment`` class. The selected definition describes the process
 plan and HTTP runtime connection; Reef owns the managed component lifecycle; other backends do not inherit Slime's Ray,

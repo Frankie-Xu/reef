@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
+
+from reef.core.config import config_option
 
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.runtime import ExecutorInferenceRuntime
@@ -17,6 +20,7 @@ from reef.runtime.deployment import (
     RayRuntimeConfig,
     RuntimeConfigError,
     RuntimeFactory,
+    RuntimeRegistry,
     runtime_pair,
 )
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
@@ -189,6 +193,86 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
             if created:
                 with suppress(Exception):
                     executor.shutdown()
+            raise
+
+
+@dataclass(frozen=True)
+class CoordinatorRuntimeConfig(RayRuntimeConfig):
+    """Connect to a Reef coordinator in Ray and pair it with a separately selected inference runtime."""
+
+    inference_runtime: str = config_option(
+        "", help="Independently selected inference runtime kind or factory reference."
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.inference_runtime:
+            raise ValueError("runtime.inference_runtime must name the selected inference implementation")
+
+
+class CoordinatorRuntimeFactory(RuntimeFactory):
+    """Build the training runtime over a named coordinator and bind the selected inference runtime.
+
+    Any integration whose model driver runs Reef's coordinator, Slime or a
+    hosted trainer alike, connects the HTTP service this way; the inference
+    factory receives the coordinator client as its control connection.
+    """
+
+    kind = "coordinator_training"
+
+    def config_type(self) -> type:
+        return CoordinatorRuntimeConfig
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        injected = {key: config[key] for key in ("connect", "inference_handler_factory") if key in config}
+        parsed = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
+        return {**{key: value for key, value in parsed.items() if key in config}, **injected}
+
+    def __call__(
+        self,
+        config: Mapping[str, Any],
+        model_path: str,
+        recipe_config: Mapping[str, Any],
+        environ: Mapping[str, str],
+    ) -> tuple[TrainingRuntime, InferenceRuntime]:
+        registry = RuntimeRegistry()
+        if "connect" in config:
+            injected = {key: value for key, value in config.items() if key != "inference_runtime"}
+            built = registry.build({**injected, "type": "ray_training"}, model_path=model_path, environ=environ)
+            pair = runtime_pair(built)
+            if pair is None:
+                raise RuntimeConfigError("the configured training connector must return a runtime pair")
+            return pair
+        training = ExecutorTrainingRuntime(
+            connect_ray_coordinator(
+                actor_name=config.get("actor_name", DEFAULT_ACTOR_NAME),
+                namespace=config.get("namespace", DEFAULT_NAMESPACE),
+                ray_address=config.get("ray_address"),
+                inference_timeout_s=config.get("inference_timeout_s", 300.0),
+                train_timeout_s=config.get("train_timeout_s"),
+            ),
+            max_staleness=config.get("max_staleness", 0),
+        )
+        try:
+            inference = registry.build(
+                {
+                    **{key: config[key] for key in CONNECTION_CONFIG_KEYS if key in config},
+                    "type": config["inference_runtime"],
+                    "control": training.train_group_handle,
+                },
+                model_path=model_path,
+                recipe_config=recipe_config,
+                environ=environ,
+            )
+            if not isinstance(inference, InferenceRuntime):
+                for component in inference if isinstance(inference, tuple) else ():
+                    with suppress(Exception):
+                        component.shutdown()
+                raise RuntimeConfigError("the selected inference factory must return an InferenceRuntime")
+            return training, inference
+        except BaseException:
+            with suppress(Exception):
+                training.shutdown()
             raise
 
 

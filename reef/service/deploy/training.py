@@ -48,8 +48,9 @@ def local_model_required(config: dict[str, Any]) -> bool:
     Provider deployments and local backends need the resolved snapshot on disk;
     a hosted backend keeps the remote model identifier as written.
     """
-    backend = config.get("reef", {}).get("training_backend")
-    if not backend:
+    reef = config.get("reef", {})
+    backend = reef.get("training_backend")
+    if not backend or reef.get("inference_backend"):
         return True
     return training_deployment_for(backend).requires_local_model
 

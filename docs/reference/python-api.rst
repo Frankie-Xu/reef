@@ -1027,7 +1027,13 @@ manifests under ``state-dir`` and the remote snapshots they reference. The
 training runtime branches candidates from the store's active checkpoint; the
 inference runtime samples from the snapshot a frozen artifact resolves to,
 activates selected candidates and binds the head Reef publishes through
-``activate_checkpoint``. Neither runtime holds the other. ``TrainingDeployment``
+``activate_checkpoint``. Neither runtime holds the other. With a local
+inference engine the same deployment instead returns a model-driver plan:
+``TinkerTrainingService`` supplies ``TinkerTrainingBackend``, a
+``reef.runtime.interfaces.TrainingBackend`` whose weight transfer loads the
+downloaded PEFT adapter into the engines through the SGLang control
+connection, and the HTTP service connects through the ``coordinator_training``
+runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.
 

@@ -43,6 +43,9 @@ class SGLangControl:
     def get_runtime_load_ids(self) -> Any:
         return self._call("get_runtime_load_ids")
 
+    def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> Any:
+        return self._call("load_adapter_from_disk", lora_name, lora_path, runtime_load_id)
+
     def pause_generation_for_update(self) -> Any:
         return self._call("pause_generation_for_update")
 

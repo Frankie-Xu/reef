@@ -104,6 +104,25 @@ class SGLangWorker:
     def get_runtime_load_ids(self):
         return ray.get([engine.get_runtime_load_id.remote() for engine in self.updatable_rollout_engines])
 
+    def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> None:
+        """Load one adapter directory into every updatable engine and serve it as ``runtime_load_id``.
+
+        The sender that owns the files is elsewhere (a hosted trainer); the
+        engines read the directory themselves. Generation is already paused
+        by the publisher, so no request observes an engine mid-load.
+        """
+        engines = self.updatable_rollout_engines
+        if not engines:
+            raise RuntimeError("no updatable SGLang engines can load an adapter")
+        results = ray.get(
+            [engine.load_lora_adapter_from_disk.remote(lora_name=lora_name, lora_path=lora_path) for engine in engines]
+        )
+        for result in results:
+            if isinstance(result, dict) and result.get("success") is False:
+                raise RuntimeError(f"SGLang refused adapter {lora_name!r}: {result.get('message', result)}")
+        if runtime_load_id is not None:
+            ray.get([engine.set_runtime_load_id.remote(runtime_load_id) for engine in engines])
+
     def inference_url(self) -> str | None:
         return self._cluster.endpoint
 

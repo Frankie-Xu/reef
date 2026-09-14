@@ -21,10 +21,10 @@ SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
 
 
 def test_configured_handler_rejects_a_function() -> None:
-    from reef.train.slime_backend.launch import _configured_inference_handler_factory
+    from reef.train.deployment import inference_handler_factory_for
 
     with pytest.raises(ValueError, match="must inherit InferenceHandler"):
-        _configured_inference_handler_factory("reef.inference.http.provider_request_headers")
+        inference_handler_factory_for("reef.inference.http.provider_request_headers")
 
 
 class _Process:

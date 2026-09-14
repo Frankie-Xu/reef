@@ -384,6 +384,13 @@ class ReefSGLangEngine:
             payload["expected_checksums"] = expected_checksums
         return self._make_request("load_lora_adapter_from_tensors", payload)
 
+    def load_lora_adapter_from_disk(self, lora_name: str, lora_path: str, pinned: bool = False):
+        """Load a PEFT adapter directory the engine's host can read, under ``lora_name``."""
+        payload: dict[str, Any] = {"lora_name": lora_name, "lora_path": lora_path}
+        if pinned:
+            payload["pinned"] = True
+        return self._make_request("load_lora_adapter", payload)
+
     def load_lora_adapter_from_distributed(
         self,
         lora_name: str,

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import importlib
 import math
+import shutil
 import sys
+import tarfile
+import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
@@ -44,7 +48,25 @@ class TinkerClient(ABC):
     def sample(self, checkpoint: TinkerCheckpoint, prompt: list[int], params: Mapping[str, Any]) -> SampleResult: ...
 
     @abstractmethod
+    def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Materialize the checkpoint's sampler weights as a PEFT adapter directory."""
+
+    @abstractmethod
     def close(self) -> None: ...
+
+
+def _extract_archive(archive: Path, directory: Path) -> None:
+    """Unpack a checkpoint archive, refusing links and paths outside ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    base = directory.resolve()
+    with tarfile.open(archive) as tar:
+        members = tar.getmembers()
+        for member in members:
+            if member.issym() or member.islnk():
+                raise ValueError(f"checkpoint archive contains a link: {member.name}")
+            if not (base / member.name).resolve().is_relative_to(base):
+                raise ValueError(f"checkpoint archive escapes its directory: {member.name}")
+        tar.extractall(path=base, members=members)
 
 
 class TinkerSDKClient(TinkerClient):
@@ -194,6 +216,36 @@ class TinkerSDKClient(TinkerClient):
         if any(not math.isfinite(value) for value in sequence.logprobs):
             raise ValueError("Tinker returned non-finite sampled log probabilities")
         return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
+
+    def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Fetch the sampler archive, then convert it with the cookbook into PEFT layout.
+
+        Tinker's archive holds the adapter in its own key naming; the
+        cookbook's converter renames tensors to the base model's parameter
+        names, which is what SGLang and vLLM load.
+        """
+        try:
+            from tinker_cookbook import weights
+        except ImportError as exc:
+            raise RuntimeError(
+                "serving Tinker checkpoints on a local engine needs tinker-cookbook: pip install tinker-cookbook"
+            ) from exc
+        response = (
+            self._service.create_rest_client()
+            .get_checkpoint_archive_url_from_tinker_path(checkpoint.sampler_path)
+            .result(timeout=self._config.train_timeout_s)
+        )
+        staging = directory.parent / f".{directory.name}.download"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        try:
+            archive = staging / "checkpoint.tar"
+            urllib.request.urlretrieve(response.url, archive)
+            raw = staging / "tinker"
+            _extract_archive(archive, raw)
+            weights.build_lora_adapter(base_model=self._model, adapter_path=str(raw), output_path=str(directory))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def close(self) -> None:
         self._service.close("success").result(timeout=self._config.train_timeout_s)
