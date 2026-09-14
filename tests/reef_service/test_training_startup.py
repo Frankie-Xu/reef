@@ -385,6 +385,19 @@ def test_inference_capacity_defaults_to_one_tensor_parallel_engine(tmp_path):
     assert "--rollout-num-gpus=4" in driver_arguments(config)
 
 
+def test_driver_arguments_expand_the_model_path_reference(tmp_path):
+    # The deploy layer binds hf-checkpoint to ``${reef.model_path}`` so the model
+    # resolves once; the driver must receive the resolved path, not the reference.
+    from reef.train.slime_backend.launch import driver_arguments
+
+    config, _ = resolve_deployment_config(training_config(), None, tmp_path / "serve.yaml")
+
+    assert config["reef"]["training_backend_options"]["hf-checkpoint"] == "${reef.model_path}"
+    argv = driver_arguments(config)
+    assert f"--hf-checkpoint={config['reef']['model_path']}" in argv
+    assert not any("${" in argument for argument in argv)
+
+
 def test_legacy_native_driver_arguments_remain_available():
     from reef.train.slime_backend.launch import driver_arguments
 

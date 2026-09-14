@@ -28,6 +28,17 @@ def driver_environment(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def expand_references(config: Mapping[str, Any], value: Any) -> Any:
+    """``value`` with every ``${dotted.path}`` string reference resolved against ``config``."""
+    if isinstance(value, str):
+        return interpolate_config(config, value)
+    if isinstance(value, Mapping):
+        return {key: expand_references(config, item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [expand_references(config, item) for item in value]
+    return value
+
+
 def driver_arguments(config: Mapping[str, Any]) -> list[str]:
     """Adapt resolved component config to the pinned Slime parser at launch.
 
@@ -35,7 +46,10 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
     process stacks without inference_num_gpus retain their native argument path.
     """
     reef = config.get("reef", {})
-    training_options = reef.get("training_backend_options", {})
+    # The deploy layer leaves references such as ``${reef.model_path}`` in the
+    # managed options so the model resolves once for the HTTP service and the
+    # driver alike; they are expanded here, against the same resolved config.
+    training_options = expand_references(config, reef.get("training_backend_options", {}))
     arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
@@ -49,7 +63,7 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
         options["offload-rollout"] = True
         if "offload-train" not in training_options:
             options["offload-train"] = True
-    for name, value in reef.get("inference_options", {}).items():
+    for name, value in expand_references(config, reef.get("inference_options", {})).items():
         # Slime has dedicated router bind flags and passes other router flags
         # directly to RouterArgs. Engine flags are all prefixed by Slime.
         flag = (
