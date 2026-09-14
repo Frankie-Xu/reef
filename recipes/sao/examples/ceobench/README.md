@@ -89,10 +89,10 @@ receipts go into the agent context in call order with their week, token
 count, and decision. Harbor then runs `tests/test.sh` in the same container.
 It stops the engine if the harness could not and scores the run. `score.py`
 opens the run's `world.nmdb` with the checkout's own `load_session_db` and
-writes `reward.json`. Final cash is the running sum of the `ledger` table,
-survival days is the last day any daily table reached, `bankrupt` means
-final cash below zero, and `reward` is final cash divided by the starting
-balance, so 1.0 is break-even.
+writes `reward.json`. Final cash is the balance the benchmark's own
+`get_cash` reads from the books, survival days is the last day any daily
+table reached, `bankrupt` means final cash below zero, and `reward` is
+final cash divided by the starting balance, so 1.0 is break-even.
 
 ### The patch to CEO-Bench
 

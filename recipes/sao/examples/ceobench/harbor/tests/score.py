@@ -19,7 +19,8 @@ import json
 import sys
 from pathlib import Path
 
-DAY_TABLES = ("config_history", "service_day", "ledger")
+#: Tables the engine writes as the days pass; the last day any of them reached is the run's length.
+DAY_TABLES = ("config_history", "service_day", "daily_usage")
 
 
 def find_run_dir(runs_dir: Path) -> Path:
@@ -42,12 +43,13 @@ def find_world_db(run_dir: Path) -> Path:
 
 
 def score(run_dir: Path) -> dict:
+    from saas_bench.database import get_cash  # the benchmark's own cash balance
     from saas_bench.db_protection import load_session_db  # the checkout's own SQLCipher reader
 
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     initial_cash = float(config["initial_cash"])
     conn = load_session_db(find_world_db(run_dir))
-    final_cash = float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM ledger").fetchone()[0])
+    final_cash = float(get_cash(conn))
     survival_days = 0
     for table in DAY_TABLES:
         last_day = conn.execute(f"SELECT COALESCE(MAX(day), 0) FROM {table}").fetchone()[0]
