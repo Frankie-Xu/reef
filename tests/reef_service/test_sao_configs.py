@@ -350,7 +350,6 @@ def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
-        "recipes/openclawrl/examples/openclawrl/serve-mlx.yaml",
         "recipes/sao/examples/sao/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
@@ -365,6 +364,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
+        "recipes/openclawrl/examples/openclawrl/serve-mlx.yaml",
         "recipes/openclawrl/examples/openclawrl/results/2026-09-10-gsm8k-stream-qwen3.5-9b-mlx/serve.yaml",
         "recipes/openclawrl/examples/openclawrl/results/2026-09-14-gsm8k-hermes-harbor-qwen3.5-9b-gated/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
