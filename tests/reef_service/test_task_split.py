@@ -1,4 +1,4 @@
-"""Tasks split by the records they came from: shared sources stay on one side, the seed fixes the draw."""
+"""Tasks split by the records they came from: shared sources stay in one split, the seed fixes the draw."""
 
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ def test_tasks_sharing_a_record_land_on_the_same_side() -> None:
     for seed in range(20):
         split = split_by_source(SOURCES, eval_fraction=0.5, seed=seed)
         for pair in (("t1", "t2"), ("t4", "t5")):
-            sides = {name in split.eval for name in pair}
-            assert len(sides) == 1, (seed, pair, split)
+            in_eval = {name in split.eval for name in pair}
+            assert len(in_eval) == 1, (seed, pair, split)
 
 
 def test_every_task_lands_on_exactly_one_side() -> None:
@@ -98,8 +98,8 @@ def test_a_bad_request_is_refused(sources: dict[str, list[str]], fraction: objec
         split_by_source(sources, eval_fraction=fraction, seed=seed)  # type: ignore[arg-type]
 
 
-def test_a_task_on_both_sides_is_refused() -> None:
-    with pytest.raises(TaskSplitError, match="both sides"):
+def test_a_task_in_both_splits_is_refused() -> None:
+    with pytest.raises(TaskSplitError, match="both the train split and the eval split"):
         TaskSplit(("a",), ("a",), 0, 0.5)
 
 
@@ -157,7 +157,7 @@ def test_the_manifest_round_trips(tmp_path: Path) -> None:
         ('{"version": 1, "seed": 0, "eval_fraction": 0.5, "train": ["a", "a"], "eval": []}', "twice"),
         ('{"version": 1, "seed": "0", "eval_fraction": 0.5, "train": [], "eval": []}', "seed must be"),
         ('{"version": 1, "seed": 0, "eval_fraction": 2, "train": [], "eval": []}', "eval_fraction"),
-        ('{"version": 1, "seed": 0, "eval_fraction": 0.5, "train": ["a"], "eval": ["a"]}', "both sides"),
+        ('{"version": 1, "seed": 0, "eval_fraction": 0.5, "train": ["a"], "eval": ["a"]}', "both the train split"),
     ],
 )
 def test_a_bad_manifest_is_refused(tmp_path: Path, text: str, message: str) -> None:
@@ -275,9 +275,9 @@ def test_a_manifest_task_that_is_missing_or_edited_is_refused(tmp_path: Path) ->
         manifest_task_paths(tmp_path / "split.json", root, "eval")
 
 
-def test_a_side_that_is_not_train_or_eval_is_refused(tmp_path: Path) -> None:
+def test_a_split_that_is_not_train_or_eval_is_refused(tmp_path: Path) -> None:
     write_split_manifest(tmp_path / "split.json", TaskSplit((), (), 0, 0))
-    with pytest.raises(TaskSplitError, match="side must be"):
+    with pytest.raises(TaskSplitError, match="split must be"):
         manifest_task_paths(tmp_path / "split.json", tmp_path, "test")
 
 

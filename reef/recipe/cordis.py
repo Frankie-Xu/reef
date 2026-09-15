@@ -290,12 +290,17 @@ class CordisRecipe(Recipe):
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("harness_evolve requires an 'evolution' config section")
         tasks = evolution.get("tasks")
-        manifest = evolution.get("task_manifest")
+        manifest_path = evolution.get("task_manifest")
         tasks_root = evolution.get("tasks_root")
-        if manifest is not None:
+        if manifest_path is not None:
             if tasks is not None:
                 raise RecipeConfigError("evolution.tasks and evolution.task_manifest cannot both be set")
-            if not isinstance(manifest, str) or not manifest or not isinstance(tasks_root, str) or not tasks_root:
+            if (
+                not isinstance(manifest_path, str)
+                or not manifest_path
+                or not isinstance(tasks_root, str)
+                or not tasks_root
+            ):
                 raise RecipeConfigError(
                     "evolution.task_manifest and evolution.tasks_root must both be non-empty paths"
                 )
@@ -304,7 +309,7 @@ class CordisRecipe(Recipe):
                 descriptor = get_adapter(adapter_name)
             except DescriptorError as exc:
                 raise RecipeConfigError(str(exc)) from exc
-            if not descriptor.prompt_is_task_directory:
+            if not descriptor.is_prompt_task_directory:
                 raise RecipeConfigError(
                     f"evolution.task_manifest needs an adapter that takes a task directory, not a prompt; "
                     f"{adapter_name!r} takes a prompt (terminus takes a task directory)"
@@ -314,11 +319,13 @@ class CordisRecipe(Recipe):
                     "evolution.promote_failures adds prompts to a gate whose tasks are directories"
                 )
             try:
-                task_paths = manifest_task_paths(Path(manifest).expanduser(), Path(tasks_root).expanduser(), "eval")
+                task_paths = manifest_task_paths(
+                    Path(manifest_path).expanduser(), Path(tasks_root).expanduser(), "eval"
+                )
             except TaskSplitError as exc:
                 raise RecipeConfigError(str(exc)) from exc
             if not task_paths:
-                raise RecipeConfigError(f"evolution.task_manifest {manifest} names no eval tasks")
+                raise RecipeConfigError(f"evolution.task_manifest {manifest_path} names no eval tasks")
             tasks = [str(path) for path in task_paths]
         elif tasks_root is not None:
             raise RecipeConfigError("evolution.tasks_root is only read with evolution.task_manifest")

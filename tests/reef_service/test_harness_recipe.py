@@ -2529,7 +2529,7 @@ def test_yaml_config_takes_the_gate_tasks_from_a_split_manifest(tmp_path: Path, 
     }
     built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
     assert built.tasks == (str(root / "held-1"), str(root / "held-2"))
-    assert get_adapter("terminus").prompt_is_task_directory and not get_adapter("pi").prompt_is_task_directory
+    assert get_adapter("terminus").is_prompt_task_directory and not get_adapter("pi").is_prompt_task_directory
 
     with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
         CordisRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}}, runtime=runtime())
