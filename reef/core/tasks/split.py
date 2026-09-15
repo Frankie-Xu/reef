@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,7 +113,16 @@ def write_split_manifest(path: Path, split: TaskSplit) -> None:
         "train": list(split.train),
         "eval": list(split.eval),
     }
-    Path(path).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path = Path(path)
+    text = json.dumps(document, indent=2, sort_keys=True) + "\n"
+    # A sibling file replaced into place: a reader sees the old manifest or the new one, never a torn one.
+    partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    try:
+        partial.write_text(text, encoding="utf-8")
+        os.replace(partial, path)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise TaskSplitError(f"cannot write split manifest {path}: {exc}") from exc
 
 
 def read_split_manifest(path: Path) -> TaskSplit:

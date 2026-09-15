@@ -14,7 +14,8 @@ and every example under ``recipes/`` ships::
 the agent record ids it was made from. The digest covers every file, so a
 replay that writes the same task again is a no-op and a directory edited by
 hand, or given an extra entry of any kind, is refused. A task is staged under
-``<root>/.staging/`` and renamed into place; nothing under ``.staging`` is a task.
+``<root>/.staging/`` and renamed into place; that directory stays, and nothing
+under it is a task.
 """
 
 from __future__ import annotations
@@ -167,14 +168,13 @@ def write_harbor_task(task: HarborTask, root: Path) -> Path:
     """Write ``task`` under ``root/<name>`` atomically; the same task again is a no-op, a different one a conflict."""
     root = Path(root)
     target = root / task.name
-    staging_root = root / STAGING_DIRECTORY
-    staging_root.mkdir(parents=True, exist_ok=True)
     if os.path.lexists(target):
         require_same_task(task, target)
         return target
-    # A plain mkdir, not mkdtemp: the directory keeps the umask mode it will be published with.
-    staging = staging_root / f"{task.name}.{uuid.uuid4().hex}"
-    staging.mkdir()
+    # A plain mkdir, not mkdtemp: the directory keeps the umask mode it will be published with. The staging
+    # parent is never removed, so two writers cannot pull it out from under each other.
+    staging = root / STAGING_DIRECTORY / f"{task.name}.{uuid.uuid4().hex}"
+    staging.mkdir(parents=True)
     try:
         write_task_files(task, staging)
         # What the filesystem kept must be what was written: a case folding or normalizing volume merges names.
@@ -190,7 +190,6 @@ def write_harbor_task(task: HarborTask, root: Path) -> Path:
             require_same_task(task, target)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        remove_empty_directory(staging_root)
     return target
 
 
@@ -199,6 +198,8 @@ def read_harbor_task(path: Path) -> HarborTask:
     path = Path(path)
     if not path.is_dir():
         raise HarborTaskError(f"{path} is not a task directory")
+    # abspath, not resolve: the name is the directory's own, even when it is reached as "." or through a symlink.
+    name = Path(os.path.abspath(path)).name
     files, directories = read_all_entries(path)
     if "task.toml" not in files:
         raise HarborTaskError(f"{path / 'task.toml'} is missing")
@@ -215,8 +216,11 @@ def read_harbor_task(path: Path) -> HarborTask:
     if not isinstance(metadata, dict) or not isinstance(metadata.get("reef"), dict):
         raise HarborTaskError(f"{path / 'task.toml'} carries no [metadata.reef] table; reef did not write it")
     reef_table = metadata["reef"]
-    if sorted(reef_table) != sorted(REEF_TABLE_KEYS) or not isinstance(reef_table["source_agent_record_ids"], list):
+    record_ids = reef_table.get("source_agent_record_ids")
+    if sorted(reef_table) != sorted(REEF_TABLE_KEYS) or not isinstance(record_ids, list):
         raise HarborTaskError(f"{path / 'task.toml'} metadata.reef must hold exactly {' and '.join(REEF_TABLE_KEYS)}")
+    if any(not isinstance(record_id, str) for record_id in record_ids):
+        raise HarborTaskError(f"{path / 'task.toml'} metadata.reef.source_agent_record_ids must hold strings")
     trees: dict[str, dict[str, str]] = {directory: {} for directory in TREE_DIRECTORIES}
     foreign: list[str] = []
     for relative, text in files.items():
@@ -238,14 +242,14 @@ def read_harbor_task(path: Path) -> HarborTask:
         if directory not in directories:
             raise HarborTaskError(f"{path / directory} is missing")
     task = HarborTask(
-        name=path.name,
+        name=name,
         instruction=files["instruction.md"],
         tests=trees["tests"],
         environment=trees["environment"],
         config={table: document[table] for table in KNOWN_CONFIG_KEYS if table in document},
         metadata={key: value for key, value in metadata.items() if key != "reef"},
         solution=trees["solution"],
-        source_agent_record_ids=tuple(str(record_id) for record_id in reef_table["source_agent_record_ids"]),
+        source_agent_record_ids=tuple(record_ids),
     )
     if reef_table["digest"] != task.digest:
         raise HarborTaskError(
@@ -374,9 +378,13 @@ def checked_config(config: object) -> dict[str, dict[str, object]]:
 def checked_config_value(key_path: str, key: str, value: object) -> object:
     """One task.toml value in the form Harbor's own model would accept for ``key``."""
     if key.endswith("timeout_sec"):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        try:
+            seconds = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else math.nan
+        except OverflowError:
+            seconds = math.inf
+        if not math.isfinite(seconds) or seconds <= 0:
             raise HarborTaskError(f"{key_path} must be a positive number of seconds")
-        return float(value)
+        return seconds
     if key in SIZE_KEYS:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise HarborTaskError(f"{key_path} must be a non-negative integer")
@@ -470,13 +478,6 @@ def write_task_files(task: HarborTask, root: Path) -> None:
         # newline="" on both sides: the bytes hashed are the bytes on disk, carriage returns included.
         target.write_text(text, encoding="utf-8", newline="")
     (root / "tests" / "test.sh").chmod(0o755)
-
-
-def remove_empty_directory(path: Path) -> None:
-    try:
-        path.rmdir()
-    except OSError:
-        return
 
 
 def require_same_task(task: HarborTask, target: Path) -> None:

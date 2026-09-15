@@ -80,7 +80,7 @@ def test_the_published_directory_has_the_umask_mode_not_a_private_one(tmp_path: 
     os.umask(mask)
     root = write_harbor_task(task(), tmp_path)
     assert root.stat().st_mode & 0o777 == 0o777 & ~mask
-    assert list(tmp_path.iterdir()) == [root]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".staging", root.name]
 
 
 def test_helpers_solution_and_nested_environment_files_are_written(tmp_path: Path) -> None:
@@ -149,7 +149,8 @@ def test_a_failed_write_leaves_nothing_behind(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(module, "write_task_files", explode)
     with pytest.raises(OSError, match="disk full"):
         write_harbor_task(task(), tmp_path)
-    assert list(tmp_path.iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".staging"]
+    assert list((tmp_path / ".staging").iterdir()) == []
 
 
 def test_a_rename_that_fails_for_its_own_reason_is_not_reported_as_a_conflict(
@@ -163,7 +164,8 @@ def test_a_rename_that_fails_for_its_own_reason_is_not_reported_as_a_conflict(
     monkeypatch.setattr(module.os, "rename", refuse)
     with pytest.raises(PermissionError, match="read-only volume"):
         write_harbor_task(task(), tmp_path)
-    assert list(tmp_path.iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".staging"]
+    assert list((tmp_path / ".staging").iterdir()) == []
 
 
 def test_a_writer_that_lost_the_race_accepts_the_same_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -531,9 +533,51 @@ def test_staging_lives_under_a_hidden_directory_that_never_looks_like_a_task(tmp
     assert read_harbor_task(root) == task()
 
 
-def test_the_staging_directory_is_removed_when_it_is_empty(tmp_path: Path) -> None:
+def test_the_staging_directory_stays_so_writers_never_pull_it_from_under_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import reef.core.tasks.harbor as module
+
+    write_harbor_task(task(), tmp_path)
+    assert (tmp_path / module.STAGING_DIRECTORY).is_dir()
+    # Another process removing the parent between two of our steps is survived: the leaf is made with parents.
+    real_uuid4 = module.uuid.uuid4
+
+    def uuid4_after_a_sweep() -> object:
+        (tmp_path / module.STAGING_DIRECTORY).rmdir()
+        return real_uuid4()
+
+    monkeypatch.setattr(module.uuid, "uuid4", uuid4_after_a_sweep)
+    assert write_harbor_task(task(name="sum-392"), tmp_path) == tmp_path / "sum-392"
+
+
+def test_a_replay_and_a_conflict_create_no_staging_directory(tmp_path: Path) -> None:
     root = write_harbor_task(task(), tmp_path)
+    (tmp_path / ".staging").rmdir()
+    write_harbor_task(task(), tmp_path)
+    with pytest.raises(HarborTaskConflict):
+        write_harbor_task(task(instruction="Add 1 and 1."), tmp_path)
     assert [p.name for p in tmp_path.iterdir()] == [root.name]
+
+
+def test_a_task_directory_reads_as_itself_from_inside(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    monkeypatch.chdir(root)
+    assert read_harbor_task(Path(".")) == task()
+    assert read_harbor_task(Path("../sum-391")) == task()
+
+
+def test_a_numeric_record_id_written_by_hand_is_refused(tmp_path: Path) -> None:
+    root = write_harbor_task(task(source_agent_record_ids=("1",)), tmp_path)
+    text = (root / "task.toml").read_text()
+    (root / "task.toml").write_text(text.replace('"1",', "1,"))
+    with pytest.raises(HarborTaskError, match="must hold strings"):
+        read_harbor_task(root)
+
+
+def test_an_absurd_timeout_is_refused_not_overflowed() -> None:
+    with pytest.raises(HarborTaskError, match="positive number of seconds"):
+        task(config={"agent": {"timeout_sec": 10**400}})
 
 
 def test_a_dangling_symlink_at_the_target_is_a_conflict(tmp_path: Path) -> None:
@@ -619,7 +663,7 @@ def test_a_volume_that_merges_names_is_reported_as_such(tmp_path: Path, monkeypa
     monkeypatch.setattr(module, "read_all_entries", merged)
     with pytest.raises(HarborTaskError, match="is the volume case folding"):
         write_harbor_task(task(), tmp_path)
-    assert [p.name for p in tmp_path.iterdir()] == []
+    assert [p.name for p in tmp_path.iterdir()] == [".staging"]
 
 
 def test_a_renamed_task_directory_is_refused_with_the_reason(tmp_path: Path) -> None:

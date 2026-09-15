@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.tasks import TaskSplit, read_split_manifest, split_by_source, write_split_manifest
-from reef.core.tasks.split import TaskSplitError
+from reef.core.tasks import TaskSplit, TaskSplitError, read_split_manifest, split_by_source, write_split_manifest
 
 SOURCES = {
     "t1": ["r1", "r2"],
@@ -198,3 +197,16 @@ def test_a_manifest_with_keys_reef_did_not_write_is_refused(tmp_path: Path) -> N
 def test_sets_and_dict_views_are_accepted_as_sources() -> None:
     split = split_by_source({"a": {"r"}, "b": {"r": 1}.keys()}, eval_fraction=0.5, seed=0)
     assert split.eval == ("a", "b")
+
+
+def test_a_manifest_write_that_fails_keeps_the_old_manifest_and_raises_a_split_error(tmp_path: Path) -> None:
+    first = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
+    write_split_manifest(tmp_path / "split.json", first)
+    with pytest.raises(TaskSplitError, match="cannot write split manifest"):
+        write_split_manifest(tmp_path / "missing" / "split.json", first)
+    (tmp_path / "split.json").chmod(0o444)
+    (tmp_path / "blocked").mkdir()
+    with pytest.raises(TaskSplitError, match="cannot write split manifest"):
+        write_split_manifest(tmp_path / "blocked", first)
+    assert read_split_manifest(tmp_path / "split.json") == first
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["blocked", "split.json"]
