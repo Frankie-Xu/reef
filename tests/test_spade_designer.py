@@ -40,7 +40,9 @@ HARBOR_DOCUMENT = {
         "A service on this machine writes the port it listens on under /var/run. Find that file and write the "
         "port number, and nothing else, to /workspace/port.txt."
     ),
-    "environment": {"Dockerfile": "FROM python:3.12-slim\nRUN echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"},
+    "environment": {
+        "Dockerfile": "FROM python:3.12-slim\nRUN apt-get update && apt-get install -y tmux && echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"
+    },
     "tests": {
         "test.sh": '#!/bin/sh\nmkdir -p /logs/verifier\ntest "$(cat /workspace/port.txt)" = 8471 && echo 1 > /logs/verifier/reward.txt || echo 0 > /logs/verifier/reward.txt\n'
     },
@@ -87,7 +89,7 @@ def test_the_harbor_prompt_names_the_container_the_verifier_and_the_reference_so
     assert "Harbor task, a container with files, an instruction and a verifier, that tests: deduction" in text
     assert "at most 30 commands" in text and "environment/Dockerfile" in text
     assert "/logs/verifier/reward.txt" in text and "solution/solve.sh" in text
-    assert "It never sees tests/ or solution/" in text and "The image creates every directory" in text
+    assert "It never sees tests/ or solution/" in text and "The image installs tmux" in text
     assert "TWO NETWORK PHASES" in text and "no heredocs" in text and "at least 80 characters" in text
     assert text.count("```json") == 1 and "```python" not in text
 

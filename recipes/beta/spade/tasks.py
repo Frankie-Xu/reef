@@ -174,7 +174,7 @@ def dockerfile_text(image: str, *, max_turns: int, seed: int) -> str:
     """The agent's image: sudo, a non root agent user, and the environment readable by root only."""
     return (
         f"FROM {image}\n"
-        "RUN apt-get update && apt-get install -y --no-install-recommends sudo && rm -rf /var/lib/apt/lists/* \\\n"
+        "RUN apt-get update && apt-get install -y --no-install-recommends sudo tmux && rm -rf /var/lib/apt/lists/* \\\n"
         f" && useradd --create-home --shell /bin/bash {AGENT_USER} \\\n"
         f" && mkdir -p {ENVIRONMENT_DIRECTORY} /var/env /workspace && chmod 700 {ENVIRONMENT_DIRECTORY} /var/env \\\n"
         f" && chown {AGENT_USER}:{AGENT_USER} /workspace\n"

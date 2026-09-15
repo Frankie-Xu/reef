@@ -23,7 +23,9 @@ REPLY = HarborReply(
         "A service on this machine writes the port it listens on under /var/run. Find that file and write the "
         "port number, and nothing else, to /workspace/port.txt.\n"
     ),
-    environment={"Dockerfile": "FROM python:3.12-slim\nRUN echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"},
+    environment={
+        "Dockerfile": "FROM python:3.12-slim\nRUN apt-get update && apt-get install -y tmux && echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"
+    },
     tests={
         "test.sh": (
             "#!/bin/sh\nmkdir -p /logs/verifier\n"
@@ -159,6 +161,10 @@ def test_a_substantive_reply_has_no_errors() -> None:
     [
         ({"instruction": "Do it.\n"}, "fewer than 80 characters"),
         ({"environment": {"Dockerfile": "FROM python:3.12-slim\n"}}, "needs FROM and one of RUN, COPY, ADD or ENV"),
+        (
+            {"environment": {"Dockerfile": "FROM python:3.12-slim\nRUN echo 8471 > /var/run/app.port\n"}},
+            "does not install tmux",
+        ),
         ({"environment": {"Dockerfile": "RUN echo 1\n"}}, "needs FROM"),
         (
             {

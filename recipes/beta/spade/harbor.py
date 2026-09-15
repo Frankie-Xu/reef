@@ -163,6 +163,9 @@ def reply_errors(reply: HarborReply) -> list[str]:
     }
     if "FROM" not in instructions or not instructions & SETUP_INSTRUCTIONS:
         errors.append("the Dockerfile needs FROM and one of RUN, COPY, ADD or ENV")
+    # The agent's container has no network, so the image must carry what Terminus 2 needs to run in it.
+    if "tmux" not in dockerfile:
+        errors.append("the Dockerfile does not install tmux, which the agent needs inside the container")
     solution = reply.solution.get("solve.sh", "")
     if not [line for line in solution.splitlines() if line.strip() and not line.lstrip().startswith("#")]:
         errors.append("solution/solve.sh has no command")

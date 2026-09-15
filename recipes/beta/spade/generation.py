@@ -318,11 +318,17 @@ class WrittenTask:
     action_example: Mapping[str, object] = field(default_factory=dict)
 
 
+def is_unplayed(play: TaskPlay) -> bool:
+    """An episode that never ran: no reward and an error (the agent could not start, the trial raised)."""
+    return play.reward is None and bool(play.error)
+
+
 def mean_reward(plays: Sequence[TaskPlay]) -> float:
-    """The mean reward of an arm; an unscored episode counts as 0, like a loss."""
-    if not plays:
+    """The mean reward of the episodes of an arm that ran; a run that scored nothing counts as 0, like a loss."""
+    ran = [play for play in plays if not is_unplayed(play)]
+    if not ran:
         return 0.0
-    return statistics.fmean(play.reward if play.reward is not None else 0.0 for play in plays)
+    return statistics.fmean(play.reward if play.reward is not None else 0.0 for play in ran)
 
 
 def experience_for(
@@ -391,7 +397,13 @@ class Generation:
                 proposal = Proposal(index, kind, skill, answer.record_id, None, refusal)
                 proposals.append(self.reported(proposal, request, None))
                 continue
-            measure = self.measured(written, kind, skill, request)
+            measure, refusal = self.measured(written, kind, skill, request)
+            if measure is None:
+                shutil.rmtree(self.tasks_root / written.task.name, ignore_errors=True)
+                known_hashes.discard(content_hash(written.task))
+                proposal = Proposal(index, kind, skill, answer.record_id, None, refusal)
+                proposals.append(self.reported(proposal, request, None))
+                continue
             measures.append(measure)
             proposal = Proposal(index, kind, skill, answer.record_id, measure.name, "")
             proposals.append(self.reported(proposal, request, measure))
@@ -503,13 +515,21 @@ class Generation:
             openenv_reply.action_example,
         )
 
-    def measured(self, written: WrittenTask, kind: str, skill: str, request: GenerationRequest) -> TaskMeasure:
-        """Both arms played: the plain arm reported as training data, the hint arm measured only."""
+    def measured(
+        self, written: WrittenTask, kind: str, skill: str, request: GenerationRequest
+    ) -> tuple[TaskMeasure | None, str]:
+        """Both arms played: the plain arm reported as training data, the hint arm measured only.
+
+        A task the solver could not play at all (every plain episode ended before the agent ran) is no
+        measure of the solver; it comes back as None with the first episode's error.
+        """
         task_path = self.tasks_root / written.task.name
         tags = {"generation": str(request.generation), "kind": kind, "skill": skill}
         plain = self.solver.play(
             task_path, arm="plain", plays=request.plays, is_reporting=True, extra_instruction_paths=(), tags=tags
         )
+        if plain and all(is_unplayed(play) for play in plain):
+            return None, f"the solver could not play the task: {plain[0].error[:300]}"
         hint_path = task_path / "solution" / "hint.txt"
         hint = self.solver.play(
             task_path,
@@ -526,16 +546,21 @@ class Generation:
             return_with_hint=mean_reward(hint) if hint else mean_reward(plain),
             code_excerpt=written.code_excerpt,
         )
-        return TaskMeasure(
+        measure = TaskMeasure(
             name=written.task.name,
             kind=kind,
             skill=skill,
             task_path=task_path,
             digest=written.task.digest,
-            plain_rewards=tuple(play.reward if play.reward is not None else 0.0 for play in plain),
-            hint_rewards=tuple(play.reward if play.reward is not None else 0.0 for play in hint),
+            plain_rewards=tuple(
+                play.reward if play.reward is not None else 0.0 for play in plain if not is_unplayed(play)
+            ),
+            hint_rewards=tuple(
+                play.reward if play.reward is not None else 0.0 for play in hint if not is_unplayed(play)
+            ),
             record=record,
         )
+        return measure, ""
 
     def reported(self, proposal: Proposal, request: GenerationRequest, measure: TaskMeasure | None) -> Proposal:
         """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""

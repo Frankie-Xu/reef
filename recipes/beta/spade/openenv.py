@@ -285,7 +285,7 @@ def dockerfile_text(image: str) -> str:
     """The agent's image: openenv, curl, sudo, a non root agent user, and the package readable by root only."""
     return (
         f"FROM {image}\n"
-        "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl && rm -rf /var/lib/apt/lists/* \\\n"
+        "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl tmux && rm -rf /var/lib/apt/lists/* \\\n"
         f" && pip install --no-cache-dir '{OPENENV_REQUIREMENT}' \\\n"
         f" && useradd --create-home --shell /bin/bash {AGENT_USER} \\\n"
         f" && mkdir -p {ENVIRONMENT_DIRECTORY}/{PACKAGE}/server /var/env /workspace \\\n"

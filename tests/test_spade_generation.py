@@ -46,7 +46,9 @@ HARBOR_DOCUMENT = {
         "A service on this machine writes the port it listens on under /var/run. Find that file and write the "
         "port number, and nothing else, to /workspace/port.txt."
     ),
-    "environment": {"Dockerfile": "FROM python:3.12-slim\nRUN echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"},
+    "environment": {
+        "Dockerfile": "FROM python:3.12-slim\nRUN apt-get update && apt-get install -y tmux && echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"
+    },
     "tests": {
         "test.sh": '#!/bin/sh\nmkdir -p /logs/verifier\ntest "$(cat /workspace/port.txt)" = 8471 && echo 1 > /logs/verifier/reward.txt || echo 0 > /logs/verifier/reward.txt\n'
     },
@@ -158,9 +160,10 @@ class StandInSolver(Solver):
         ("openenv", "hint"): 0.0,
     }
 
-    def __init__(self) -> None:
+    def __init__(self, *, error: str = "") -> None:
         self.calls: list[dict[str, object]] = []
         self.episodes = 0
+        self.error = error
 
     def play(self, task_path, *, arm, plays, is_reporting, extra_instruction_paths, tags) -> tuple[TaskPlay, ...]:
         self.calls.append(
@@ -174,7 +177,7 @@ class StandInSolver(Solver):
             }
         )
         kind = task_path.name.split("-")[0]
-        reward = self.REWARDS[(kind, arm)]
+        reward = None if self.error else self.REWARDS[(kind, arm)]
         played = []
         for _ in range(plays):
             self.episodes += 1
@@ -184,11 +187,11 @@ class StandInSolver(Solver):
                     name=task_path.name,
                     episode_id=f"episode-{self.episodes}",
                     reward=reward,
-                    rewards={"reward": reward},
-                    error="",
-                    receipts=(f"rec-{self.episodes}",),
+                    rewards={} if reward is None else {"reward": reward},
+                    error=self.error,
+                    receipts=() if self.error else (f"rec-{self.episodes}",),
                     failed_calls=0,
-                    report_agent_record_ids=(f"rep-{self.episodes}",) if is_reporting else (),
+                    report_agent_record_ids=(f"rep-{self.episodes}",) if is_reporting and not self.error else (),
                     trial_uri=None,
                 )
             )
@@ -213,7 +216,7 @@ def request(**overrides: object) -> GenerationRequest:
 
 def generation(tmp_path: Path, **parts: object) -> tuple[Generation, StandInDesigner, StandInSolver, StandInChecks]:
     designer = parts.get("designer") or StandInDesigner()
-    solver = StandInSolver()
+    solver = parts.get("solver") or StandInSolver()
     checks = parts.get("checks") or StandInChecks()
     run = Generation(designer=designer, solver=solver, checks=checks, tasks_root=tmp_path / "tasks")  # type: ignore[arg-type]
     return run, designer, solver, checks  # type: ignore[return-value]
@@ -314,6 +317,31 @@ def test_a_task_its_check_refuses_never_stays_under_the_root(
     assert result.measures == () and result.manifest_path is None and solver.calls == []
     assert [entry.name for entry in (tmp_path / "tasks").iterdir() if entry.name != ".staging"] == [".spade"]
     assert designer.reports[0]["score"] == 0.0
+
+
+def test_a_task_the_solver_could_not_play_is_refused_not_scored(tmp_path: Path) -> None:
+    solver = StandInSolver(error="Failed to start tmux session. Error: None")
+    run, designer, _, _ = generation(tmp_path, solver=solver)
+    result = run.run(request(kinds=("gym",), count=1))
+    proposal = result.proposals[0]
+    assert not proposal.is_written
+    assert proposal.refusal == "the solver could not play the task: Failed to start tmux session. Error: None"
+    assert result.measures == () and result.manifest_path is None
+    assert [call["arm"] for call in solver.calls] == ["plain"], "the hint arm is not played for a task that cannot run"
+    assert not (tmp_path / "tasks" / "gym-00004-000-deduction").exists()
+    assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == proposal.refusal
+    again = run.run(request(kinds=("gym",), count=1, generation=5))
+    assert (
+        again.proposals[0].refusal == "the solver could not play the task: Failed to start tmux session. Error: None"
+    )
+
+
+def test_mean_reward_skips_episodes_that_never_ran(tmp_path: Path) -> None:
+    def play(reward: float | None, error: str = "") -> TaskPlay:
+        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
+
+    assert mean_reward([play(1.0), play(None, "the trial raised")]) == 1.0
+    assert mean_reward([play(None, "the trial raised")]) == 0.0
 
 
 def test_a_task_already_under_the_root_is_not_written_twice(tmp_path: Path) -> None:
