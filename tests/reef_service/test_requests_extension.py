@@ -1369,10 +1369,14 @@ def test_a_selected_release_installs_through_the_wrapper_after_the_confirm_with_
         {"kind": "exec", "command": wrapper, "args": ["update", "--release", "rel-1111-selected"]},
         {"kind": "exec", "command": wrapper, "args": ["setup", "--json", "--release", "rel-1111-selected"]},
         {"kind": "input", "title": "The phone number to text, with the country code", "placeholder": ""},
-        {"kind": "exec", "command": wrapper, "args": ["setup", "--set", "REEF_AWAY_PHONE=+1 555 0100"]},
+        {
+            "kind": "exec",
+            "command": wrapper,
+            "args": ["setup", "--set", "REEF_AWAY_PHONE=+1 555 0100", "--release", "rel-1111-selected"],
+        },
         {"kind": "notify", "message": "reef: REEF_AWAY_PHONE set", "type": "info"},
         {"kind": "confirm", "title": "Run this check?", "message": CHECK},
-        {"kind": "exec", "command": wrapper, "args": ["setup", "--run", "notify"]},
+        {"kind": "exec", "command": wrapper, "args": ["setup", "--run", "notify", "--release", "rel-1111-selected"]},
         {"kind": "notify", "message": "reef: notify met", "type": "info"},
         {"kind": "notify", "message": INSTALLED_LINE, "type": "info"},
     ]
@@ -1480,8 +1484,8 @@ def test_an_update_the_wrapper_refuses_runs_the_setup_loop_first_then_the_update
     assert _exec_args(events) == [
         ["update", "--release", "rel-1111-selected"],
         ["setup", "--json", "--release", "rel-1111-selected"],
-        ["setup", "--set", "REEF_AWAY_PHONE=+1 555 0100"],
-        ["setup", "--run", "notify"],
+        ["setup", "--set", "REEF_AWAY_PHONE=+1 555 0100", "--release", "rel-1111-selected"],
+        ["setup", "--run", "notify", "--release", "rel-1111-selected"],
         ["update", "--release", "rel-1111-selected"],
     ]
     assert _said(events)[-1] == (INSTALLED_LINE, "info")

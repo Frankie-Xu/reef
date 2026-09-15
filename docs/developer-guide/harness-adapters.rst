@@ -641,17 +641,19 @@ two commands, two tools and two event handlers:
   first and then the update again; any other failure stops with ``reef:
   reef-pi update failed (exit N): <stderr>``. If the same installation directory
   was rebound to another service or scenario while the session was running,
-  setup and update stop before network requests or file writes and show both
-  contexts. Restart from the intended installation before retrying. If a named
+  setup and update automatically use the session's original service, scenario,
+  and token. The installation is restored to that configuration after a successful
+  update. Commands targeting a different install directory use its own configuration.
+  Setup values and checks are pinned to the release being installed. If that
   release is absent, the error identifies the queried service and scenario;
   refresh ``/reef-versions`` before choosing a release again.
 - The setup loop: ``reef-pi setup --json --release <id>`` lists the
   release's items with ``met``; each unmet item is asked once, an ``env``
   item through ``ctx.ui.input`` titled with its ``prompt`` (else ``Value
   for <NAME>``) and handed over as one argument, ``reef-pi setup --set
-  NAME=<value>``, a ``permission`` or ``service`` item through
+  NAME=<value> --release <id>``, a ``permission`` or ``service`` item through
   ``ctx.ui.confirm`` titled with its ``prompt`` (else ``Run this check?``)
-  and the check as the message, then ``reef-pi setup --run NAME``. One
+  and the check as the message, then ``reef-pi setup --run NAME --release <id>``. One
   line per item: ``reef: NAME set``, ``reef: NAME met``, ``reef: NAME not
   met (exit N)``, or ``reef: NAME skipped`` for a declined check or an
   empty value; at the end, when items stay unmet, ``reef: still to set up:

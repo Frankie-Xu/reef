@@ -413,10 +413,10 @@ export default function requests(pi) {
       if (item.kind === "env") {
         const value = await ctx.ui.input(textOf(item.prompt, `Value for ${name}`), "");
         // The value is one argument to the wrapper, never shell source; the wrapper keeps it in its env file.
-        if (value) result = await runWrapper(wrapper, ["setup", "--set", `${name}=${value}`]);
+        if (value) result = await runWrapper(wrapper, ["setup", "--set", `${name}=${value}`, "--release", releaseId]);
       } else {
         const confirmed = await ctx.ui.confirm(textOf(item.prompt, "Run this check?"), textOf(item.check, ""));
-        if (confirmed) result = await runWrapper(wrapper, ["setup", "--run", name]);
+        if (confirmed) result = await runWrapper(wrapper, ["setup", "--run", name, "--release", releaseId]);
       }
       if (result === null) {
         unmet.push(name);

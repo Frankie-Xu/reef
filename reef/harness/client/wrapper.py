@@ -107,10 +107,11 @@ When invoked with ``update`` (e.g. ``reef-pi update``, ``reef-pi update --releas
   While the release requires an item that is not met, the items are printed
   and nothing is fetched: exit 3, since the script would refuse anyway;
   this says why first. When called from an active session into its own install
-  directory, setup and update reject a service or scenario changed since launch
-  before making requests or writing files. Restart from the intended installation
-  to use its current configuration. An unknown release reports the service and
-  scenario whose catalog was queried.
+  directory, setup and update use that session's service, scenario, and token.
+  A successful update restores the installation to the session's configuration
+  even if another install rewrote it. Commands targeting another install directory
+  use that directory's configuration. An unknown release reports the service and
+  scenario whose catalog was queried; it never substitutes a different release.
 
 When invoked with ``--help``, ``-h`` or ``help``:
 
@@ -1327,6 +1328,7 @@ class _Setup:
     recorded: dict[str, dict[str, Any]]
     checked: dict[str, dict[str, Any]]
     values: dict[str, str]
+    scenario: str
     upstream: str
     token: str | None
 
@@ -1364,7 +1366,7 @@ def service_display_url(url: str) -> str:
 
 
 def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | None, prog: str) -> _Setup | None:
-    """Load setup state; report an unknown release or a changed session install context as ``prog`` on stderr.
+    """Load setup state from the active session, or from the installed configuration outside that session.
 
     The release is ``release`` when named (a pending or trial release
     included, so its items are checked off before its install), else the
@@ -1378,29 +1380,23 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
             f"reef-{adapter}: no {HARNESS_RELEASE_FILE} release file at {Path(compose_dir).resolve().parent}: this "
             "tree did not come through reef's install channel, so there is no installed release to set up or update"
         )
-    upstream = _reef_url_of(adapter, compose_dir)
     session_root = os.environ.get("REEF_HARNESS_DEST")
     session_service = os.environ.get("REEF_SERVICE_URL")
     session_scenario = os.environ.get("REEF_SCENARIO")
-    # An active session keeps its launch context even if another install rewrites this directory.
-    # A command explicitly targeting a different install remains independent of that session.
+    # Keep a session's setup and update on the service it selected the release from,
+    # even when another install has replaced this directory's wrapper or model binding.
     if (
         session_root
         and session_service
         and session_scenario
         and Path(session_root).resolve() == Path(compose_dir).resolve().parent
-        and (_strip_v1(session_service.rstrip("/")) != upstream or session_scenario != scenario)
     ):
-        print(
-            f"reef-{adapter} {prog}: session and installed harness use different services or scenarios\n"
-            f"  session: {service_display_url(session_service)} (scenario {session_scenario!r})\n"
-            f"  installed: {service_display_url(upstream)} (scenario {scenario!r})\n"
-            f"  install directory: {Path(compose_dir).resolve().parent}\n"
-            f"Restart reef-{adapter} from the intended installation before retrying.",
-            file=sys.stderr,
-        )
-        return None
-    token = _reef_token(adapter, compose_dir)
+        upstream = _strip_v1(session_service.rstrip("/"))
+        scenario = session_scenario
+        token = os.environ.get("REEF_TOKEN") or None
+    else:
+        upstream = _reef_url_of(adapter, compose_dir)
+        token = _reef_token(adapter, compose_dir)
     rows = _catalog(upstream, scenario, adapter, token)
     row = _release_to_set_up(rows, release)
     if row is None and release is not None:
@@ -1414,7 +1410,9 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     release_id = row.get("release_id") if row is not None else None
     requires = required_by(rows, release_id if isinstance(release_id, str) else None)
     recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
-    return _Setup(record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), upstream, token)
+    return _Setup(
+        record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), scenario, upstream, token
+    )
 
 
 def _save_setup(compose_dir: str, state: _Setup) -> None:
@@ -1676,7 +1674,7 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     if release is not None:
         query += f"&release_id={urllib.parse.quote(release, safe='')}"
     req = urllib.request.Request(
-        f"{state.upstream}/reef/harness/install?{query}", headers=_reef_headers(scenario, state.token)
+        f"{state.upstream}/reef/harness/install?{query}", headers=_reef_headers(state.scenario, state.token)
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as response:

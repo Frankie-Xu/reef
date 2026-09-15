@@ -2271,46 +2271,95 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
 
 
 @pytest.mark.parametrize("operation", ["update", "setup-set"])
-@pytest.mark.parametrize("changed", ["scenario", "service"])
-def test_session_setup_and_update_refuse_an_install_rebound_to_another_context(
+@pytest.mark.parametrize("changed", ["scenario", "service", "missing-binding"])
+def test_session_setup_and_update_recover_using_the_sessions_service_and_scenario(
     tmp_path, capsys, operation, changed
 ) -> None:
-    reef = _ReleasesReef([_row("v1", [{"name": "SMTP", "kind": "env"}])], install=INSTALL_SCRIPT)
-    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
-    before = release_file.read_bytes()
-    service = f"http://127.0.0.1:{reef.port}"
-    session_service = (
-        "http://user:private-password@previous-service:8901?token=url-secret#private-fragment"
-        if changed == "service"
-        else service
+    reef = _ReleasesReef([_row("v2", [{"name": "SMTP", "kind": "env"}])], install=INSTALL_SCRIPT)
+    other = _ReleasesReef([_row("other-release")])
+    compose, release_file = _setup_tree(
+        tmp_path, other.port if changed == "service" else reef.port, {"release_id": "v1"}
     )
-    session_scenario = "previous-scenario" if changed == "scenario" else "setup-scenario"
+    if changed == "missing-binding":
+        (Path(compose) / "models.json").unlink()
+    disk_scenario = "other-scenario" if changed == "scenario" else "setup-scenario"
     env = _ask_env(
         tmp_path / "captures",
         compose,
-        REEF_TOKEN="private-token",
+        REEF_TOKEN="session-token",
         SMTP="smtp.example",
         REEF_HARNESS_DEST=str(Path(compose).parent),
-        REEF_SERVICE_URL=session_service,
-        REEF_SCENARIO=session_scenario,
+        REEF_SERVICE_URL=f"http://127.0.0.1:{reef.port}",
+        REEF_SCENARIO="setup-scenario",
     )
     try:
         with patch.dict(os.environ, env, clear=True):
             if operation == "update":
-                assert update("setup-scenario", "pi", compose, release="v1") == 1
+                assert update(disk_scenario, "pi", compose, release="v2") == 0
+                assert json.loads(release_file.read_text())["release_id"] == "v2"
+                assert (tmp_path / "dest-seen").read_text().strip() == str(tmp_path.resolve())
             else:
-                assert setup_set("setup-scenario", "pi", compose, "SMTP=new-value", release="v1") == 2
+                assert setup_set(disk_scenario, "pi", compose, "SMTP=new-value", release="v2") == 0
+                assert "SMTP=new-value" in (tmp_path / ".reef-harness-env").read_text()
+        assert capsys.readouterr().err == ""
+        assert other.seen == []
+        assert all(call["headers"]["x-reef-scenario"] == "setup-scenario" for call in reef.seen)
+        assert all(call["headers"]["authorization"] == "Bearer session-token" for call in reef.seen)
+        if operation == "update":
+            assert reef.seen[-1]["path"] == "/reef/harness/install?adapter=pi&release_id=v2"
+    finally:
+        reef.close()
+        other.close()
+
+
+def test_session_recovery_does_not_substitute_another_catalog_or_release(tmp_path, capsys) -> None:
+    reef = _ReleasesReef([_row("new-head")], install=INSTALL_SCRIPT)
+    other = _ReleasesReef([_row("selected-release")], install=INSTALL_SCRIPT)
+    compose, release_file = _setup_tree(tmp_path, other.port, {"release_id": "installed"})
+    before = release_file.read_bytes()
+    env = _ask_env(
+        tmp_path / "captures",
+        compose,
+        REEF_HARNESS_DEST=str(tmp_path),
+        REEF_SCENARIO="setup-scenario",
+        REEF_SERVICE_URL=f"http://127.0.0.1:{reef.port}",
+    )
+    # The active session is unauthenticated; the overwritten binding's token belongs to another service.
+    models_file = Path(compose) / "models.json"
+    models = json.loads(models_file.read_text())
+    models["providers"]["reef"]["apiKey"] = "other-service-token"
+    models_file.write_text(json.dumps(models))
+    try:
+        with patch.dict(os.environ, env, clear=True):
+            assert update("other-scenario", "pi", compose, release="selected-release") == 1
         error = capsys.readouterr().err
-        assert "session and installed harness use different services or scenarios" in error
-        expected_service = "http://previous-service:8901" if changed == "service" else service
-        assert expected_service in error and service in error
-        assert all(secret not in error for secret in ("private-password", "url-secret", "private-fragment"))
-        assert repr(session_scenario) in error and "'setup-scenario'" in error
-        assert "Restart" in error and "private-token" not in error
-        assert reef.seen == []
-        assert release_file.read_bytes() == before
-        assert not (tmp_path / ".reef-harness-env").exists()
+        assert "no release selected-release" in error and f"127.0.0.1:{reef.port}" in error
+        assert "other-service-token" not in error
+        assert len(reef.seen) == 1 and reef.seen[0]["path"] == "/reef/harness/releases"
+        assert "authorization" not in reef.seen[0]["headers"]
+        assert other.seen == [] and release_file.read_bytes() == before
         assert not (tmp_path / "dest-seen").exists()
+    finally:
+        reef.close()
+        other.close()
+
+
+def test_session_does_not_redirect_an_explicit_update_of_another_installation(tmp_path, capsys) -> None:
+    reef = _ReleasesReef([_row("v2")], install=INSTALL_SCRIPT)
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(
+        tmp_path / "captures",
+        compose,
+        REEF_HARNESS_DEST=str(tmp_path / "another-installation"),
+        REEF_SERVICE_URL="http://session-service.invalid",
+        REEF_SCENARIO="session-scenario",
+    )
+    try:
+        with patch.dict(os.environ, env, clear=True):
+            assert update("setup-scenario", "pi", compose, release="v2") == 0
+        assert capsys.readouterr().err == ""
+        assert json.loads(release_file.read_text())["release_id"] == "v2"
+        assert all(call["headers"]["x-reef-scenario"] == "setup-scenario" for call in reef.seen)
     finally:
         reef.close()
 
