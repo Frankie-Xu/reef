@@ -13,7 +13,7 @@ and every example under ``recipes/`` ships::
 ``task.toml`` carries a ``[metadata.reef]`` table with the task's digest and
 the agent record ids it was made from. The digest covers every file, so a
 replay that writes the same task again is a no-op and a directory edited by
-hand, or given an extra file, is refused.
+hand, or given an extra entry of any kind, is refused.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ import math
 import os
 import re
 import shutil
+import stat
+import time
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -44,17 +46,31 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 #: The ``version`` every task.toml under ``recipes/`` declares; Harbor reads it as ``schema_version``.
 TASK_CONFIG_VERSION = "1.0"
 NETWORK_MODES = ("no-network", "public", "allowlist")
+#: A staging directory older than this with no writer behind it is swept before the next write.
+STALE_STAGING_S = 3600.0
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _SIZE_KEYS = ("cpus", "memory_mb", "storage_mb", "gpus")
 _KNOWN_KEYS: dict[str, tuple[str, ...]] = {
-    "verifier": ("timeout_sec", "env"),
-    "agent": ("timeout_sec",),
-    "environment": ("build_timeout_sec", "docker_image", "network_mode", "allowed_hosts", *_SIZE_KEYS),
+    "verifier": ("timeout_sec", "env", "user"),
+    "agent": ("timeout_sec", "user"),
+    "environment": (
+        "build_timeout_sec",
+        "docker_image",
+        "network_mode",
+        "allowed_hosts",
+        "env",
+        "workdir",
+        *_SIZE_KEYS,
+    ),
 }
 _TOP_LEVEL = ("version", "metadata", *_KNOWN_KEYS)
+_REEF_KEYS = ("digest", "source_agent_record_ids")
 _TREES = ("tests", "environment", "solution")
+_ROOT_FILES = ("task.toml", "instruction.md")
+_MAX_COMPONENT_BYTES = 255
+_MAX_PATH_BYTES = 1024
 
 
 class HarborTaskError(ReefError):
@@ -98,6 +114,11 @@ class HarborTask:
             or len(set(ids)) != len(ids)
         ):
             raise HarborTaskError("source_agent_record_ids must be a tuple of distinct non-empty strings")
+        # One encode of everything the writer will put on disk: a lone surrogate anywhere fails here, not mid write.
+        try:
+            self.task_toml().encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise HarborTaskError(f"task.toml is not valid Unicode text: {exc.reason}") from exc
 
     @property
     def digest(self) -> str:
@@ -136,24 +157,24 @@ def write_harbor_task(task: HarborTask, root: Path) -> Path:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     target = root / task.name
-    if target.exists():
+    if os.path.lexists(target):
         _require_same(task, target)
         return target
+    _sweep_stale_staging(root, task.name)
     # A plain mkdir, not mkdtemp: the directory keeps the umask mode it will be published with.
     staging = root / f".{task.name}.{uuid.uuid4().hex}"
     staging.mkdir()
     try:
         _write_files(task, staging)
         # What the filesystem kept must be what was hashed: a case folding or normalizing volume merges names.
-        staged = _read_task(staging, task.name)
-        if staged.digest != task.digest:
+        if _read_task(staging, task.name).digest != task.digest:
             raise HarborTaskError(
                 f"{staging} does not read back as the task written to it; is the volume case folding?"
             )
         try:
             os.rename(staging, target)
         except OSError:
-            if not target.exists():
+            if not os.path.lexists(target):
                 raise
             # A concurrent writer won the rename: accept its directory only if it holds the same task.
             _require_same(task, target)
@@ -174,8 +195,11 @@ def read_harbor_task(path: Path) -> HarborTask:
 
 
 def _read_task(path: Path, name: str) -> HarborTask:
+    files = _read_all(path)
+    if "task.toml" not in files:
+        raise HarborTaskError(f"{path / 'task.toml'} is missing")
     try:
-        document = tomllib.loads(_read_text(path / "task.toml"))
+        document = tomllib.loads(files["task.toml"])
     except tomllib.TOMLDecodeError as exc:
         raise HarborTaskError(f"{path / 'task.toml'} is not valid TOML: {exc}") from exc
     if document.get("version") != TASK_CONFIG_VERSION:
@@ -187,29 +211,62 @@ def _read_task(path: Path, name: str) -> HarborTask:
     if not isinstance(metadata, dict) or not isinstance(metadata.get("reef"), dict):
         raise HarborTaskError(f"{path / 'task.toml'} carries no [metadata.reef] table; reef did not write it")
     reef = metadata["reef"]
-    ids = reef.get("source_agent_record_ids", [])
-    if not isinstance(ids, list):
-        raise HarborTaskError(f"{path / 'task.toml'} metadata.reef.source_agent_record_ids must be a list")
-    extra = sorted(
-        p.relative_to(path).as_posix()
-        for p in path.rglob("*")
-        if p.is_file() and p.relative_to(path).parts[0] not in _TREES and p.name not in ("task.toml", "instruction.md")
-    )
+    if sorted(reef) != sorted(_REEF_KEYS) or not isinstance(reef["source_agent_record_ids"], list):
+        raise HarborTaskError(f"{path / 'task.toml'} metadata.reef must hold exactly {' and '.join(_REEF_KEYS)}")
+    trees: dict[str, dict[str, str]] = {tree: {} for tree in _TREES}
+    extra: list[str] = []
+    for relative, text in files.items():
+        parts = relative.split("/")
+        if len(parts) == 1 and parts[0] in _ROOT_FILES:
+            continue
+        if len(parts) > 1 and parts[0] in _TREES:
+            trees[parts[0]]["/".join(parts[1:])] = text
+        else:
+            extra.append(relative)
     if extra:
-        raise HarborTaskError(f"{path} holds files reef did not write: {', '.join(extra)}")
+        raise HarborTaskError(f"{path} holds entries reef did not write: {', '.join(sorted(extra))}")
+    if "instruction.md" not in files:
+        raise HarborTaskError(f"{path / 'instruction.md'} is missing")
+    for tree in ("tests", "environment"):
+        if not (path / tree).is_dir():
+            raise HarborTaskError(f"{path / tree} is missing")
     task = HarborTask(
         name=name,
-        instruction=_read_text(path / "instruction.md"),
-        tests=_read_tree(path / "tests"),
-        environment=_read_tree(path / "environment"),
+        instruction=files["instruction.md"],
+        tests=trees["tests"],
+        environment=trees["environment"],
         config={table: document[table] for table in _KNOWN_KEYS if table in document},
         metadata={key: value for key, value in metadata.items() if key != "reef"},
-        solution=_read_tree(path / "solution") if (path / "solution").is_dir() else {},
-        source_agent_record_ids=tuple(str(i) for i in ids),
+        solution=trees["solution"],
+        source_agent_record_ids=tuple(str(i) for i in reef["source_agent_record_ids"]),
     )
-    if reef.get("digest") != task.digest:
+    if reef["digest"] != task.digest:
         raise HarborTaskError(f"{path} was edited after it was written: its content no longer matches its digest")
     return task
+
+
+def _read_all(root: Path) -> dict[str, str]:
+    """Every regular file under ``root`` as {relative posix path: text}; any other kind of entry is refused."""
+    files: dict[str, str] = {}
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in sorted(entries, key=lambda e: e.name):
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    relative = Path(entry.path).relative_to(root).as_posix()
+                    if stat.S_ISDIR(mode):
+                        pending.append(Path(entry.path))
+                    elif stat.S_ISREG(mode):
+                        files[relative] = _read_text(Path(entry.path))
+                    else:
+                        raise HarborTaskError(
+                            f"{root / relative} is not a regular file or directory; reef wrote neither"
+                        )
+    except OSError as exc:
+        raise HarborTaskError(f"{root} cannot be read: {exc}") from exc
+    return files
 
 
 def _require_text(what: str, value: Any) -> str:
@@ -227,7 +284,8 @@ def _files(what: str, files: Any) -> dict[str, str]:
     if not isinstance(files, Mapping):
         raise HarborTaskError(f"{what} must map relative file paths to text")
     checked: dict[str, str] = {}
-    folded: set[str] = set()
+    folded_files: set[str] = set()
+    folded_dirs: set[str] = set()
     for name, text in files.items():
         if not isinstance(name, str) or not name or "\\" in name or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
             raise HarborTaskError(
@@ -238,25 +296,34 @@ def _files(what: str, files: Any) -> dict[str, str]:
             raise HarborTaskError(f"{what} file name {name!r} must stay inside the {what} directory")
         if str(pure) != name:
             raise HarborTaskError(f"{what} file name {name!r} must be written plainly, as {str(pure)!r}")
+        try:
+            encoded = name.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise HarborTaskError(f"{what} file name {name!r} is not valid Unicode text: {exc.reason}") from exc
+        if len(encoded) > _MAX_PATH_BYTES or any(
+            len(part.encode("utf-8")) > _MAX_COMPONENT_BYTES for part in pure.parts
+        ):
+            raise HarborTaskError(f"{what} file name {name!r} is longer than a filesystem allows")
         if not isinstance(text, str):
             raise HarborTaskError(f"{what}/{name} must be text")
         try:
             text.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise HarborTaskError(f"{what}/{name} is not valid Unicode text: {exc.reason}") from exc
-        key = str(pure)
-        # Two names one filesystem may merge (case, Unicode normalization) would leave one of them unwritten.
-        fold = unicodedata.normalize("NFC", key).casefold()
-        if key in checked or fold in folded:
+        # Two names one filesystem may merge (case, Unicode normalization) would leave one of them unwritten;
+        # a file folding onto a directory of another file is the same accident one level up.
+        fold = _fold(name)
+        parents = {_fold(str(parent)) for parent in pure.parents} - {"."}
+        if fold in folded_files or fold in folded_dirs or parents & folded_files:
             raise HarborTaskError(f"{what} names {name!r} twice, or under a spelling a filesystem may fold together")
-        checked[key] = text
-        folded.add(fold)
-    for name in checked:
-        parents = {str(parent) for parent in PurePosixPath(name).parents} - {"."}
-        clash = sorted(parents & checked.keys())
-        if clash:
-            raise HarborTaskError(f"{what} names {clash[0]!r} both as a file and as a directory of {name!r}")
+        checked[name] = text
+        folded_files.add(fold)
+        folded_dirs |= parents
     return checked
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def _config(config: Any) -> dict[str, dict[str, Any]]:
@@ -304,6 +371,12 @@ def _config_value(table: str, key: str, value: Any) -> Any:
         ):
             raise HarborTaskError(f"{where} must map variable names to strings")
         return dict(value)
+    if key == "user":
+        if isinstance(value, bool) or not (
+            (isinstance(value, str) and value) or (isinstance(value, int) and value >= 0)
+        ):
+            raise HarborTaskError(f"{where} must be a user name or a non-negative uid")
+        return value
     if not isinstance(value, str) or not value:
         raise HarborTaskError(f"{where} must be a non-empty string")
     return value
@@ -317,6 +390,8 @@ def _allowed_host(where: str, host: Any) -> str:
     reject = HarborTaskError(
         f"{where} entry {host!r} must be a host name, an IP address or a CIDR range, not a URL, port or path"
     )
+    if "%" in host or "[" in host or "]" in host:
+        raise reject
     if "/" in host:
         try:
             return ip_network(host, strict=True).compressed
@@ -330,8 +405,6 @@ def _allowed_host(where: str, host: Any) -> str:
         if address.version != 6:
             raise reject
         return address.compressed
-    if "[" in host or "]" in host:
-        raise reject
     labels = host[2:] if host.startswith("*.") else host
     if not labels or "*" in labels:
         raise reject
@@ -365,7 +438,8 @@ def _write_files(task: HarborTask, root: Path) -> None:
     _write_text(root / "task.toml", task.task_toml())
     _write_text(root / "instruction.md", task.instruction)
     for directory, files in (("tests", task.tests), ("environment", task.environment), ("solution", task.solution)):
-        if not files:
+        # tests/ and environment/ exist even when empty: Harbor refuses a task directory without them.
+        if not files and directory == "solution":
             continue
         (root / directory).mkdir()
         for name, text in files.items():
@@ -380,18 +454,35 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
+def _sweep_stale_staging(root: Path, name: str) -> None:
+    """Remove staging directories an earlier writer left behind, so a root listing never shows a hidden copy."""
+    now = time.time()
+    for stale in root.glob(f".{name}.*"):
+        _remove_if_stale(stale, now)
+
+
+def _remove_if_stale(path: Path, now: float) -> None:
+    try:
+        if path.is_dir() and not path.is_symlink() and now - path.stat().st_mtime > STALE_STAGING_S:
+            shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        return
+
+
 def _require_same(task: HarborTask, target: Path) -> None:
     try:
+        if not target.is_dir() or target.is_symlink():
+            raise HarborTaskError(f"{target} is not a directory")
         existing = read_harbor_task(target)
     except HarborTaskError as exc:
         raise HarborTaskConflict(f"{target} exists and is not a task reef wrote: {exc}") from exc
+    except OSError as exc:
+        raise HarborTaskConflict(f"{target} exists and cannot be read: {exc}") from exc
     if existing.digest != task.digest:
         raise HarborTaskConflict(f"{target} already holds a different task with the same name")
 
 
 def _read_text(path: Path) -> str:
-    if not path.is_file():
-        raise HarborTaskError(f"{path} is missing")
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             return handle.read()
@@ -399,10 +490,3 @@ def _read_text(path: Path) -> str:
         raise HarborTaskError(f"{path} is not UTF-8 text; reef writes text files only") from exc
     except OSError as exc:
         raise HarborTaskError(f"{path} cannot be read: {exc}") from exc
-
-
-def _read_tree(root: Path) -> dict[str, str]:
-    if not root.is_dir():
-        raise HarborTaskError(f"{root} is missing")
-    paths = sorted(p for p in root.rglob("*") if p.is_file())
-    return {path.relative_to(root).as_posix(): _read_text(path) for path in paths}

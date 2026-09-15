@@ -307,12 +307,12 @@ def test_digest_ignores_mapping_order_and_type() -> None:
         ({"environment": {"a\x00b": "x", "Dockerfile": "FROM x\n"}}, "control characters"),
         ({"environment": {"Dockerfile": "FROM x\n", "dockerfile": "x"}}, "fold together"),
         ({"environment": {"Dockerfile": "FROM x\n", "caf\u00e9.txt": "a", "cafe\u0301.txt": "b"}}, "fold together"),
-        ({"environment": {"Dockerfile": "FROM x\n", "a": "x", "a/b": "y"}}, "both as a file and as a directory"),
+        ({"environment": {"Dockerfile": "FROM x\n", "a": "x", "a/b": "y"}}, "fold together"),
         ({"environment": {"Dockerfile": b"bytes"}}, "must be text"),
         ({"environment": {"Dockerfile": "FROM x\n", "note.txt": "\udfff"}}, "not valid Unicode"),
         ({"solution": {"dir/../solve.sh": "x"}}, "stay inside"),
         ({"config": {"steps": {}}}, "not one reef writes"),
-        ({"config": {"agent": {"user": "root"}}}, "not a key Harbor reads"),
+        ({"config": {"agent": {"workdir": "/x"}}}, "not a key Harbor reads"),
         ({"config": {"agent": {"timeout_sec": 0}}}, "positive number"),
         ({"config": {"agent": {"timeout_sec": True}}}, "positive number"),
         ({"config": {"agent": {"timeout_sec": float("nan")}}}, "positive number"),
@@ -417,3 +417,173 @@ def test_harbor_itself_loads_what_reef_wrote(tmp_path: Path) -> None:
     assert paths.config_path.is_file()
     assert paths.environment_dir.is_dir()
     assert paths.test_path.is_file()
+
+
+# ----------------------------------------------------------------------------------------------- round two
+
+
+def test_a_prebuilt_image_task_with_no_environment_files_is_written_with_the_directory(tmp_path: Path) -> None:
+    spec = task(environment={}, config={"environment": {"docker_image": "python:3.12-slim"}})
+    root = write_harbor_task(spec, tmp_path)
+    assert (root / "environment").is_dir() and files_of(root / "environment") == []
+    assert read_harbor_task(root) == spec
+
+
+@pytest.mark.parametrize("extra", ["junk/task.toml", "junk/deeper/instruction.md", "steps/one/instruction.md"])
+def test_a_root_file_name_at_depth_is_still_an_extra_entry(tmp_path: Path, extra: str) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    (root / extra).parent.mkdir(parents=True)
+    (root / extra).write_text("x")
+    with pytest.raises(HarborTaskError, match="entries reef did not write"):
+        read_harbor_task(root)
+
+
+def test_a_plain_file_named_solution_is_refused(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    (root / "solution").write_text("x")
+    with pytest.raises(HarborTaskError, match="entries reef did not write"):
+        read_harbor_task(root)
+
+
+def test_entries_that_are_not_regular_files_are_refused(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    cases = {
+        root / "gone": lambda p: p.symlink_to(tmp_path / "nowhere"),
+        root / "tests" / "loop": lambda p: p.symlink_to(root),
+        root / "tests" / "copy.sh": lambda p: p.symlink_to(root / "tests" / "test.sh"),
+        root / "tests" / "pipe": lambda p: os.mkfifo(p),
+    }
+    for path, make in cases.items():
+        make(path)
+        with pytest.raises(HarborTaskError, match="not a regular file or directory"):
+            read_harbor_task(root)
+        path.unlink()
+    assert read_harbor_task(root) == task()
+
+
+def test_an_empty_foreign_directory_is_refused(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    (root / "tests" / "empty").mkdir()
+    # An empty directory carries no bytes to hash, so it is invisible; Harbor ignores it too.
+    assert read_harbor_task(root) == task()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every directory")
+def test_an_unreadable_directory_is_an_error_not_a_crash(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    (root / "tests").chmod(0)
+    try:
+        with pytest.raises(HarborTaskError, match="cannot be read"):
+            read_harbor_task(root)
+        with pytest.raises(HarborTaskConflict, match=r"cannot be read|not a task reef wrote"):
+            write_harbor_task(task(), tmp_path)
+    finally:
+        (root / "tests").chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"metadata": {"note": "bad \ud800"}},
+        {"metadata": {"bad \udc00": 1}},
+        {"metadata": {"items": ["ok", "bad \ud800"]}},
+        {"config": {"verifier": {"env": {"K": "bad \ud800"}}}},
+        {"config": {"verifier": {"env": {"bad \ud800": "v"}}}},
+        {"config": {"environment": {"docker_image": "img \ud800"}}},
+        {"source_agent_record_ids": ("rec \ud800",)},
+        {"environment": {"Dockerfile": "FROM x\n", "name \ud800.txt": "x"}},
+    ],
+)
+def test_a_lone_surrogate_anywhere_is_refused_at_construction(overrides: dict[str, object]) -> None:
+    with pytest.raises(HarborTaskError, match="not valid Unicode"):
+        task(**overrides)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"Dockerfile": "FROM x\n", "A/b": "x", "a": "y"},
+        {"Dockerfile": "FROM x\n", "a": "y", "A/b": "x"},
+        {"Dockerfile": "FROM x\n", "caf\u00e9/b": "x", "cafe\u0301": "y"},
+    ],
+)
+def test_a_file_that_folds_onto_a_directory_is_refused(environment: dict[str, str]) -> None:
+    with pytest.raises(HarborTaskError, match="fold together"):
+        task(environment=environment)
+
+
+@pytest.mark.parametrize("name", ["x" * 256, "a/" + "y" * 256, "/".join(["d"] * 600)])
+def test_a_name_longer_than_a_filesystem_allows_is_refused(name: str) -> None:
+    with pytest.raises(HarborTaskError, match="longer than a filesystem allows"):
+        task(environment={"Dockerfile": "FROM x\n", name: "x"})
+
+
+def test_a_stale_staging_directory_is_swept_before_the_next_write(tmp_path: Path) -> None:
+    import reef.core.tasks.harbor as module
+
+    stale = tmp_path / ".sum-391.deadbeef"
+    stale.mkdir()
+    module._write_files(task(), stale)
+    old = 1_000_000_000
+    os.utime(stale, (old, old))
+    root = write_harbor_task(task(), tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [root.name]
+
+
+def test_a_young_staging_directory_is_left_alone(tmp_path: Path) -> None:
+    young = tmp_path / ".sum-391.cafebabe"
+    young.mkdir()
+    write_harbor_task(task(), tmp_path)
+    assert young.is_dir()
+
+
+def test_a_dangling_symlink_at_the_target_is_a_conflict(tmp_path: Path) -> None:
+    (tmp_path / "sum-391").symlink_to(tmp_path / "nowhere")
+    with pytest.raises(HarborTaskConflict, match="not a directory"):
+        write_harbor_task(task(), tmp_path)
+
+
+def test_extra_keys_under_the_reef_table_are_refused(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    text = (root / "task.toml").read_text().replace("[metadata.reef]", '[metadata.reef]\nsigned = "yes"')
+    (root / "task.toml").write_text(text)
+    with pytest.raises(HarborTaskError, match="must hold exactly"):
+        read_harbor_task(root)
+
+
+@pytest.mark.parametrize("host", ["fe80::1%eth0", "fe80::1%25eth0", "fe80::%eth0/64", "::1%0"])
+def test_ipv6_zone_ids_are_refused_like_harbor_does(host: str) -> None:
+    with pytest.raises(HarborTaskError, match="must be a host name"):
+        task(config={"environment": {"network_mode": "allowlist", "allowed_hosts": [host]}})
+
+
+def test_the_user_env_and_workdir_keys_harbor_reads_round_trip(tmp_path: Path) -> None:
+    spec = task(
+        config={
+            "verifier": {"timeout_sec": 30, "user": "root"},
+            "agent": {"timeout_sec": 300, "user": 1000},
+            "environment": {"env": {"HOME": "/workspace"}, "workdir": "/workspace"},
+        }
+    )
+    root = write_harbor_task(spec, tmp_path)
+    document = tomllib.loads((root / "task.toml").read_text())
+    assert document["agent"] == {"timeout_sec": 300.0, "user": 1000}
+    assert document["verifier"] == {"timeout_sec": 30.0, "user": "root"}
+    assert document["environment"] == {"env": {"HOME": "/workspace"}, "workdir": "/workspace"}
+    assert read_harbor_task(root) == spec
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"config": {"agent": {"user": ""}}}, "user name or a non-negative uid"),
+        ({"config": {"agent": {"user": -1}}}, "user name or a non-negative uid"),
+        ({"config": {"agent": {"user": True}}}, "user name or a non-negative uid"),
+        ({"config": {"environment": {"workdir": ""}}}, "non-empty string"),
+        ({"config": {"environment": {"env": {"": "x"}}}}, "variable names to strings"),
+        ({"config": {"environment": {"os": "linux"}}}, "not a key Harbor reads"),
+    ],
+)
+def test_the_new_keys_are_checked_the_way_harbor_checks_them(overrides: dict[str, object], message: str) -> None:
+    with pytest.raises(HarborTaskError, match=message):
+        task(**overrides)

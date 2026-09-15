@@ -99,7 +99,7 @@ def test_a_task_on_both_sides_is_refused() -> None:
 
 def test_one_shot_source_iterables_still_group() -> None:
     linked = {"a": iter(["r"]), "b": map(str, ["r"]), "c": (x for x in ["r"])}
-    split = split_by_source(linked, eval_fraction=0.34, seed=0)
+    split = split_by_source(linked, eval_fraction=0.34, seed=0)  # one shot iterables, materialized once
     assert split.eval in ((), ("a", "b", "c"))
     assert split.eval == ("a", "b", "c")
 
@@ -163,3 +163,38 @@ def test_a_bad_manifest_is_refused(tmp_path: Path, text: str, message: str) -> N
 def test_a_missing_manifest_is_refused(tmp_path: Path) -> None:
     with pytest.raises(TaskSplitError, match="cannot read"):
         read_split_manifest(tmp_path / "missing.json")
+
+
+# ----------------------------------------------------------------------------------------------- round two
+
+
+def test_a_split_built_from_one_shot_iterators_keeps_every_name() -> None:
+    split = TaskSplit(iter(["b", "a"]), (x for x in ["c"]), 0, 0.5)  # type: ignore[arg-type]
+    assert split.train == ("a", "b") and split.eval == ("c",)
+
+
+def test_a_split_side_that_is_not_iterable_is_refused() -> None:
+    with pytest.raises(TaskSplitError, match="sequence of task names"):
+        TaskSplit(3, (), 0, 0.5)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("version", ["1.0", "true", '"1"'])
+def test_a_manifest_version_that_is_not_the_integer_is_refused(tmp_path: Path, version: str) -> None:
+    (tmp_path / "split.json").write_text(
+        '{"version": %s, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": []}' % version
+    )
+    with pytest.raises(TaskSplitError, match="not a version 1"):
+        read_split_manifest(tmp_path / "split.json")
+
+
+def test_a_manifest_with_keys_reef_did_not_write_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "split.json").write_text(
+        '{"version": 1, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": [], "holdout": ["a"]}'
+    )
+    with pytest.raises(TaskSplitError, match="keys reef did not write: holdout"):
+        read_split_manifest(tmp_path / "split.json")
+
+
+def test_sets_and_dict_views_are_accepted_as_sources() -> None:
+    split = split_by_source({"a": {"r"}, "b": {"r": 1}.keys()}, eval_fraction=0.5, seed=0)
+    assert split.eval == ("a", "b")

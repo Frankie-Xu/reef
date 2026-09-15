@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from typing import Any
 from reef.core.errors import ReefError
 
 MANIFEST_VERSION = 1
+_MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
 
 
 class TaskSplitError(ReefError):
@@ -37,10 +38,13 @@ class TaskSplit:
     def __post_init__(self) -> None:
         sides: dict[str, tuple[str, ...]] = {}
         for side in ("train", "eval"):
-            names = getattr(self, side)
-            if isinstance(names, str) or any(not isinstance(n, str) or not n for n in names):
+            raw = getattr(self, side)
+            try:
+                names = () if isinstance(raw, str) else tuple(raw)
+            except TypeError:
+                raise TaskSplitError(f"{side} must be a sequence of task names") from None
+            if isinstance(raw, str) or any(not isinstance(n, str) or not n for n in names):
                 raise TaskSplitError(f"{side} must be a sequence of task names")
-            names = tuple(names)
             if len(set(names)) != len(names):
                 raise TaskSplitError(f"{side} lists a task twice")
             sides[side] = tuple(sorted(names))
@@ -56,7 +60,7 @@ class TaskSplit:
         object.__setattr__(self, "eval_fraction", float(fraction))
 
 
-def split_by_source(sources: Mapping[str, Sequence[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
+def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
     """Assign each group of tasks that share a source record to one side; the seed fixes the draw.
 
     ``sources`` maps a task name to the agent record ids it was made from.
@@ -114,8 +118,12 @@ def read_split_manifest(path: Path) -> TaskSplit:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise TaskSplitError(f"cannot read split manifest {path}: {exc}") from exc
-    if not isinstance(document, dict) or document.get("version") != MANIFEST_VERSION:
+    version = document.get("version") if isinstance(document, dict) else None
+    if not isinstance(version, int) or isinstance(version, bool) or version != MANIFEST_VERSION:
         raise TaskSplitError(f"{path} is not a version {MANIFEST_VERSION} split manifest")
+    unknown = sorted(key for key in document if key not in _MANIFEST_KEYS)
+    if unknown:
+        raise TaskSplitError(f"{path} carries keys reef did not write: {', '.join(unknown)}")
     for side in ("train", "eval"):
         if not isinstance(document.get(side), list):
             raise TaskSplitError(f"{path}: {side} must be a list of task names")
@@ -129,7 +137,7 @@ def read_split_manifest(path: Path) -> TaskSplit:
         raise TaskSplitError(f"{path}: {exc}") from exc
 
 
-def _groups(sources: Mapping[str, Sequence[str]]) -> list[list[str]]:
+def _groups(sources: Mapping[str, Iterable[str]]) -> list[list[str]]:
     """Connected components of tasks over shared record ids, each sorted by name."""
     parent: dict[str, str] = {name: name for name in sources}
 
