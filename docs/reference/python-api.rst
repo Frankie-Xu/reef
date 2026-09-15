@@ -96,6 +96,13 @@ Custom request adapters use ``inference.handler-factory`` and
 subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
 **config)`` class method; arbitrary functions are not accepted. Handlers injected
 directly into ``create_app`` need only implement the inference methods.
+
+Streaming handlers return ``InferenceStream``; its ``record_response`` and
+``record_response_pending`` fields carry buffered or deferred recording state.
+Implementations and test doubles must initialize these fields through the
+stream constructor. SGLang handler subclasses that preserve raw reasoning tags
+can set ``SPLIT_REASONING = False`` (renamed from ``_SPLIT_REASONING``).
+
 These configuration names replace the previous request-adapter
 ``backend-factory`` and ``backend-config`` names. Python extensions migrate the
 old recipe-facing ``TrainingBackend`` to ``CandidateBackend`` and the old

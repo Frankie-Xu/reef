@@ -302,6 +302,13 @@ The factory path must name an ``InferenceHandler`` subclass with a
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
+For ``reef.inference.sglang.chat.SGLangInferenceHandler``, set
+``inference.handler-config.force_reasoning`` to ``true`` if the chat template
+pre-opens ``<think>``, or ``false`` if it does not. When omitted, the handler
+detects this by rendering the template and caches only a successful result.
+Tokenizer or template errors propagate to the request; they do not silently
+disable reasoning separation. An explicit value bypasses this detection.
+
 Explicit file selection and legacy compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

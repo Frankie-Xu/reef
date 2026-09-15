@@ -125,20 +125,6 @@ def _write_file_block(target: str, content: str) -> str:
     return f"printf '%s' \"$(cat {opener}\n{content}\n{delimiter}\n)\" > {redirect}\n"
 
 
-def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
-    """The env var and compose subdirectory that point the binary at the composition.
-
-    The compose directory is the deepest directory above the primary config
-    target that an env entry relocates with a ``{root}/<dir>`` value: the
-    target's own parent for pi and opencode, the home two levels up for dsh,
-    whose config file sits inside a profile. That entry relocates the
-    binary's whole composition at the episode root, and it is the only env
-    entry the user-facing wrapper needs (session/state dirs use the binary's
-    own defaults outside episodes).
-    """
-    return descriptor.compose_relocation()
-
-
 def _wrapper_lines(
     descriptor: AdapterDescriptor,
     env_var: str,
@@ -505,7 +491,7 @@ def render_install_script(
     install = descriptor.install
     if install is None:
         raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
-    env_var, compose_dir = _compose_env_var(descriptor)
+    env_var, compose_dir = descriptor.compose_relocation()
     wrapper_name = f"reef-{descriptor.name}"
     bindings = dict(binding_files or {})
     for relative in (*files, *bindings):

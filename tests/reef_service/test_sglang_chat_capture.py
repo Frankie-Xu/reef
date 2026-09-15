@@ -20,13 +20,37 @@ class FakeTokenizer:
         self.rendered_messages = None
 
     def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
-        assert tokenize is True and add_generation_prompt is True
+        assert add_generation_prompt is True
+        if not tokenize:
+            return "<user></user><assistant>"
         self.rendered_messages = (messages, kwargs)
         return [10, 11]
 
     def decode(self, token_ids, *, skip_special_tokens=False):
         assert skip_special_tokens is False
         return f"<{token_ids[0]}>"
+
+
+@pytest.mark.unit
+def test_reasoning_template_failure_propagates_without_caching_a_false_result() -> None:
+    class ThinkingTokenizer(FakeTokenizer):
+        template_available = False
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            if not self.template_available:
+                raise TypeError("chat template is unavailable")
+            return "<user></user><assistant><think>"
+
+    tokenizer = ThinkingTokenizer()
+    backend = SGLangInferenceHandler("http://unused", model_path="model", tokenizer=tokenizer)
+    with pytest.raises(TypeError, match="chat template is unavailable"):
+        backend.reasoning_is_pre_opened()
+
+    tokenizer.template_available = True
+    message, _ = backend._assistant_message(
+        "unfinished reasoning", None, force_reasoning=backend.reasoning_is_pre_opened()
+    )
+    assert message == {"role": "assistant", "content": "", "reasoning_content": "unfinished reasoning"}
 
 
 def _artifact(tmp_path) -> Artifact:

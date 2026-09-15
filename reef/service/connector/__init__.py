@@ -22,10 +22,12 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from reef.service.connector.runtime import BODY_LIMIT, HTTPFailure, JSONClient, ReefRuntime, endpoint_url
+from reef.service.connector.runtime import HTTPFailure, JSONClient, ReefRuntime, endpoint_url
 from reef.service.connector.state import ConnectorState
 
 logger = logging.getLogger(__name__)
+
+BODY_LIMIT = 192 * 1024
 
 
 class Connector:

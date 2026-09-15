@@ -799,7 +799,7 @@ class TrainingCoordinator:
         )
 
     def prepare_training_step(
-        self, batch: Any, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
     ) -> PreparedTrainingStep:
         return self._training.prepare_training_step(batch, step_preparer, algorithm_state)
 

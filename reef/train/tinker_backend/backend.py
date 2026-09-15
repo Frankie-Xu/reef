@@ -19,6 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from reef.core.batches import TrainingBatch
 from reef.runtime.interfaces import (
     PreparedTrainingJob,
     PreparedTrainingStep,
@@ -130,7 +131,7 @@ class TinkerTrainingBackend(TrainingBackend):
         return self._base
 
     def prepare_training_step(
-        self, batch: Any, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
     ) -> PreparedTrainingStep:
         # Staleness admission is the coordinator's; the payload carries only the rows.
         return prepare_tinker_step(batch, step_preparer, algorithm_state, batch_size=self._config.batch_size)

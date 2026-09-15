@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.core.batches import TrainingBatch
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
@@ -321,7 +322,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
 
     def prepare_training_step(
         self,
-        batch,
+        batch: TrainingBatch,
         step_preparer: str,
         algorithm_state: Mapping[str, Any],
     ) -> PreparedTrainingStep:

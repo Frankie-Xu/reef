@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
+from reef.runtime.interfaces import InferenceStream
 from reef.service.streaming import (
     SSEFrameDecoder,
     aggregate_sse_text,
@@ -10,9 +13,12 @@ from reef.service.streaming import (
 )
 
 
-class _FakeStream:
-    status = 200
-    headers = {"content-type": "text/event-stream"}
+class FakeStream(InferenceStream):
+    def __init__(self) -> None:
+        super().__init__(status=200, headers={"content-type": "text/event-stream"}, chunks=self.chunks_iter())
+
+    async def chunks_iter(self) -> AsyncIterator[bytes]:
+        yield OPENAI_SSE.encode("utf-8")
 
 
 OPENAI_SSE = (
@@ -66,13 +72,13 @@ def test_aggregate_sse_text_survives_unicode_line_separators_and_multiline_data(
 
 
 def test_stream_record_stores_the_aggregated_message_next_to_the_raw_body() -> None:
-    record = stream_record(_FakeStream(), OPENAI_SSE.encode("utf-8"), complete=True)
+    record = stream_record(FakeStream(), OPENAI_SSE.encode("utf-8"), complete=True)
     assert record["body"] == OPENAI_SSE
     assert record["message"] == {"role": "assistant", "content": "The answer is 7."}
 
 
 def test_stream_record_skips_the_message_for_incomplete_streams() -> None:
-    record = stream_record(_FakeStream(), OPENAI_SSE.encode("utf-8"), complete=False, error="client disconnected")
+    record = stream_record(FakeStream(), OPENAI_SSE.encode("utf-8"), complete=False, error="client disconnected")
     assert record["body"] == OPENAI_SSE
     assert "message" not in record
 

@@ -138,10 +138,6 @@ class RequestService:
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
 
-    @staticmethod
-    def _require_inference(headers: Mapping[str, str]) -> RequestHeaders:
-        return parse_request_headers(headers, RequestType.INFERENCE)
-
     def accept(
         self,
         headers: Mapping[str, str],
@@ -247,8 +243,8 @@ class RequestService:
         lease = prepared.lease
         try:
             stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
-            record_response = getattr(stream, "record_response", None)
-            record_response_pending = bool(getattr(stream, "record_response_pending", False))
+            record_response = stream.record_response
+            record_response_pending = stream.record_response_pending
             if record_response is not None:
                 if prepared.surface.inference is not None:
                     prepared.surface.inference.verify_response(prepared.artifact, path, record_response)
@@ -345,7 +341,7 @@ class RequestService:
         """The shared first half of every inference: freeze the serving state
         (headers, scenario, artifact, handler, surface) and let the surface
         transform the request payload."""
-        parsed = self._require_inference(headers)
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(
             self._dispatcher.get_or_create_scenario,
             parsed.scenario,
@@ -711,7 +707,7 @@ class RequestService:
                 raise ReefError("implicit harness scenario creation returned no scenario")
             return scenario
 
-        parsed = self._require_inference(headers)
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
         scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)

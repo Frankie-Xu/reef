@@ -83,13 +83,8 @@ NATIVE_GRAPH_MAX_STEPS = 32
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
 NATIVE_GRAPH_MAX_CASES = 8
-#: A proposed pattern's length limit, how much of the last assistant text a branch matches against, and the wall
-#: clock one search gets. Python's matcher has no step budget and no static test tells a pattern that finishes
-#: from one that never does ((a|a)+b hangs on forty characters), so the interpreter runs each search in a child
-#: process and a search that outlives the clock is a check that failed, never a step that stalls.
+#: Admission bounds pattern length; the interpreter separately bounds search text and execution time.
 NATIVE_PATTERN_MAX_LENGTH = 200
-NATIVE_MATCH_WINDOW = 4096
-NATIVE_PATTERN_TIMEOUT_S = 1.0
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text, checked like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
