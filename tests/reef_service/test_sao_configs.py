@@ -350,6 +350,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
+        "recipes/openclawrl/examples/openclawrl/serve-mlx.yaml",
         "recipes/sao/examples/sao/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
