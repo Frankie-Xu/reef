@@ -1,4 +1,4 @@
-"""The SPADE solver recipe: the served model trains on the tasks the Designer wrote, one task group at a time."""
+"""The SPADE Reasoning Agent recipe: the served model trains on the tasks the Designer wrote, one task group at a time."""
 
 from __future__ import annotations
 

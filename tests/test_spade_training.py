@@ -1,4 +1,4 @@
-"""The solver's training data: reports grouped by task, complete groups batched, group relative advantages."""
+"""The Reasoning Agent's training data: reports grouped by task, complete groups batched, group relative advantages."""
 
 from __future__ import annotations
 

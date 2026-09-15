@@ -1,9 +1,9 @@
-"""The solver's training data: the task player's reports grouped by task, a batch of complete groups.
+"""The Reasoning Agent's training data: the task player's reports grouped by task, a batch of complete groups.
 
 Every plain episode the task player reports names its task under ``metadata.task``; the processor
 groups the episodes of one task, a group is complete at ``rollouts_per_task`` episodes, and a batch
 holds ``tasks_per_step`` complete groups, in arrival order. The preparer turns each group into
-group relative advantages, so the solver learns from the tasks the Designer wrote for it.
+group relative advantages, so the Reasoning Agent learns from the tasks the Designer wrote for it.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def reported_task_name(report: AgentRecord) -> str | None:
 
 
 class SpadeProcessor(ReportedFeedbackProcessor):
-    """Groups the solver's episodes by the task they played; a batch is ``tasks_per_step`` complete groups."""
+    """Groups the Reasoning Agent's episodes by the task they played; a batch is ``tasks_per_step`` complete groups."""
 
     output_schema = TrainingBatch
     exclusive_sources = True

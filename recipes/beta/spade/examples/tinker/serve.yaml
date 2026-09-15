@@ -1,4 +1,4 @@
-# The SPADE solver on Tinker: the served model plays the generated tasks and trains on them, one task group at a time.
+# The SPADE Reasoning Agent on Tinker: the served model plays the generated tasks and trains on them, one task group at a time.
 # Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
 schema-version: 2
 reef:

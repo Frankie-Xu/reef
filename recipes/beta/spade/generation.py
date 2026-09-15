@@ -2,7 +2,7 @@
 
 The Designer is the served model: every proposal is one chat call through Reef, so it is a record with
 a receipt. Per proposal the reply is parsed, the task is written under the tasks root, Harbor's oracle
-and nop agents check it (the reference solution must score 1, doing nothing below 1), and the solver
+and nop agents check it (the reference solution must score 1, doing nothing below 1), and the Reasoning Agent
 plays it: ``plays`` times as it is, reported to Reef as training data, and ``hint_plays`` times with the
 hint appended to the instruction, measured only. Regret is the mean hint reward minus the mean plain
 reward; the plain mean puts the task in a band (mastered, frontier, out of reach). The written tasks are
@@ -149,7 +149,7 @@ class RealChecks(Checks):
         return oracle_check(task_path, harbor=self.harbor)
 
 
-class Solver(ABC):
+class ReasoningAgent(ABC):
     """Who plays a written task for one arm: the served model through a Harbor agent and the task player."""
 
     @abstractmethod
@@ -165,7 +165,7 @@ class Solver(ABC):
     ) -> tuple[TaskPlay, ...]: ...
 
 
-class ReefSolver(Solver):
+class ReefReasoningAgent(ReasoningAgent):
     """A task player per arm: the plain arm reports its episodes, the hint arm only measures."""
 
     def __init__(
@@ -218,7 +218,7 @@ class ReefSolver(Solver):
 
 @dataclass(frozen=True)
 class GenerationRequest:
-    """What one generation asks the Designer for and how the solver measures what it gets."""
+    """What one generation asks the Designer for and how the Reasoning Agent measures what it gets."""
 
     description: str
     skills: tuple[str, ...] = ()
@@ -353,19 +353,19 @@ def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
 
 
 class Generation:
-    """Runs one generation against a Designer, a Solver and the checks, under a tasks root."""
+    """Runs one generation against a Designer, a ReasoningAgent and the checks, under a tasks root."""
 
     def __init__(
         self,
         *,
         designer: Designer,
-        solver: Solver,
+        reasoning_agent: ReasoningAgent,
         checks: Checks,
         tasks_root: Path,
         is_reporting_designer: bool = True,
     ) -> None:
         self.designer = designer
-        self.solver = solver
+        self.reasoning_agent = reasoning_agent
         self.checks = checks
         self.tasks_root = Path(tasks_root)
         self.is_reporting_designer = is_reporting_designer
@@ -465,18 +465,18 @@ class Generation:
     ) -> tuple[TaskMeasure | None, str]:
         """Both arms played: the plain arm reported as training data, the hint arm measured only.
 
-        A task the solver could not play at all (every plain episode ended before the agent ran) is no
-        measure of the solver; it comes back as None with the first episode's error.
+        A task the Reasoning Agent could not play at all (every plain episode ended before the agent ran) is no
+        measure of the Reasoning Agent; it comes back as None with the first episode's error.
         """
         task_path = self.tasks_root / task.name
         tags = {"generation": str(request.generation), **skill_tag(skill)}
-        plain = self.solver.play(
+        plain = self.reasoning_agent.play(
             task_path, arm="plain", plays=request.plays, is_reporting=True, extra_instruction_paths=(), tags=tags
         )
         if plain and all(is_unplayed(play) for play in plain):
-            return None, f"the solver could not play the task: {plain[0].error[:300]}"
+            return None, f"the Reasoning Agent could not play the task: {plain[0].error[:300]}"
         hint_path = task_path / "solution" / "hint.txt"
-        hint = self.solver.play(
+        hint = self.reasoning_agent.play(
             task_path,
             arm="hint",
             plays=request.hint_plays,
@@ -582,7 +582,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     designer: Designer | None = None,
-    solver: Solver | None = None,
+    reasoning_agent: ReasoningAgent | None = None,
     checks: Checks | None = None,
 ) -> int:
     """Run one generation from the command line and print one line per proposal."""
@@ -592,9 +592,9 @@ def main(
     )
     parser.add_argument("--reef-url", required=True)
     parser.add_argument(
-        "--scenario", required=True, help="the scenario the Designer's and the solver's records belong to"
+        "--scenario", required=True, help="the scenario the Designer's and the Reasoning Agent's records belong to"
     )
-    parser.add_argument("--model", required=True, help="the served model, Designer and solver alike")
+    parser.add_argument("--model", required=True, help="the served model, Designer and reasoning_agent alike")
     parser.add_argument("--token", default=os.environ.get("REEF_TOKEN") or None)
     parser.add_argument("--designer-reef-url", default=None, help="the Designer's Reef service; --reef-url by default")
     parser.add_argument("--designer-scenario", default=None, help="the Designer's scenario; --scenario by default")
@@ -627,7 +627,7 @@ def main(
         default=None,
         help='extra fields of the Designer\'s chat request as JSON, e.g. {"reasoning_effort": "none"}',
     )
-    parser.add_argument("--agent-json", default=None, help="the solver's Harbor agent; terminus-2 by default")
+    parser.add_argument("--agent-json", default=None, help="the Reasoning Agent's Harbor agent; terminus-2 by default")
     parser.add_argument("--agent-host", default=None)
     parser.add_argument("--concurrency", type=int, default=2, help="episodes in flight per arm")
     parser.add_argument("--harbor", default=None, help="the harbor command line for the oracle check")
@@ -669,10 +669,10 @@ def main(
                 timeout_s=arguments.designer_timeout_s,
             )
         ),
-        solver=(
-            solver
-            if solver is not None
-            else ReefSolver(
+        reasoning_agent=(
+            reasoning_agent
+            if reasoning_agent is not None
+            else ReefReasoningAgent(
                 reef_url=arguments.reef_url,
                 scenario=arguments.scenario,
                 model=arguments.model,

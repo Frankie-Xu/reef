@@ -9,9 +9,9 @@ Harbor agent can play.
 - ``harbor``: the written task under the team's structural gate, its hash, a split per generation, and Harbor's
   oracle check.
 - ``generation``: one generation end to end: the Designer proposes through Reef, the oracle check refuses, the
-  task is written, the solver plays both arms through the task player, regret splits, the manifest and the
+  task is written, the Reasoning Agent plays both arms through the task player, regret splits, the manifest and the
   report are written, and each proposal is reported against the Designer's receipt.
-- ``recipe``, ``processor``, ``preparer``: the solver's training: the task player's reports grouped by task,
+- ``recipe``, ``processor``, ``preparer``: the Reasoning Agent's training: the task player's reports grouped by task,
   group relative advantages, Tinker's importance sampling loss.
 
 The Designer's own training follows.
@@ -34,9 +34,9 @@ from recipes.beta.spade.generation import (
     GenerationRequest,
     GenerationResult,
     RealChecks,
+    ReasoningAgent,
     ReefDesigner,
-    ReefSolver,
-    Solver,
+    ReefReasoningAgent,
     load_experience,
 )
 from recipes.beta.spade.harbor import (
@@ -66,9 +66,9 @@ __all__ = [
     "OracleResult",
     "PlayRecord",
     "RealChecks",
+    "ReasoningAgent",
     "ReefDesigner",
-    "ReefSolver",
-    "Solver",
+    "ReefReasoningAgent",
     "SpadePreparer",
     "SpadeProcessor",
     "SpadeRecipe",

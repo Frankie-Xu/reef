@@ -16,7 +16,7 @@ from recipes.beta.spade.generation import (
     Generation,
     GenerationError,
     GenerationRequest,
-    Solver,
+    ReasoningAgent,
     experience_for,
     load_experience,
     main,
@@ -81,7 +81,7 @@ class StandInChecks(Checks):
         return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
 
 
-class StandInSolver(Solver):
+class StandInReasoningAgent(ReasoningAgent):
     """Scripted rewards per arm; records how each arm was asked for."""
 
     def __init__(self, *, plain: float = 0.25, hint: float = 0.75, error: str = "") -> None:
@@ -137,12 +137,14 @@ def request(**overrides: object) -> GenerationRequest:
     return GenerationRequest(**fields)  # type: ignore[arg-type]
 
 
-def generation(tmp_path: Path, **parts: object) -> tuple[Generation, StandInDesigner, StandInSolver, StandInChecks]:
+def generation(
+    tmp_path: Path, **parts: object
+) -> tuple[Generation, StandInDesigner, StandInReasoningAgent, StandInChecks]:
     designer = parts.get("designer") or StandInDesigner()
-    solver = parts.get("solver") or StandInSolver()
+    reasoning_agent = parts.get("reasoning_agent") or StandInReasoningAgent()
     checks = parts.get("checks") or StandInChecks()
-    run = Generation(designer=designer, solver=solver, checks=checks, tasks_root=tmp_path / "tasks")  # type: ignore[arg-type]
-    return run, designer, solver, checks  # type: ignore[return-value]
+    run = Generation(designer=designer, reasoning_agent=reasoning_agent, checks=checks, tasks_root=tmp_path / "tasks")  # type: ignore[arg-type]
+    return run, designer, reasoning_agent, checks  # type: ignore[return-value]
 
 
 def written(root: Path) -> list[str]:
@@ -150,7 +152,7 @@ def written(root: Path) -> list[str]:
 
 
 def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path: Path) -> None:
-    run, designer, solver, checks = generation(tmp_path)
+    run, designer, reasoning_agent, checks = generation(tmp_path)
     result = run.run(request(skills=("inspection", "repair")))
 
     assert [proposal.skill for proposal in result.proposals] == ["inspection", "repair", "inspection"]
@@ -168,7 +170,10 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
     assert designer.calls[0]["messages"][0]["role"] == "system"
     assert checks.calls == [tmp_path / "tasks" / name for name in names]
 
-    arms = [(call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"]) for call in solver.calls]
+    arms = [
+        (call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"])
+        for call in reasoning_agent.calls
+    ]
     assert arms[0] == ("harbor-00004-000-inspection", "plain", 2, True, [])
     assert arms[1] == (
         "harbor-00004-000-inspection",
@@ -177,7 +182,9 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
         False,
         [tmp_path / "tasks" / "harbor-00004-000-inspection" / "solution" / "hint.txt"],
     )
-    assert all(call["tags"] == {"generation": "4", "skill": call["task"].split("-")[-1]} for call in solver.calls)
+    assert all(
+        call["tags"] == {"generation": "4", "skill": call["task"].split("-")[-1]} for call in reasoning_agent.calls
+    )
 
     first = result.measures[0]
     assert first.plain_rewards == (0.25, 0.25) and first.hint_rewards == (0.75,)
@@ -204,13 +211,13 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
 
 
 def test_a_generation_without_skills_takes_the_description_as_the_target(tmp_path: Path) -> None:
-    run, designer, solver, _ = generation(tmp_path)
+    run, designer, reasoning_agent, _ = generation(tmp_path)
     result = run.run(request(skills=(), count=2))
     assert [measure.name for measure in result.measures] == ["harbor-00004-000", "harbor-00004-001"]
     assert designer.calls[0]["tags"] == {"role": "designer", "generation": "4"}
     prompt = designer.calls[0]["messages"][1]["content"]
     assert "that tests: shell tasks with hidden state under /var and /etc." in prompt
-    assert all("skill" not in call["tags"] for call in solver.calls)
+    assert all("skill" not in call["tags"] for call in reasoning_agent.calls)
     assert "skill" not in designer.reports[0]["metadata"] and result.experience[0].skill is None
     document = json.loads(result.report_path.read_text())
     assert document["tasks"][0]["skill"] is None and load_experience(result.report_path) == result.experience
@@ -218,35 +225,37 @@ def test_a_generation_without_skills_takes_the_description_as_the_target(tmp_pat
 
 def test_a_reply_the_parser_refuses_is_reported_as_zero_and_the_generation_goes_on(tmp_path: Path) -> None:
     designer = StandInDesigner(scripted=["no json here", reply_for(2)])
-    run, designer, solver, _ = generation(tmp_path, designer=designer)
+    run, designer, reasoning_agent, _ = generation(tmp_path, designer=designer)
     result = run.run(request(count=2))
     first, second = result.proposals
     assert not first.is_written and first.refusal.startswith("reply refused:") and first.task_name is None
     assert second.is_written and second.task_name == "harbor-00004-001-inspection"
     assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == first.refusal
     assert not (tmp_path / "tasks" / "harbor-00004-000-inspection").exists()
-    assert [call["task"] for call in solver.calls] == ["harbor-00004-001-inspection"] * 2
+    assert [call["task"] for call in reasoning_agent.calls] == ["harbor-00004-001-inspection"] * 2
 
 
 def test_a_task_the_oracle_check_refuses_never_stays_under_the_root(tmp_path: Path) -> None:
-    run, designer, solver, _ = generation(tmp_path, checks=StandInChecks(is_solvable=False))
+    run, designer, reasoning_agent, _ = generation(tmp_path, checks=StandInChecks(is_solvable=False))
     result = run.run(request(count=1))
     proposal = result.proposals[0]
     assert not proposal.is_written and proposal.refusal == "oracle check refused: the oracle scored 0"
-    assert result.measures == () and result.manifest_path is None and solver.calls == []
+    assert result.measures == () and result.manifest_path is None and reasoning_agent.calls == []
     assert written(tmp_path / "tasks") == [".spade"]
     assert designer.reports[0]["score"] == 0.0
 
 
-def test_a_task_the_solver_could_not_play_is_refused_not_scored(tmp_path: Path) -> None:
-    solver = StandInSolver(error="Failed to start tmux session. Error: None")
-    run, designer, _, _ = generation(tmp_path, solver=solver)
+def test_a_task_the_reasoning_agent_could_not_play_is_refused_not_scored(tmp_path: Path) -> None:
+    reasoning_agent = StandInReasoningAgent(error="Failed to start tmux session. Error: None")
+    run, designer, _, _ = generation(tmp_path, reasoning_agent=reasoning_agent)
     result = run.run(request(count=1))
     proposal = result.proposals[0]
     assert not proposal.is_written
-    assert proposal.refusal == "the solver could not play the task: Failed to start tmux session. Error: None"
+    assert proposal.refusal == "the Reasoning Agent could not play the task: Failed to start tmux session. Error: None"
     assert result.measures == () and result.manifest_path is None
-    assert [call["arm"] for call in solver.calls] == ["plain"], "the hint arm is not played for a task that cannot run"
+    assert [call["arm"] for call in reasoning_agent.calls] == [
+        "plain"
+    ], "the hint arm is not played for a task that cannot run"
     assert not (tmp_path / "tasks" / "harbor-00004-000-inspection").exists()
     assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == proposal.refusal
 
@@ -318,7 +327,7 @@ def test_load_experience_refuses_a_file_that_is_not_a_report(tmp_path: Path) -> 
 
 
 def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_proposal(tmp_path: Path, capsys) -> None:
-    solver = StandInSolver()
+    reasoning_agent = StandInReasoningAgent()
     status = main(
         [
             "--reef-url",
@@ -343,7 +352,7 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
             "1",
         ],
         designer=StandInDesigner(),
-        solver=solver,
+        reasoning_agent=reasoning_agent,
         checks=StandInChecks(),
     )
     assert status == 0
@@ -375,7 +384,7 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
             str(tmp_path / "tasks" / ".spade" / "generation-00003.json"),
         ],
         designer=StandInDesigner(scripted=[reply_for(9)]),
-        solver=StandInSolver(),
+        reasoning_agent=StandInReasoningAgent(),
         checks=StandInChecks(),
     )
     assert second == 0
@@ -480,7 +489,7 @@ def test_main_refuses_a_request_it_cannot_run(tmp_path: Path) -> None:
                 "0",
             ],
             designer=StandInDesigner(),
-            solver=StandInSolver(),
+            reasoning_agent=StandInReasoningAgent(),
             checks=StandInChecks(),
         )
 
@@ -504,7 +513,7 @@ def test_main_points_the_designer_at_its_own_service_and_model(tmp_path: Path, m
         "--designer-model",
         "strong",
     ]
-    stand_ins: dict[str, object] = {"solver": StandInSolver(), "checks": StandInChecks()}
+    stand_ins: dict[str, object] = {"reasoning_agent": StandInReasoningAgent(), "checks": StandInChecks()}
     assert main([*shared, *request, str(tmp_path / "shared")], **stand_ins) == 0
     assert main([*shared, *request, str(tmp_path / "own"), *own, "--designer-token", "t2"], **stand_ins) == 0
     keys = ("reef_url", "scenario", "model", "token")

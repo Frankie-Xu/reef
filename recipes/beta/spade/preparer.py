@@ -1,4 +1,4 @@
-"""The solver's step: group relative advantages over the episodes of one task, on Tinker's importance sampling loss."""
+"""The Reasoning Agent's step: group relative advantages over the episodes of one task, on Tinker's importance sampling loss."""
 
 from __future__ import annotations
 
