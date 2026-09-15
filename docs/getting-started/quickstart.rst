@@ -158,7 +158,7 @@ with no GPU.
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
-start from ``recipes/sao/examples/sao/serve.yaml``. It selects
+start from ``recipes/sao/examples/imo_answerbench/serve.yaml``. It selects
 ``recipe.implementation: recipes.sao.recipe:SAORecipe`` and configures the
 training driver and model workers.
 Weight recipes need GPUs (`Evolve your model

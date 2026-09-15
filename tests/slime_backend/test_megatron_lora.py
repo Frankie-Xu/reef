@@ -705,3 +705,18 @@ def test_adapter_merge_tasks_use_cpu_actor_backup_instead_of_paused_model() -> N
     assert replaced[0].linear_in_task.param_weight == "cuda:A"
     assert replaced[0].linear_out_task.param_weight == "cuda:B"
     assert adapter_tasks[0].linear_in_task.param_weight is paused_weight
+
+
+def test_distributed_lora_publication_rejects_a_missing_broadcast_handle(monkeypatch) -> None:
+    colocated = _load_colocated_module(monkeypatch)
+    monkeypatch.setattr(colocated.dist, "broadcast", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="asynchronous work handle"):
+        colocated.send_lora_to_distributed_engines(
+            [("layer.lora_A.weight", torch.ones(1))],
+            rollout_engines=(),
+            model_update_group="nccl-group",
+            group_name="update",
+            lora_config={"r": 1},
+            lora_name="reef_lora",
+        )

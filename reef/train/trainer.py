@@ -12,6 +12,8 @@ row is deleted.
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from threading import Lock
@@ -22,6 +24,7 @@ from reef.core.records_types import RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
+from reef.observability.operations import OperationMetrics
 from reef.storage.records import RecordStore
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -118,6 +121,36 @@ class Trainer:
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
         self._lock = Lock()
+        self.operations = OperationMetrics(("execution",))
+
+    def operational_metrics(self) -> dict[str, float | int]:
+        """Sample backlog and execution separately; a reserved batch can be running.
+
+        Unread records are not necessarily trainable. Processor counts retain
+        their recipe-defined names rather than being guessed into batch depth.
+        A busy processor omits its gauges for this sample instead of blocking
+        execution metrics behind ingestion or commit work.
+        """
+        values = {f"training/{key}": value for key, value in self.operations.snapshot().items()}
+        if self._candidate_backend is not None:
+            values.update(self._candidate_backend.operational_metrics())
+        if not self._lock.acquire(blocking=False):
+            return values
+        try:
+            values["records/unread_count"] = self._records.count(self.scenario, after_sequence=self._data_sequence)
+            oldest = self._records.replay_page(self.scenario, after_sequence=self._data_sequence, limit=1)
+            values["records/oldest_unread_age_seconds"] = (
+                max(0.0, time.time() - oldest[0][1].created_at) if oldest else 0.0
+            )
+            values["training/reserved_batches"] = int(self._pending is not None)
+            values["training/auto_enabled"] = int(self.training_mode in {"auto", "hybrid"})
+            processor_metrics = {**self._processor.status(), **self._processor.operational_metrics()}
+            for name, value in processor_metrics.items():
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    values[f"processor/{name}"] = int(value) if isinstance(value, bool) else value
+        finally:
+            self._lock.release()
+        return values
 
     @property
     def scenario(self) -> str:
@@ -267,7 +300,8 @@ class Trainer:
                 self._pending = _PendingStep(batch=batch, result=None)
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
-        execution = self._execute_backend_step(batch, scenario_step)
+        with self.operations.measure("execution"):
+            execution = self._execute_backend_step(batch, scenario_step)
         if execution.outcome != "commit" or execution.result is None:
             raise RuntimeError(f"inline candidate backend returned {execution.outcome!r}")
         with self._lock:
@@ -351,7 +385,8 @@ class Trainer:
             if self._pending.result is not None:
                 return StepExecution("commit", self._pending.result)
             batch = self._pending.batch
-        execution = self._execute_backend_step(batch, scenario_step)
+        with self.operations.measure("execution"):
+            execution = self._execute_backend_step(batch, scenario_step)
         if execution.outcome == "commit":
             if execution.result is None:
                 raise RuntimeError("commit execution must carry a training result")

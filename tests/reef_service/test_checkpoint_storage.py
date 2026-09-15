@@ -9,7 +9,12 @@ import pytest
 
 from reef.runtime import recovery as durable_io
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
-from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    CheckpointStorage,
+    CheckpointStorageError,
+    RetentionConfig,
+    critic_checkpoint_due,
+)
 
 Usage = namedtuple("Usage", "total used free")
 
@@ -33,6 +38,8 @@ def _storage(
     free: int = 1000,
     min_free: int = 0,
     lora: bool = False,
+    critic: bool = False,
+    critic_save_interval: int = 1,
 ) -> CheckpointStorage:
     root = tmp_path / "checkpoints"
     source_hf, source_megatron = tmp_path / "source-hf", tmp_path / "source-megatron"
@@ -48,6 +55,8 @@ def _storage(
         measure=_logical_bytes,
         disk_usage=lambda path: Usage(1000, 1000 - free, free),
         lora=lora,
+        critic_root=root / "megatron-critic" if critic else None,
+        critic_save_interval=critic_save_interval,
     )
 
 
@@ -65,6 +74,42 @@ def _completed_storage(tmp_path: Path, rewards, **options) -> CheckpointStorage:
     for rollout_id, reward in enumerate(rewards):
         _complete(storage, rollout_id, reward=reward)
     return storage
+
+
+@pytest.mark.unit
+def test_complete_requires_the_critic_asset_only_on_its_save_commits(tmp_path: Path) -> None:
+    # A critic checkpointed every second commit leaves nothing under its root
+    # on the commits in between; completing those must not demand a critic
+    # asset, while a commit on the cadence still refuses to record a durable
+    # checkpoint without one.
+    storage = _storage(tmp_path, critic=True, critic_save_interval=2)
+    assert storage.critic_root is not None
+    critic_root = storage.critic_root
+
+    assert storage.required_assets(0) == storage.pair_paths(0)
+    assert storage.asset_paths(0) == (*storage.pair_paths(0), critic_root / "iter_0000000")
+    _complete(storage, 0, reward=1.0)
+
+    with storage.admit(rollout_id=1) as plan:
+        assert not plan["blocked"], plan
+        for path, size in zip(storage.pair_paths(1), (40, 60), strict=True):
+            _write_bytes(path, size)
+        (storage.megatron_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+        with pytest.raises(CheckpointStorageError, match="missing or unsafe"):
+            storage.complete("job-1", 1, reward=1.0)
+        _write_bytes(critic_root / "iter_0000001", 30)
+        (critic_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+        storage.complete("job-1", 1, reward=1.0)
+
+    assert storage.required_assets(1) == (*storage.pair_paths(1), critic_root / "iter_0000001")
+
+
+@pytest.mark.unit
+def test_critic_checkpoint_cadence_counts_from_the_first_commit(tmp_path: Path) -> None:
+    assert all(critic_checkpoint_due(rollout_id, 1) for rollout_id in range(4))
+    assert [rollout_id for rollout_id in range(17) if critic_checkpoint_due(rollout_id, 8)] == [7, 15]
+    with pytest.raises(ValueError, match="critic_save_interval"):
+        _storage(tmp_path, critic=True, critic_save_interval=0)
 
 
 @pytest.mark.unit

@@ -461,6 +461,9 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
             assert first == first_chunk
             assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
 
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/active"] == 1
+            assert metrics["serve/request/completed_total"] == 0
             finish_upstream.set()
             metadata_frame = await asyncio.wait_for(response.content.readuntil(b"\n\n"), timeout=1)
             metadata = json.loads(metadata_frame.removeprefix(b"data: "))
@@ -470,6 +473,10 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
             assert len(records) == 1
             assert records[0].agent_record_id == agent_record_id
             assert await asyncio.wait_for(response.read(), timeout=1) == final_chunk
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/active"] == 0
+            assert metrics["serve/request/completed_total"] == 1
+            assert metrics["ingest/accepted_total"] == 1
             assert records[0].payload["response"]["stream"] is True
             assert records[0].payload["response"]["complete"] is True
             assert records[0].payload["response"]["status"] == 200
@@ -582,6 +589,11 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
             [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
             assert record.payload["response"]["complete"] is False
             assert record.payload["response"]["error"] == "upstream SSE ended without a terminal event"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/completed_total"] == 0
+            assert metrics["serve/request/active"] == 0
+            assert metrics["ingest/accepted_total"] == 1
         finally:
             await client.close()
             await upstream_server.close()
@@ -774,6 +786,11 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         finally:
             await client.close()
 
+        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+        assert metrics["serve/request/started_total"] == 1
+        assert metrics["serve/request/completed_total"] == 1
+        assert metrics["serve/retries_total"] == 1
+        assert metrics["serve/version_mismatch_total"] == 0
         assert [ref.runtime_load_id for ref in calls] == ["sglang-v1", "sglang-v1"]
         recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert len(recorded) == 1
@@ -824,6 +841,11 @@ def test_completed_inference_with_mismatched_runtime_load_id_fails_loudly(tmp_pa
         finally:
             await client.close()
 
+        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+        assert metrics["serve/request/failed_total"] == 1
+        assert metrics["serve/version_mismatch_total"] == 1
+        assert metrics["serve/retries_total"] == 0
+        assert metrics["ingest/accepted_total"] == 0
         assert [ref.runtime_load_id for ref in calls] == ["sglang-v1"]
         assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
 
@@ -858,6 +880,9 @@ def test_interrupted_inference_stops_at_the_configured_retry_deadline() -> None:
             )
             assert response.status == 503
             assert "retry deadline exceeded" in await response.text()
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/timeouts_total"] == 1
             assert not dispatcher.get_or_create_scenario("chat").records.replay("chat")
         finally:
             await client.close()
@@ -1199,3 +1224,56 @@ def test_http_app_closes_dispatcher_only_when_requested(monkeypatch, close_dispa
 
         asyncio.run(run())
         assert calls == (["close"] if close_dispatcher else [])
+
+
+def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from reef.core import AgentRecord
+    from reef.core.reports import ReportValidationError
+    from reef.storage.records import RecordConflict
+
+    with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
+        item = AgentRecord.create(scenario="math", request_type=RequestType.INFERENCE, payload={})
+        dispatcher.accept_record(item)
+        dispatcher.accept_record(item)
+        with pytest.raises(RecordConflict):
+            dispatcher.accept_record(replace(item, payload={"different": True}))
+        with pytest.raises(ReportValidationError):
+            dispatcher.accept_record(
+                AgentRecord.create(
+                    scenario="math",
+                    request_type=RequestType.REPORT,
+                    payload={"score": 1},
+                    references=("missing",),
+                )
+            )
+        with pytest.raises(ValueError, match="training_mode"):
+            dispatcher.accept_record(
+                AgentRecord.create(
+                    scenario="math",
+                    request_type=RequestType.TRAIN,
+                    payload={"text": "train"},
+                )
+            )
+        scenario = dispatcher.get_or_create_scenario("math")
+
+        def fail_write(item: AgentRecord) -> None:
+            raise OSError("storage unavailable")
+
+        monkeypatch.setattr(scenario.records, "append_result", fail_write)
+        with pytest.raises(OSError):
+            dispatcher.accept_record(replace(item, agent_record_id="another"))
+        metrics = scenario.operations.snapshot()
+        assert metrics["ingest/accepted_total"] == 1
+        assert metrics["ingest/duplicates_total"] == 1
+        assert metrics["ingest/rejected_conflict_total"] == 1
+        assert metrics["ingest/rejected_report_total"] == 1
+        assert metrics["ingest/rejected_request_total"] == 1
+        assert metrics["ingest/write/failed_total"] == 2
+        assert metrics["ingest/write/completed_total"] == 2
+        assert metrics["ingest/write/active"] == 0
+        assert metrics["ingest/write/duration_seconds_total"] > 0
+        assert dispatcher.get_or_create_scenario("code").operations.snapshot()["ingest/accepted_total"] == 0

@@ -188,6 +188,7 @@ def test_retryable_training_outcome_reopens_unchanged_colocated_inference(failur
     training.failure = failure
     with pytest.raises(type(failure)):
         scheduler.train_candidate({})
+    assert scheduler.operations.snapshot()["stale_batches_total"] == int(isinstance(failure, StaleCandidate))
     assert inference.inference_admission_status["open"]
     assert inference.current_runtime_load_id() == "engine:0"
     assert inference.calls == []

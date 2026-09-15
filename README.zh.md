@@ -128,7 +128,7 @@ uv pip install -e ".[slime]" && uv pip install --no-deps --group runtime
 export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
 
-reef serve -c recipes/sao/examples/sao/serve.yaml \
+reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
   --reef.port "8900"
 
@@ -193,7 +193,7 @@ reef.post(
 
 用模型 API（而非 GPU）根据自然语言请求改进编码 harness。
 
-Reefine 是内置的 harness 改进 recipe，自带 profile；只需指定 provider URL 和模型：
+Reefine 是内置的 harness 改进 recipe，自带部署配置；只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
 reef serve --recipe reefine \
@@ -203,9 +203,9 @@ reef serve --recipe reefine \
 
 该示例连接本地 Ollama 服务。使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
-`REEF_UPSTREAM_API_KEY`。该 profile 监听 `127.0.0.1:8901`，token 为 `reef-local`，状态保存在
-`.reef/reefine/`（`--recipe harness-evolve` 是该 profile 的旧名称，启动的是同一个 profile）。
-需要修改其他内容时，复制[该 profile](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
+`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，token 为 `reef-local`，状态保存在
+`.reef/reefine/`（`--recipe harness-evolve` 是旧名称，启动的是同一个配置）。
+需要修改其他内容时，复制[该部署配置](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
 
 在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`），创建 scenario、安装 harness 并提出修改请求：
 
@@ -232,7 +232,7 @@ recipe 链接到其指南，每个已测 benchmark 链接到其结果页，[Reci
 | 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
 |---|---|---|---|---|
 | 科学发现 | 对一个有可度量目标的难题反复尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
-| 任务流上的持续学习 | 由校验器逐个打分的独立任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、Terminal-Bench（[示例](recipes/meta_harness/examples/terminal_bench/README.md)、[结果](recipes/meta_harness/RESULTS.md)）。 |
+| 任务流上的持续学习 | 由校验器逐个打分的独立任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract)、[IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results)、[CEO-Bench](recipes/sao/examples/ceobench/README.md#results)、[Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results)。 |
 | 从使用中学习 | 没有人上报分数或反馈延迟到达的真实交互 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[GSM8K 任务流上的模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
 
 [`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解

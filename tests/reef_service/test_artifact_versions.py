@@ -12,7 +12,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.observability import NullExperimentLogger
+from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import ActivatedModel, InferenceHandler, ModelCandidate, PreparedTrainingStep
 from reef.scenario import ReleaseNotRestorable
@@ -95,7 +95,7 @@ class BlockingBackend(InferenceHandler):
         return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
 
 
-class RecordingExperimentTracker:
+class RecordingExperimentTracker(ExperimentTracker):
     def __init__(self) -> None:
         self.events = []
         self.rollbacks = []

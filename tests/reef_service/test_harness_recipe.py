@@ -2498,3 +2498,61 @@ def test_the_proposer_cannot_create_update_or_remove_a_reserved_entry(tmp_path: 
     assert (published / "extensions" / "reef-version-check.ts").read_text(encoding="utf-8") == notice["config"]["code"]
     assert (published / "AGENTS.md").read_text(encoding="utf-8") == "marker rules\n"
     assert not (published / "tree.json").exists()
+
+
+def test_yaml_config_takes_the_gate_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
+    from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
+
+    module = tmp_path / "demo_evolution.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    root = tmp_path / "tasks"
+    for name in ("held-1", "held-2", "train-1"):
+        write_harbor_task(
+            HarborTask(
+                name=name,
+                instruction=f"task {name}",
+                tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+                environment={"Dockerfile": "FROM python:3.12-slim\n"},
+            ),
+            root,
+        )
+    write_split_manifest(tmp_path / "split.json", TaskSplit(("train-1",), ("held-1", "held-2"), 0, 0.5))
+    evolution = {
+        "propose": "demo_evolution:propose",
+        "evaluate": "demo_evolution:evaluate",
+        "task_manifest": str(tmp_path / "split.json"),
+        "tasks_root": str(root),
+        "adapter": "terminus",
+    }
+    built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
+    assert built.tasks == (str(root / "held-1"), str(root / "held-2"))
+    assert get_adapter("terminus").is_prompt_task_directory and not get_adapter("pi").is_prompt_task_directory
+
+    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="promote_failures adds prompts"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "promote_failures": True}}, runtime=runtime()
+        )
+    with pytest.raises(RecipeConfigError, match=r"only read with evolution\.task_manifest"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "task_manifest": None, "tasks": ["x"]}}, runtime=runtime()
+        )
+
+    with pytest.raises(RecipeConfigError, match="cannot both be set"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "tasks": ["x"]}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="must both be non-empty paths"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {k: v for k, v in evolution.items() if k != "tasks_root"}}, runtime=runtime()
+        )
+    write_split_manifest(tmp_path / "empty.json", TaskSplit(("train-1",), (), 0, 0))
+    with pytest.raises(RecipeConfigError, match="names no eval tasks"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "task_manifest": str(tmp_path / "empty.json")}}, runtime=runtime()
+        )
+    (root / "held-2" / "instruction.md").write_text("changed")
+    with pytest.raises(RecipeConfigError, match=r"held-2.*does not match its digest"):
+        CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())

@@ -131,7 +131,7 @@ uv pip install -e ".[slime]" && uv pip install --no-deps --group runtime
 export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
 
-reef serve -c recipes/sao/examples/sao/serve.yaml \
+reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
   --reef.port "8900"
 
@@ -201,8 +201,9 @@ current version without restarting Reef.
 
 Refine a coding harness from plain-language asks, using a model API instead of GPUs.
 
-Reefine is the built-in harness-refinement recipe and carries its own profile;
-specify the provider URL and model:
+Reefine is the built-in harness-refinement recipe and includes a deployment
+configuration; specify the provider URL and model. From your Reef checkout and
+activated Python environment:
 
 ```bash
 reef serve --recipe reefine \
@@ -212,10 +213,11 @@ reef serve --recipe reefine \
 
 The example connects to a local Ollama server. For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
-`REEF_UPSTREAM_API_KEY` if authentication is required. The profile listens on
-`127.0.0.1:8901` with token `reef-local` and keeps its state under `.reef/reefine/`
-(`--recipe harness-evolve`, the profile's former name, starts the same profile). To
-change anything else, copy [the profile](reef/service/profiles/reefine.yaml) and pass
+`REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
+listens on `127.0.0.1:8901` with token `reef-local` and keeps its state under
+`.reef/reefine/` (`--recipe harness-evolve`, the former name, starts the same
+configuration). To change anything else, copy
+[the deployment configuration](reef/service/profiles/reefine.yaml) and pass
 your copy with `-c`.
 
 In another terminal with the same Python environment activated (the install
@@ -257,7 +259,7 @@ selected by dotted class reference and not shipped in the Reef wheel.
 | Task type | Task shape | Evolves the model | Evolves the harness | Standard benchmarks |
 |---|---|---|---|---|
 | Scientific discovery | Repeated attempts at one hard problem with a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
-| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), Terminal-Bench ([example](recipes/meta_harness/examples/terminal_bench/README.md), [results](recipes/meta_harness/RESULTS.md)). |
+| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract), [IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results), [CEO-Bench](recipes/sao/examples/ceobench/README.md#results), [Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results). |
 | Learning from usage | Real interaction where no one reports a score or feedback arrives late | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [simulated student with GSM8K task stream](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays

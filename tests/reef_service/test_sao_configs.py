@@ -135,7 +135,11 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--hidden-dropout",
         "--lr-decay-style",
         "--normalization",
+        "--no-save-optim",
         "--optimizer",
+        "--optimizer-cpu-offload",
+        "--overlap-cpu-optimizer-d2h-h2d",
+        "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
         "--pipeline-model-parallel-size",
@@ -147,6 +151,11 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--rotary-base",
         "--seq-length",
         "--sequence-parallel",
+        "--spec",
+        "--use-gated-attention",
+        "--rotary-percent",
+        "--attention-output-gate",
+        "--apply-layernorm-1p",
         "--swiglu",
         "--tensor-model-parallel-size",
         "--weight-decay",
@@ -287,12 +296,22 @@ def _parse_config(config_path: Path):
     tokens = _strip_sglang_flags(tokens)
 
     parser = _build_slime_parser()
-    args, leftover = parser.parse_known_args(tokens)
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
+    # The full parser adds these bootstrap flags before its Slime option provider.
+    parser.add_argument("--debug-train-only", action="store_true")
+    parser.add_argument("--debug-rollout-only", action="store_true")
+    args, leftover = parser.parse_known_args(tokens, namespace=SlimeArguments())
 
     index = 0
     while index < len(leftover):
         token = leftover[index]
         flag = token.split("=", 1)[0]
+        if flag == "--spec":
+            # ``--spec <module> <function>`` names a layer spec (Slime's Qwen3.5
+            # plugin); Megatron consumes exactly two values.
+            index += 3
+            continue
         assert flag.startswith("--") and flag in _MEGATRON_ONLY_FLAGS, (
             f"{config_path.name} passes {token!r}, which neither the Slime parser nor the "
             "Megatron-only allowlist recognizes — a typo or a removed flag"
@@ -350,7 +369,8 @@ def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
+        "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -370,7 +390,8 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
         "tutorials/evolve-your-harness/configs/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
+        "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }
@@ -461,7 +482,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
 @pytest.mark.unit
 def test_sao_config_uses_the_hook_based_contract() -> None:
-    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "sao" / "serve.yaml"
+    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "imo_answerbench" / "serve.yaml"
     args, spec, options, _ = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)

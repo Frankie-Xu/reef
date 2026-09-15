@@ -64,6 +64,9 @@ class RuntimeCandidateBackend(CandidateBackend):
             **({"loss_family": self._loss_family} if self._loss_family is not None else {}),
         }
 
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        return {f"runtime/{key}": value for key, value in self.scheduler.operations.snapshot().items()}
+
     def initial_state(self) -> Mapping[str, Any]:
         return {}
 
