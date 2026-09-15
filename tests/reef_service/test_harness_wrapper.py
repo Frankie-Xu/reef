@@ -1862,7 +1862,7 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
     assert capsys.readouterr().err == (
         "reef-pi setup: no release nope in the catalog\n"
         f"catalog: http://127.0.0.1:{reef.port} (scenario 'setup-scenario'). "
-        "Refresh the version list with /reef-versions before retrying.\n"
+        "Check the service and scenario, then refresh the release list before retrying.\n"
     )
     reef.close()
     # Nothing served yet: said so, and there is nothing to check off.
@@ -2005,7 +2005,7 @@ def test_setup_json_lists_the_items_with_met_from_the_environment_the_env_file_a
     assert capsys.readouterr().err == (
         "reef-pi setup: no release nope in the catalog\n"
         f"catalog: http://127.0.0.1:{reef.port} (scenario 'setup-scenario'). "
-        "Refresh the version list with /reef-versions before retrying.\n"
+        "Check the service and scenario, then refresh the release list before retrying.\n"
     )
     reef.close()
     reef = _ReleasesReef([_row("v9", [{"name": "x", "kind": "env"}], pending=True)])
@@ -2254,7 +2254,7 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
     assert capsys.readouterr().err == (
         "reef-pi update: no release nope in the catalog\n"
         f"catalog: http://127.0.0.1:{reef.port} (scenario 'setup-scenario'). "
-        "Refresh the version list with /reef-versions before retrying.\n"
+        "Check the service and scenario, then refresh the release list before retrying.\n"
     )
     reef.close()
     for name, install, message in (

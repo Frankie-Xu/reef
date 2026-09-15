@@ -1407,7 +1407,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
         print(
             f"reef-{adapter} {prog}: no release {release} in the catalog\n"
             f"catalog: {service_display_url(upstream)} (scenario {scenario!r}). "
-            "Refresh the version list with /reef-versions before retrying.",
+            "Check the service and scenario, then refresh the release list before retrying.",
             file=sys.stderr,
         )
         return None
