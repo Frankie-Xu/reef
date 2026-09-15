@@ -726,8 +726,12 @@ HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
 ``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/reef-harness``
 print the link. Until the step settles the page reloads itself every five
-seconds and has two sections: Request (the text, the session and release it
-came from, and what it says it needs from your machine) and Progress, with
+seconds. A four-stage progress strip and a status badge summarize the
+request. The responsive layout places Request beside Progress on desktop
+and stacks them on narrow screens, with automatic light and dark themes.
+Request highlights the instruction; session, release, request ID, submission
+time and machine requirements are available in expandable details.
+Progress shows
 the request's state and what it means: ``queued`` while no step has taken
 the request, ``proposing`` while the served model writes the change,
 ``gating`` while the candidate's episodes run (with their count and the
@@ -739,8 +743,11 @@ id settles the page: the reload stops and Progress gives way to Verdict
 (the verdict as the version page words it, what it means and the next
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
 ``proposer failure``, the release id and a link to the version page), What
-changed (each mutation's op, id and kind) and, when the step recorded a
-review, Review (its verdict and the points it left uncovered). An unknown
+changed (each mutation's op, id and kind; labeled Proposed changes for
+pending, rejected or skipped steps) and, when the step recorded a review,
+Review (its verdict and the points it left uncovered). Published and pending
+results show the session command to install or promote when the person is
+ready, alongside a link to the version page. An unknown
 id, or one that is not a training instruction, is HTTP 404 naming it.
 
 Both pages are links a person opens in a browser, which sends no header, so
