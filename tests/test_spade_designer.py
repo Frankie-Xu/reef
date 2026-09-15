@@ -59,6 +59,7 @@ def test_the_prompt_names_the_container_the_verifier_and_the_reference_solution(
     assert "/logs/verifier/reward.txt" in text and "solution/solve.sh" in text
     assert "It never sees tests/ or solution/" in text and "The image installs tmux" in text
     assert "TWO NETWORK PHASES" in text and "no heredocs" in text and "at least 80 characters" in text
+    assert "NO PROCESS SURVIVES THE BUILD" in text and "sleep infinity" in text
     assert "step by step" in text and text.count("```json") == 1 and "```python" not in text
 
 
