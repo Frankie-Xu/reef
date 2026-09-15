@@ -1219,10 +1219,8 @@ def harness(
     settled = _await_step(
         upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
-    if settled == "timeout":
-        return 2
-    if settled == "gone":
-        return 1
+    if isinstance(settled, str):
+        return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
     print(f"reef-{adapter}: {_verdict_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
     uncovered = _uncovered(rows[step])
