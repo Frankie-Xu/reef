@@ -14,12 +14,11 @@ import random
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from reef.core.errors import ReefError
 
 MANIFEST_VERSION = 1
-_MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
+MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
 
 
 class TaskSplitError(ReefError):
@@ -36,28 +35,30 @@ class TaskSplit:
     eval_fraction: float
 
     def __post_init__(self) -> None:
-        sides: dict[str, tuple[str, ...]] = {}
-        for side in ("train", "eval"):
-            raw = getattr(self, side)
-            try:
-                names = () if isinstance(raw, str) else tuple(raw)
-            except TypeError:
-                raise TaskSplitError(f"{side} must be a sequence of task names") from None
-            if isinstance(raw, str) or any(not isinstance(n, str) or not n for n in names):
-                raise TaskSplitError(f"{side} must be a sequence of task names")
-            if len(set(names)) != len(names):
-                raise TaskSplitError(f"{side} lists a task twice")
-            sides[side] = tuple(sorted(names))
-        if set(sides["train"]) & set(sides["eval"]):
+        train = checked_side("train", self.train)
+        eval_ = checked_side("eval", self.eval)
+        if set(train) & set(eval_):
             raise TaskSplitError("a task cannot be on both sides of a split")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TaskSplitError("seed must be an integer")
         fraction = self.eval_fraction
         if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 <= fraction <= 1:
             raise TaskSplitError("eval_fraction must be a number between 0 and 1")
-        object.__setattr__(self, "train", sides["train"])
-        object.__setattr__(self, "eval", sides["eval"])
+        object.__setattr__(self, "train", train)
+        object.__setattr__(self, "eval", eval_)
         object.__setattr__(self, "eval_fraction", float(fraction))
+
+
+def checked_side(side: str, names: object) -> tuple[str, ...]:
+    """One side of a split as a sorted tuple of distinct task names."""
+    if isinstance(names, str) or not isinstance(names, Iterable):
+        raise TaskSplitError(f"{side} must be a sequence of task names")
+    listed = tuple(names)
+    if any(not isinstance(name, str) or not name for name in listed):
+        raise TaskSplitError(f"{side} must be a sequence of task names")
+    if len(set(listed)) != len(listed):
+        raise TaskSplitError(f"{side} lists a task twice")
+    return tuple(sorted(listed))
 
 
 def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
@@ -73,16 +74,17 @@ def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: floa
         raise TaskSplitError("eval_fraction must be a number between 0 and 1")
     if not isinstance(sources, Mapping) or any(not isinstance(name, str) or not name for name in sources):
         raise TaskSplitError("sources must map non-empty task names to their record ids")
-    fixed: dict[str, tuple[str, ...]] = {}
-    for name, ids in sources.items():
+    record_ids_by_task: dict[str, tuple[str, ...]] = {}
+    for name, record_ids in sources.items():
         try:
-            fixed[name] = tuple(ids)
+            listed = tuple(record_ids)
         except TypeError:
             raise TaskSplitError(f"sources of {name!r} must be a sequence of non-empty record ids") from None
-        if isinstance(ids, str) or any(not isinstance(i, str) or not i for i in fixed[name]):
+        if isinstance(record_ids, str) or any(not isinstance(record_id, str) or not record_id for record_id in listed):
             raise TaskSplitError(f"sources of {name!r} must be a sequence of non-empty record ids")
-    names = list(fixed)
-    order = sorted(_groups(fixed), key=lambda group: group[0])
+        record_ids_by_task[name] = listed
+    names = list(record_ids_by_task)
+    order = sorted(task_groups(record_ids_by_task), key=lambda group: group[0])
     random.Random(seed).shuffle(order)
     # ceil with a small slack absorbs float noise such as 7.000000000000001; any positive fraction holds a group.
     target = 0 if eval_fraction == 0 else max(1, math.ceil(eval_fraction * len(names) - 1e-9))
@@ -118,17 +120,22 @@ def read_split_manifest(path: Path) -> TaskSplit:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise TaskSplitError(f"cannot read split manifest {path}: {exc}") from exc
-    version = document.get("version") if isinstance(document, dict) else None
+    if not isinstance(document, dict):
+        raise TaskSplitError(f"{path} is not a version {MANIFEST_VERSION} split manifest")
+    version = document.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version != MANIFEST_VERSION:
         raise TaskSplitError(f"{path} is not a version {MANIFEST_VERSION} split manifest")
-    unknown = sorted(key for key in document if key not in _MANIFEST_KEYS)
-    if unknown:
-        raise TaskSplitError(f"{path} carries keys reef did not write: {', '.join(unknown)}")
+    unknown_keys = sorted(key for key in document if key not in MANIFEST_KEYS)
+    if unknown_keys:
+        raise TaskSplitError(f"{path} carries keys reef did not write: {', '.join(unknown_keys)}")
     for side in ("train", "eval"):
         if not isinstance(document.get(side), list):
             raise TaskSplitError(f"{path}: {side} must be a list of task names")
-    seed: Any = document.get("seed")
-    fraction: Any = document.get("eval_fraction")
+    seed, fraction = document.get("seed"), document.get("eval_fraction")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TaskSplitError(f"{path}: seed must be an integer")
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+        raise TaskSplitError(f"{path}: eval_fraction must be a number between 0 and 1")
     try:
         return TaskSplit(
             train=tuple(document["train"]), eval=tuple(document["eval"]), seed=seed, eval_fraction=fraction
@@ -137,9 +144,9 @@ def read_split_manifest(path: Path) -> TaskSplit:
         raise TaskSplitError(f"{path}: {exc}") from exc
 
 
-def _groups(sources: Mapping[str, Iterable[str]]) -> list[list[str]]:
+def task_groups(record_ids_by_task: Mapping[str, Iterable[str]]) -> list[list[str]]:
     """Connected components of tasks over shared record ids, each sorted by name."""
-    parent: dict[str, str] = {name: name for name in sources}
+    parent: dict[str, str] = {name: name for name in record_ids_by_task}
 
     def find(name: str) -> str:
         while parent[name] != name:
@@ -148,11 +155,11 @@ def _groups(sources: Mapping[str, Iterable[str]]) -> list[list[str]]:
         return name
 
     owner: dict[str, str] = {}
-    for name in sorted(sources):
-        for record_id in sources[name]:
+    for name in sorted(record_ids_by_task):
+        for record_id in record_ids_by_task[name]:
             first = owner.setdefault(record_id, name)
             parent[find(name)] = find(first)
     members: dict[str, list[str]] = {}
-    for name in sorted(sources):
+    for name in sorted(record_ids_by_task):
         members.setdefault(find(name), []).append(name)
     return [sorted(group) for group in members.values()]

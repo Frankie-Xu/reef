@@ -146,7 +146,7 @@ def test_a_failed_write_leaves_nothing_behind(tmp_path: Path, monkeypatch: pytes
     def explode(*args: object, **kwargs: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(module, "_write_files", explode)
+    monkeypatch.setattr(module, "write_task_files", explode)
     with pytest.raises(OSError, match="disk full"):
         write_harbor_task(task(), tmp_path)
     assert list(tmp_path.iterdir()) == []
@@ -175,7 +175,7 @@ def test_a_writer_that_lost_the_race_accepts_the_same_task(tmp_path: Path, monke
         # The other writer lands the same task first, so this rename finds the target taken.
         winner = tmp_path / "winner-staging"
         winner.mkdir()
-        module._write_files(task(), winner)
+        module.write_task_files(task(), winner)
         real_rename(winner, destination)
         real_rename(source, destination)
 
@@ -210,7 +210,7 @@ def test_read_returns_the_task_that_was_written(tmp_path: Path) -> None:
 def test_an_edited_file_is_refused(tmp_path: Path, edit: tuple[str, str]) -> None:
     root = write_harbor_task(task(), tmp_path)
     (root / edit[0]).write_text(edit[1])
-    with pytest.raises(HarborTaskError, match="edited after it was written"):
+    with pytest.raises(HarborTaskError, match="does not match its digest"):
         read_harbor_task(root)
 
 
@@ -218,7 +218,7 @@ def test_an_edited_task_toml_table_is_refused(tmp_path: Path) -> None:
     root = write_harbor_task(task(), tmp_path)
     text = (root / "task.toml").read_text().replace("timeout_sec = 300.0", "timeout_sec = 3.0")
     (root / "task.toml").write_text(text)
-    with pytest.raises(HarborTaskError, match="edited after it was written"):
+    with pytest.raises(HarborTaskError, match="does not match its digest"):
         read_harbor_task(root)
 
 
@@ -227,7 +227,7 @@ def test_a_file_reef_did_not_write_is_refused(tmp_path: Path, extra: str) -> Non
     root = write_harbor_task(task(), tmp_path)
     (root / extra).parent.mkdir(parents=True, exist_ok=True)
     (root / extra).write_text("x")
-    with pytest.raises(HarborTaskError, match=r"did not write|edited after"):
+    with pytest.raises(HarborTaskError, match=r"did not write|does not match its digest"):
         read_harbor_task(root)
 
 
@@ -464,8 +464,8 @@ def test_entries_that_are_not_regular_files_are_refused(tmp_path: Path) -> None:
 def test_an_empty_foreign_directory_is_refused(tmp_path: Path) -> None:
     root = write_harbor_task(task(), tmp_path)
     (root / "tests" / "empty").mkdir()
-    # An empty directory carries no bytes to hash, so it is invisible; Harbor ignores it too.
-    assert read_harbor_task(root) == task()
+    with pytest.raises(HarborTaskError, match="entries reef did not write: tests/empty"):
+        read_harbor_task(root)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads every directory")
@@ -518,23 +518,22 @@ def test_a_name_longer_than_a_filesystem_allows_is_refused(name: str) -> None:
         task(environment={"Dockerfile": "FROM x\n", name: "x"})
 
 
-def test_a_stale_staging_directory_is_swept_before_the_next_write(tmp_path: Path) -> None:
+def test_staging_lives_under_a_hidden_directory_that_never_looks_like_a_task(tmp_path: Path) -> None:
     import reef.core.tasks.harbor as module
 
-    stale = tmp_path / ".sum-391.deadbeef"
-    stale.mkdir()
-    module._write_files(task(), stale)
-    old = 1_000_000_000
-    os.utime(stale, (old, old))
+    leftover = tmp_path / module.STAGING_DIRECTORY / "sum-391.deadbeef"
+    leftover.mkdir(parents=True)
+    module.write_task_files(task(), leftover)
     root = write_harbor_task(task(), tmp_path)
-    assert sorted(p.name for p in tmp_path.iterdir()) == [root.name]
+    # The leftover of a killed writer is left alone, out of the way of a root listing, and blocks nothing.
+    assert sorted(p.name for p in tmp_path.iterdir()) == [module.STAGING_DIRECTORY, root.name]
+    assert leftover.is_dir()
+    assert read_harbor_task(root) == task()
 
 
-def test_a_young_staging_directory_is_left_alone(tmp_path: Path) -> None:
-    young = tmp_path / ".sum-391.cafebabe"
-    young.mkdir()
-    write_harbor_task(task(), tmp_path)
-    assert young.is_dir()
+def test_the_staging_directory_is_removed_when_it_is_empty(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    assert [p.name for p in tmp_path.iterdir()] == [root.name]
 
 
 def test_a_dangling_symlink_at_the_target_is_a_conflict(tmp_path: Path) -> None:
@@ -587,3 +586,44 @@ def test_the_user_env_and_workdir_keys_harbor_reads_round_trip(tmp_path: Path) -
 def test_the_new_keys_are_checked_the_way_harbor_checks_them(overrides: dict[str, object], message: str) -> None:
     with pytest.raises(HarborTaskError, match=message):
         task(**overrides)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"Dockerfile": "FROM x\n", "A/x": "1", "a/y": "2"},
+        {"Dockerfile": "FROM x\n", "caf\u00e9/x": "1", "cafe\u0301/y": "2"},
+        {"Dockerfile": "FROM x\n", "lib/a/x": "1", "LIB/b/y": "2"},
+    ],
+)
+def test_directory_spellings_that_fold_together_are_refused(environment: dict[str, str]) -> None:
+    with pytest.raises(HarborTaskError, match="fold together"):
+        task(environment=environment)
+
+
+def test_the_same_directory_spelled_the_same_way_twice_is_fine() -> None:
+    spec = task(environment={"Dockerfile": "FROM x\n", "lib/a": "1", "lib/b": "2", "lib/sub/c": "3"})
+    assert len(spec.environment) == 4
+
+
+def test_a_volume_that_merges_names_is_reported_as_such(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import reef.core.tasks.harbor as module
+
+    real_read = module.read_all_entries
+
+    def merged(root: Path) -> tuple[dict[str, str], set[str]]:
+        files, directories = real_read(root)
+        files.pop("environment/Dockerfile", None)
+        return files, directories
+
+    monkeypatch.setattr(module, "read_all_entries", merged)
+    with pytest.raises(HarborTaskError, match="is the volume case folding"):
+        write_harbor_task(task(), tmp_path)
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_a_renamed_task_directory_is_refused_with_the_reason(tmp_path: Path) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    moved = root.rename(tmp_path / "sum-392")
+    with pytest.raises(HarborTaskError, match="edited, renamed or read through another name"):
+        read_harbor_task(moved)
