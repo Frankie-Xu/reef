@@ -51,6 +51,39 @@ That is the gate behaving as designed. It does not show that gating improves
 the stream: no ungated Hermes run of the same configuration was made, so the
 comparison that would settle it has not been run.
 
+### Follow-up: the probe was coaching the answer, and clipping it
+
+Two defects in the probe itself were found after this run, by re-running the
+pinned set offline against the base weights and four saved candidates — 100
+generations, every reply scored and kept.
+
+**The probe told the model the answer.** Its instruction ended *"Write plainly
+in complete sentences — do not use bold, headings, bullet points, or numbered
+lists."* The style criterion it then scored against is one the student never
+states up front, so the probe was measuring compliance with its own instruction,
+not what the policy had internalised. That is what the 0.125 baseline above was.
+With the instruction uncoached, the baseline is **0.0**, which is the number
+that agrees with the 67-of-72 markdown rejection rate in the table below.
+
+**At `max_tokens: 96` it scored truncation.** This model opens with a "here's a
+thinking process" preamble, so the budget ran out before the arithmetic:
+`no-shown-work` fired on **50 of 50** replies at 96 and on **13 of 50** at 320.
+At 320 the replies run to a median 1056 characters, against the 770 a real
+session's first reply runs to; at 96 they run to 356.
+
+**What the corrected probe shows is a hard floor, not a resolution problem.**
+All three style markers — bold, bullets, numbered — are present in **100 of 100**
+replies, base and every candidate alike. Mean violations per reply sit at
+3.2–3.3 and do not move across four steps. So the gate on this configuration has
+no signal to act on: with the running best pinned at 0.0 every candidate reads
+*"within margin of best"* and is selected. The gate is not wrong, it is
+uninformative until the rate lifts off the floor, and the selected-20-of-67
+result above was produced by the coached probe.
+
+The evaluator now also reports `mean_violations` — the distance to the
+criterion, which moves while `clean_rate` is pinned — alongside the rate it
+gates on.
+
 ## What did not happen
 
 | | |
@@ -94,6 +127,14 @@ Three operational notes, each of which cost a discarded run:
   pushes all fail against the scenario the service already bound.
 - **The two timeouts are coupled.** Raising the per-turn ceiling without raising
   Harbor's session budget just moves which one fires.
+
+**Correction: this run had no KL term.** `serve.yaml` sets `kl_coef: 0.05`, but
+that setting then reached only the generic loss path, and this recipe always
+names the `openclawrl` family, whose objective took its coefficient from a
+separate default of zero — the run's step metrics recorded `kl_coef 0.0`
+throughout. The runtime now routes the deployment's `kl_coef` to whichever
+mechanism the active objective carries, so a rerun of this config trains
+against a term this run did not have.
 
 ## Files
 

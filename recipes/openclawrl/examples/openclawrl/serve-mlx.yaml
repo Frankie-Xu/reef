@@ -59,8 +59,11 @@ training:
     # The top-K the policy considered while generating. The openclawrl
     # objective distils onto those candidates, so it cannot be rebuilt later.
     capture_topk: 4
-    # Frozen-base KL. Without it earlier runs collapsed into an unconditional
-    # tool loop: it prices the drift neither objective term targets.
+    # Prices drift from the frozen base — the movement neither objective term
+    # targets, and the direction the collapsed runs drifted in. Each loss
+    # family spends it through its own mechanism: the openclawrl objective
+    # this recipe selects adds a KL term to the loss, as the slime reference
+    # does. Set `openclawrl.kl_coef` to drive that term separately.
     kl_coef: 0.05
 
 recipe:
@@ -107,5 +110,17 @@ evaluation:
   module: recipes.openclawrl.candidate_evaluator:OpenClawRLCandidateEvaluation
   config:
     probe_size: 8
-    max_tokens: 96
+    # Enough room to write a reply the size a session elicits. At 96 the probe
+    # scored truncation rather than style: this model opens with a "here's a
+    # thinking process" preamble, so 50 of 50 probe replies were cut before the
+    # arithmetic and every one failed the shown-work check on length alone. At
+    # 320 that drops to 13 of 50, and the replies run to a median 1056
+    # characters against the 770 a real session's first reply runs to.
+    max_tokens: 320
+    # Tolerated dip below the running best. Note the granularity this implies:
+    # at probe_size 8 one probe item is worth 0.125, so a margin above that
+    # forgives any single-item regression and the gate acts only on a drop of
+    # two or more. That is deliberate on a probe this small — the gate is for
+    # collapse, not jitter — but it is the number to revisit before reading
+    # anything into a gate that held nothing out.
     regression_margin: 0.17

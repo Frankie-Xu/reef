@@ -105,7 +105,8 @@ What breaks is the **save turn of the agent loop, not the answer**. The objectiv
 (OPD + RL) pushes the trainable weights past where they still generalise on the
 multi-turn loop, and the verifier — which grades only the first reply — scores an
 automatic reject when there is no first reply at all. The open item is stabilising
-the tail: a lower learning rate or a stronger KL past the adaptation point.
+the tail: a lower learning rate, or a KL term past the adaptation point — see the
+correction under [Configuration](#configuration), which found this run had none.
 
 One limit on how far this reading can be pushed: no held-out control was run for
 this config, so this record measures the stream, not the *answer* quality of a
@@ -127,8 +128,18 @@ and no version OOM'd across the full run. `max_tokens: 2048` was the run's setti
 
 See [`serve.yaml`](serve.yaml). The load-bearing choices: `lora_layers: 32`
 (the whole 9B), `lora_rank: 64`, `log_probs_chunk_size: 512` (so the head's
-backward cost is set by the chunk, not the response length), `kl_coef: 0.05`
-(frozen-base KL, holds the untargeted mass), `batch_size: 8`, `temperature: 0.6`.
+backward cost is set by the chunk, not the response length), `batch_size: 8`,
+`temperature: 0.6`.
+
+**Correction.** This file first listed `kl_coef: 0.05` among those choices, as
+the term holding the untargeted mass. It was not: the setting reached only the
+generic loss path, and OpenClaw-RL's recipe always names the `openclawrl`
+family, whose objective took its KL coefficient from a separate default of
+zero. The run's own step metrics recorded `kl_coef 0.0` throughout, which is
+what caught it. So **this run trained with no KL term at all**, and the tail
+described above is what the objective does unpriced. The runtime now routes the
+deployment's `kl_coef` to whichever mechanism the active objective carries, so
+a rerun of this config would not reproduce these numbers.
 The judge is a hosted model (`prm_model: z-ai/glm-5.3`), so the deployment serves
 only the policy. The API key is read from `$OPENROUTER_API_KEY`; the config
 records only the variable name.

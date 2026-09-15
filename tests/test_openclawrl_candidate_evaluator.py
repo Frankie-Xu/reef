@@ -71,6 +71,34 @@ def test_the_probe_scores_clean_markdown_and_empty_replies() -> None:
     assert evaluation.metrics["answered_rate"] == pytest.approx(5 / 6)
 
 
+def test_the_probe_reports_how_far_the_replies_are_from_the_criterion() -> None:
+    """``clean_rate`` alone cannot separate "nearly clean" from "nothing like it".
+
+    It is all-or-nothing per reply, so a policy that violates some marker every
+    time scores 0 for every candidate and the record shows a flat line whether
+    the replies are improving or not. ``mean_violations`` is the distance, and
+    it is reported next to the rate rather than gated on.
+    """
+    plugin, runtime = _plugin()
+    one_marker = "- April: 48 divided by 2 equals 24, and 48 plus 24 equals 72."
+
+    _, near = _decide(plugin, runtime, [one_marker] * 6)
+    _, far = _decide(plugin, runtime, [_MARKDOWN] * 6)
+    _, silent = _decide(plugin, runtime, [_EMPTY] * 6)
+
+    # Every one of these scores a clean rate of zero...
+    assert near.metrics["clean_rate"] == far.metrics["clean_rate"] == silent.metrics["clean_rate"] == 0.0
+    # ...and the distance still orders the two that answered.
+    assert near.metrics["mean_violations"] == pytest.approx(1.0)
+    assert far.metrics["mean_violations"] == pytest.approx(3.0)
+    # A silent turn scores *well* on distance — an empty reply breaks only the
+    # shown-work check — so this metric must not be read as a collapse signal.
+    # ``answered_rate`` is the one that separates the two.
+    assert silent.metrics["mean_violations"] == pytest.approx(1.0)
+    assert silent.metrics["answered_rate"] == 0.0
+    assert near.metrics["answered_rate"] == 1.0
+
+
 def test_the_wired_plugin_admits_the_climb_and_rejects_the_collapse() -> None:
     plugin, runtime = _plugin()
     # Climb: the probe scores rising clean rates, the gate admits them.

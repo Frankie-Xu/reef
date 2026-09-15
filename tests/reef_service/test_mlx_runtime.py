@@ -836,6 +836,42 @@ def test_the_openclawrl_family_reaches_the_distillation_step(tmp_path: Path) -> 
     assert candidate.training_metrics["w_opd"] == 1.0
 
 
+@pytest.mark.unit
+def test_the_deployments_kl_coef_prices_drift_on_the_openclawrl_path(tmp_path: Path) -> None:
+    """``kl_coef`` has to reach the objective the recipe actually selects.
+
+    The generic path spends it shaping advantages, the openclawrl objective
+    spends it on a KL term inside the loss. OpenClaw-RL's recipe always names
+    the openclawrl family, so a ``kl_coef`` that only reached the generic path
+    was a configured setting that never did anything: the run's own metrics
+    reported ``kl_coef 0.0`` while the deployment asked for 0.05.
+    """
+    runtime = build_runtime(tmp_path, kl_coef=0.05)
+    batch = TrainingBatch("b", (_distillation_sample(),))
+    prepared = runtime.prepare_training_step(batch, "mlx-test-openclawrl", {}, 0)
+
+    candidate = runtime.train_candidate(prepared.payload)
+
+    assert candidate.training_metrics["kl_coef"] == 0.05
+
+
+@pytest.mark.unit
+def test_an_explicit_objective_kl_coef_overrides_the_deployments(tmp_path: Path) -> None:
+    """A deployment may still set the two apart, which is why it is a default."""
+    runtime = MLXRuntime(
+        FakeEngine(),
+        checkpoint_dir=str(tmp_path / "ckpt"),
+        kl_coef=0.05,
+        openclawrl={"kl_coef": 0.5},
+    )
+    batch = TrainingBatch("b", (_distillation_sample(),))
+    prepared = runtime.prepare_training_step(batch, "mlx-test-openclawrl", {}, 0)
+
+    candidate = runtime.train_candidate(prepared.payload)
+
+    assert candidate.training_metrics["kl_coef"] == 0.5
+
+
 # ------------------------------------------------------- reading the reply back
 
 READ_FILE = [

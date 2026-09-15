@@ -25,11 +25,18 @@ measure the problems, not the candidate.
 Wire it into a deployment's config:
 
     evaluation:
-      module: recipes.openclawrl.candidate_evaluator:build
+      module: recipes.openclawrl.candidate_evaluator:OpenClawRLCandidateEvaluation
       config:
         probe_size: 8            # pinned GSM8K openings to probe
-        max_tokens: 96           # per-probe generation budget
+        max_tokens: 320          # per-probe generation budget
         regression_margin: 0.17  # tolerated dip below the running best
+
+``max_tokens`` has to leave room for a reply the size a session elicits, or the
+probe scores truncation instead of style: a model that opens with a preamble
+runs out of budget before the arithmetic and fails the shown-work check on
+length alone. ``regression_margin`` should be read against ``probe_size`` — one
+probe item is worth ``1 / probe_size``, and a margin above that forgives any
+single-item regression.
 """
 
 from __future__ import annotations
@@ -98,12 +105,15 @@ _PROBE: tuple[tuple[str, str], ...] = (
     ),
 )
 
-# What the probe asks for: a plainly-written, worked answer — the same shape the
-# acceptance criterion rewards, so the score tracks the behaviour that collapses.
+#: What the probe asks for, worded the way the student asks for it and saying
+#: nothing about style. The criterion scores a reply the student never coached,
+#: so a probe that states the style requirement measures compliance with its own
+#: instruction rather than what the policy learned: a model told "no bullet
+#: points" can score well on the probe while still opening every session with
+#: them. The task framing stays — the student does ask for the working — and the
+#: style is left for the policy to have internalised or not.
 _INSTRUCTION = (
-    "Solve this math problem. Show the full arithmetic, step by step, then give the final "
-    "number. Write plainly in complete sentences — do not use bold, headings, bullet "
-    "points, or numbered lists."
+    "Here is my homework problem. Solve it and show the full arithmetic, step by step, then give the final number."
 )
 
 
@@ -163,7 +173,8 @@ class OpenClawRLCandidateEvaluationPlugin(RegressionGateMixin):
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         replies = self._runtime.probe_candidate(candidate.candidate_id, self._prompts, max_tokens=self._max_tokens)
-        clean = sum(1 for reply in replies if self._clean(reply))
+        found = [self._violations(reply) for reply in replies]
+        clean = sum(1 for reply, violations in zip(replies, found, strict=True) if reply.strip() and not violations)
         answered = sum(1 for reply in replies if reply.strip())
         correct = sum(
             1 for (_, gold), reply in zip(self._probe, replies, strict=True) if gold in reply.replace(",", "")
@@ -176,6 +187,18 @@ class OpenClawRLCandidateEvaluationPlugin(RegressionGateMixin):
                 _METRIC: clean / total if total else 0.0,
                 "answered_rate": answered / total if total else 0.0,
                 "gold_rate": correct / total if total else 0.0,
+                # How far the replies are from the criterion, not just whether
+                # they met it. ``clean_rate`` is all-or-nothing per reply, so on
+                # a policy that violates every marker it reads 0 for every
+                # candidate and the record shows nothing moving. This does, and
+                # it is reported rather than gated on: which one is the better
+                # gate signal is not settled by the runs made so far.
+                #
+                # A silent turn is not the worst score here — an empty reply
+                # violates only the shown-work check. ``answered_rate`` is the
+                # metric that separates a collapse from a badly-styled answer,
+                # and it is the one that caught the last one.
+                "mean_violations": sum(len(v) for v in found) / total if total else 0.0,
                 "n_clean": clean,
                 "n_total": total,
             },

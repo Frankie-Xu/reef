@@ -73,7 +73,16 @@ class MLXRuntime(TrainingRuntime):
             "eps_lo": 0.2,
             "eps_hi": 0.28,
             "diff_clip": 1.0,
-            "kl_coef": 0.0,
+            # The deployment's ``kl_coef`` prices drift from the frozen base,
+            # and each loss family carries its own mechanism for that: the
+            # generic path shapes advantages the way TTT-Discover's
+            # ``incorporate_kl_penalty`` does, the openclawrl objective adds a
+            # KL term to the loss the way the slime reference's
+            # ``kl_loss_coef`` does. The key means the same thing on both, so
+            # it defaults here rather than silently staying zero on the only
+            # path this recipe takes. An explicit ``openclawrl.kl_coef`` still
+            # wins, for a deployment that wants the two set apart.
+            "kl_coef": self._kl_coef,
             "hint_selection": "sequence_optimal",
             "native_k": 20,
             **dict(openclawrl or {}),
