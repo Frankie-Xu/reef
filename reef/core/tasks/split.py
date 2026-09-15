@@ -1,7 +1,7 @@
-"""Split generated tasks into a training side and an evaluation side by the records they came from.
+"""Split generated tasks into a train split and an eval split by the records they came from.
 
-Two tasks made from a shared agent record go to the same side, so nothing
-the training side saw reappears, reworded, in the gate. The split is a
+Two tasks made from a shared agent record go to the same split, so nothing
+the train split saw reappears, reworded, in the gate. The split is a
 function of the task names, their sources and a seed, and the result is
 written as a manifest the gate reads.
 """
@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.errors import ReefError
+from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, read_harbor_task
 
 MANIFEST_VERSION = 1
 STAGING_DIRECTORY = ".staging"
@@ -30,7 +31,7 @@ class TaskSplitError(ReefError):
 
 @dataclass(frozen=True)
 class TaskSplit:
-    """Task names on each side, sorted, with the parameters that produced them."""
+    """Task names in each split, sorted, with the parameters that produced them."""
 
     train: tuple[str, ...]
     eval: tuple[str, ...]
@@ -38,10 +39,10 @@ class TaskSplit:
     eval_fraction: float
 
     def __post_init__(self) -> None:
-        train = checked_side("train", self.train)
-        eval_ = checked_side("eval", self.eval)
+        train = checked_split("train", self.train)
+        eval_ = checked_split("eval", self.eval)
         if set(train) & set(eval_):
-            raise TaskSplitError("a task cannot be on both sides of a split")
+            raise TaskSplitError("a task cannot be in both the train split and the eval split")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TaskSplitError("seed must be an integer")
         fraction = self.eval_fraction
@@ -52,23 +53,25 @@ class TaskSplit:
         object.__setattr__(self, "eval_fraction", float(fraction))
 
 
-def checked_side(side: str, names: object) -> tuple[str, ...]:
-    """One side of a split as a sorted tuple of distinct task names."""
+def checked_split(split: str, names: object) -> tuple[str, ...]:
+    """One split as a sorted tuple of distinct task names."""
     if isinstance(names, str) or not isinstance(names, Iterable):
-        raise TaskSplitError(f"{side} must be a sequence of task names")
+        raise TaskSplitError(f"{split} must be a sequence of task names")
     listed = tuple(names)
-    if any(not isinstance(name, str) or not name for name in listed):
-        raise TaskSplitError(f"{side} must be a sequence of task names")
+    if any(not isinstance(name, str) or not TASK_NAME_PATTERN.fullmatch(name) or ".." in name for name in listed):
+        raise TaskSplitError(
+            f"{split} must be a sequence of task names (a task name matches {TASK_NAME_PATTERN.pattern})"
+        )
     if len(set(listed)) != len(listed):
-        raise TaskSplitError(f"{side} lists a task twice")
+        raise TaskSplitError(f"{split} lists a task twice")
     return tuple(sorted(listed))
 
 
 def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
-    """Assign each group of tasks that share a source record to one side; the seed fixes the draw.
+    """Assign each group of tasks that share a source record to one split; the seed fixes the draw.
 
     ``sources`` maps a task name to the agent record ids it was made from.
-    Groups are drawn in seeded random order onto the evaluation side until it
+    Groups are drawn in seeded random order into the eval split until it
     holds at least ``eval_fraction`` of the tasks, then the rest train.
     """
     if isinstance(seed, bool) or not isinstance(seed, int):
@@ -106,7 +109,7 @@ def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: floa
 
 
 def write_split_manifest(path: Path, split: TaskSplit) -> None:
-    """Write the split as JSON; the gate and the trainer read their side from here."""
+    """Write the split as JSON; the gate reads the eval split and the trainer the train split from here."""
     document = {
         "version": MANIFEST_VERSION,
         "seed": split.seed,
@@ -147,9 +150,9 @@ def read_split_manifest(path: Path) -> TaskSplit:
     unknown_keys = sorted(key for key in document if key not in MANIFEST_KEYS)
     if unknown_keys:
         raise TaskSplitError(f"{path} carries keys reef did not write: {', '.join(unknown_keys)}")
-    for side in ("train", "eval"):
-        if not isinstance(document.get(side), list):
-            raise TaskSplitError(f"{path}: {side} must be a list of task names")
+    for split in ("train", "eval"):
+        if not isinstance(document.get(split), list):
+            raise TaskSplitError(f"{path}: {split} must be a list of task names")
     seed, fraction = document.get("seed"), document.get("eval_fraction")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TaskSplitError(f"{path}: seed must be an integer")
@@ -182,3 +185,20 @@ def task_groups(record_ids_by_task: Mapping[str, Iterable[str]]) -> list[list[st
     for name in sorted(record_ids_by_task):
         members.setdefault(find(name), []).append(name)
     return [sorted(group) for group in members.values()]
+
+
+def manifest_task_paths(manifest_path: Path, root: Path, split: str) -> tuple[Path, ...]:
+    """The task directories one split of a manifest names under ``root``, each read back before it is trusted."""
+    if split not in ("train", "eval"):
+        raise TaskSplitError(f"split must be 'train' or 'eval', not {split!r}")
+    manifest = read_split_manifest(manifest_path)
+    names = manifest.train if split == "train" else manifest.eval
+    paths: list[Path] = []
+    for name in names:
+        path = Path(os.path.abspath(Path(root) / name))
+        try:
+            read_harbor_task(path)
+        except HarborTaskError as exc:
+            raise TaskSplitError(f"{manifest_path}: {split} task {name!r}: {exc}") from exc
+        paths.append(path)
+    return tuple(paths)
