@@ -69,6 +69,22 @@ def test_processor_requires_sample_assembly_instead_of_judge() -> None:
     assert not hasattr(ReportedFeedbackProcessor, "judge")
 
 
+def test_operational_backlog_excludes_reserved_reports() -> None:
+    processor = SampleProcessor(batch_size=1)
+    for index in (1, 2):
+        processor.ingest(inference(f"i{index}"))
+        processor.ingest(report(f"r{index}", f"i{index}"))
+    assert processor.operational_metrics()["unreserved_reports"] == 2
+    batch = processor.build_batch()
+    sample = processor.operational_metrics()
+    assert sample["unreserved_reports"] == 1
+    assert sample["reserved_reports"] == 1
+    assert sample["oldest_report_wait_seconds"] >= 0
+    processor.acknowledge(batch.batch_id)
+    assert processor.operational_metrics()["unreserved_reports"] == 1
+    assert processor.operational_metrics()["reserved_reports"] == 0
+
+
 def test_inferences_wait_for_reports_and_batch_counts_completed_samples() -> None:
     processor = SampleProcessor(batch_size=2)
     for record_id in ("i1", "i2", "i3"):

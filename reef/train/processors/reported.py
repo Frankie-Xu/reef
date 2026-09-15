@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, cast
@@ -125,6 +126,19 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._manual_limit_warned = False
 
     # ------------------------------------------------------- the recipe hooks
+
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        """Unconsumed reports, excluding the reserved batch; readiness is recipe-owned."""
+        reserved = {pending.report.agent_record_id for pending in self._pending_reports or ()}
+        waiting = [report for record_id, report in self._reports.items() if record_id not in reserved]
+        return {
+            **super().operational_metrics(),
+            "unreserved_reports": len(waiting),
+            "reserved_reports": len(reserved),
+            "oldest_report_wait_seconds": (
+                max(0.0, time.time() - min(report.created_at for report in waiting)) if waiting else 0.0
+            ),
+        }
 
     #: The batch type ``make_batch`` returns; the trainer validates it.
     output_schema: type[TrainingBatch] = TrainingBatch
