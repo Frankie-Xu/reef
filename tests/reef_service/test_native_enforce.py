@@ -448,15 +448,42 @@ def test_concurrent_first_calls_import_once_and_a_raising_top_level_fails_every_
 
 
 def require_nested_jail() -> None:
-    """A live jail test runs where two bubblewrap jails nest; elsewhere it skips with the preflight's own reason."""
+    """Require nested jails in sandbox CI; allow local runs to skip unsupported hosts."""
     if shutil.which("bwrap") is None:
-        pytest.skip("bubblewrap (bwrap) is not on PATH")
-    try:
-        SandboxExecutor().preflight()
-    except SandboxUnavailable as exc:
-        pytest.skip(str(exc))
+        reason = "bubblewrap (bwrap) is not on PATH"
+    else:
+        try:
+            SandboxExecutor().preflight()
+            return
+        except SandboxUnavailable as exc:
+            reason = str(exc)
+    if os.environ.get("REEF_REQUIRE_SANDBOX") == "1":
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("availability", ["missing", "refused", "available"])
+def test_nested_jail_requirement_handles_host_availability(
+    monkeypatch: pytest.MonkeyPatch, required: bool, availability: str
+) -> None:
+    monkeypatch.setenv("REEF_REQUIRE_SANDBOX", "1" if required else "0")
+    monkeypatch.setattr(shutil, "which", lambda name: None if availability == "missing" else "/usr/bin/bwrap")
+
+    def _preflight(executor: SandboxExecutor) -> None:
+        if availability == "refused":
+            raise SandboxUnavailable("nested namespaces unavailable")
+
+    monkeypatch.setattr(SandboxExecutor, "preflight", _preflight)
+    if availability == "available":
+        require_nested_jail()
+        return
+    outcome = pytest.fail.Exception if required else pytest.skip.Exception
+    with pytest.raises(outcome, match=r"bubblewrap|nested namespaces unavailable"):
+        require_nested_jail()
+
+
+@pytest.mark.sandbox
 def test_bwrap_denies_what_the_declaration_withholds(tmp_path: Path) -> None:
     require_nested_jail()
     work = tmp_path / "work"
