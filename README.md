@@ -201,7 +201,7 @@ current version without restarting Reef.
 
 Improve harness skills using a model API instead of GPUs.
 
-The harness evolve recipe carries its own profile; specify the provider URL
+The harness evolve recipe includes a deployment configuration; specify the provider URL
 and model. From your Reef checkout and activated Python environment:
 
 ```bash
@@ -212,9 +212,9 @@ reef serve --recipe harness-evolve \
 
 The example connects to a local Ollama server. For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
-`REEF_UPSTREAM_API_KEY` if authentication is required. The profile listens on
+`REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef listens on
 `127.0.0.1:8900` with no token and keeps its state under `.reef/harness-evolve/`. To change anything
-else, copy [the profile](reef/service/profiles/harness-evolve.yaml) and pass
+else, copy [the deployment configuration](reef/service/profiles/harness-evolve.yaml) and pass
 your copy with `-c`.
 
 In another terminal with the same Python environment activated (the install
