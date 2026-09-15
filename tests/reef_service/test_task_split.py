@@ -202,11 +202,27 @@ def test_sets_and_dict_views_are_accepted_as_sources() -> None:
 def test_a_manifest_write_that_fails_keeps_the_old_manifest_and_raises_a_split_error(tmp_path: Path) -> None:
     first = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
     write_split_manifest(tmp_path / "split.json", first)
-    with pytest.raises(TaskSplitError, match="cannot write split manifest"):
-        write_split_manifest(tmp_path / "missing" / "split.json", first)
-    (tmp_path / "split.json").chmod(0o444)
+    write_split_manifest(tmp_path / "missing" / "split.json", first)
+    assert read_split_manifest(tmp_path / "missing" / "split.json") == first
     (tmp_path / "blocked").mkdir()
     with pytest.raises(TaskSplitError, match="cannot write split manifest"):
         write_split_manifest(tmp_path / "blocked", first)
+    with pytest.raises(TaskSplitError, match="names no file"):
+        write_split_manifest(tmp_path, first)
     assert read_split_manifest(tmp_path / "split.json") == first
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["blocked", "split.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".staging", "blocked", "missing", "split.json"]
+    assert list((tmp_path / ".staging").iterdir()) == []
+
+
+def test_a_manifest_keeps_its_mode_and_its_symlink_when_replaced(tmp_path: Path) -> None:
+    first = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
+    second = split_by_source(SOURCES, eval_fraction=0.5, seed=2)
+    real = tmp_path / "runs" / "42" / "split.json"
+    real.parent.mkdir(parents=True)
+    write_split_manifest(real, first)
+    real.chmod(0o444)
+    link = tmp_path / "current.json"
+    link.symlink_to(real)
+    write_split_manifest(link, second)
+    assert link.is_symlink() and read_split_manifest(real) == second
+    assert real.stat().st_mode & 0o777 == 0o444

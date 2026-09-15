@@ -20,6 +20,7 @@ from pathlib import Path
 from reef.core.errors import ReefError
 
 MANIFEST_VERSION = 1
+STAGING_DIRECTORY = ".staging"
 MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
 
 
@@ -113,13 +114,20 @@ def write_split_manifest(path: Path, split: TaskSplit) -> None:
         "train": list(split.train),
         "eval": list(split.eval),
     }
-    path = Path(path)
+    # The real file, so a manifest published through a symlink changes behind the link instead of replacing it.
+    target = Path(os.path.realpath(path))
     text = json.dumps(document, indent=2, sort_keys=True) + "\n"
-    # A sibling file replaced into place: a reader sees the old manifest or the new one, never a torn one.
-    partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    # Written whole under .staging beside the manifest, then replaced into place: a reader sees the old manifest
+    # or the new one, never a torn one, and a writer killed midway leaves nothing where the manifest lives.
+    partial = target.parent / STAGING_DIRECTORY / f"{target.name}.{uuid.uuid4().hex}"
     try:
+        if not target.name:
+            raise TaskSplitError(f"cannot write split manifest {path}: it names no file")
+        partial.parent.mkdir(parents=True, exist_ok=True)
         partial.write_text(text, encoding="utf-8")
-        os.replace(partial, path)
+        if target.exists():
+            os.chmod(partial, target.stat().st_mode)
+        os.replace(partial, target)
     except OSError as exc:
         partial.unlink(missing_ok=True)
         raise TaskSplitError(f"cannot write split manifest {path}: {exc}") from exc

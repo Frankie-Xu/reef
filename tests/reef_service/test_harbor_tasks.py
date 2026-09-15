@@ -565,6 +565,10 @@ def test_a_task_directory_reads_as_itself_from_inside(tmp_path: Path, monkeypatc
     monkeypatch.chdir(root)
     assert read_harbor_task(Path(".")) == task()
     assert read_harbor_task(Path("../sum-391")) == task()
+    assert read_harbor_task(Path("tests/..")) == task()
+    hop = tmp_path / "hop"
+    hop.symlink_to(root / "tests")
+    assert read_harbor_task(hop / "..") == task()
 
 
 def test_a_numeric_record_id_written_by_hand_is_refused(tmp_path: Path) -> None:

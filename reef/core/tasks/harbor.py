@@ -198,8 +198,9 @@ def read_harbor_task(path: Path) -> HarborTask:
     path = Path(path)
     if not path.is_dir():
         raise HarborTaskError(f"{path} is not a task directory")
-    # abspath, not resolve: the name is the directory's own, even when it is reached as "." or through a symlink.
-    name = Path(os.path.abspath(path)).name
+    # The parent resolved physically, the last component kept as written: a symlink alias keeps its own name,
+    # "." gains one, and a path ending in ".." names the directory it lands in.
+    name = Path(os.path.normpath(os.path.join(os.path.realpath(path.parent), path.name))).name
     files, directories = read_all_entries(path)
     if "task.toml" not in files:
         raise HarborTaskError(f"{path / 'task.toml'} is missing")
