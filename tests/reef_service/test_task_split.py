@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.tasks import TaskSplit, TaskSplitError, read_split_manifest, split_by_source, write_split_manifest
+from reef.core.tasks import (
+    TaskSplit,
+    TaskSplitError,
+    manifest_task_paths,
+    read_split_manifest,
+    split_by_source,
+    write_split_manifest,
+)
 
 SOURCES = {
     "t1": ["r1", "r2"],
@@ -226,3 +233,49 @@ def test_a_manifest_keeps_its_mode_and_its_symlink_when_replaced(tmp_path: Path)
     write_split_manifest(link, second)
     assert link.is_symlink() and read_split_manifest(real) == second
     assert real.stat().st_mode & 0o777 == 0o444
+
+
+# ----------------------------------------------------------------------------------------------- manifest to gate
+
+
+def written_tasks(root: Path, names: tuple[str, ...]) -> None:
+    from reef.core.tasks import HarborTask, write_harbor_task
+
+    for name in names:
+        write_harbor_task(
+            HarborTask(
+                name=name,
+                instruction=f"task {name}",
+                tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+                environment={"Dockerfile": "FROM python:3.12-slim\n"},
+                source_agent_record_ids=(f"rec-{name}",),
+            ),
+            root,
+        )
+
+
+def test_the_eval_side_of_a_manifest_becomes_task_directory_paths(tmp_path: Path) -> None:
+    root = tmp_path / "tasks"
+    written_tasks(root, ("t1", "t2", "t3"))
+    split = TaskSplit(("t1",), ("t2", "t3"), 0, 0.5)
+    write_split_manifest(tmp_path / "split.json", split)
+    assert manifest_task_paths(tmp_path / "split.json", root, "eval") == (root / "t2", root / "t3")
+    assert manifest_task_paths(tmp_path / "split.json", root, "train") == (root / "t1",)
+
+
+def test_a_manifest_task_that_is_missing_or_edited_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "tasks"
+    written_tasks(root, ("t1",))
+    write_split_manifest(tmp_path / "split.json", TaskSplit((), ("t1", "t2"), 0, 1))
+    with pytest.raises(TaskSplitError, match="eval task 't2'.*not a task directory"):
+        manifest_task_paths(tmp_path / "split.json", root, "eval")
+    write_split_manifest(tmp_path / "split.json", TaskSplit((), ("t1",), 0, 1))
+    (root / "t1" / "instruction.md").write_text("changed")
+    with pytest.raises(TaskSplitError, match="eval task 't1'.*does not match its digest"):
+        manifest_task_paths(tmp_path / "split.json", root, "eval")
+
+
+def test_a_side_that_is_not_train_or_eval_is_refused(tmp_path: Path) -> None:
+    write_split_manifest(tmp_path / "split.json", TaskSplit((), (), 0, 0))
+    with pytest.raises(TaskSplitError, match="side must be"):
+        manifest_task_paths(tmp_path / "split.json", tmp_path, "test")

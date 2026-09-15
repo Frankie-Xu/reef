@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.errors import ReefError
+from reef.core.tasks.harbor import HarborTaskError, read_harbor_task
 
 MANIFEST_VERSION = 1
 STAGING_DIRECTORY = ".staging"
@@ -182,3 +183,20 @@ def task_groups(record_ids_by_task: Mapping[str, Iterable[str]]) -> list[list[st
     for name in sorted(record_ids_by_task):
         members.setdefault(find(name), []).append(name)
     return [sorted(group) for group in members.values()]
+
+
+def manifest_task_paths(manifest: Path, root: Path, side: str) -> tuple[Path, ...]:
+    """The task directories one side of a manifest names under ``root``, each read back before it is trusted."""
+    if side not in ("train", "eval"):
+        raise TaskSplitError(f"side must be 'train' or 'eval', not {side!r}")
+    split = read_split_manifest(manifest)
+    names = split.train if side == "train" else split.eval
+    paths: list[Path] = []
+    for name in names:
+        path = Path(os.path.abspath(Path(root) / name))
+        try:
+            read_harbor_task(path)
+        except HarborTaskError as exc:
+            raise TaskSplitError(f"{manifest}: {side} task {name!r}: {exc}") from exc
+        paths.append(path)
+    return tuple(paths)

@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
+from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.executor import EpisodeExecutor, build_executor
@@ -289,8 +290,26 @@ class CordisRecipe(Recipe):
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("harness_evolve requires an 'evolution' config section")
         tasks = evolution.get("tasks")
-        if not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
-            raise RecipeConfigError("evolution.tasks must be a non-empty list of prompts")
+        manifest = evolution.get("task_manifest")
+        if manifest is not None:
+            if tasks is not None:
+                raise RecipeConfigError("evolution.tasks and evolution.task_manifest cannot both be set")
+            tasks_root = evolution.get("tasks_root")
+            if not isinstance(manifest, str) or not manifest or not isinstance(tasks_root, str) or not tasks_root:
+                raise RecipeConfigError(
+                    "evolution.task_manifest and evolution.tasks_root must both be non-empty paths"
+                )
+            try:
+                task_paths = manifest_task_paths(Path(manifest).expanduser(), Path(tasks_root).expanduser(), "eval")
+            except TaskSplitError as exc:
+                raise RecipeConfigError(str(exc)) from exc
+            if not task_paths:
+                raise RecipeConfigError(f"evolution.task_manifest {manifest} names no eval tasks")
+            tasks = [str(path) for path in task_paths]
+        elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
+            raise RecipeConfigError(
+                "evolution.tasks must be a non-empty list of prompts, or set evolution.task_manifest with evolution.tasks_root"
+            )
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
             raise RecipeConfigError("evolution.binary must be a non-empty string when set")
