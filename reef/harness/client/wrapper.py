@@ -512,9 +512,11 @@ class CaptureProxy:
         *,
         tags: Mapping[str, str] | None = None,
         observer: ReleaseObserver | None = None,
+        listen_host: str = "127.0.0.1",
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
+        self.listen_host = listen_host
         fixed: dict[str, str] = {"x-reef-scenario": scenario}
         if token:
             fixed["authorization"] = f"Bearer {token}"
@@ -535,7 +537,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler)
+        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):

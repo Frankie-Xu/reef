@@ -6,7 +6,10 @@ and its receipt comes back here. When the verifier scores the episode, one repor
 and digest under ``metadata.task``. A recipe's reported processor turns those records into training
 samples the way it does for any report. The agent is the caller's choice: any name Harbor knows
 (``terminus-2`` unless told otherwise) or an import path, with the served model and the proxy filled
-into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of its configuration.
+into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of its configuration. The proxy
+listens on the host's loopback, which an agent running in the host process reaches; an agent that runs
+inside the task container (Harbor's installed agents) needs ``agent_host``, an address of this host the
+container can reach, and the proxy then listens on every interface.
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ import contextlib
 import json
 import math
 import os
+import re
+import sys
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -25,7 +30,7 @@ from pathlib import Path
 
 from reef_client.client import ReefClient, ReefClientError
 
-from reef.core.tasks import HarborTaskError, manifest_task_paths, read_harbor_task
+from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, read_harbor_task
 from reef.harness.client.wrapper import CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
@@ -35,6 +40,11 @@ DEFAULT_AGENT: Mapping[str, object] = {
     "model_name": "openai/{model}",
     "kwargs": {"api_base": "{base_url}/v1", "llm_kwargs": {"api_key": "{api_key}"}},
 }
+#: What the agent presents as its key: the proxy replaces it with Reef's bearer, so no trial directory holds the token.
+PLACEHOLDER_API_KEY = "reef"
+#: A label rides every call as an ``x-reef-tag-<name>`` header; the service keeps the name in lower case.
+LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+RESERVED_LABELS = ("task", "episode")
 
 
 class TaskPlayError(RuntimeError):
@@ -111,6 +121,24 @@ def bound_agent(agent: Mapping[str, object], *, model: str, base_url: str, api_k
     return {str(name): fill(item) for name, item in agent.items()}
 
 
+def checked_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    """Labels as the service stores them: lower case names of header token characters, printable ASCII values."""
+    checked: dict[str, str] = {}
+    for raw_name, raw_value in labels.items():
+        name = str(raw_name).strip().lower()
+        value = str(raw_value).strip()
+        if LABEL_NAME.fullmatch(name) is None:
+            raise TaskPlayError(
+                f"label name {raw_name!r} must be letters, digits, '_', '.' or '-' (it rides as a header)"
+            )
+        if name in RESERVED_LABELS:
+            raise TaskPlayError(f"label {name!r} is the player's own tag; choose another name")
+        if not value or not value.isascii() or not value.isprintable():
+            raise TaskPlayError(f"label {name!r} needs a non-empty printable ASCII value, not {raw_value!r}")
+        checked[name] = value
+    return checked
+
+
 def episode_reward(rewards: Mapping[str, float]) -> float | None:
     """The verifier's reward: the ``reward`` entry, else the first one; None when the verifier wrote nothing finite."""
     if not rewards:
@@ -130,6 +158,22 @@ def task_identity(task_path: Path) -> dict[str, str]:
     return identity
 
 
+def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
+    """Why no model call got a receipt: the count of failed calls and what the service answered the first one."""
+    failed = [turn for turn in turns if turn.get("status") != 200 or not turn.get("receipt")]
+    if not failed:
+        return ""
+    first = failed[0]
+    response = first.get("response")
+    if isinstance(response, Mapping):
+        error = response.get("error")
+        message = error.get("message") if isinstance(error, Mapping) else error
+        detail = str(message) if message else json.dumps(response)[:200]
+    else:
+        detail = str(response or "no body")[:200]
+    return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
+
+
 @dataclass(frozen=True)
 class TaskPlay:
     """One played task: what the verifier said and what reached Reef."""
@@ -141,12 +185,24 @@ class TaskPlay:
     rewards: Mapping[str, float]
     error: str
     receipts: tuple[str, ...]
+    failed_calls: int
     report_agent_record_ids: tuple[str, ...]
     trial_uri: str | None
 
     @property
     def is_reported(self) -> bool:
         return bool(self.report_agent_record_ids)
+
+    def as_line(self) -> dict[str, object]:
+        """The JSON line the command prints for this task."""
+        return {
+            "task": self.name,
+            "reward": self.reward,
+            "receipts": len(self.receipts),
+            "failed_calls": self.failed_calls,
+            "reports": list(self.report_agent_record_ids),
+            "error": self.error,
+        }
 
 
 class TaskPlayer:
@@ -161,6 +217,7 @@ class TaskPlayer:
         work_dir: Path,
         token: str | None = None,
         agent: Mapping[str, object] | None = None,
+        agent_host: str | None = None,
         environment: str = "docker",
         labels: Mapping[str, str] | None = None,
         extra_instruction_paths: Sequence[Path] = (),
@@ -175,6 +232,8 @@ class TaskPlayer:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise TaskPlayError(f"{label} must be a non-empty string")
+        if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
+            raise TaskPlayError("agent_host must be a non-empty host name or address")
         self.reef_url = reef_url.rstrip("/")
         self.scenario = scenario
         self.model = model
@@ -183,8 +242,9 @@ class TaskPlayer:
         self.agent: dict[str, object] = dict(agent) if agent is not None else dict(DEFAULT_AGENT)
         if not (self.agent.get("name") or self.agent.get("import_path")):
             raise TaskPlayError("agent must carry a Harbor agent name or an import_path")
+        self.agent_host = agent_host
         self.environment = environment
-        self.labels = {str(name): str(value) for name, value in dict(labels or {}).items()}
+        self.labels = checked_labels(dict(labels or {}))
         for path in extra_instruction_paths:
             if not Path(path).is_file():
                 raise TaskPlayError(f"extra instruction file {path} does not exist")
@@ -211,13 +271,13 @@ class TaskPlayer:
         if not (task_path / "task.toml").is_file():
             raise TaskPlayError(f"{task_path} is not a Harbor task directory: no task.toml")
         episode_id = uuid.uuid4().hex
-        tags = {"task": task_path.name, "episode": episode_id, **self.labels}
-        proxy = CaptureProxy(self.reef_url, self.scenario, self.token, tags=tags)
+        tags = {**self.labels, "task": task_path.name, "episode": episode_id}
+        listen_host = "0.0.0.0" if self.agent_host else "127.0.0.1"
+        proxy = CaptureProxy(self.reef_url, self.scenario, self.token, tags=tags, listen_host=listen_host)
         proxy.start()
         try:
-            agent = bound_agent(
-                self.agent, model=self.model, base_url=f"http://127.0.0.1:{proxy.port}", api_key=self.token or "reef"
-            )
+            base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
+            agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
             overrides: dict[str, object] = {"environment": {"type": self.environment}}
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
@@ -226,6 +286,8 @@ class TaskPlayer:
             turns = proxy.drain()
             proxy.stop()
         receipts = tuple(str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200)
+        failed_calls = len(turns) - len(receipts)
+        error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
         report_ids: tuple[str, ...] = ()
         if reward is not None and receipts:
@@ -236,8 +298,9 @@ class TaskPlayer:
             episode_id=episode_id,
             reward=reward,
             rewards=dict(row.rewards),
-            error=row.error,
+            error=error,
             receipts=receipts,
+            failed_calls=failed_calls,
             report_agent_record_ids=report_ids,
             trial_uri=row.trial_uri,
         )
@@ -269,6 +332,8 @@ class TaskPlayer:
                 raise TaskPlayError(
                     f"the report for {task_path.name} was refused ({exc.status}): {exc.body[:300]}"
                 ) from exc
+            except OSError as exc:
+                raise TaskPlayError(f"the report for {task_path.name} did not reach {self.reef_url}: {exc}") from exc
             record_ids.append(str(answer.get("agent_record_id", "")))
         return tuple(record_ids)
 
@@ -284,7 +349,7 @@ def parsed_labels(pairs: Sequence[str]) -> dict[str, str]:
 
 
 def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> int:
-    """Play task directories, or one side of a split manifest, and print one JSON line per task."""
+    """Play task directories, or one side of a split manifest, and print one JSON line per task as it finishes."""
     parser = argparse.ArgumentParser(
         prog="python -m reef.harness.client.tasks",
         description="Play Harbor task directories through Reef and report each scored episode.",
@@ -303,6 +368,12 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
         default=None,
         help="Harbor AgentConfig fields as JSON with {model}, {base_url} and {api_key} placeholders; terminus-2 by default",
     )
+    parser.add_argument(
+        "--agent-host",
+        default=None,
+        help="an address of this host the task container can reach, for an agent that runs inside the container "
+        "(host.docker.internal on Docker Desktop); the proxy then listens on every interface",
+    )
     parser.add_argument("--environment", default="docker", help="the Harbor environment type")
     parser.add_argument(
         "--label", action="append", default=[], metavar="NAME=VALUE", help="tags every call and report"
@@ -314,43 +385,51 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
         "--per-receipt", action="store_true", help="one report per model call instead of one per episode"
     )
     arguments = parser.parse_args(argv)
-    if arguments.manifest is not None:
-        if arguments.tasks or arguments.tasks_root is None:
-            parser.error("--manifest goes with --tasks-root and no task directories")
-        task_paths: tuple[Path, ...] = manifest_task_paths(arguments.manifest, arguments.tasks_root, arguments.side)
-    elif arguments.tasks:
-        task_paths = tuple(arguments.tasks)
-    else:
-        parser.error("name task directories or a --manifest")
-    agent = json.loads(arguments.agent_json) if arguments.agent_json else None
-    if agent is not None and not isinstance(agent, dict):
-        parser.error("--agent-json must hold an object")
-    player = TaskPlayer(
-        reef_url=arguments.reef_url,
-        scenario=arguments.scenario,
-        model=arguments.model,
-        work_dir=arguments.work_dir,
-        token=arguments.token,
-        agent=agent,
-        environment=arguments.environment,
-        labels=parsed_labels(arguments.label),
-        extra_instruction_paths=arguments.instructions,
-        per_receipt=arguments.per_receipt,
-        lab=lab,
-    )
+    try:
+        if arguments.manifest is not None:
+            if arguments.tasks or arguments.tasks_root is None:
+                raise TaskPlayError("--manifest goes with --tasks-root and no task directories")
+            task_paths: tuple[Path, ...] = manifest_task_paths(
+                arguments.manifest, arguments.tasks_root, arguments.side
+            )
+            if not task_paths:
+                raise TaskPlayError(f"the manifest's {arguments.side} side names no task")
+        elif arguments.tasks:
+            task_paths = tuple(arguments.tasks)
+        else:
+            raise TaskPlayError("name task directories or a --manifest")
+        for task_path in task_paths:
+            if not (task_path / "task.toml").is_file():
+                raise TaskPlayError(f"{task_path} is not a Harbor task directory: no task.toml")
+        agent = json.loads(arguments.agent_json) if arguments.agent_json else None
+        if agent is not None and not isinstance(agent, dict):
+            raise TaskPlayError("--agent-json must hold an object")
+        player = TaskPlayer(
+            reef_url=arguments.reef_url,
+            scenario=arguments.scenario,
+            model=arguments.model,
+            work_dir=arguments.work_dir,
+            token=arguments.token,
+            agent=agent,
+            agent_host=arguments.agent_host,
+            environment=arguments.environment,
+            labels=parsed_labels(arguments.label),
+            extra_instruction_paths=arguments.instructions,
+            per_receipt=arguments.per_receipt,
+            lab=lab,
+        )
+    except (TaskPlayError, TaskSplitError, HarborTaskError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
     is_complete = True
-    for play in player.play_all(task_paths):
-        line = {
-            "task": play.name,
-            "reward": play.reward,
-            "receipts": len(play.receipts),
-            "reports": list(play.report_agent_record_ids),
-            "error": play.error,
-        }
-        print(json.dumps(line))
-        is_complete = is_complete and play.is_reported
+    for task_path in task_paths:
+        try:
+            line = player.play(task_path).as_line()
+        except TaskPlayError as exc:
+            line = {"task": task_path.name, "error": str(exc)}
+        print(json.dumps(line), flush=True)
+        is_complete = is_complete and bool(line.get("reports"))
     return 0 if is_complete else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

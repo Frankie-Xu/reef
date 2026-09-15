@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
+import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +30,7 @@ from reef.harness.client.tasks import (
 class StandInReef:
     """A Reef service that answers inference with a receipt and keeps every report it gets."""
 
-    def __init__(self, *, refuse_reports: bool = False) -> None:
+    def __init__(self, *, refuse_reports: bool = False, refuse_inference: bool = False) -> None:
         self.inferences: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
         service = self
@@ -38,7 +40,10 @@ class StandInReef:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
                 headers = {name.lower(): value for name, value in self.headers.items()}
-                if self.path == "/v1/chat/completions":
+                if self.path == "/v1/chat/completions" and refuse_inference:
+                    service.inferences.append({"headers": headers, "body": body})
+                    self.answer(401, {"error": {"message": "invalid service token"}})
+                elif self.path == "/v1/chat/completions":
                     service.inferences.append({"headers": headers, "body": body})
                     receipt = f"rec-{len(service.inferences)}"
                     answer = {"id": receipt, "choices": [{"message": {"role": "assistant", "content": "ls"}}]}
@@ -101,7 +106,8 @@ class StandInLab(TaskLab):
                 headers={"Content-Type": "application/json", "Authorization": "Bearer agent-side"},
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=10) as response:
+            # An agent that is refused keeps going, like terminus after its retries; the episode still ends.
+            with contextlib.suppress(urllib.error.HTTPError), urllib.request.urlopen(request, timeout=10) as response:
                 response.read()
         return EpisodeRow(rewards=self.rewards, error=self.error, trial_uri=f"trials/{task_path.name}")
 
@@ -205,7 +211,8 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     agent = call["agent"]
     assert agent["name"] == "terminus-2" and agent["model_name"] == "openai/qwen3.8:27b"
     assert agent["kwargs"]["api_base"].startswith("http://127.0.0.1:") and agent["kwargs"]["api_base"].endswith("/v1")
-    assert agent["kwargs"]["llm_kwargs"] == {"api_key": "tok"}
+    assert agent["kwargs"]["llm_kwargs"] == {"api_key": "reef"}, "the proxy injects the token; no trial dir holds it"
+    assert played.failed_calls == 0
 
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-scenario"] == "guess" and headers["authorization"] == "Bearer tok"
@@ -298,6 +305,63 @@ def test_a_directory_without_task_toml_is_refused(reef: StandInReef, tmp_path: P
         player(reef, tmp_path, StandInLab({"reward": 1.0})).play(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("labels", "message"),
+    [
+        ({"my arm": "x"}, "label name 'my arm' must be letters"),
+        ({"arm/v2": "x"}, "label name 'arm/v2' must be letters"),
+        ({"task": "other"}, "label 'task' is the player's own tag"),
+        ({"arm": "提示"}, "needs a non-empty printable ASCII value"),
+        ({"arm": " "}, "needs a non-empty printable ASCII value"),
+    ],
+)
+def test_a_label_that_cannot_ride_as_a_header_is_refused(reef: StandInReef, tmp_path: Path, labels, message) -> None:
+    with pytest.raises(TaskPlayError, match=message):
+        player(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels)
+
+
+def test_labels_are_stored_the_way_the_service_stores_tags(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"Arm": " Hint "}).play(task_path)
+    assert reef.inferences[0]["headers"]["x-reef-tag-arm"] == "Hint"
+    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "Hint"} and played.is_reported
+
+
+def test_refused_model_calls_are_named_in_the_error(tmp_path: Path) -> None:
+    reef = StandInReef(refuse_inference=True)
+    try:
+        task_path = written_task(tmp_path / "tasks", "t1")
+        played = player(reef, tmp_path, StandInLab({"reward": 1.0})).play(task_path)
+    finally:
+        reef.close()
+    assert played.reward == 1.0 and played.receipts == () and not played.is_reported
+    assert played.failed_calls == 2
+    assert played.error == "2 model calls failed; the first answered 401: invalid service token"
+    assert played.as_line()["failed_calls"] == 2
+
+
+def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    played = player(reef, tmp_path, lab, agent_host="localhost").play(task_path)
+    assert played.is_reported and played.receipts == ("rec-1", "rec-2")
+    assert lab.calls[0]["agent"]["kwargs"]["api_base"].startswith("http://localhost:")
+
+
+def test_a_report_that_does_not_reach_reef_is_an_error_that_names_the_task(
+    reef: StandInReef, tmp_path: Path, monkeypatch
+) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    playing = player(reef, tmp_path, StandInLab({"reward": 1.0}))
+
+    def refused(*args: object, **kwargs: object) -> dict[str, object]:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(playing.client, "report", refused)
+    with pytest.raises(TaskPlayError, match="the report for t1 did not reach"):
+        playing.play(task_path)
+
+
 # ------------------------------------------------------------------------------------------------ the command
 
 
@@ -361,7 +425,54 @@ def test_main_returns_one_when_a_task_was_not_reported(reef: StandInReef, tmp_pa
     )
     assert status == 1
     line = json.loads(capsys.readouterr().out.strip())
-    assert line == {"task": "t1", "reward": None, "receipts": 2, "reports": [], "error": "no verifier"}
+    assert line == {
+        "task": "t1",
+        "reward": None,
+        "receipts": 2,
+        "failed_calls": 0,
+        "reports": [],
+        "error": "no verifier",
+    }
+
+
+def test_main_prints_each_line_as_it_finishes_and_keeps_going_after_a_refused_report(tmp_path: Path, capsys) -> None:
+    reef = StandInReef(refuse_reports=True)
+    try:
+        first = written_task(tmp_path / "tasks", "t1")
+        second = written_task(tmp_path / "tasks", "t2")
+        lab = StandInLab({"reward": 1.0})
+        status = main(
+            [
+                str(first),
+                str(second),
+                "--reef-url",
+                reef.url,
+                "--scenario",
+                "guess",
+                "--model",
+                "m",
+                "--work-dir",
+                str(tmp_path / "w"),
+            ],
+            lab=lab,
+        )
+    finally:
+        reef.close()
+    assert status == 1
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [line["task"] for line in lines] == ["t1", "t2"] and len(lab.calls) == 2
+    assert all(line["error"].startswith("the report for t") for line in lines)
+
+
+def test_main_checks_every_task_directory_before_the_first_play(reef: StandInReef, tmp_path: Path, capsys) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    with pytest.raises(SystemExit):
+        main(
+            [str(task_path), str(tmp_path / "nope"), "--reef-url", reef.url, "--scenario", "s", "--model", "m"],
+            lab=lab,
+        )
+    assert lab.calls == [] and "not a Harbor task directory" in capsys.readouterr().err
 
 
 def test_main_refuses_a_manifest_beside_task_directories(tmp_path: Path) -> None:

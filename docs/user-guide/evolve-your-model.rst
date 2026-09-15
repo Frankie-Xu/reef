@@ -260,4 +260,9 @@ the task's name, path and digest under ``metadata.task``. The recipe's reported
 processor turns those records into training samples like any other report.
 ``--instructions FILE`` appends a file to every task's instruction and
 ``--label name=value`` tags the calls and the report, so two arms of one task
-stay apart. Needs ``reef-infra[terminus]`` on Python 3.12 or later, and Docker.
+stay apart. The proxy the agent talks to listens on this host's loopback; an
+agent that runs inside the task container (``claude-code``, ``codex`` and the
+other installed agents) needs ``--agent-host host.docker.internal`` (on Linux,
+give the container that name with Docker's ``host-gateway``), and the proxy then
+listens on every interface. Needs ``reef-infra[terminus]`` on Python 3.12 or
+later, and Docker.
