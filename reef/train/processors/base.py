@@ -313,6 +313,10 @@ class DataProcessor:
         """
         return False
 
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        """Numeric queue state, sampled under the trainer lock without advancing work."""
+        return {"buffered_requests": self.buffered_requests()}
+
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that callers need while waiting.
 

@@ -10,6 +10,7 @@ from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorab
 from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
+from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
@@ -40,6 +41,19 @@ class Scenario:
         process_id: str | None = None,
         recovered_head_record: CommitRecord | None = None,
     ) -> None:
+        self.operations = OperationMetrics(
+            ("serve/request", "serve/admission", "ingest/write"),
+            counters=(
+                "serve/retries_total",
+                "serve/version_mismatch_total",
+                "serve/timeouts_total",
+                "ingest/accepted_total",
+                "ingest/duplicates_total",
+                "ingest/rejected_report_total",
+                "ingest/rejected_conflict_total",
+                "ingest/rejected_request_total",
+            ),
+        )
         self._name = name
         self._binding = binding
         self.model_config = model_config or ModelConfig()
