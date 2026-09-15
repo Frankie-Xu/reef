@@ -267,11 +267,11 @@ def test_a_manifest_task_that_is_missing_or_edited_is_refused(tmp_path: Path) ->
     root = tmp_path / "tasks"
     written_tasks(root, ("t1",))
     write_split_manifest(tmp_path / "split.json", TaskSplit((), ("t1", "t2"), 0, 1))
-    with pytest.raises(TaskSplitError, match="eval task 't2'.*not a task directory"):
+    with pytest.raises(TaskSplitError, match=r"eval task 't2'.*not a task directory"):
         manifest_task_paths(tmp_path / "split.json", root, "eval")
     write_split_manifest(tmp_path / "split.json", TaskSplit((), ("t1",), 0, 1))
     (root / "t1" / "instruction.md").write_text("changed")
-    with pytest.raises(TaskSplitError, match="eval task 't1'.*does not match its digest"):
+    with pytest.raises(TaskSplitError, match=r"eval task 't1'.*does not match its digest"):
         manifest_task_paths(tmp_path / "split.json", root, "eval")
 
 

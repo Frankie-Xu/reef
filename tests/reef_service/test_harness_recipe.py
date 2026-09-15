@@ -2542,5 +2542,5 @@ def test_yaml_config_takes_the_gate_tasks_from_a_split_manifest(tmp_path: Path, 
             {}, config={"evolution": {**evolution, "task_manifest": str(tmp_path / "empty.json")}}, runtime=runtime()
         )
     (root / "held-2" / "instruction.md").write_text("changed")
-    with pytest.raises(RecipeConfigError, match="held-2.*does not match its digest"):
+    with pytest.raises(RecipeConfigError, match=r"held-2.*does not match its digest"):
         CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
