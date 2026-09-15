@@ -522,7 +522,9 @@ def test_the_reef_designer_posts_its_request_options_and_keeps_the_receipt() -> 
             model="m",
             token="tok",
             request_options={"reasoning_effort": "none"},
+            timeout_s=5.0,
         )
+        assert designer.client.timeout_s == 5.0
         answer = designer.answer([{"role": "user", "content": "hi"}], tags={"role": "designer", "kind": "gym"})
         report_id = designer.report(answer.record_id, score=0.5, metadata={"kind": "gym"})
     finally:
@@ -538,6 +540,27 @@ def test_the_reef_designer_posts_its_request_options_and_keeps_the_receipt() -> 
     assert call["headers"]["authorization"] == "Bearer tok"
     assert report["path"] == "/reef/report" and report["body"]["references"] == ["designer-rec-1"]
     assert report["body"]["score"] == 0.5 and report["body"]["metadata"] == {"kind": "gym"}
+
+
+def test_a_designer_call_that_times_out_is_a_generation_error() -> None:
+    import socket
+
+    from recipes.beta.spade.generation import ReefDesigner
+
+    # A listener that never answers: the client's own timeout is what ends the call.
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(1)
+    try:
+        designer = ReefDesigner(
+            reef_url=f"http://127.0.0.1:{silent.getsockname()[1]}", scenario="spade", model="m", timeout_s=0.5
+        )
+        with pytest.raises(GenerationError, match=r"did not complete within 0\.5 s"):
+            designer.answer([{"role": "user", "content": "hi"}], tags={"kind": "gym"})
+    finally:
+        silent.close()
+    with pytest.raises(GenerationError, match="timeout_s must be a positive number"):
+        ReefDesigner(reef_url="http://127.0.0.1:1", scenario="spade", model="m", timeout_s=0)
 
 
 def test_main_refuses_an_unknown_kind(tmp_path: Path) -> None:

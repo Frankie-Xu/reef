@@ -55,6 +55,7 @@ from reef.core.tasks import (
 from reef.harness.client.tasks import TaskPlay, TaskPlayer
 
 REPORT_DIRECTORY = ".spade"
+DESIGNER_TIMEOUT_S = 1800.0
 CODE_EXCERPT_CHARS = 600
 CHAT_PATH = "/v1/chat/completions"
 
@@ -92,13 +93,17 @@ class ReefDesigner(Designer):
         model: str,
         token: str | None = None,
         request_options: Mapping[str, object] | None = None,
+        timeout_s: float = DESIGNER_TIMEOUT_S,
     ) -> None:
         self.scenario = scenario
         self.model = model
         # Extra fields of the chat request, e.g. {"reasoning_effort": "none"} for a model that would think for
         # thousands of tokens before writing an environment and run past the service's inference deadline.
         self.request_options = dict(request_options or {})
-        self.client = ReefClient(reef_url, token=token, timeout_s=600.0)
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
+            raise GenerationError("timeout_s must be a positive number of seconds")
+        # A large local model writes an environment in minutes; the service's own inference deadline must allow it too.
+        self.client = ReefClient(reef_url, token=token, timeout_s=float(timeout_s))
 
     def answer(self, messages: Sequence[Mapping[str, str]], *, tags: Mapping[str, str]) -> DesignerAnswer:
         headers = {f"x-reef-tag-{name}": value for name, value in tags.items()}
@@ -109,6 +114,10 @@ class ReefDesigner(Designer):
             )
         except ReefClientError as exc:
             raise GenerationError(f"the Designer call was refused ({exc.status}): {exc.body[:300]}") from exc
+        except OSError as exc:
+            raise GenerationError(
+                f"the Designer call did not complete within {self.client.timeout_s:g} s: {exc}"
+            ) from exc
         choices = body.get("choices")
         message = choices[0].get("message") if isinstance(choices, list) and choices else None
         text = message.get("content") if isinstance(message, Mapping) else None
@@ -120,6 +129,8 @@ class ReefDesigner(Designer):
             answer = self.client.report(self.scenario, payload, references=[record_id])
         except ReefClientError as exc:
             raise GenerationError(f"the Designer report was refused ({exc.status}): {exc.body[:300]}") from exc
+        except OSError as exc:
+            raise GenerationError(f"the Designer report did not reach Reef: {exc}") from exc
         return str(answer.get("agent_record_id", ""))
 
 
@@ -674,6 +685,12 @@ def main(
     parser.add_argument("--eval-fraction", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--designer-timeout-s",
+        type=float,
+        default=DESIGNER_TIMEOUT_S,
+        help="seconds one Designer call may take; the service's inference.timeout_s must allow it too",
+    )
+    parser.add_argument(
         "--designer-json",
         default=None,
         help='extra fields of the Designer\'s chat request as JSON, e.g. {"reasoning_effort": "none"}',
@@ -718,6 +735,7 @@ def main(
                 model=arguments.model,
                 token=arguments.token,
                 request_options=designer_options,
+                timeout_s=arguments.designer_timeout_s,
             )
         ),
         solver=(
