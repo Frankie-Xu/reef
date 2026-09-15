@@ -128,6 +128,19 @@ Three operational notes, each of which cost a discarded run:
 - **The two timeouts are coupled.** Raising the per-turn ceiling without raising
   Harbor's session budget just moves which one fires.
 
+**Correction: about half this run's training pairs were discarded before being
+judged.** `serve.yaml` sets `session-ttl-s: 45`, against a documented default of
+900. The method trains on a reply bound to the student reaction that follows it,
+and an expired session can never bind the two — Hermes runs each turn as a fresh
+process, so the session tag is the only thing carrying that link. On this runtime
+a generation takes over two minutes, so the session routinely expired between a
+reply and its reaction. Measured on a later run of this configuration, 15 of 31
+consecutive requests were further apart than the 45s window, and the processor
+logged more sessions expiring unbound than binding — two independent measurements
+agreeing at about half. The stream's reported behaviour is therefore what the
+method does on roughly half its intended signal, which is the first thing to
+re-check before reading anything below as a property of the method.
+
 **Correction: this run had no KL term.** `serve.yaml` sets `kl_coef: 0.05`, but
 that setting then reached only the generic loss path, and this recipe always
 names the `openclawrl` family, whose objective took its coefficient from a

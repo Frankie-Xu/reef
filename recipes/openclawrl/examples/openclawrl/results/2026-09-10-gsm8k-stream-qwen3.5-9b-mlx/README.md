@@ -131,6 +131,15 @@ See [`serve.yaml`](serve.yaml). The load-bearing choices: `lora_layers: 32`
 backward cost is set by the chunk, not the response length), `batch_size: 8`,
 `temperature: 0.6`.
 
+**Correction: this run also used `session-ttl-s: 45` against a documented
+default of 900.** The method binds a reply to the student reaction that judges
+it, and an expired session can never bind the two. On this runtime a generation
+takes over two minutes, so the session routinely expired in between and the
+reply was dropped untrained. Measured on a later run of the same configuration,
+15 of 31 consecutive requests were further apart than that window. Read the tail
+described above with that in mind: it is what the objective does on roughly half
+the training pairs it was meant to have.
+
 **Correction.** This file first listed `kl_coef: 0.05` among those choices, as
 the term holding the untargeted mass. It was not: the setting reached only the
 generic loss path, and OpenClaw-RL's recipe always names the `openclawrl`
