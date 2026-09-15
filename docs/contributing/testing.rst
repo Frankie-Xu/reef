@@ -55,8 +55,9 @@ Run it in the supported container environment. Many torch-dependent tests use
 collection. Without the training dependencies, pytest cannot collect the full
 suite.
 
-CI runs source and installed-wheel tests on Python 3.10, 3.11, and 3.12 with
-four pytest workers on Blacksmith. The source suite excludes tests marked
+CI runs source and installed-wheel tests on Python 3.10, 3.11, and 3.12 on
+Blacksmith. Source tests use eight workers on an 8-vCPU runner; installed-wheel
+tests use four workers on a 4-vCPU runner. The source suite excludes tests marked
 ``sandbox``; a parallel GitHub-hosted matrix runs those tests serially on the
 same three Python versions. Both matrices collect all of ``tests/`` and use
 complementary marker selections, so each test belongs to exactly one group.
@@ -72,7 +73,7 @@ test runner plugin and reproduce the parallel run:
 
    uv pip install pytest-xdist==3.8.0
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-     pytest tests/ -n 4 --dist loadfile
+     pytest tests/ -n 8 --dist loadfile
 
 Use ``-n 0`` for a serial run when diagnosing a failure. Tests in different
 files may run at the same time; use temporary directories and dynamically
@@ -81,6 +82,9 @@ allocated ports for their external resources.
 CI installs dependencies with ``uv pip`` and caches downloads and built wheels
 separately for each job and Python version. It still creates a fresh installed
 environment on each runner, including the CPU-only package boundary checks.
+The source and sandbox suites can restore older download caches for the same
+OS, architecture, and Python version after workflow or dependency edits; uv
+still resolves and installs the requested versions.
 
 The existing ``test (3.10)``, ``test (3.11)``, and ``test (3.12)`` checks now
 gate completion of both matrices. A failed, cancelled, or skipped matrix
@@ -102,7 +106,7 @@ Markers
 <marker>``.
 
 ``sandbox`` selects tests that need real nested bubblewrap jails. Reproduce
-the two source-suite groups with ``pytest tests -m 'not sandbox' -n 4 --dist
+the two source-suite groups with ``pytest tests -m 'not sandbox' -n 8 --dist
 loadfile`` and ``REEF_REQUIRE_SANDBOX=1 pytest tests -m sandbox``. The second
 command requires a Linux host that supports nested jails.
 
@@ -120,7 +124,7 @@ below the floor. Reproduce it the way CI does:
 
 .. code:: bash
 
-   pytest tests -n 4 --dist loadfile --cov --cov-report=term
+   pytest tests -n 8 --dist loadfile --cov --cov-report=term
 
 ``pytest-cov`` ships in the ``dev`` extra. The floor applies to the whole
 package, so a partial run reports far less than CI does; measure against the
