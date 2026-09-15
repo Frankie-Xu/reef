@@ -225,13 +225,13 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
 
 def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str, Any]:
     """Build the standard local HTTP child and its readiness probe."""
-    host = settings.host
-    if host == "0.0.0.0":
+    if settings.host == "0.0.0.0":
         host = "127.0.0.1"
-    elif host == "::":
+    elif settings.host == "::":
         host = "::1"
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
+    else:
+        host = settings.host
+    host = f"[{host}]" if ":" in host and not host.startswith("[") else host
     endpoint = f"http://{host}:{settings.port}"
     python = os.environ.get("REEF_PYTHON", sys.executable)
     return {

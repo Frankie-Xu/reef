@@ -103,7 +103,8 @@ class DataProcessor:
         # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
         if not context.config.get("manual_enabled", True):
             self.supported_training_modes = self.supported_training_modes - {"manual", "hybrid"}
-        self.set_training_mode(context.training_mode)
+        # Validate the initial mode before subclasses initialize their buffers.
+        DataProcessor.set_training_mode(self, context.training_mode)
         self._training_requests: dict[str, TrainingRequest] = {}
         self._consumed_requests: set[str] = set()
         # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.

@@ -114,7 +114,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._terminal_owned_sources: set[str] = set()  # owned by terminal reports
 
         # --- buffered reports ---
-        self._singletons: dict[str, _PendingReport] = {}  # report id → buffered report
+        self.singletons: dict[str, _PendingReport] = {}  # report id → buffered report
         self._groups: dict[Hashable, dict[Hashable, _PendingReport]] = {}  # group key → slot → buffered report
         self._ready_groups: set[Hashable] = set()
         self._discarded_groups: set[Hashable] = set()
@@ -206,19 +206,17 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             slot=slot,
         )
         if key is None:
-            self._singletons[item.agent_record_id] = pending
+            self.singletons[item.agent_record_id] = pending
         else:
             self._groups.setdefault(key, {})[slot] = pending
             self._refresh_group(key)
-        self._cap_manual_units()
+        self.cap_manual_units()
 
     def set_training_mode(self, training_mode: str) -> None:
         super().set_training_mode(training_mode)
-        # The base selects the initial mode inside __init__, before any unit store exists; a switch trims at once.
-        if hasattr(self, "_singletons"):
-            self._cap_manual_units()
+        self.cap_manual_units()
 
-    def _cap_manual_units(self) -> None:
+    def cap_manual_units(self) -> None:
         """Manual mode batches on instructions, not units, so the pile is bounded here instead."""
         limit = self._batch_size * self.manual_unit_cap_batches
         if self.training_mode != "manual" or self._ready_count() <= limit:
@@ -249,7 +247,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         for pending in unit:
             report_id = pending.report.agent_record_id
             report = self._reports.pop(report_id, None)
-            self._singletons.pop(report_id, None)
+            self.singletons.pop(report_id, None)
             if report is not None:
                 self._terminate(report)
             self._terminal_owned_sources.update(pending.report.references)
@@ -315,7 +313,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     # engine's half of the shared cycle in base.py is the three methods below.
 
     def _ready_count(self) -> int:
-        return len(self._singletons) + len(self._ready_groups)
+        return len(self.singletons) + len(self._ready_groups)
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
         units = self._ordered_units()[: self._batch_size]
@@ -324,7 +322,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     def _ordered_units(self) -> list[tuple[_PendingReport, ...]]:
         """Ready groups and singleton reports, preserving the configured priority."""
-        singletons = [(pending,) for pending in self._singletons.values()]
+        singletons = [(pending,) for pending in self.singletons.values()]
         if self.ordered_groups:
             # Ordered groups require sortable keys, such as step indices.
             ordered = sorted(cast("set[Any]", self._ready_groups))
@@ -344,7 +342,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             self._consumed.add(report_id)
             consumed_reports.add(report_id)
             self._reports.pop(report_id, None)
-            self._singletons.pop(report_id, None)
+            self.singletons.pop(report_id, None)
             trained_sources.update(pending.report.references)
             if pending.group_key is not None:
                 group = self._groups.get(pending.group_key)
@@ -396,7 +394,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         # Stored records: only inferences can be here. The trainer compacts
         # ``releasable - protected``, and every live report, every reference
         # a live report holds, and every buffered report are protected —
-        # so a compacted id is never in _reports, _singletons, or a
+        # so a compacted id is never in _reports, singletons, or a
         # group.
         for agent_record_id in agent_record_ids:
             self._inferences.pop(agent_record_id, None)

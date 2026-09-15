@@ -112,6 +112,48 @@ for the environment required by the selected backend.
 - Do not bypass checks by adding broad suppressions or growing
   `.github/python-design-baseline.txt` to accommodate new violations.
 
+### Code structure and readability
+
+Apply these rules when writing or reviewing code. The
+[Code Review Style Guide](https://github.com/zhaochenyang20/sglang-diffusion-routing/issues/32)
+is a reference; the rules here take precedence where it differs.
+
+- **Avoid fragmented functions.** Inline tiny helpers used only once or twice
+  when they merely split up a continuous operation. Extract functions for a
+  meaningful responsibility or substantial reuse, not to meet an arbitrary
+  line limit. Keep related logic readable in one place.
+- **Use ordinary identifier names.** Only functions nested inside other
+  functions should use a leading underscore. Start other variables, fields,
+  constants, module-level functions, and methods with an English letter.
+  Preserve Python-required special names such as `__init__`.
+- **Handle realistic failures.** Validate types and data at entry points, then
+  rely on those contracts internally. Keep `try/except` blocks narrow and catch
+  specific, expected failures only when there is a meaningful recovery or error
+  translation. Do not add speculative fallbacks, repeated checks, or tests for
+  impossible states. Tests should be concise and cover observable behavior and
+  the operation's main failure modes.
+- **Keep constants with their consumer.** If a constant is defined in one
+  module solely to be imported by one other module, define it in the consuming
+  module instead. Share constants when they have actual shared use; avoid
+  unnecessary imports and separate modules for single-use values.
+- **Describe types explicitly.** Do not use `Any` fields or annotations to
+  bypass pre-commit, mypy, or other checks. Model the actual value types and
+  interfaces instead of weakening annotations to silence failures.
+- **Name the actual quantity or concept.** Variable and function names must
+  express their domain, scientific, or physical meaning. Include units or
+  representation where needed, such as `timeout_seconds`, `token_count`, or
+  `weight_dtype`; avoid arbitrary abbreviations and vague placeholder names.
+- **Make branches complete and shallow.** Use explicit `else` branches when
+  choosing values, assigning variables, or returning alternative results.
+  Guard clauses that return, raise, or continue early do not need `else`.
+  Check types and invalid data early to keep the main path clear and avoid
+  excessive branching or deeply nested `if/else` blocks.
+- **Use explicit attributes and interfaces.** Do not use `getattr`, `hasattr`,
+  or dynamic attribute mutation to guess object capabilities or add defensive
+  defaults. Replace these patterns in code being changed with typed attributes,
+  direct access, and explicit interfaces; fix the contract instead of probing
+  for attributes at runtime.
+
 ## Naming and terminology
 
 Prefer simple, conventional terminology already used in this repository.
