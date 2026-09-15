@@ -35,7 +35,7 @@ import logging
 import queue
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from threading import Lock, Thread
 from typing import Any
@@ -210,6 +210,15 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         self._pending_receipts: tuple[str, ...] = ()
 
     # ------------------------------------------------------- the recipe hooks
+
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        return {
+            **super().operational_metrics(),
+            "tracked_records": len(self._tracked),
+            "judging_records": len(self._in_flight),
+            "unreserved_candidates": len(self._candidates) - len(self._pending_receipts),
+            "reserved_candidates": len(self._pending_receipts),
+        }
 
     @abstractmethod
     def ingest(self, item: AgentRecord) -> None:

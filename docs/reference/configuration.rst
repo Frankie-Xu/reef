@@ -978,6 +978,81 @@ Recipe and processor code logs through the same object without importing W&B:
 Those become ``recipe/*`` and ``processor/*``, each namespace on its own
 ``<namespace>/event`` axis. Only finite numeric values are sent.
 
+Operational metrics
+~~~~~~~~~~~~~~~~~~~
+
+With W&B enabled, the dispatcher samples each loaded training scenario every
+10 seconds and once during graceful shutdown. Samples use the existing scenario
+run under ``operations/*``, with Unix time in ``operations/time_seconds`` as
+their horizontal axis. They do not advance ``train/step`` and do not wait for a
+successful commit or a ``/reef/status`` request. Offline mode records the same
+samples locally; disabled tracking starts no sampling thread.
+
+The following names are relative to ``operations/``:
+
+.. list-table:: Operational measurements
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Metric
+     - Meaning
+   * - ``records/unread_count``
+     - Training-visible records after the processor's read cursor. These may
+       still need feedback or filtering; this is not a ready-batch count.
+   * - ``records/oldest_unread_age_seconds``
+     - Age of the first unread record, measured from its recorded creation
+       time; zero when none remain.
+   * - ``processor/unreserved_reports``, ``processor/reserved_reports``
+     - Reported-feedback records waiting outside, or held inside, the reserved
+       batch. An incomplete group still counts as waiting.
+   * - ``processor/oldest_report_wait_seconds``
+     - Age of the oldest unreserved report; zero when none remain.
+   * - ``processor/tracked_records``, ``processor/judging_records``
+     - Computed-feedback records waiting for more traffic or a judgment.
+   * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
+     - Computed-feedback candidates outside or inside the reserved batch.
+   * - ``processor/buffered_requests``
+     - Explicit training instructions already buffered by the processor.
+   * - ``training/reserved_batches``
+     - Zero or one. A reservation can be executing or waiting for settlement;
+       it is not necessarily a queued batch.
+   * - ``training/auto_enabled``
+     - One for auto/hybrid training, zero for manual training. Waiting data in
+       manual mode does not by itself indicate a stalled worker.
+   * - ``training/error``, ``training/failed_attempts_total``
+     - Current recorded training error (zero/one) and cumulative failures
+       recorded by the dispatcher, including retries and worker failures.
+       Recovery clears the current error but retains the counter. The counter
+       resets on dispatcher restart or scenario deletion.
+   * - ``training/checkpoint_storage_blocked``
+     - Whether the dispatched training worker is blocked on checkpoint storage.
+   * - ``training/execution/*``
+     - Backend preparation, evaluation, and settlement measurements.
+   * - ``runtime/weight_sync/*``
+     - Runtime-scheduler weight activation/update calls, including resumed
+       transfers. This covers the call's full duration, not only network time.
+
+The execution and weight-sync families expose ``active`` (zero/one),
+``elapsed_seconds`` while active, ``completed_total``, ``failed_total``,
+``duration_seconds_total``, and ``last_duration_seconds`` after a call finishes.
+An execution returning a skip, stale drop, or storage retry is a completed
+backend call, not necessarily a committed training step. These measurements
+reset when their trainer or scheduler is rebuilt, including recovery; the
+corresponding ``training/started_at_seconds`` and ``runtime/started_at_seconds``
+identify that reset. They are not persisted training history.
+
+Additional finite numeric processor status fields appear under
+``operations/processor/``. Sampling does not advance processor readiness or
+consume its queue. If ingestion or commit holds the trainer lock, that sample
+omits queue gauges while still reporting execution measurements. Operational
+samples contain no request bodies, record IDs, or error messages. They are
+low-frequency training diagnostics; underlying inference engines retain their
+own high-frequency monitoring. Uploading these values does not configure
+alert notifications.
+
+Commit correlation
+~~~~~~~~~~~~~~~~~~
+
 Durable commit metrics carry ``experiment/provider``, ``experiment/project``,
 ``experiment/group``, and ``experiment/run_id``. Use them to open the run from
 a Reef version, and use the run's ``reef/training_job_id`` to go the other way.

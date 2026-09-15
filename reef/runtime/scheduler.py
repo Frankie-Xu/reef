@@ -31,6 +31,7 @@ from typing import Any, Literal
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import TrainingBatch
 from reef.core.evaluation import SelectionDecision
+from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
     ActivatedModel,
     CandidateTrainingDeferred,
@@ -548,6 +549,7 @@ class RuntimeScheduler:
     """
 
     def __init__(self, training_runtime: TrainingRuntime, inference_runtime: InferenceRuntime) -> None:
+        self.operations = OperationMetrics(("weight_sync",))
         self.training_runtime = training_runtime
         self.inference_runtime = inference_runtime
         status = training_runtime.training_job_status()
@@ -597,7 +599,8 @@ class RuntimeScheduler:
             # Training and checkpointing may overlap inference on disjoint
             # GPUs. Close admission only for the short serving-weight update.
             self.inference_runtime.pause_admission()
-        updated = self.inference_runtime.resume_weight_update(checkpoint.training_job_id)
+        with self.operations.measure("weight_sync"):
+            updated = self.inference_runtime.resume_weight_update(checkpoint.training_job_id)
         return TrainingJobResult(
             "complete",
             updated.runtime_load_id,
@@ -618,7 +621,8 @@ class RuntimeScheduler:
     def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
         """Stage selected weights behind closed inference admission."""
         self.inference_runtime.pause_admission()
-        return self.inference_runtime.activate_candidate(candidate)
+        with self.operations.measure("weight_sync"):
+            return self.inference_runtime.activate_candidate(candidate)
 
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
         """Discard a candidate before reopening the unchanged serving version."""
@@ -699,7 +703,8 @@ class RuntimeScheduler:
             return
         rollout_id, training_job_id = _pending_job_identity(training_job)
         if status == "UPDATING_WEIGHTS":
-            self.inference_runtime.resume_weight_update(training_job_id)
+            with self.operations.measure("weight_sync"):
+                self.inference_runtime.resume_weight_update(training_job_id)
         if (
             status == "COMPLETE"
             and training_job.get("commit_acknowledged") is not True

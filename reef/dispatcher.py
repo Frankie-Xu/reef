@@ -83,6 +83,7 @@ class _TrainingState:
     lock: Lock = field(default_factory=Lock)
     ready: Event = field(default_factory=Event)
     errors: dict[str, str] = field(default_factory=dict)
+    failure_counts: dict[str, int] = field(default_factory=dict)
     status_build_error: str | None = None
     storage_status: Mapping[str, Any] | None = None
     last_drain: float | None = None
@@ -95,6 +96,7 @@ class _TrainingState:
 class _LifecycleState:
     closed: Event = field(default_factory=Event)
     preload_thread: Thread | None = None
+    metrics_thread: Thread | None = None
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -139,6 +141,7 @@ class Dispatcher:
     # means the training thread is not waking. Status reads perform the check,
     # so the alarm rides the health polling that already watches the service.
     undrained_warning_seconds: float = 60.0
+    operational_metrics_interval_seconds: float = 10.0
 
     def __init__(
         self,
@@ -176,6 +179,13 @@ class Dispatcher:
                 daemon=True,
             )
             self._lifecycle.preload_thread.start()
+        if self._experiment_tracker.operational_metrics_enabled:
+            self._lifecycle.metrics_thread = Thread(
+                target=self.run_operational_metrics,
+                name="reef-operational-metrics",
+                daemon=True,
+            )
+            self._lifecycle.metrics_thread.start()
 
     @property
     def published(self) -> Mapping[str, Any]:
@@ -246,6 +256,8 @@ class Dispatcher:
             self._stop_local_backend_worker(scenario)
             self._publication.forget(scenario)
             self._record_training_error(scenario, None)
+            with self._training.lock:
+                self._training.failure_counts.pop(scenario, None)
             if dropped is not None:
                 backend = dropped.trainer.candidate_backend
                 if backend is not None:
@@ -486,6 +498,32 @@ class Dispatcher:
                 self._registry.record_preload_error(scenario, f"{type(exc).__name__}: {exc}")
 
     # -- Background workers ---------------------------------------------
+
+    def run_operational_metrics(self) -> None:
+        """Sample while training is idle, blocked, or failing, without status polling."""
+        while not self._lifecycle.closed.wait(self.operational_metrics_interval_seconds):
+            self.record_operational_metrics()
+
+    def record_operational_metrics(self) -> None:
+        """Publish numeric state only; one unavailable scenario must not hide others."""
+        with self._training.lock:
+            failures = dict(self._training.failure_counts)
+            errors = frozenset(self._training.errors)
+            storage_blocked = self._training.storage_status is not None
+        for current in self._registry.loaded_scenarios():
+            if current.trainer.candidate_backend is None:
+                continue
+            try:
+                metrics = current.trainer.operational_metrics()
+                metrics["training/failed_attempts_total"] = failures.get(current.name, 0)
+                metrics["training/error"] = int(current.name in errors)
+                if current.training_runtime is not None:
+                    metrics["training/checkpoint_storage_blocked"] = int(storage_blocked)
+                current.trainer.processor.experiment_logger.log(metrics, namespace="operations")
+            except Exception as exc:
+                logger.warning(
+                    "operational metrics unavailable for scenario %r (%s)", current.name, type(exc).__name__
+                )
 
     def _start_training(self, scenario: Scenario) -> None:
         """Start the training drain thread if it hasn't been started yet.
@@ -760,6 +798,7 @@ class Dispatcher:
                 self._training.errors.pop(scenario, None)
             else:
                 self._training.errors[scenario] = value
+                self._training.failure_counts[scenario] = self._training.failure_counts.get(scenario, 0) + 1
 
     def _record_status_build_error(self, value: str | None) -> bool:
         """Record a failure to build training status; return whether it changed."""
@@ -932,6 +971,9 @@ class Dispatcher:
             self._training.thread.join()
         for worker in local_workers:
             worker.thread.join()
+        if self._lifecycle.metrics_thread is not None:
+            self._lifecycle.metrics_thread.join()
+            self.record_operational_metrics()
         errors: list[BaseException] = []
         for scenario in self._registry.loaded_scenarios():
             # scenario.close(), not records.close(): processor teardown has to
