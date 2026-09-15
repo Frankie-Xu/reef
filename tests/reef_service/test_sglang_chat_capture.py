@@ -1030,15 +1030,20 @@ def test_chat_facade_rejects_requests_it_cannot_capture_exactly(tmp_path, overri
 
 
 @pytest.mark.unit
-def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path) -> None:
+@pytest.mark.parametrize("split_reasoning", [True, False])
+def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_reasoning: bool) -> None:
     """Thinking text must ride reasoning_content, never the visible reply.
 
     The chat template auto-opens <think>, so sampled text carries only the
     closing tag; everything before the LAST </think> is chain-of-thought.
     OpenAI-shaped consumers (agents, judges, user simulators) read content
     verbatim — leaking reasoning there made every downstream judgment grade
-    the monologue instead of the reply. Training tokens stay untouched.
+    the monologue instead of the reply. A subclass can preserve raw tags;
+    training tokens stay untouched in either mode.
     """
+
+    class ConfiguredHandler(SGLangInferenceHandler):
+        SPLIT_REASONING = split_reasoning
 
     async def run() -> None:
         async def generate(request):
@@ -1058,7 +1063,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path) -> None:
         server = TestServer(app)
         await server.start_server()
         try:
-            backend = SGLangInferenceHandler(
+            backend = ConfiguredHandler(
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
@@ -1076,8 +1081,14 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path) -> None:
             await server.close()
 
         message = response["choices"][0]["message"]
-        assert message["content"] == "The answer is 5."
-        assert message["reasoning_content"] == "Okay, let me think. 2+3 is 5."
+        if split_reasoning:
+            assert message["content"] == "The answer is 5."
+            assert message["reasoning_content"] == "Okay, let me think. 2+3 is 5."
+        else:
+            assert message == {
+                "role": "assistant",
+                "content": "Okay, let me think. 2+3 is 5.\n</think>\n\nThe answer is 5.",
+            }
         # The exact sampled ids still train, reasoning included.
         assert response["training"]["tokens"] == [10, 11, 20, 21, 22]
         assert response["training"]["response_length"] == 3
