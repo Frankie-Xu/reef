@@ -482,7 +482,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
 @pytest.mark.unit
 def test_sao_config_uses_the_hook_based_contract() -> None:
-    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "sao" / "serve.yaml"
+    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "imo_answerbench" / "serve.yaml"
     args, spec, options, _ = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)
