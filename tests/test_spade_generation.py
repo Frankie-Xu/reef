@@ -1,14 +1,14 @@
-"""One SPADE generation end to end against stand ins: propose, check, write, play both arms, split, report."""
+"""One SPADE generation end to end against stand ins: propose, write, check, play both arms, split, report."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
-from recipes.beta.spade import OpenEnvCheck, OracleResult, PlayRecord, SmokeResult
+from recipes.beta.spade import OracleResult, PlayRecord
 from recipes.beta.spade.generation import (
     Checks,
     Designer,
@@ -25,23 +25,7 @@ from recipes.beta.spade.generation import (
 from reef.core.tasks import read_harbor_task, read_split_manifest
 from reef.harness.client.tasks import TaskPlay
 
-GUESS = """class GuessEnv:
-    def reset(self, seed=None):
-        self.target = random.Random(seed).randint(1, 3)
-        return "Guess a number from 1 to 3. Answer with \\\\boxed{n}.", {}
-
-    def step(self, action):
-        match = re.search(r"\\\\boxed\\{([^}]*)\\}", action)
-        if not match:
-            return "Use \\\\boxed{n}.", 0.0, False, False, {}
-        if match.group(1).strip() == str(self.target):
-            return "Right.", 1.0, True, False, {}
-        return "Wrong.", 0.0, False, False, {}
-"""
-GYM_REPLY = (
-    "Here it is.\n\n```python\n" + GUESS + "```\n\n```hint\nThe number is one of three; answer with one digit.\n```\n"
-)
-HARBOR_DOCUMENT = {
+DOCUMENT = {
     "instruction": (
         "A service on this machine writes the port it listens on under /var/run. Find that file and write the "
         "port number, and nothing else, to /workspace/port.txt."
@@ -55,70 +39,29 @@ HARBOR_DOCUMENT = {
     "solution": {"solve.sh": "#!/bin/sh\ncat /var/run/app.port > /workspace/port.txt\n"},
     "hint": "Look under /var/run for what the service left behind.",
 }
-HARBOR_REPLY = "```json\n" + json.dumps(HARBOR_DOCUMENT) + "\n```\n"
-OPENENV_MODELS = """from openenv.core.env_server.types import Action, Observation
-from pydantic import Field
+REPLY = "```json\n" + json.dumps(DOCUMENT) + "\n```\n"
 
 
-class GuessAction(Action):
-    guess: int = Field(..., description="A number from 1 to 3")
-
-
-class GuessObservation(Observation):
-    message: str = Field("", description="What the environment said")
-"""
-OPENENV_ENVIRONMENT = """import random
-import uuid
-
-from openenv.core.env_server import Environment
-from openenv.core.env_server.types import State
-
-from openenv_task.models import GuessAction, GuessObservation
-
-
-class GuessEnvironment(Environment):
-    def __init__(self):
-        self._state = State(episode_id=str(uuid.uuid4()), step_count=0)
-        self.target = 0
-
-    def reset(self, seed=None, **kwargs):
-        self.target = random.Random(seed).randint(1, 3)
-        self._state = State(episode_id=str(uuid.uuid4()), step_count=0)
-        return GuessObservation(message="Guess a number from 1 to 3.", reward=0.0, done=False)
-
-    def step(self, action: GuessAction):
-        self._state.step_count += 1
-        if action.guess == self.target:
-            return GuessObservation(message="Right.", reward=1.0, done=True)
-        return GuessObservation(message="Wrong.", reward=0.0, done=False)
-
-    @property
-    def state(self):
-        return self._state
-"""
-OPENENV_DOCUMENT = {
-    "instruction": "A hidden number between 1 and 3 was drawn. Find it with as few guesses as you can; each guess tells you only whether it was right.",
-    "models": OPENENV_MODELS,
-    "environment": OPENENV_ENVIRONMENT,
-    "action_example": {"guess": 2},
-    "hint": "There are only three candidates; a wrong guess rules one out.",
-}
-OPENENV_REPLY = "```json\n" + json.dumps(OPENENV_DOCUMENT) + "\n```\n"
-REPLIES = {"gym": GYM_REPLY, "harbor": HARBOR_REPLY, "openenv": OPENENV_REPLY}
+def reply_for(index: int) -> str:
+    """A distinct task per proposal: the port differs, so the content hash differs."""
+    document = json.loads(json.dumps(DOCUMENT))
+    port = 8471 + index
+    document["environment"]["Dockerfile"] = document["environment"]["Dockerfile"].replace("8471", str(port))
+    document["tests"]["test.sh"] = document["tests"]["test.sh"].replace("8471", str(port))
+    return "```json\n" + json.dumps(document) + "\n```\n"
 
 
 class StandInDesigner(Designer):
-    """Answers each kind with a fixed reply (or a scripted one) and keeps the reports it gets."""
+    """Answers with a distinct task per call (or a scripted reply) and keeps the reports it gets."""
 
-    def __init__(self, replies: Mapping[str, str] | None = None, scripted: Sequence[str] = ()) -> None:
-        self.replies = dict(replies or REPLIES)
+    def __init__(self, scripted: Sequence[str] = ()) -> None:
         self.scripted = list(scripted)
         self.calls: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
 
     def answer(self, messages, *, tags) -> DesignerAnswer:
         self.calls.append({"messages": list(messages), "tags": dict(tags)})
-        text = self.scripted.pop(0) if self.scripted else self.replies[tags["kind"]]
+        text = self.scripted.pop(0) if self.scripted else reply_for(len(self.calls))
         return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
 
     def report(self, record_id, *, score, metadata) -> str:
@@ -127,43 +70,25 @@ class StandInDesigner(Designer):
 
 
 class StandInChecks(Checks):
-    def __init__(self, *, refuse: str = "") -> None:
-        self.refuse = refuse
-        self.calls: list[tuple[str, object]] = []
-
-    def smoke(self, code, *, seed, max_turns) -> SmokeResult:
-        self.calls.append(("smoke", seed))
-        return SmokeResult(is_runnable=self.refuse != "smoke", reason="broken step" if self.refuse == "smoke" else "")
+    def __init__(self, *, is_solvable: bool = True) -> None:
+        self.is_solvable = is_solvable
+        self.calls: list[Path] = []
 
     def oracle(self, task_path) -> OracleResult:
-        self.calls.append(("oracle", task_path))
-        if self.refuse == "oracle":
+        self.calls.append(task_path)
+        if not self.is_solvable:
             return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0, nop_reward=0.0)
         return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
 
-    def serving(self, task_path, action_example) -> OpenEnvCheck:
-        self.calls.append(("serving", task_path))
-        if self.refuse == "serving":
-            return OpenEnvCheck(is_serving=False, reason="reset answered 500")
-        return OpenEnvCheck(is_serving=True, reason="", first_observation="{}")
-
 
 class StandInSolver(Solver):
-    """Scripted rewards per kind and arm; records how each arm was asked for."""
+    """Scripted rewards per arm; records how each arm was asked for."""
 
-    REWARDS = {
-        ("gym", "plain"): 0.25,
-        ("gym", "hint"): 0.75,
-        ("harbor", "plain"): 1.0,
-        ("harbor", "hint"): 1.0,
-        ("openenv", "plain"): 0.0,
-        ("openenv", "hint"): 0.0,
-    }
-
-    def __init__(self, *, error: str = "") -> None:
+    def __init__(self, *, plain: float = 0.25, hint: float = 0.75, error: str = "") -> None:
+        self.rewards = {"plain": plain, "hint": hint}
+        self.error = error
         self.calls: list[dict[str, object]] = []
         self.episodes = 0
-        self.error = error
 
     def play(self, task_path, *, arm, plays, is_reporting, extra_instruction_paths, tags) -> tuple[TaskPlay, ...]:
         self.calls.append(
@@ -176,8 +101,7 @@ class StandInSolver(Solver):
                 "tags": dict(tags),
             }
         )
-        kind = task_path.name.split("-")[0]
-        reward = None if self.error else self.REWARDS[(kind, arm)]
+        reward = None if self.error else self.rewards[arm]
         played = []
         for _ in range(plays):
             self.episodes += 1
@@ -200,9 +124,8 @@ class StandInSolver(Solver):
 
 def request(**overrides: object) -> GenerationRequest:
     fields: dict[str, object] = {
-        "description": "small deduction puzzles with hidden state",
-        "skills": ("deduction",),
-        "kinds": ("gym", "harbor", "openenv"),
+        "description": "shell tasks with hidden state under /var and /etc",
+        "skills": ("inspection",),
         "count": 3,
         "generation": 4,
         "plays": 2,
@@ -222,14 +145,18 @@ def generation(tmp_path: Path, **parts: object) -> tuple[Generation, StandInDesi
     return run, designer, solver, checks  # type: ignore[return-value]
 
 
-def test_one_generation_proposes_checks_writes_plays_splits_and_reports(tmp_path: Path) -> None:
-    run, designer, solver, checks = generation(tmp_path)
-    result = run.run(request())
+def written(root: Path) -> list[str]:
+    return sorted(entry.name for entry in root.iterdir() if entry.name != ".staging")
 
-    assert [proposal.kind for proposal in result.proposals] == ["gym", "harbor", "openenv"]
+
+def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path: Path) -> None:
+    run, designer, solver, checks = generation(tmp_path)
+    result = run.run(request(skills=("inspection", "repair")))
+
+    assert [proposal.skill for proposal in result.proposals] == ["inspection", "repair", "inspection"]
     assert all(proposal.is_written for proposal in result.proposals)
     names = [measure.name for measure in result.measures]
-    assert names == ["gym-00004-000-deduction", "harbor-00004-001-deduction", "openenv-00004-002-deduction"]
+    assert names == ["harbor-00004-000-inspection", "harbor-00004-001-repair", "harbor-00004-002-inspection"]
     for index, measure in enumerate(result.measures):
         task = read_harbor_task(measure.task_path)
         assert task.digest == measure.digest and (measure.task_path / "solution" / "hint.txt").is_file()
@@ -237,46 +164,35 @@ def test_one_generation_proposes_checks_writes_plays_splits_and_reports(tmp_path
             f"designer-{index + 1}",
         ), "the Designer's receipt is the task's source"
 
-    assert designer.calls[0]["tags"] == {
-        "role": "designer",
-        "generation": "4",
-        "kind": "gym",
-        "skill": "deduction",
-    }
+    assert designer.calls[0]["tags"] == {"role": "designer", "generation": "4", "skill": "inspection"}
     assert designer.calls[0]["messages"][0]["role"] == "system"
-    assert [step for step, _ in checks.calls] == ["smoke", "oracle", "serving"]
-    assert checks.calls[1][1] == tmp_path / "tasks" / "harbor-00004-001-deduction"
+    assert checks.calls == [tmp_path / "tasks" / name for name in names]
 
     arms = [(call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"]) for call in solver.calls]
-    assert arms[0] == ("gym-00004-000-deduction", "plain", 2, True, [])
+    assert arms[0] == ("harbor-00004-000-inspection", "plain", 2, True, [])
     assert arms[1] == (
-        "gym-00004-000-deduction",
+        "harbor-00004-000-inspection",
         "hint",
         1,
         False,
-        [tmp_path / "tasks" / "gym-00004-000-deduction" / "solution" / "hint.txt"],
+        [tmp_path / "tasks" / "harbor-00004-000-inspection" / "solution" / "hint.txt"],
     )
-    assert all(
-        call["tags"] == {"generation": "4", "kind": call["task"].split("-")[0], "skill": "deduction"}
-        for call in solver.calls
-    )
+    assert all(call["tags"] == {"generation": "4", "skill": call["task"].split("-")[-1]} for call in solver.calls)
 
-    by_name = {measure.name: measure for measure in result.measures}
-    gym = by_name["gym-00004-000-deduction"]
-    assert gym.plain_rewards == (0.25, 0.25) and gym.hint_rewards == (0.75,)
-    assert gym.regret == 0.5 and gym.outcome == "frontier"
-    assert by_name["harbor-00004-001-deduction"].outcome == "mastered"
-    assert by_name["openenv-00004-002-deduction"].outcome == "out_of_reach"
+    first = result.measures[0]
+    assert first.plain_rewards == (0.25, 0.25) and first.hint_rewards == (0.75,)
+    assert first.regret == 0.5 and first.outcome == "frontier"
+    assert first.record.code_excerpt.startswith("A service on this machine")
 
     assert result.manifest_path == tmp_path / "tasks" / "manifest-00004.json"
     manifest = read_split_manifest(result.manifest_path)
     assert sorted([*manifest.train, *manifest.eval]) == names and len(manifest.eval) == 1
 
     assert [report["record_id"] for report in designer.reports] == ["designer-1", "designer-2", "designer-3"]
-    assert [report["score"] for report in designer.reports] == [0.5, 0.0, 0.0]
-    first = designer.reports[0]["metadata"]
-    assert first["task"] == {"name": gym.name, "path": str(gym.task_path), "digest": gym.digest}
-    assert first["outcome"] == "frontier" and first["regret"] == 0.5 and first["kind"] == "gym"
+    assert [report["score"] for report in designer.reports] == [0.5, 0.5, 0.5]
+    metadata = designer.reports[0]["metadata"]
+    assert metadata["task"] == {"name": first.name, "path": str(first.task_path), "digest": first.digest}
+    assert metadata["outcome"] == "frontier" and metadata["regret"] == 0.5 and metadata["skill"] == "inspection"
     assert [proposal.designer_report_id for proposal in result.proposals] == ["report-1", "report-2", "report-3"]
 
     document = json.loads(result.report_path.read_text())
@@ -287,74 +203,48 @@ def test_one_generation_proposes_checks_writes_plays_splits_and_reports(tmp_path
     assert load_experience(result.report_path) == result.experience
 
 
-def test_a_reply_the_kind_cannot_parse_is_refused_and_reported_as_zero(tmp_path: Path) -> None:
-    designer = StandInDesigner(scripted=["no code here", GYM_REPLY])
+def test_a_reply_the_parser_refuses_is_reported_as_zero_and_the_generation_goes_on(tmp_path: Path) -> None:
+    designer = StandInDesigner(scripted=["no json here", reply_for(2)])
     run, designer, solver, _ = generation(tmp_path, designer=designer)
-    result = run.run(request(kinds=("gym",), count=2))
+    result = run.run(request(count=2))
     first, second = result.proposals
-    assert not first.is_written and first.refusal.startswith("gym reply refused:") and first.task_name is None
-    assert second.is_written and second.task_name == "gym-00004-001-deduction"
+    assert not first.is_written and first.refusal.startswith("reply refused:") and first.task_name is None
+    assert second.is_written and second.task_name == "harbor-00004-001-inspection"
     assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == first.refusal
-    assert not (tmp_path / "tasks" / "gym-00004-000-deduction").exists()
-    assert [call["task"] for call in solver.calls] == ["gym-00004-001-deduction"] * 2
+    assert not (tmp_path / "tasks" / "harbor-00004-000-inspection").exists()
+    assert [call["task"] for call in solver.calls] == ["harbor-00004-001-inspection"] * 2
 
 
-@pytest.mark.parametrize(
-    ("kind", "refuse", "message"),
-    [
-        ("gym", "smoke", "smoke test refused: broken step"),
-        ("harbor", "oracle", "oracle check refused: the oracle scored 0"),
-        ("openenv", "serving", "serve check refused: reset answered 500"),
-    ],
-)
-def test_a_task_its_check_refuses_never_stays_under_the_root(
-    tmp_path: Path, kind: str, refuse: str, message: str
-) -> None:
-    run, designer, solver, _ = generation(tmp_path, checks=StandInChecks(refuse=refuse))
-    result = run.run(request(kinds=(kind,), count=1))
+def test_a_task_the_oracle_check_refuses_never_stays_under_the_root(tmp_path: Path) -> None:
+    run, designer, solver, _ = generation(tmp_path, checks=StandInChecks(is_solvable=False))
+    result = run.run(request(count=1))
     proposal = result.proposals[0]
-    assert not proposal.is_written and message in proposal.refusal
+    assert not proposal.is_written and proposal.refusal == "oracle check refused: the oracle scored 0"
     assert result.measures == () and result.manifest_path is None and solver.calls == []
-    assert [entry.name for entry in (tmp_path / "tasks").iterdir() if entry.name != ".staging"] == [".spade"]
+    assert written(tmp_path / "tasks") == [".spade"]
     assert designer.reports[0]["score"] == 0.0
 
 
 def test_a_task_the_solver_could_not_play_is_refused_not_scored(tmp_path: Path) -> None:
     solver = StandInSolver(error="Failed to start tmux session. Error: None")
     run, designer, _, _ = generation(tmp_path, solver=solver)
-    result = run.run(request(kinds=("gym",), count=1))
+    result = run.run(request(count=1))
     proposal = result.proposals[0]
     assert not proposal.is_written
     assert proposal.refusal == "the solver could not play the task: Failed to start tmux session. Error: None"
     assert result.measures == () and result.manifest_path is None
     assert [call["arm"] for call in solver.calls] == ["plain"], "the hint arm is not played for a task that cannot run"
-    assert not (tmp_path / "tasks" / "gym-00004-000-deduction").exists()
+    assert not (tmp_path / "tasks" / "harbor-00004-000-inspection").exists()
     assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == proposal.refusal
-    again = run.run(request(kinds=("gym",), count=1, generation=5))
-    assert (
-        again.proposals[0].refusal == "the solver could not play the task: Failed to start tmux session. Error: None"
-    )
-
-
-def test_mean_reward_skips_episodes_that_never_ran(tmp_path: Path) -> None:
-    def play(reward: float | None, error: str = "") -> TaskPlay:
-        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
-
-    assert mean_reward([play(1.0), play(None, "the trial raised")]) == 1.0
-    assert mean_reward([play(None, "the trial raised")]) == 0.0
 
 
 def test_a_task_already_under_the_root_is_not_written_twice(tmp_path: Path) -> None:
-    run, _, _, _ = generation(tmp_path)
-    first = run.run(request(kinds=("gym",), count=1, generation=1))
-    second = run.run(request(kinds=("gym",), count=1, generation=2))
+    run, _, _, _ = generation(tmp_path, designer=StandInDesigner(scripted=[REPLY, REPLY]))
+    first = run.run(request(count=1, generation=1))
+    second = run.run(request(count=1, generation=2))
     assert first.proposals[0].is_written
     assert second.proposals[0].refusal == "duplicate of a task already under the root"
-    assert sorted(entry.name for entry in (tmp_path / "tasks").iterdir() if entry.name != ".staging") == [
-        ".spade",
-        "gym-00001-000-deduction",
-        "manifest-00001.json",
-    ]
+    assert written(tmp_path / "tasks") == [".spade", "harbor-00001-000-inspection", "manifest-00001.json"]
 
 
 def test_experience_for_puts_this_skill_and_the_frontier_first_and_caps_the_records() -> None:
@@ -362,13 +252,13 @@ def test_experience_for_puts_this_skill_and_the_frontier_first_and_caps_the_reco
         return PlayRecord(name=name, skill=skill, return_without_hint=plain, return_with_hint=hint)
 
     records = [
-        record("t-mastered", "deduction", 0.95, 1.0),
-        record("t-other-skill", "planning", 0.5, 0.9),
-        record("t-frontier-low", "deduction", 0.5, 0.6),
-        record("t-frontier-high", "deduction", 0.3, 0.9),
-        record("t-out", "deduction", 0.0, 0.2),
+        record("t-mastered", "inspection", 0.95, 1.0),
+        record("t-other-skill", "repair", 0.5, 0.9),
+        record("t-frontier-low", "inspection", 0.5, 0.6),
+        record("t-frontier-high", "inspection", 0.3, 0.9),
+        record("t-out", "inspection", 0.0, 0.2),
     ]
-    chosen = experience_for(records, "deduction")
+    chosen = experience_for(records, "inspection")
     assert [item.name for item in chosen] == [
         "t-frontier-high",
         "t-frontier-low",
@@ -376,15 +266,17 @@ def test_experience_for_puts_this_skill_and_the_frontier_first_and_caps_the_reco
         "t-mastered",
         "t-other-skill",
     ]
-    many = [record(f"t-{index:02d}", "deduction", 0.5, 0.6) for index in range(20)]
-    assert len(experience_for(many, "deduction")) == 12
+    many = [record(f"t-{index:02d}", "inspection", 0.5, 0.6) for index in range(20)]
+    assert len(experience_for(many, "inspection")) == 12
 
 
-def test_mean_reward_counts_an_unscored_episode_as_a_loss(tmp_path: Path) -> None:
-    def play(reward: float | None) -> TaskPlay:
-        return TaskPlay(tmp_path, "t", "e", reward, {}, "", (), 0, (), None)
+def test_mean_reward_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
+    def play(reward: float | None, error: str = "") -> TaskPlay:
+        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
 
     assert mean_reward([play(1.0), play(None)]) == 0.5 and mean_reward([]) == 0.0
+    assert mean_reward([play(1.0), play(None, "the trial raised")]) == 1.0
+    assert mean_reward([play(None, "the trial raised")]) == 0.0
 
 
 @pytest.mark.parametrize(
@@ -392,7 +284,6 @@ def test_mean_reward_counts_an_unscored_episode_as_a_loss(tmp_path: Path) -> Non
     [
         ({"description": " "}, "description must be non-empty text"),
         ({"skills": ()}, "skills must name at least one skill"),
-        ({"kinds": ("gym", "board")}, "kinds must be among"),
         ({"count": 0}, "count must be at least 1"),
         ({"plays": 0}, "plays must be at least 1"),
         ({"eval_fraction": 1.0}, "eval_fraction must be in"),
@@ -412,7 +303,6 @@ def test_load_experience_refuses_a_file_that_is_not_a_report(tmp_path: Path) -> 
 
 
 def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_proposal(tmp_path: Path, capsys) -> None:
-    designer, checks = StandInDesigner(), StandInChecks()
     solver = StandInSolver()
     status = main(
         [
@@ -425,11 +315,9 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
             "--tasks-root",
             str(tmp_path / "tasks"),
             "--description",
-            "small deduction puzzles with hidden state",
+            "shell tasks with hidden state under /var and /etc",
             "--skills",
-            "deduction,planning",
-            "--kinds",
-            "gym,harbor",
+            "inspection,repair",
             "--count",
             "2",
             "--generation",
@@ -439,13 +327,13 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
             "--hint-plays",
             "1",
         ],
-        designer=designer,
+        designer=StandInDesigner(),
         solver=solver,
-        checks=checks,
+        checks=StandInChecks(),
     )
     assert status == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [line.get("task") for line in lines[:2]] == ["gym-00003-000-deduction", "harbor-00003-001-planning"]
+    assert [line.get("task") for line in lines[:2]] == ["harbor-00003-000-inspection", "harbor-00003-001-repair"]
     assert lines[0]["regret"] == 0.5 and lines[0]["outcome"] == "frontier"
     assert lines[2]["manifest"].endswith("manifest-00003.json") and lines[2]["report"].endswith(
         "generation-00003.json"
@@ -461,11 +349,9 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
             "--tasks-root",
             str(tmp_path / "tasks"),
             "--description",
-            "small deduction puzzles with hidden state",
+            "shell tasks with hidden state under /var and /etc",
             "--skills",
-            "deduction",
-            "--kinds",
-            "openenv",
+            "inspection",
             "--count",
             "1",
             "--generation",
@@ -473,7 +359,7 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
             "--experience",
             str(tmp_path / "tasks" / ".spade" / "generation-00003.json"),
         ],
-        designer=StandInDesigner(),
+        designer=StandInDesigner(scripted=[reply_for(9)]),
         solver=StandInSolver(),
         checks=StandInChecks(),
     )
@@ -494,9 +380,7 @@ def test_the_reef_designer_posts_its_request_options_and_keeps_the_receipt() -> 
             body = json.loads(self.rfile.read(length) or b"{}")
             seen.append({"path": self.path, "body": body, "headers": {k.lower(): v for k, v in self.headers.items()}})
             if self.path == "/v1/chat/completions":
-                answer = {
-                    "choices": [{"message": {"role": "assistant", "content": "```python\nclass AEnv: pass\n```"}}]
-                }
+                answer = {"choices": [{"message": {"role": "assistant", "content": REPLY}}]}
                 receipt = "designer-rec-1"
             else:
                 answer = {"agent_record_id": "designer-rep-1"}
@@ -525,21 +409,19 @@ def test_the_reef_designer_posts_its_request_options_and_keeps_the_receipt() -> 
             timeout_s=5.0,
         )
         assert designer.client.timeout_s == 5.0
-        answer = designer.answer([{"role": "user", "content": "hi"}], tags={"role": "designer", "kind": "gym"})
-        report_id = designer.report(answer.record_id, score=0.5, metadata={"kind": "gym"})
+        answer = designer.answer([{"role": "user", "content": "hi"}], tags={"role": "designer", "skill": "inspection"})
+        report_id = designer.report(answer.record_id, score=0.5, metadata={"skill": "inspection"})
     finally:
         server.shutdown()
         server.server_close()
-    assert (
-        answer.text.startswith("```python") and answer.record_id == "designer-rec-1" and report_id == "designer-rep-1"
-    )
+    assert answer.text == REPLY and answer.record_id == "designer-rec-1" and report_id == "designer-rep-1"
     call, report = seen
     assert call["path"] == "/v1/chat/completions" and call["body"]["reasoning_effort"] == "none"
     assert call["body"]["model"] == "m" and call["body"]["messages"] == [{"role": "user", "content": "hi"}]
-    assert call["headers"]["x-reef-scenario"] == "spade" and call["headers"]["x-reef-tag-kind"] == "gym"
+    assert call["headers"]["x-reef-scenario"] == "spade" and call["headers"]["x-reef-tag-skill"] == "inspection"
     assert call["headers"]["authorization"] == "Bearer tok"
     assert report["path"] == "/reef/report" and report["body"]["references"] == ["designer-rec-1"]
-    assert report["body"]["score"] == 0.5 and report["body"]["metadata"] == {"kind": "gym"}
+    assert report["body"]["score"] == 0.5 and report["body"]["metadata"] == {"skill": "inspection"}
 
 
 def test_a_designer_call_that_times_out_is_a_generation_error() -> None:
@@ -556,14 +438,14 @@ def test_a_designer_call_that_times_out_is_a_generation_error() -> None:
             reef_url=f"http://127.0.0.1:{silent.getsockname()[1]}", scenario="spade", model="m", timeout_s=0.5
         )
         with pytest.raises(GenerationError, match=r"did not complete within 0\.5 s"):
-            designer.answer([{"role": "user", "content": "hi"}], tags={"kind": "gym"})
+            designer.answer([{"role": "user", "content": "hi"}], tags={"skill": "inspection"})
     finally:
         silent.close()
     with pytest.raises(GenerationError, match="timeout_s must be a positive number"):
         ReefDesigner(reef_url="http://127.0.0.1:1", scenario="spade", model="m", timeout_s=0)
 
 
-def test_main_refuses_an_unknown_kind(tmp_path: Path) -> None:
+def test_main_refuses_a_request_it_cannot_run(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(
             [
@@ -579,8 +461,8 @@ def test_main_refuses_an_unknown_kind(tmp_path: Path) -> None:
                 "d",
                 "--skills",
                 "a",
-                "--kinds",
-                "board",
+                "--count",
+                "0",
             ],
             designer=StandInDesigner(),
             solver=StandInSolver(),

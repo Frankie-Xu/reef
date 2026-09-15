@@ -1,16 +1,15 @@
-"""One SPADE generation: the Designer proposes, the checks refuse, the tasks are written, both arms play, regret splits.
+"""One SPADE generation: the Designer proposes, the oracle check refuses, the tasks are written, both arms play, regret splits.
 
 The Designer is the served model: every proposal is one chat call through Reef, so it is a record with
-a receipt. Per proposal the kind's reply is parsed, the kind's check runs (``gym``: the smoke test on the
-host; ``harbor``: the oracle and nop agents through the harbor command line; ``openenv``: the docker
-serve check), the task is written under the tasks root, and the solver plays it: ``plays`` times as it
-is, reported to Reef as training data, and ``hint_plays`` times with the hint appended to the
-instruction, measured only. Regret is the mean hint reward minus the mean plain reward; the plain mean
-puts the task in a band (mastered, frontier, out of reach). The written tasks are split by the
-Designer's record ids into train and eval, the manifest is written beside them, a JSON report keeps
-every proposal and measure, and each proposal is reported to Reef against the Designer's receipt with
-its regret as the score, which is the Designer's own training signal. The report's experience feeds
-the next generation's prompts.
+a receipt. Per proposal the reply is parsed, the task is written under the tasks root, Harbor's oracle
+and nop agents check it (the reference solution must score 1, doing nothing below 1), and the solver
+plays it: ``plays`` times as it is, reported to Reef as training data, and ``hint_plays`` times with the
+hint appended to the instruction, measured only. Regret is the mean hint reward minus the mean plain
+reward; the plain mean puts the task in a band (mastered, frontier, out of reach). The written tasks are
+split by the Designer's record ids into train and eval, the manifest is written beside them, a JSON
+report keeps every proposal and measure, and each proposal is reported to Reef against the Designer's
+receipt with its regret as the score, which is the Designer's own training signal. The report's
+experience feeds the next generation's prompts.
 """
 
 from __future__ import annotations
@@ -23,27 +22,28 @@ import statistics
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from reef_client.client import ReefClient, ReefClientError
 
 from recipes.beta.spade.designer import (
-    KINDS,
+    DEFAULT_TURN_LIMIT,
     MAX_EXPERIENCE_RECORDS,
     DesignerReplyError,
     DesignerRequest,
     PlayRecord,
-    SmokeResult,
     designer_messages,
-    parse_gym_reply,
     parse_harbor_reply,
-    parse_openenv_reply,
-    smoke_test,
 )
-from recipes.beta.spade.harbor import GeneratedHarborTask, OracleResult, content_hash, harbor_task, oracle_check
-from recipes.beta.spade.openenv import GeneratedOpenEnvTask, OpenEnvCheck, openenv_check, openenv_task
-from recipes.beta.spade.tasks import DEFAULT_MAX_TURNS, GeneratedEnvironment, environment_task, split_generation
+from recipes.beta.spade.harbor import (
+    GeneratedHarborTask,
+    OracleResult,
+    content_hash,
+    harbor_task,
+    oracle_check,
+    split_generation,
+)
 from reef.core.tasks import (
     HarborTask,
     HarborTaskConflict,
@@ -56,7 +56,7 @@ from reef.harness.client.tasks import TaskPlay, TaskPlayer
 
 REPORT_DIRECTORY = ".spade"
 DESIGNER_TIMEOUT_S = 1800.0
-CODE_EXCERPT_CHARS = 600
+INSTRUCTION_EXCERPT_CHARS = 600
 CHAT_PATH = "/v1/chat/completions"
 
 
@@ -135,30 +135,18 @@ class ReefDesigner(Designer):
 
 
 class Checks(ABC):
-    """The kind's check before a proposal becomes a task; the real ones need the host, harbor and docker."""
-
-    @abstractmethod
-    def smoke(self, code: str, *, seed: int, max_turns: int) -> SmokeResult: ...
+    """The check before a written task is played: Harbor's oracle and nop agents through the harbor command line."""
 
     @abstractmethod
     def oracle(self, task_path: Path) -> OracleResult: ...
-
-    @abstractmethod
-    def serving(self, task_path: Path, action_example: Mapping[str, object]) -> OpenEnvCheck: ...
 
 
 class RealChecks(Checks):
     def __init__(self, *, harbor: str | None = None) -> None:
         self.harbor = harbor
 
-    def smoke(self, code: str, *, seed: int, max_turns: int) -> SmokeResult:
-        return smoke_test(code, seed=seed, max_turns=max_turns)
-
     def oracle(self, task_path: Path) -> OracleResult:
         return oracle_check(task_path, harbor=self.harbor)
-
-    def serving(self, task_path: Path, action_example: Mapping[str, object]) -> OpenEnvCheck:
-        return openenv_check(task_path, action_example=dict(action_example))
 
 
 class Solver(ABC):
@@ -234,11 +222,10 @@ class GenerationRequest:
 
     description: str
     skills: tuple[str, ...]
-    kinds: tuple[str, ...] = KINDS
     count: int = 8
     generation: int = 0
     difficulty: str = "medium"
-    turn_limit: int = DEFAULT_MAX_TURNS
+    turn_limit: int = DEFAULT_TURN_LIMIT
     grounding: str | None = None
     experience: tuple[PlayRecord, ...] = ()
     plays: int = 4
@@ -251,8 +238,6 @@ class GenerationRequest:
             raise GenerationError("description must be non-empty text")
         if not self.skills or not all(isinstance(skill, str) and skill for skill in self.skills):
             raise GenerationError("skills must name at least one skill")
-        if not self.kinds or any(kind not in KINDS for kind in self.kinds):
-            raise GenerationError(f"kinds must be among {', '.join(KINDS)}")
         for label, value in (("count", self.count), ("generation", self.generation), ("seed", self.seed)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise GenerationError(f"{label} must be a non-negative integer")
@@ -272,7 +257,6 @@ class Proposal:
     """One Designer call and what became of it."""
 
     index: int
-    kind: str
     skill: str
     designer_record_id: str
     task_name: str | None
@@ -289,7 +273,6 @@ class TaskMeasure:
     """A written task after both arms played: the rewards, the regret and the band."""
 
     name: str
-    kind: str
     skill: str
     task_path: Path
     digest: str
@@ -320,13 +303,6 @@ class GenerationResult:
     @property
     def experience(self) -> tuple[PlayRecord, ...]:
         return tuple(measure.record for measure in self.measures)
-
-
-@dataclass(frozen=True)
-class WrittenTask:
-    task: HarborTask
-    code_excerpt: str
-    action_example: Mapping[str, object] = field(default_factory=dict)
 
 
 def is_unplayed(play: TaskPlay) -> bool:
@@ -390,11 +366,9 @@ class Generation:
         proposals: list[Proposal] = []
         measures: list[TaskMeasure] = []
         for index in range(request.count):
-            kind = request.kinds[index % len(request.kinds)]
             skill = request.skills[index % len(request.skills)]
-            tags = {"role": "designer", "generation": str(request.generation), "kind": kind, "skill": skill}
+            tags = {"role": "designer", "generation": str(request.generation), "skill": skill}
             designer_request = DesignerRequest(
-                kind=kind,
                 skill=skill,
                 skill_description=request.description,
                 difficulty=request.difficulty,
@@ -403,20 +377,20 @@ class Generation:
                 experience=experience_for(request.experience, skill),
             )
             answer = self.designer.answer(designer_messages(designer_request), tags=tags)
-            written, refusal = self.written_task(kind, answer, skill, index, request, known_hashes)
+            written, refusal = self.written_task(answer, skill, index, request, known_hashes)
             if written is None:
-                proposal = Proposal(index, kind, skill, answer.record_id, None, refusal)
+                proposal = Proposal(index, skill, answer.record_id, None, refusal)
                 proposals.append(self.reported(proposal, request, None))
                 continue
-            measure, refusal = self.measured(written, kind, skill, request)
+            measure, refusal = self.measured(written, skill, request)
             if measure is None:
-                shutil.rmtree(self.tasks_root / written.task.name, ignore_errors=True)
-                known_hashes.discard(content_hash(written.task))
-                proposal = Proposal(index, kind, skill, answer.record_id, None, refusal)
+                shutil.rmtree(self.tasks_root / written.name, ignore_errors=True)
+                known_hashes.discard(content_hash(written))
+                proposal = Proposal(index, skill, answer.record_id, None, refusal)
                 proposals.append(self.reported(proposal, request, None))
                 continue
             measures.append(measure)
-            proposal = Proposal(index, kind, skill, answer.record_id, measure.name, "")
+            proposal = Proposal(index, skill, answer.record_id, measure.name, "")
             proposals.append(self.reported(proposal, request, measure))
         manifest_path = self.written_manifest(measures, request)
         report_path = self.written_report(request, proposals, measures, manifest_path)
@@ -441,101 +415,44 @@ class Generation:
         return hashes
 
     def written_task(
-        self,
-        kind: str,
-        answer: DesignerAnswer,
-        skill: str,
-        index: int,
-        request: GenerationRequest,
-        known_hashes: set[str],
-    ) -> tuple[WrittenTask | None, str]:
-        """Parse, check and write one proposal; the written task, or None and why it was refused."""
+        self, answer: DesignerAnswer, skill: str, index: int, request: GenerationRequest, known_hashes: set[str]
+    ) -> tuple[HarborTask | None, str]:
+        """Parse, write and check one proposal; the written task, or None and why it was refused."""
         try:
-            prepared = self.prepared_task(kind, answer, skill, index, request)
+            reply = parse_harbor_reply(answer.text)
+            generated = GeneratedHarborTask(
+                reply=reply,
+                skill=skill,
+                generation=request.generation,
+                index=index,
+                source_record_id=answer.record_id,
+                difficulty=request.difficulty,
+            )
+            task = harbor_task(generated)
         except (DesignerReplyError, ValueError) as exc:
-            return None, f"{kind} reply refused: {exc}"
-        if prepared is None:
-            return None, "refused"
-        digest = content_hash(prepared.task)
+            return None, f"reply refused: {exc}"
+        digest = content_hash(task)
         if digest in known_hashes:
             return None, "duplicate of a task already under the root"
         try:
-            task_path = write_harbor_task(prepared.task, self.tasks_root)
+            task_path = write_harbor_task(task, self.tasks_root)
         except HarborTaskConflict as exc:
-            return None, f"a different task holds the name {prepared.task.name}: {exc}"
-        if kind == "harbor":
-            oracle = self.checks.oracle(task_path)
-            if not oracle.is_solvable:
-                shutil.rmtree(task_path, ignore_errors=True)
-                return None, f"oracle check refused: {oracle.reason}"
-        elif kind == "openenv":
-            serving = self.checks.serving(task_path, prepared.action_example)
-            if not serving.is_serving:
-                shutil.rmtree(task_path, ignore_errors=True)
-                return None, f"serve check refused: {serving.reason}"
+            return None, f"a different task holds the name {task.name}: {exc}"
+        oracle = self.checks.oracle(task_path)
+        if not oracle.is_solvable:
+            shutil.rmtree(task_path, ignore_errors=True)
+            return None, f"oracle check refused: {oracle.reason}"
         known_hashes.add(digest)
-        return prepared, ""
+        return task, ""
 
-    def prepared_task(
-        self, kind: str, answer: DesignerAnswer, skill: str, index: int, request: GenerationRequest
-    ) -> WrittenTask | None:
-        """The kind's reply parsed and, for gym, smoke tested; None when the smoke test refused it."""
-        seed = request.seed * 1000 + index
-        if kind == "gym":
-            reply = parse_gym_reply(answer.text)
-            smoke = self.checks.smoke(reply.code, seed=seed, max_turns=request.turn_limit)
-            if not smoke.is_runnable:
-                raise ValueError(f"smoke test refused: {smoke.reason}")
-            environment = GeneratedEnvironment(
-                code=reply.code,
-                skill=skill,
-                generation=request.generation,
-                index=index,
-                hint=reply.hint,
-                source_record_id=answer.record_id,
-                difficulty=request.difficulty,
-                seed=seed,
-            )
-            return WrittenTask(
-                environment_task(environment, max_turns=request.turn_limit), reply.code[:CODE_EXCERPT_CHARS]
-            )
-        if kind == "harbor":
-            harbor_reply = parse_harbor_reply(answer.text)
-            generated = GeneratedHarborTask(
-                reply=harbor_reply,
-                skill=skill,
-                generation=request.generation,
-                index=index,
-                source_record_id=answer.record_id,
-                difficulty=request.difficulty,
-            )
-            return WrittenTask(harbor_task(generated), harbor_reply.instruction[:CODE_EXCERPT_CHARS])
-        openenv_reply = parse_openenv_reply(answer.text)
-        generated_openenv = GeneratedOpenEnvTask(
-            reply=openenv_reply,
-            skill=skill,
-            generation=request.generation,
-            index=index,
-            source_record_id=answer.record_id,
-            difficulty=request.difficulty,
-            seed=seed,
-        )
-        return WrittenTask(
-            openenv_task(generated_openenv, max_turns=request.turn_limit),
-            openenv_reply.environment[:CODE_EXCERPT_CHARS],
-            openenv_reply.action_example,
-        )
-
-    def measured(
-        self, written: WrittenTask, kind: str, skill: str, request: GenerationRequest
-    ) -> tuple[TaskMeasure | None, str]:
+    def measured(self, task: HarborTask, skill: str, request: GenerationRequest) -> tuple[TaskMeasure | None, str]:
         """Both arms played: the plain arm reported as training data, the hint arm measured only.
 
         A task the solver could not play at all (every plain episode ended before the agent ran) is no
         measure of the solver; it comes back as None with the first episode's error.
         """
-        task_path = self.tasks_root / written.task.name
-        tags = {"generation": str(request.generation), "kind": kind, "skill": skill}
+        task_path = self.tasks_root / task.name
+        tags = {"generation": str(request.generation), "skill": skill}
         plain = self.solver.play(
             task_path, arm="plain", plays=request.plays, is_reporting=True, extra_instruction_paths=(), tags=tags
         )
@@ -551,18 +468,17 @@ class Generation:
             tags=tags,
         )
         record = PlayRecord(
-            name=written.task.name,
+            name=task.name,
             skill=skill,
             return_without_hint=mean_reward(plain),
             return_with_hint=mean_reward(hint) if hint else mean_reward(plain),
-            code_excerpt=written.code_excerpt,
+            code_excerpt=task.instruction[:INSTRUCTION_EXCERPT_CHARS],
         )
         measure = TaskMeasure(
-            name=written.task.name,
-            kind=kind,
+            name=task.name,
             skill=skill,
             task_path=task_path,
-            digest=written.task.digest,
+            digest=task.digest,
             plain_rewards=tuple(
                 play.reward if play.reward is not None else 0.0 for play in plain if not is_unplayed(play)
             ),
@@ -577,11 +493,7 @@ class Generation:
         """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
         if not self.is_reporting_designer:
             return proposal
-        metadata: dict[str, object] = {
-            "generation": request.generation,
-            "kind": proposal.kind,
-            "skill": proposal.skill,
-        }
+        metadata: dict[str, object] = {"generation": request.generation, "skill": proposal.skill}
         if measure is None:
             score = 0.0
             metadata["refusal"] = proposal.refusal
@@ -595,7 +507,6 @@ class Generation:
         report_id = self.designer.report(proposal.designer_record_id, score=score, metadata=metadata)
         return Proposal(
             proposal.index,
-            proposal.kind,
             proposal.skill,
             proposal.designer_record_id,
             proposal.task_name,
@@ -634,7 +545,6 @@ class Generation:
             "tasks": [
                 {
                     "name": measure.name,
-                    "kind": measure.kind,
                     "skill": measure.skill,
                     "path": str(measure.task_path),
                     "digest": measure.digest,
@@ -673,11 +583,10 @@ def main(
     parser.add_argument("--work-dir", type=Path, default=Path("work/spade"))
     parser.add_argument("--description", required=True, help="what the environments are about")
     parser.add_argument("--skills", required=True, help="comma separated skill names, cycled over the proposals")
-    parser.add_argument("--kinds", default=",".join(KINDS), help="comma separated kinds, cycled over the proposals")
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--generation", type=int, default=0)
     parser.add_argument("--difficulty", default="medium")
-    parser.add_argument("--turn-limit", type=int, default=DEFAULT_MAX_TURNS)
+    parser.add_argument("--turn-limit", type=int, default=DEFAULT_TURN_LIMIT)
     parser.add_argument("--grounding", type=Path, default=None, help="a text file the Designer grounds in")
     parser.add_argument("--experience", type=Path, default=None, help="the previous generation's report")
     parser.add_argument("--plays", type=int, default=4)
@@ -707,7 +616,6 @@ def main(
         request = GenerationRequest(
             description=arguments.description,
             skills=tuple(part.strip() for part in arguments.skills.split(",") if part.strip()),
-            kinds=tuple(part.strip() for part in arguments.kinds.split(",") if part.strip()),
             count=arguments.count,
             generation=arguments.generation,
             difficulty=arguments.difficulty,
@@ -762,7 +670,7 @@ def main(
         parser.error(str(exc))
     measures = {measure.name: measure for measure in result.measures}
     for proposal in result.proposals:
-        line: dict[str, object] = {"index": proposal.index, "kind": proposal.kind, "skill": proposal.skill}
+        line: dict[str, object] = {"index": proposal.index, "skill": proposal.skill}
         if proposal.is_written and proposal.task_name in measures:
             measure = measures[proposal.task_name]
             line.update(

@@ -1,103 +1,37 @@
-"""The Environment Designer: what it is asked and how its reply becomes an environment of one kind.
+"""The Environment Designer: what it is asked and how its reply becomes a Harbor task.
 
 The Designer is the served model in a second role (SPADE Sec. 4.1). One call asks for one environment
-of one kind at the edge of what the agent can do today: the request carries what the agent did on the
-last generation's environments, sorted by the hint based regret of Sec. 4.2 into the frontier (the hint
+at the edge of what the agent can do today: the request carries what the agent did on the last
+generation's environments, sorted by the hint based regret of Sec. 4.2 into the frontier (the hint
 turns losses into wins), the mastered (won without it) and the out of reach (lost even with it), so the
-next environment lands where the agent fails without a hint and passes with one. Two kinds so far, one
-Harbor task each, all playable by any Harbor agent: ``gym``, a Python class with the Gym interface (a game, a simulated
-tool use setting) served inside the container behind the ``observe`` and ``act`` commands and validated by running it in
-child interpreters on the host; ``harbor``, a Harbor task written directly (an instruction, a container, a
-verifier, a reference solution) validated by Harbor running the reference solution; ``openenv``, an
-OpenEnv environment package served inside the container behind ``serve`` and validated by a reset and one
-step against that server.
+next environment lands where the agent fails without a hint and passes with one. The environment is a
+Harbor task written directly, an instruction, a container, a verifier and a reference solution, and Harbor
+running the reference solution validates it.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import re
-import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from recipes.beta.spade.environment_loader import environment_class_name
-from recipes.beta.spade.process import EnvironmentProcess, EnvironmentProcessError
-from recipes.beta.spade.tasks import DEFAULT_MAX_TURNS, SKILL_PATTERN
 from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, checked_files
 from reef.train.cordis_backend.strategies import untrusted_text
 
-KINDS = ("harbor", "gym", "openenv")
 DIFFICULTIES = ("easy", "medium", "hard")
+DEFAULT_TURN_LIMIT = 12
 MAX_EXPERIENCE_RECORDS = 12
 CODE_EXCERPT_CHARS = 1200
 GROUNDING_CHARS = 6000
 MASTERED_RETURN = 0.9
 TOO_HARD_RETURN = 0.1
-SMOKE_INSTANCES = 3
-SMOKE_PROBES = ("\\boxed{probe}", "\\boxed{1}")
-# The rules forbid files, processes, the network and the interpreter; the smoke test runs on the host, so these are refused first.
-FORBIDDEN_MODULES = frozenset(
-    {
-        "os",
-        "sys",
-        "subprocess",
-        "socket",
-        "shutil",
-        "pathlib",
-        "http",
-        "urllib",
-        "ctypes",
-        "importlib",
-        "io",
-        "signal",
-        "threading",
-        "multiprocessing",
-        "asyncio",
-        "tempfile",
-        "glob",
-        "webbrowser",
-        "ftplib",
-        "smtplib",
-        "xmlrpc",
-        "pickle",
-        "marshal",
-        "code",
-        "codeop",
-        "runpy",
-        "pty",
-        "resource",
-        "gc",
-        "inspect",
-        "builtins",
-        "sysconfig",
-        "platform",
-        "time",
-        "datetime",
-        "secrets",
-        "uuid",
-        "posix",
-        "nt",
-        "fcntl",
-        "_posixsubprocess",
-        "_io",
-        "_socket",
-        "_thread",
-        "_signal",
-    }
-)
-FORBIDDEN_CALLS = frozenset(
-    {"open", "__import__", "exec", "eval", "compile", "input", "breakpoint", "globals", "getattr", "setattr"}
-)
-PYTHON_BLOCK = re.compile(r"^[ \t]*```(?:python3?|py)\b[^\n]*\r?\n(.*?)\r?\n[ \t]*```", re.S | re.M | re.I)
-HINT_BLOCK = re.compile(r"^[ \t]*```hint\b[^\n]*\r?\n(.*?)\r?\n[ \t]*```", re.S | re.M | re.I)
-HINT_LINE = re.compile(r"^HINT:[ \t]*(.+)$", re.M)
+SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 JSON_BLOCK = re.compile(r"^[ \t]*```[^\n{]*(?:\r?\n)?[ \t]*(\{.*?\})[ \t]*(?:\r?\n)?[ \t]*```", re.S | re.M)
 HARBOR_FILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(/[A-Za-z0-9][A-Za-z0-9._-]{0,99}){0,3}$")
 
 SYSTEM_PROMPT = (
-    "You are an expert Python programmer and environment designer. You write executable environments that train "
+    "You are an expert programmer and environment designer. You write executable environments that train "
     "a language model agent by finding the edge of what it can do."
 )
 
@@ -147,19 +81,16 @@ class PlayRecord:
 
 @dataclass(frozen=True)
 class DesignerRequest:
-    """One Designer call: the kind and skill to test, how hard, what the agent did last time, and a grounding text."""
+    """One Designer call: the skill to test, how hard, what the agent did last time, and a grounding text."""
 
-    kind: str
     skill: str
     skill_description: str
     difficulty: str = "medium"
-    turn_limit: int = DEFAULT_MAX_TURNS
+    turn_limit: int = DEFAULT_TURN_LIMIT
     grounding: str | None = None
     experience: tuple[PlayRecord, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if self.kind not in KINDS:
-            raise ValueError(f"kind must be one of {KINDS}")
         if not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill):
             raise ValueError(f"skill {self.skill!r} must match {SKILL_PATTERN.pattern}")
         if not isinstance(self.skill_description, str) or not self.skill_description.strip():
@@ -177,16 +108,8 @@ class DesignerRequest:
 
 
 @dataclass(frozen=True)
-class GymReply:
-    """A usable reply of the ``gym`` kind: the class and the hint for the agent."""
-
-    code: str
-    hint: str
-
-
-@dataclass(frozen=True)
 class HarborReply:
-    """A usable reply of the ``harbor`` kind: the task's files by directory, and the hint for the agent."""
+    """A usable reply: the task's files by directory, and the hint for the agent."""
 
     instruction: str
     environment: dict[str, str]
@@ -195,56 +118,18 @@ class HarborReply:
     hint: str
 
 
-@dataclass(frozen=True)
-class OpenEnvReply:
-    """A usable reply of the ``openenv`` kind: the goal, the models and environment modules, an example action, the hint."""
-
-    instruction: str
-    models: str
-    environment: str
-    action_example: dict[str, object]
-    hint: str
-
-
-@dataclass(frozen=True)
-class SmokeResult:
-    """Whether a ``gym`` class runs as an environment; ``reason`` names the first contract break."""
-
-    is_runnable: bool
-    reason: str
-    first_observation: str = ""
-
-
 def designer_messages(request: DesignerRequest) -> list[dict[str, str]]:
     """The chat messages for one Designer call, in the shape ``ModelBinding.chat`` takes."""
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": designer_prompt(request)}]
 
 
 def designer_prompt(request: DesignerRequest) -> str:
-    """The user turn of a Designer call: target, what the agent did last time, grounding, the kind's rules, output."""
-    if request.kind == "gym":
-        opening = (
-            "Create ONE interactive, multi turn environment as a Python class with the Gym interface that tests: "
-            f"{request.skill} ({request.skill_description.strip()})."
-        )
-        rules = GYM_RULES_TEXT.format(turn_limit=request.turn_limit)
-        output = GYM_OUTPUT_TEXT
-    elif request.kind == "openenv":
-        opening = (
-            "Create ONE interactive, multi turn environment as an OpenEnv environment package that tests: "
-            f"{request.skill} ({request.skill_description.strip()})."
-        )
-        rules = OPENENV_RULES_TEXT.format(turn_limit=request.turn_limit)
-        output = OPENENV_OUTPUT_TEXT
-    else:
-        opening = (
+    """The user turn of a Designer call: target, what the agent did last time, grounding, the rules, output."""
+    parts = [
+        (
             "Create ONE Harbor task, a container with files, an instruction and a verifier, that tests: "
             f"{request.skill} ({request.skill_description.strip()})."
-        )
-        rules = HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit)
-        output = HARBOR_OUTPUT_TEXT
-    parts = [
-        opening,
+        ),
         (
             f"DIFFICULTY: {request.difficulty}. The agent has at most {request.turn_limit} turns; a careful agent "
             "finishes in fewer, a careless one fails."
@@ -257,7 +142,7 @@ def designer_prompt(request: DesignerRequest) -> str:
             "document. Never mention the document in the environment's text.\n"
             + untrusted_text(request.grounding.strip()[:GROUNDING_CHARS], "reference document")
         )
-    parts.extend([rules, output])
+    parts.extend([HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit), HARBOR_OUTPUT_TEXT])
     return "\n\n".join(parts)
 
 
@@ -289,7 +174,7 @@ def experience_text(experience: Sequence[PlayRecord]) -> str:
     if out_of_reach:
         lines.append(
             "- Won fewer than one attempt in ten without the hint. Out of reach or broken; do not write environments "
-            "like these, and make sure the observation gives the agent enough to act on:"
+            "like these, and make sure the instruction gives the agent enough to act on:"
         )
         lines.extend(record_lines(out_of_reach, is_code_shown=False))
     return "\n".join(lines)
@@ -303,27 +188,9 @@ def record_lines(records: Sequence[PlayRecord], *, is_code_shown: bool) -> list[
             f"with hint {record.return_with_hint:+.2f}"
         )
         if is_code_shown and record.code_excerpt.strip():
-            lines.append(untrusted_text(record.code_excerpt.strip()[:CODE_EXCERPT_CHARS], "earlier environment code"))
+            lines.append(untrusted_text(record.code_excerpt.strip()[:CODE_EXCERPT_CHARS], "earlier environment"))
     return lines
 
-
-GYM_RULES_TEXT = """RULES:
-- One class whose name ends in Env, standard library only (random, json, re, math, itertools, collections), no input(), no files, no network, no printing.
-- reset(self, seed=None) -> (observation: str, info: dict). All randomness comes from the seed: the same seed gives the same environment, in reset() and in every step(). reset() generates ONE task for the episode; step() never generates a new one.
-- step(self, action: str) -> (observation: str, reward: float, terminated: bool, truncated: bool, info: dict). Every code path returns that 5-tuple; info is a dict, never a string.
-- step() receives the agent's answer as \\boxed{{action}}. Extract the action with re.search(r"\\\\boxed\\{{([^}}]*)\\}}", action); when there is no box, return a reminder of the format with reward 0.0 and do not end the episode. An action the environment does not understand gets a specific error observation and does not end the episode.
-- HIDDEN STATE: the goal cannot be reached in one action; the agent must probe, remember and plan. The observation never states the answer or the rule behind it.
-- Every observation shows the current state, the result of the last action, what actions are possible, and reminds the agent to answer with \\boxed{{action}}.
-- REWARD: success returns 1.0 with terminated=True; failure returns 0.0 with terminated=True; every other step returns 0.0; after {turn_limit} turns return truncated=True with 0.0.
-- SELF CHECK before you answer, in your head, never as a code block: trace two different action sequences from reset(seed=0) and confirm the returns above."""
-
-GYM_OUTPUT_TEXT = """OUTPUT exactly two fenced blocks and nothing else:
-```python
-<the complete environment code>
-```
-```hint
-<one to three sentences for the agent: the key strategy and the answer format, without the answer itself; mention only what the agent can see>
-```"""
 
 HARBOR_RULES_TEXT = """RULES:
 - The agent gets a shell in a container built from environment/Dockerfile and the text of instruction.md; it has at most {turn_limit} commands. It never sees tests/ or solution/.
@@ -332,7 +199,7 @@ HARBOR_RULES_TEXT = """RULES:
 - instruction.md is at least 80 characters, self contained, and never contains the answer.
 - tests/test.sh is the verifier: it runs after the agent, with /tests holding the tests/ files, and writes one number in [0, 1] to /logs/verifier/reward.txt (1 for success). It checks the outcome, never the transcript, and needs nothing the image lacks.
 - solution/solve.sh is a reference solution: the commands that complete the task from the same starting point. The task is accepted only if this script scores 1 and doing nothing scores below 1.
-- HIDDEN STATE: the task needs the agent to inspect the container (files, logs, a running process, a database) before it can act.
+- HIDDEN STATE: the task needs the agent to inspect the container (files, logs, a running process, a database) before it can act; an environment that answers the agent step by step (a game, a puzzle, a simulated tool) is a program in the image whose state the agent cannot read, driven by a command the instruction names.
 - TARGET: an agent at the frontier completes the task in one of four to three of four attempts; too easy or out of reach is refused later.
 - Files are plain text; paths are relative, no directories above the task, at most four levels."""
 
@@ -348,148 +215,16 @@ HARBOR_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, w
 ```"""
 
 
-def checked_code(code: str) -> str:
-    """The environment class name of ``code`` after the rules' bans: no file, process, network or interpreter access."""
-    name = environment_class_name(code)
-    tree = ast.parse(code)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules = [alias.name.split(".")[0] for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules = [node.module.split(".")[0]]
-        else:
-            modules = []
-        for module in modules:
-            if module in FORBIDDEN_MODULES:
-                raise ValueError(f"environment code imports {module!r}, which the rules forbid")
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
-            raise ValueError(f"environment code calls {node.func.id}(), which the rules forbid")
-    return name
-
-
-OPENENV_RULES_TEXT = """RULES:
-- Two Python modules of the OpenEnv framework (huggingface/OpenEnv). models.py defines exactly one class inheriting Action and exactly one inheriting Observation, imported with `from openenv.core.env_server.types import Action, Observation`, with pydantic fields; the observation carries reward: float and done: bool. environment.py defines exactly one class inheriting Environment, imported with `from openenv.core.env_server import Environment`, and imports the models with `from openenv_task.models import ...`; it has reset(self, seed=None, **kwargs) -> the observation, step(self, action) -> the observation, both plain methods (no async), and a state property returning State(episode_id=..., step_count=...) from openenv.core.env_server.types. No other class may subclass it.
-- Standard library, openenv and pydantic only; no files, no processes, no network, no printing. All randomness comes from the seed: the same seed gives the same episode. reset() generates ONE task for the episode; step() never generates a new one.
-- HIDDEN STATE: the goal cannot be reached in one action; the agent must probe, remember and plan. The observation never states the answer or the rule behind it, and every observation shows the state, the result of the last action and what actions are possible.
-- REWARD: success sets reward 1.0 and done True; failure sets reward 0.0 and done True; every other step sets reward 0.0 and done False. The server ends the episode after {turn_limit} steps on its own.
-- Give one valid example action as a JSON object with the action's fields, so the agent and the check can take a first step."""
-
-OPENENV_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, with these keys:
-```json
-{
-  "instruction": "<the goal the agent reads, at least 80 characters, without the answer>",
-  "models": "<the complete models.py>",
-  "environment": "<the complete environment.py>",
-  "action_example": {"<field>": "<value>"},
-  "hint": "<one to three sentences for the agent: the key strategy, without the answer itself>"
-}
-```"""
-
-
-def parse_openenv_reply(text: str) -> OpenEnvReply:
-    """The ``json`` block of an openenv reply: the goal, both modules, the example action and the hint, all checked."""
-    if not isinstance(text, str) or not text.strip():
-        raise DesignerReplyError("the reply is empty")
-    blocks = list(JSON_BLOCK.finditer(text))
-    if not blocks:
-        raise DesignerReplyError("the reply holds no ```json block with an object")
-    chosen = None
-    first_error = ""
-    for block in blocks:
-        try:
-            # strict=False: a model writes real line breaks inside the code strings as often as escaped ones.
-            document = json.loads(textwrap.dedent(block.group(1)), strict=False)
-        except json.JSONDecodeError as exc:
-            first_error = first_error or f"the ```json block is not valid JSON: {exc}"
-            continue
-        if not isinstance(document, dict):
-            first_error = first_error or "the ```json block must hold an object"
-            continue
-        if chosen is None or "models" in document:
-            chosen = (block, document)
-        if "models" in document:
-            break
-    if chosen is None:
-        raise DesignerReplyError(first_error)
-    block, document = chosen
-    unknown = sorted(
-        key for key in document if key not in ("instruction", "models", "environment", "action_example", "hint")
-    )
-    if unknown:
-        raise DesignerReplyError(f"the reply carries keys the task has no place for: {', '.join(unknown)}")
-    if "hint" not in document:
-        hint_match = HINT_BLOCK.search(text, block.end()) or HINT_LINE.search(text, block.end())
-        if hint_match is not None:
-            document["hint"] = hint_match.group(1)
-    instruction = checked_text(document.get("instruction"), "instruction")
-    models = checked_text(document.get("models"), "models")
-    environment = checked_text(document.get("environment"), "environment")
-    hint = checked_text(document.get("hint"), "hint")
-    action_example = document.get("action_example")
-    if isinstance(action_example, str):
-        try:
-            action_example = json.loads(action_example, strict=False)
-        except json.JSONDecodeError:
-            action_example = None
-    if not isinstance(action_example, dict) or not action_example:
-        raise DesignerReplyError("the reply's action_example must be a non-empty object")
-    return OpenEnvReply(
-        instruction=instruction.strip() + "\n",
-        models=models.strip("\n") + "\n",
-        environment=environment.strip("\n") + "\n",
-        action_example=action_example,
-        hint=" ".join(hint.split()),
-    )
-
-
-def parse_gym_reply(text: str) -> GymReply:
-    """The first ``python`` block that holds an environment class, and the hint after it."""
-    if not isinstance(text, str) or not text.strip():
-        raise DesignerReplyError("the reply is empty")
-    blocks = list(PYTHON_BLOCK.finditer(text))
-    if not blocks:
-        raise DesignerReplyError("the reply holds no ```python block")
-    chosen = None
-    first_error = ""
-    for block in blocks:
-        code = textwrap.dedent(block.group(1).replace("\r\n", "\n")).strip("\n") + "\n"
-        if not code.strip():
-            continue
-        try:
-            environment_class_name(code)
-        except ValueError as exc:
-            if not first_error:
-                first_error = str(exc)
-            continue
-        chosen = (block, code)
-        break
-    if chosen is None:
-        if first_error:
-            raise DesignerReplyError(f"no ```python block holds an environment class: {first_error}")
-        raise DesignerReplyError("the ```python block is empty")
-    block, code = chosen
-    try:
-        checked_code(code)
-    except ValueError as exc:
-        raise DesignerReplyError(str(exc)) from exc
-    hint_match = HINT_BLOCK.search(text, block.end()) or HINT_LINE.search(text, block.end())
-    if hint_match is None:
-        raise DesignerReplyError("the reply holds no ```hint block after the code")
-    hint = " ".join(hint_match.group(1).split())
-    if not hint:
-        raise DesignerReplyError("the hint is empty")
-    return GymReply(code=code, hint=hint)
-
-
 def parse_harbor_reply(text: str) -> HarborReply:
-    """The ``json`` block of a harbor reply: instruction, the three file mappings and the hint, all checked."""
+    """The ``json`` block of a reply: instruction, the three file mappings and the hint, all checked."""
     if not isinstance(text, str) or not text.strip():
         raise DesignerReplyError("the reply is empty")
     match = JSON_BLOCK.search(text)
     if match is None:
         raise DesignerReplyError("the reply holds no ```json block with an object")
     try:
-        document = json.loads(match.group(1))
+        # strict=False: a model writes real line breaks inside the file strings as often as escaped ones.
+        document = json.loads(match.group(1), strict=False)
     except json.JSONDecodeError as exc:
         raise DesignerReplyError(f"the ```json block is not valid JSON: {exc}") from exc
     if not isinstance(document, dict):
@@ -539,37 +274,3 @@ def checked_harbor_files(value: object, label: str) -> dict[str, str]:
     except HarborTaskError as exc:
         raise DesignerReplyError(f"the reply's {label}: {exc}") from exc
     return files
-
-
-def smoke_test(
-    code: str, *, seed: int = 0, max_turns: int = DEFAULT_MAX_TURNS, timeout_s: float = 20.0
-) -> SmokeResult:
-    """Run a ``gym`` class the way the container will, in three child interpreters: it loads, reset and step agree, the 5-tuple holds."""
-    try:
-        checked_code(code)
-    except ValueError as exc:
-        return SmokeResult(is_runnable=False, reason=str(exc))
-    instances = [EnvironmentProcess(code, max_turns=max_turns) for _ in range(SMOKE_INSTANCES)]
-    try:
-        observations = [instance.reset(seed, timeout_s=timeout_s) for instance in instances]
-        if not observations[0].strip():
-            return SmokeResult(is_runnable=False, reason="reset(seed) must return a non-empty observation")
-        if len(set(observations)) != 1:
-            return SmokeResult(
-                is_runnable=False, reason="reset(seed) is not deterministic: resets with one seed differ"
-            )
-        for probe in SMOKE_PROBES:
-            results = [instance.step(probe, timeout_s=timeout_s) for instance in instances]
-            if len(set(results)) != 1:
-                return SmokeResult(
-                    is_runnable=False,
-                    reason="step(action) is not deterministic: instances with one seed and one action differ",
-                )
-            if results[0][2] or results[0][3]:
-                break
-    except EnvironmentProcessError as exc:
-        return SmokeResult(is_runnable=False, reason=str(exc))
-    finally:
-        for instance in instances:
-            instance.close()
-    return SmokeResult(is_runnable=True, reason="", first_observation=observations[0])

@@ -156,13 +156,11 @@ wiring but do not establish learning performance.
 synthetic executable environments, `arXiv:2608.19197
 <https://arxiv.org/abs/2608.19197>`__) is **beta** under
 ``recipes/beta/spade/``: one policy plays an Environment Designer that writes
-executable environments with the Gym interface and a Reasoning Agent that
-learns in them. Reef knows one task format, Harbor; the package holds what
-SPADE needs beyond it: the Designer's three kinds, one per interface the
-community writes environments in (a Harbor task written directly; a Gym style
-class behind observe and act commands inside the container; an OpenEnv package
-served inside the container), every kind a Harbor task any Harbor agent can
-play; the Designer call with its reply parsers; and the checks on what it
-writes; and one generation end to end, from the Designer's proposals to the
-split manifest the two consumers read, with the Designer's regret reported
-back. The training side follows.
+executable environments and a Reasoning Agent that learns in them. Reef knows
+one task format, Harbor, and the Designer writes it directly: an instruction,
+a container, a verifier and a reference solution, a task any Harbor agent can
+play. The package holds the Designer call with its reply parser, the team's
+structural gate and Harbor's oracle check on what it writes, and one
+generation end to end, from the Designer's proposals to the split manifest the
+two consumers read, with the Designer's regret reported back. The training
+side follows.

@@ -1,6 +1,6 @@
-"""A generated environment of the harbor kind: a Harbor task written directly, and the checks that Harbor can solve it.
+"""A generated environment: a Harbor task written directly, and the checks that Harbor can solve it.
 
-The Designer's ``harbor`` kind is a Harbor task written directly: the instruction the agent reads, the
+The Designer writes a Harbor task directly: the instruction the agent reads, the
 files of the container image, the verifier under ``tests/`` and a reference solution under ``solution/``.
 Any Harbor agent plays it; Harbor scores it. The checks follow the team's terminal task designer
 (spare, ``scripts/terminal-rsi``): a structural gate refuses an untouched scaffold, the Dockerfile is
@@ -22,13 +22,12 @@ import re
 import shutil
 import signal
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from recipes.beta.spade.designer import HarborReply
-from recipes.beta.spade.tasks import SKILL_PATTERN
-from reef.core.tasks import HarborTask
+from recipes.beta.spade.designer import SKILL_PATTERN, HarborReply
+from reef.core.tasks import HarborTask, TaskSplit, split_by_source
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
 CATEGORIES = (
@@ -325,3 +324,14 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
             reason = f"{reason}; the trial ended with {nop.exception}"
         return OracleResult(is_solvable=False, reason=reason, oracle_reward=oracle.reward, nop_reward=nop.reward)
     return OracleResult(is_solvable=True, reason="", oracle_reward=oracle.reward, nop_reward=nop.reward)
+
+
+def split_generation(tasks: Sequence[HarborTask], *, eval_fraction: float, seed: int) -> TaskSplit:
+    """Split one generation's tasks so that every task of one Designer call lands in one split."""
+    names = [task.name for task in tasks]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"tasks share a name: {', '.join(repeated)}")
+    return split_by_source(
+        {task.name: task.source_agent_record_ids for task in tasks}, eval_fraction=eval_fraction, seed=seed
+    )
