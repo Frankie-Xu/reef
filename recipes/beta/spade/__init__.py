@@ -11,8 +11,10 @@ Harbor agent can play.
 - ``generation``: one generation end to end: the Designer proposes through Reef, the oracle check refuses, the
   task is written, the solver plays both arms through the task player, regret splits, the manifest and the
   report are written, and each proposal is reported against the Designer's receipt.
+- ``recipe``, ``processor``, ``preparer``: the solver's training: the task player's reports grouped by task,
+  group relative advantages, Tinker's importance sampling loss.
 
-The training side follows.
+The Designer's own training follows.
 """
 
 from recipes.beta.spade.designer import (
@@ -46,6 +48,9 @@ from recipes.beta.spade.harbor import (
     reply_errors,
     split_generation,
 )
+from recipes.beta.spade.preparer import SpadePreparer
+from recipes.beta.spade.processor import SpadeProcessor
+from recipes.beta.spade.recipe import SpadeRecipe
 
 __all__ = [
     "Checks",
@@ -64,6 +69,9 @@ __all__ = [
     "ReefDesigner",
     "ReefSolver",
     "Solver",
+    "SpadePreparer",
+    "SpadeProcessor",
+    "SpadeRecipe",
     "content_hash",
     "designer_messages",
     "designer_prompt",

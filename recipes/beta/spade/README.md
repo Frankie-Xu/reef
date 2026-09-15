@@ -14,6 +14,10 @@ beta/spade/
   designer.py     the Designer's adversarial prompt, its reply parsed, the experience the prompt carries
   harbor.py       the written task under the team's structural gate, its hash, a split per generation, Harbor's oracle check
   generation.py   one generation end to end: propose, write, check, play both arms, split, report
+  recipe.py       the solver's training recipe: the task player's reports, grouped by task, on Tinker
+  processor.py    the reports grouped by task; a batch is tasks_per_step complete groups
+  preparer.py     group relative advantages per task group
+  examples/tinker/serve.yaml   a Tinker deployment of the solver recipe
 ```
 
 ## The Designer
@@ -35,3 +39,22 @@ python -m recipes.beta.spade.generation \
 ```
 
 `Generation.run(GenerationRequest)` is the same call from Python. The description is the target; `--skills` adds an optional axis, comma separated names cycled over the proposals, named in the prompt and in the task names and used to sort the experience. The Designer is the served model through Reef, so every proposal is a record with a receipt; the reply is parsed, the task is written under the tasks root, a duplicate of a task already there is refused, and the oracle check runs. The solver plays each written task through `reef.harness.client.tasks`: `--plays` times as it is, reported to Reef as training data, and `--hint-plays` times with `solution/hint.txt` appended to the instruction, measured only. Regret is the mean hint reward minus the mean plain reward; the plain mean puts the task in its band. The tasks are split by the Designer's record ids into `manifest-<generation>.json` under the root, which `evolution.task_manifest` and the task player read; `.spade/generation-<generation>.json` keeps every proposal, refusal and measure, and `--experience` hands its records to the next generation's prompts. Each proposal is reported against the Designer's receipt with its regret as the score, the Designer's own training signal; `--no-designer-report` turns that off. `--agent-json` and `--agent-host` choose the solver's Harbor agent as the task player does; `--harbor` names the harbor command line for the oracle check. `--designer-timeout-s` bounds one Designer call (30 minutes by default; a large local model writes an environment in minutes, and the service's `inference.timeout_s` must allow it too). `--designer-json` adds fields to the Designer's chat request: a model that thinks for thousands of tokens before writing an environment runs past the service's inference deadline, and `{"reasoning_effort": "none"}` keeps it to the reply.
+
+## Train the solver on the generated tasks
+
+```bash
+export REEF_TOKEN=reef-local REEF_SPADE_STATE_DIR="$PWD/work/spade-tinker"   # and TINKER_API_KEY
+reef serve -c recipes/beta/spade/examples/tinker/serve.yaml
+```
+
+`SpadeRecipe` is a weight training recipe: the served model is the solver, its episodes on the generated tasks are its training data. Every plain episode the task player reports names its task under `metadata.task`; `SpadeProcessor` groups the reports by task, a group is complete at `rollouts-per-task` episodes, and a batch holds `tasks-per-step` complete groups. `SpadePreparer` centers and scales each episode's reward within its task group (a group with one reward everywhere gives 0), and Tinker's built in `importance_sampling` loss puts that advantage on every response token, so the recipe runs on the `tinker` backend today and fails at selection on Slime, which has no loss family of that name. With the deployment up, play the train split of a manifest `rollouts-per-task` times per task and watch the scenario's step count:
+
+```bash
+for rollout in 1 2 3 4; do
+  python -m reef.harness.client.tasks --reef-url http://127.0.0.1:8900 --scenario spade --model Qwen/Qwen3-8B \
+    --manifest tasks/manifest-00000.json --tasks-root tasks --side train --work-dir work/play-$rollout
+done
+curl -s -H "Authorization: Bearer $REEF_TOKEN" http://127.0.0.1:8900/reef/status | python -m json.tool | grep -A 3 '"spade"'
+```
+
+A generation whose solver is this deployment (`--reef-url` the same service, `--plays` at least `rollouts-per-task`) trains as it plays: the plain arm's reports are the batch. The Designer's own training, its regret as the reward of its proposals, follows.
