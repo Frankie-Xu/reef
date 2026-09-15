@@ -197,6 +197,8 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["reef"]
+# Coverage from the GitHub and Blacksmith checkouts is combined in one gate.
+relative_files = true
 # Reef-authored training control flow counts toward the CPU coverage gate. These
 # four modules execute only inside a live Megatron/CUDA worker; their useful
 # validation is the GPU integration suite, not import-only CPU mocks.
@@ -233,6 +235,7 @@ norecursedirs = [
 ]
 # markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
 markers = [
+    "sandbox: requires real nested bubblewrap jails on the GitHub CI runner",
     "unit: marks unit test, i.e. testing a single, well isolated functionality (deselect with '-m \"not unit\"')",
     "integration: marks test checking the elements when integrated into subsystems (deselect with '-m \"not integration\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",

@@ -10,6 +10,7 @@ permissions:
   contents: read
 
 env:
+  COVERAGE_VERSION: "7.16.1"
   UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
   UV_INSTALL_DIR: ${{ github.workspace }}/.ci-uv
 
@@ -60,6 +61,9 @@ jobs:
           tar --extract --gzip --file "$archive" actionlint
           ./actionlint
       - run: pipx run pre-commit run --all-files --show-diff-on-failure
+        env:
+          # These repository-wide checks have dedicated steps in this job.
+          SKIP: python-design-policy,python-statement-policy,readme-i18n
       # Keep this explicit in CI as well as pre-commit: TYPE_CHECKING and new
       # Callable-based object state are architectural policy violations.
       - name: Enforce Python design policy
@@ -72,13 +76,14 @@ jobs:
       - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
-  test:
-    # Keep the sandbox network-isolation tests on their known-working runner.
-    runs-on: ubuntu-latest
+  test-suites:
+    name: ${{ matrix.suite }} tests (${{ matrix.python-version }})
+    # Real nested network namespaces are only proven on the GitHub runner.
+    runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-latest' || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16
+        image: ${{ matrix.suite == 'source' && 'postgres:16' || '' }}
         env:
           POSTGRES_USER: reef
           POSTGRES_PASSWORD: reef_test
@@ -89,12 +94,15 @@ jobs:
           --health-cmd "pg_isready -U reef -d reef_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      REEF_TEST_POSTGRES_URL: postgresql://reef:reef_test@localhost:5432/reef_test
+      REEF_TEST_POSTGRES_URL: ${{ matrix.suite == 'source' && 'postgresql://reef:reef_test@localhost:5432/reef_test' || '' }}
+      REEF_REQUIRE_SANDBOX: ${{ matrix.suite == 'sandbox' && '1' || '0' }}
+      COVERAGE_FILE: .coverage.${{ matrix.suite }}
     strategy:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
         python-version: ["3.10", "3.11", "3.12"]
+        suite: [source, sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,8 +112,8 @@ jobs:
       # skip: the nested tool jail is only ever proven on a host that has it.
       # The runner's AppArmor confines unprivileged user namespaces, which the
       # jail's loopback setup needs; lifting it is what makes the jail nest.
-      # The live tests skip with the preflight's reason on a host that still
-      # refuses, so the step never fails the job by itself.
+      # The sandbox suite requires the preflight to succeed; local runs can
+      # still skip with its reason when the host cannot provide a nested jail.
       - run: |
           sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -120,6 +128,9 @@ jobs:
             ${{ env.UV_CACHE_DIR }}
             ${{ env.UV_INSTALL_DIR }}
           key: uv-${{ runner.os }}-${{ runner.arch }}-test-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+          # Reuse downloads after workflow/dependency edits; uv still resolves
+          # and installs the requested versions into a fresh environment.
+          restore-keys: uv-${{ runner.os }}-${{ runner.arch }}-test-${{ matrix.python-version }}-
       - name: Install uv on a cache miss
         if: steps.uv-cache.outputs.cache-hit != 'true'
         run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
@@ -130,7 +141,7 @@ jobs:
       # OPD teacher-client tests, ray for the slime bridge suites, and openai
       # for the CEO-Bench harness tests; keeping them here avoids expanding
       # Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4"
+      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -148,7 +159,7 @@ jobs:
       # dependency of the Reef wheel. Production Torch remains owned by the
       # Slime image.
       - run: uv pip install --system --python python torch --index-url https://download.pytorch.org/whl/cpu
-      # Directory-driven selection: run everything under tests/ so a new suite
+      # Both suites collect tests/ and use complementary markers so new tests
       # cannot be silently dropped from CI. Nothing is ignored today — what
       # genuinely needs Megatron carries its own importorskip and reports as
       # skipped; any future exception must be an explicit --ignore here with a
@@ -170,27 +181,84 @@ jobs:
       # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
       # coverage.xml is uploaded, so the other legs were paying the risk for a
       # report nothing reads.
-      # Four workers share the runner; keep each file together so module fixtures
-      # and expensive imports are reused. All workers contribute to coverage.
+      # Source tests share eight workers and keep each file together. The two
+      # sandbox tests run serially, avoiding unnecessary worker startup.
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: python -m pytest tests -n 4 --dist loadfile
+        run: >
+          python -m pytest tests
+          -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
+          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist loadfile
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_SYSTEM: /dev/null
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
         run: >
-          python -m pytest tests -n 4 --dist loadfile
-          --cov=reef --cov-report=term --cov-report=xml
+          python -m pytest tests
+          -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
+          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist loadfile
+          --cov --cov-report= --cov-fail-under=0
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_SYSTEM: /dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: matrix.python-version == '3.12'
         with:
+          name: coverage-${{ matrix.suite }}
+          path: .coverage.${{ matrix.suite }}
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # Preserve the existing required check names. A failed, skipped, or cancelled
+  # suite must not turn these gates green; 3.12 also checks combined coverage.
+  test:
+    needs: [test-suites]
+    if: always()
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Require every source and sandbox suite to pass
+        env:
+          SUITES_RESULT: ${{ needs.test-suites.result }}
+        run: test "$SUITES_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: matrix.python-version == '3.12'
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-source
+          path: coverage-inputs
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-sandbox
+          path: coverage-inputs
+      - name: Combine coverage and enforce the repository floor
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pip install "coverage==$COVERAGE_VERSION"
+          test -s coverage-inputs/.coverage.source
+          test -s coverage-inputs/.coverage.sandbox
+          python -m coverage combine coverage-inputs/.coverage.source coverage-inputs/.coverage.sandbox
+          python -m coverage report
+          python -m coverage xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.python-version == '3.12'
+        with:
           name: coverage-xml
           path: coverage.xml
+          if-no-files-found: error
 
   package:
     runs-on: blacksmith-4vcpu-ubuntu-2404
