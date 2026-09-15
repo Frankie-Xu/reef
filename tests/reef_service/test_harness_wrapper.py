@@ -1859,7 +1859,11 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
     assert [item["name"] for item in json.loads(release_file.read_text())["setup"]] == ["TWILIO_SID", "later"]
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, release="nope") == 2
-    assert capsys.readouterr().err == "reef-pi setup: no release nope in the catalog\n"
+    assert capsys.readouterr().err == (
+        "reef-pi setup: no release nope in the catalog\n"
+        f"catalog: http://127.0.0.1:{reef.port} (scenario 'setup-scenario'). "
+        "Refresh the version list with /reef-versions before retrying.\n"
+    )
     reef.close()
     # Nothing served yet: said so, and there is nothing to check off.
     reef = _ReleasesReef([_chain_row("v9", None, [{"name": "x", "kind": "env"}], pending=True)])
@@ -1998,7 +2002,11 @@ def test_setup_json_lists_the_items_with_met_from_the_environment_the_env_file_a
     assert release_file.read_text() == before and [call["path"] for call in reef.seen] == ["/reef/harness/releases"]
     with patch.dict(os.environ, env, clear=True):
         assert setup_json("setup-scenario", "pi", compose, release="nope") == 2
-    assert capsys.readouterr().err == "reef-pi setup: no release nope in the catalog\n"
+    assert capsys.readouterr().err == (
+        "reef-pi setup: no release nope in the catalog\n"
+        f"catalog: http://127.0.0.1:{reef.port} (scenario 'setup-scenario'). "
+        "Refresh the version list with /reef-versions before retrying.\n"
+    )
     reef.close()
     reef = _ReleasesReef([_row("v9", [{"name": "x", "kind": "env"}], pending=True)])
     (tmp_path / "waiting").mkdir()
@@ -2208,7 +2216,14 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
     rows = [_row("v1"), _row("v2", [{"name": "SMTP", "kind": "env", "prompt": "The SMTP host"}])]
     reef = _ReleasesReef(rows, install=INSTALL_SCRIPT)
     compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
-    env = _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok")
+    env = _ask_env(
+        tmp_path / "captures",
+        compose,
+        REEF_TOKEN="tok",
+        REEF_HARNESS_DEST=str(Path(compose).resolve().parent),
+        REEF_SERVICE_URL=f"http://127.0.0.1:{reef.port}/",
+        REEF_SCENARIO="setup-scenario",
+    )
     env.pop("SMTP", None)
     with patch.dict(os.environ, env, clear=True):
         assert update("setup-scenario", "pi", compose) == 3
@@ -2236,7 +2251,11 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
         assert update("setup-scenario", "pi", compose, release="v2") == 0
         assert update("setup-scenario", "pi", compose, release="nope") == 1
     assert reef.seen[-2]["path"] == "/reef/harness/install?adapter=pi&release_id=v2"
-    assert capsys.readouterr().err == "reef-pi update: no release nope in the catalog\n"
+    assert capsys.readouterr().err == (
+        "reef-pi update: no release nope in the catalog\n"
+        f"catalog: http://127.0.0.1:{reef.port} (scenario 'setup-scenario'). "
+        "Refresh the version list with /reef-versions before retrying.\n"
+    )
     reef.close()
     for name, install, message in (
         ("failing", "#!/bin/sh\nexit 7\n", "reef-pi update: the install script exited 7"),
@@ -2248,6 +2267,51 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
         with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
             assert update("setup-scenario", "pi", compose) == 1
         assert capsys.readouterr().err.splitlines()[-1] == message
+        reef.close()
+
+
+@pytest.mark.parametrize("operation", ["update", "setup-set"])
+@pytest.mark.parametrize("changed", ["scenario", "service"])
+def test_session_setup_and_update_refuse_an_install_rebound_to_another_context(
+    tmp_path, capsys, operation, changed
+) -> None:
+    reef = _ReleasesReef([_row("v1", [{"name": "SMTP", "kind": "env"}])], install=INSTALL_SCRIPT)
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    before = release_file.read_bytes()
+    service = f"http://127.0.0.1:{reef.port}"
+    session_service = (
+        "http://user:private-password@previous-service:8901?token=url-secret#private-fragment"
+        if changed == "service"
+        else service
+    )
+    session_scenario = "previous-scenario" if changed == "scenario" else "setup-scenario"
+    env = _ask_env(
+        tmp_path / "captures",
+        compose,
+        REEF_TOKEN="private-token",
+        SMTP="smtp.example",
+        REEF_HARNESS_DEST=str(Path(compose).parent),
+        REEF_SERVICE_URL=session_service,
+        REEF_SCENARIO=session_scenario,
+    )
+    try:
+        with patch.dict(os.environ, env, clear=True):
+            if operation == "update":
+                assert update("setup-scenario", "pi", compose, release="v1") == 1
+            else:
+                assert setup_set("setup-scenario", "pi", compose, "SMTP=new-value", release="v1") == 2
+        error = capsys.readouterr().err
+        assert "session and installed harness use different services or scenarios" in error
+        expected_service = "http://previous-service:8901" if changed == "service" else service
+        assert expected_service in error and service in error
+        assert all(secret not in error for secret in ("private-password", "url-secret", "private-fragment"))
+        assert repr(session_scenario) in error and "'setup-scenario'" in error
+        assert "Restart" in error and "private-token" not in error
+        assert reef.seen == []
+        assert release_file.read_bytes() == before
+        assert not (tmp_path / ".reef-harness-env").exists()
+        assert not (tmp_path / "dest-seen").exists()
+    finally:
         reef.close()
 
 

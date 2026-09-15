@@ -639,7 +639,12 @@ two commands, two tools and two event handlers:
   ``session_start`` on the installed tree; only the person can type it). An
   update the wrapper refuses for unmet items (exit 3) runs the setup loop
   first and then the update again; any other failure stops with ``reef:
-  reef-pi update failed (exit N): <stderr>``.
+  reef-pi update failed (exit N): <stderr>``. If the same installation directory
+  was rebound to another service or scenario while the session was running,
+  setup and update stop before network requests or file writes and show both
+  contexts. Restart from the intended installation before retrying. If a named
+  release is absent, the error identifies the queried service and scenario;
+  refresh ``/reef-versions`` before choosing a release again.
 - The setup loop: ``reef-pi setup --json --release <id>`` lists the
   release's items with ``met``; each unmet item is asked once, an ``env``
   item through ``ctx.ui.input`` titled with its ``prompt`` (else ``Value
