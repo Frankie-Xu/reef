@@ -548,9 +548,13 @@ class CaptureProxy:
             self._server.server_close()
             self._server = None
 
+    def drain(self) -> list[dict[str, Any]]:
+        """The captures since the last drain or publish, each with the tags in force when it landed."""
+        return self._store.drain()
+
     def publish_turn(self) -> int:
         """Spool the receipts captured since the last publish, so ``report`` claims them; the count written."""
-        turns = self._store.drain()
+        turns = self.drain()
         if turns:
             _publish_captures(self.upstream, self.scenario, turns)
         return len(turns)
