@@ -13,7 +13,6 @@ from typing import Any
 from reef.runtime.interfaces import RuntimeLoadId
 
 TOKEN_RUNTIME_LOAD_IDS_KEY = "_reef_token_runtime_load_ids"
-SGLANG_PLUGIN_NAME = "reef"
 REEF_SGLANG_PLUGIN_ENV = "SGLANG_REEF_PLUGIN"
 _UNSET_RUNTIME_LOAD_ID = object()
 _PROCESSING_RUNTIME_LOAD_ID: ContextVar[object] = ContextVar(

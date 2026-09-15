@@ -538,7 +538,7 @@ class SGLangInferenceHandler(HttpInferenceHandler):
         # temperature here (e.g. OpenClaw-RL: 0.6/0.95/20).
         self._sampling_defaults = dict(sampling_defaults or {})
         # None = sniff the chat template on first render.
-        self._force_reasoning = force_reasoning
+        self.force_reasoning = force_reasoning
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == ANTHROPIC_COUNT_TOKENS_PATH:
@@ -975,7 +975,7 @@ class SGLangInferenceHandler(HttpInferenceHandler):
         """Forward SGLang's incremental events as client frames, then record the exact sample."""
         capture = _NativeStreamCapture()
         reasoning = _ReasoningStreamSplitter(
-            enabled=self._SPLIT_REASONING, force_reasoning=self._reasoning_is_pre_opened()
+            enabled=self.SPLIT_REASONING, force_reasoning=self.reasoning_is_pre_opened()
         )
         wants_logprobs = not call.anthropic and call.request.get("logprobs") is True
         try:
@@ -1215,7 +1215,7 @@ class SGLangInferenceHandler(HttpInferenceHandler):
             }
         }
         message, parsed_tool_calls = self._assistant_message(
-            text, tool_parser, force_reasoning=self._reasoning_is_pre_opened()
+            text, tool_parser, force_reasoning=self.reasoning_is_pre_opened()
         )
         choice: dict[str, Any] = {
             "index": 0,
@@ -1319,33 +1319,30 @@ class SGLangInferenceHandler(HttpInferenceHandler):
 
     # A harness that parses raw thinking tags itself opts out by overriding
     # this class attribute.
-    _SPLIT_REASONING = True
+    SPLIT_REASONING = True
     # Set when the chat template pre-opens ``<think>``: the sample then
     # carries only the closing tag, so a sample with no ``</think>`` is
     # reasoning that ran out of tokens, not an answer. Sniffed from the
     # rendered template at first use; ``force_reasoning`` in the handler
     # config pins it either way.
-    _force_reasoning: bool | None = None
+    force_reasoning: bool | None = None
 
-    def _reasoning_is_pre_opened(self) -> bool:
+    def reasoning_is_pre_opened(self) -> bool:
         """Whether this model's chat template opens ``<think>`` for the model.
 
         Qwen3-*-Thinking templates end the generation prompt with an open
         ``<think>``, so the sample carries only the closing tag and a sample
         without one is truncated reasoning. Sniffed once from the rendered
         prompt; an explicit ``force_reasoning`` in the handler config wins.
+        Rendering errors propagate without caching a result.
         """
-        if self._force_reasoning is not None:
-            return self._force_reasoning
-        try:
-            rendered = self._require_tokenizer().apply_chat_template(
-                [{"role": "user", "content": ""}], tokenize=False, add_generation_prompt=True
-            )
-        except Exception:  # a template we cannot render tells us nothing
-            self._force_reasoning = False
-            return False
-        self._force_reasoning = str(rendered).rstrip().endswith("<think>")
-        return self._force_reasoning
+        if self.force_reasoning is not None:
+            return self.force_reasoning
+        rendered = self._require_tokenizer().apply_chat_template(
+            [{"role": "user", "content": ""}], tokenize=False, add_generation_prompt=True
+        )
+        self.force_reasoning = str(rendered).rstrip().endswith("<think>")
+        return self.force_reasoning
 
     @classmethod
     def _assistant_message(
@@ -1364,11 +1361,11 @@ class SGLangInferenceHandler(HttpInferenceHandler):
         # reply. Training tensors are captured from the raw token stream and
         # are unaffected by this presentation split.
         reasoning: str | None = None
-        if cls._SPLIT_REASONING and "</think>" in text:
+        if cls.SPLIT_REASONING and "</think>" in text:
             head, _, tail = text.rpartition("</think>")
             reasoning = head.replace("<think>", "").strip()
             text = tail.lstrip("\n")
-        elif cls._SPLIT_REASONING and force_reasoning:
+        elif cls.SPLIT_REASONING and force_reasoning:
             # A pre-opened template with no closing tag: the generation hit
             # its token cap mid-thought. The whole sample is reasoning, so
             # fail closed — handing it back as content is exactly the

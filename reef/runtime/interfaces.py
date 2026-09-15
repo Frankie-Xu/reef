@@ -725,7 +725,7 @@ class TrainingBackend(ABC):
 
     @abstractmethod
     def prepare_training_step(
-        self, batch: Any, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
     ) -> PreparedTrainingStep: ...
 
     @abstractmethod
