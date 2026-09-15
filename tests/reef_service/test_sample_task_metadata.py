@@ -43,6 +43,22 @@ def test_a_report_that_names_its_task_puts_it_on_the_sample() -> None:
 
 
 def test_a_report_without_a_task_leaves_the_sample_as_before() -> None:
-    for metadata in (None, {}, {"task": "not a mapping"}, {"episode": {"id": "e1"}}):
+    for metadata in (
+        None,
+        {},
+        {"task": "not a mapping"},
+        {"task": {}},
+        {"task": {"name": ""}},
+        {"task": {"path": "/tasks/x"}},
+        {"episode": {"id": "e1"}},
+        {"harbor": {"trial_id": "t1"}},
+    ):
         sample = assembled(metadata)
         assert "task" not in sample.metadata and sample.metadata["feedback"] == "verifier reward 1.0"
+
+
+def test_a_harbor_report_names_its_task_the_way_the_shipped_harness_writes_it() -> None:
+    sample = assembled({"harbor": {"trial_id": "run42:7", "task_name": "hello-world"}})
+    assert sample.metadata["task"] == {"name": "hello-world"}
+    both = assembled({"task": TASK, "harbor": {"trial_id": "run42:7", "task_name": "other"}})
+    assert both.metadata["task"] == TASK, "an explicit task wins over the harbor trial's name"

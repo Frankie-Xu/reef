@@ -417,6 +417,23 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 # --------------------------------------------------------- shared helpers
 
 
+def reported_task(metadata: object) -> dict[str, Any] | None:
+    """The task a report names, so a recipe can group samples by task; None when the report names none.
+
+    ``metadata.task`` is a mapping with at least a ``name`` (the task player also sends ``path`` and
+    ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    task = metadata.get("task")
+    if isinstance(task, Mapping) and isinstance(task.get("name"), str) and task["name"]:
+        return dict(task)
+    harbor = metadata.get("harbor")
+    if isinstance(harbor, Mapping) and isinstance(harbor.get("task_name"), str) and harbor["task_name"]:
+        return {"name": harbor["task_name"]}
+    return None
+
+
 @dataclass(frozen=True)
 class SampleAssembly:
     """Shape a resolved report into a policy sample, without recipe policy.
@@ -470,9 +487,7 @@ class SampleAssembly:
             "report_agent_record_id": context.report.agent_record_id,
             "references": list(context.references),
         }
-        # A report that names the task it played (metadata.task: name, path, digest) lets a recipe group samples by task.
-        report_metadata = context.report.payload.get("metadata")
-        task = report_metadata.get("task") if isinstance(report_metadata, Mapping) else None
-        if isinstance(task, Mapping):
-            fields["task"] = dict(task)
+        task = reported_task(context.report.payload.get("metadata"))
+        if task is not None:
+            fields["task"] = task
         return sample.with_metadata(**fields)
