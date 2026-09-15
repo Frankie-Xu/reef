@@ -182,7 +182,7 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
     first = result.measures[0]
     assert first.plain_rewards == (0.25, 0.25) and first.hint_rewards == (0.75,)
     assert first.regret == 0.5 and first.outcome == "frontier"
-    assert first.record.code_excerpt.startswith("A service on this machine")
+    assert first.record.instruction_excerpt.startswith("A service on this machine")
 
     assert result.manifest_path == tmp_path / "tasks" / "manifest-00004.json"
     manifest = read_split_manifest(result.manifest_path)

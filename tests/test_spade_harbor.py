@@ -105,7 +105,6 @@ def test_the_task_carries_the_files_the_hint_beside_the_solution_and_the_metadat
     assert (root / "solution" / "hint.txt").read_text() == REPLY.hint + "\n"
     document = tomllib.loads((root / "task.toml").read_text())
     assert document["metadata"] == {
-        "kind": "harbor",
         "skill": "inspection",
         "generation": 3,
         "step": 9,
@@ -114,6 +113,7 @@ def test_the_task_carries_the_files_the_hint_beside_the_solution_and_the_metadat
         "reef": {"digest": task.digest, "source_agent_record_ids": ["rec-designer-3"]},
     }
     assert document["environment"]["network_mode"] == "no-network" and document["agent"]["timeout_sec"] == 900
+    assert document["verifier"] == {"timeout_sec": 300, "user": "root"}, "the verifier reads root only state"
     assert read_harbor_task(root) == task
 
 
@@ -276,6 +276,24 @@ def test_a_trial_that_ended_in_an_exception_says_so_in_the_reason(tmp_path: Path
     assert (
         result.reason == "the reference solution scored None, not 1; the trial ended with agent timed out after 900 s"
     )
+
+
+def test_a_failed_oracle_run_ends_the_check_before_the_nop_agent_runs(tmp_path: Path) -> None:
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    result = oracle_check(root, harbor=fake_harbor(tmp_path, {"oracle": 0.0, "nop": 0.0}))
+    assert not result.is_solvable and result.oracle_reward == 0.0 and result.nop_reward is None
+    jobs = root.parent / ".harbor-jobs" / root.name
+    assert (jobs / "oracle").is_dir() and not (jobs / "nop").exists(), "the nop run would only cost a build"
+
+
+def test_a_build_failure_reaches_the_reason_as_its_last_lines(tmp_path: Path) -> None:
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    log = "Docker compose command failed\n" + "\n".join(f"#{n} [1/9] RUN apt-get update" for n in range(40))
+    log += "\nE: Unable to locate package tmuxx\nERROR: failed to solve: process did not complete successfully"
+    harbor = fake_harbor(tmp_path, {"oracle": None, "nop": 0.0}, exceptions={"oracle": log})
+    result = oracle_check(root, harbor=harbor)
+    assert not result.is_solvable and result.reason.endswith("process did not complete successfully")
+    assert "Unable to locate package tmuxx" in result.reason and len(result.reason) < 400
 
 
 def test_a_reference_solution_that_fails_names_its_exit_code_and_last_line(tmp_path: Path) -> None:

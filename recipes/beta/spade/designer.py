@@ -22,7 +22,7 @@ from reef.train.cordis_backend.strategies import untrusted_text
 DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12
 MAX_EXPERIENCE_RECORDS = 12
-CODE_EXCERPT_CHARS = 1200
+INSTRUCTION_EXCERPT_CHARS = 1200
 GROUNDING_CHARS = 6000
 MASTERED_RETURN = 0.9
 TOO_HARD_RETURN = 0.1
@@ -48,7 +48,7 @@ class PlayRecord:
     return_without_hint: float
     return_with_hint: float
     skill: str | None = None
-    code_excerpt: str = ""
+    instruction_excerpt: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not TASK_NAME_PATTERN.fullmatch(self.name):
@@ -61,8 +61,8 @@ class PlayRecord:
         ):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not -1.0 <= value <= 1.0:
                 raise ValueError(f"{label} must be a number in [-1, 1]")
-        if not isinstance(self.code_excerpt, str):
-            raise ValueError("code_excerpt must be text")
+        if not isinstance(self.instruction_excerpt, str):
+            raise ValueError("instruction_excerpt must be text")
 
     @property
     def regret(self) -> float:
@@ -167,28 +167,30 @@ def experience_text(experience: Sequence[PlayRecord]) -> str:
             "- Within reach but not mastered, the ones the hint helped most first. Write environments like these, "
             "varied, not copies:"
         )
-        lines.extend(record_lines(frontier, is_code_shown=True))
+        lines.extend(record_lines(frontier, is_instruction_shown=True))
     if mastered:
         lines.append("- Mastered without any hint. Too easy; do not write environments like these:")
-        lines.extend(record_lines(mastered, is_code_shown=False))
+        lines.extend(record_lines(mastered, is_instruction_shown=False))
     if out_of_reach:
         lines.append(
             "- Won fewer than one attempt in ten without the hint. Out of reach or broken; do not write environments "
             "like these, and make sure the instruction gives the agent enough to act on:"
         )
-        lines.extend(record_lines(out_of_reach, is_code_shown=False))
+        lines.extend(record_lines(out_of_reach, is_instruction_shown=False))
     return "\n".join(lines)
 
 
-def record_lines(records: Sequence[PlayRecord], *, is_code_shown: bool) -> list[str]:
+def record_lines(records: Sequence[PlayRecord], *, is_instruction_shown: bool) -> list[str]:
     lines = []
     for record in records:
         label = record.name if record.skill is None else f"{record.name} ({record.skill})"
         lines.append(
             f"  {label}: without hint {record.return_without_hint:+.2f}, with hint {record.return_with_hint:+.2f}"
         )
-        if is_code_shown and record.code_excerpt.strip():
-            lines.append(untrusted_text(record.code_excerpt.strip()[:CODE_EXCERPT_CHARS], "earlier environment"))
+        if is_instruction_shown and record.instruction_excerpt.strip():
+            lines.append(
+                untrusted_text(record.instruction_excerpt.strip()[:INSTRUCTION_EXCERPT_CHARS], "earlier instruction")
+            )
     return lines
 
 
@@ -200,7 +202,7 @@ HARBOR_RULES_TEXT = """RULES:
 - instruction.md is at least 80 characters, self contained, and never contains the answer.
 - tests/test.sh is the verifier: it runs after the agent, with /tests holding the tests/ files, and writes one number in [0, 1] to /logs/verifier/reward.txt (1 for success). It checks the outcome, never the transcript, and needs nothing the image lacks.
 - solution/solve.sh is a reference solution: the commands that complete the task from the same starting point. The task is accepted only if this script scores 1 and doing nothing scores below 1.
-- HIDDEN STATE: the task needs the agent to inspect the container (files, logs, a running process, a database) before it can act; an environment that answers the agent step by step (a game, a puzzle, a simulated tool) is a program in the image whose state the agent cannot read, driven by a command the instruction names.
+- HIDDEN STATE: the task needs the agent to inspect the container (files, logs, a running process, a database) before it can act. The agent runs as the image's user: root unless the Dockerfile adds a user and switches to it with USER; the verifier always runs as root. An environment that answers the agent step by step (a game, a puzzle, a simulated tool) is a program in the image whose state the agent cannot read: keep the state under a root only path, run the agent as a non root user, and let a sudoers rule for that one command drive it.
 - TARGET: an agent at the frontier completes the task in one of four to three of four attempts; too easy or out of reach is refused later.
 - Files are plain text; paths are relative, no directories above the task, at most four levels."""
 

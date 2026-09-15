@@ -72,6 +72,7 @@ SCAFFOLD_LINES = (
     ("solution/solve.sh", "Use this file to solve the task"),
 )
 DEFAULT_AGENT_TIMEOUT_S = 900
+EXCEPTION_CHARS = 300
 ORACLE_TIMEOUT_S = 1800.0
 STOP_GRACE_S = 30.0
 JOBS_DIRECTORY = ".harbor-jobs"
@@ -200,7 +201,6 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
     if errors:
         raise ValueError("the reply is not a substantive task: " + "; ".join(errors))
     metadata: dict[str, object] = {
-        "kind": "harbor",
         "generation": task.generation,
         "step": task.step,
         "index": task.index,
@@ -222,7 +222,8 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
         environment=dict(reply.environment),
         config={
             "agent": {"timeout_sec": agent_timeout_s},
-            "verifier": {"timeout_sec": DEFAULT_VERIFIER_TIMEOUT_S},
+            # The verifier reads state a Dockerfile may have kept from the agent's user.
+            "verifier": {"timeout_sec": DEFAULT_VERIFIER_TIMEOUT_S, "user": "root"},
             "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 2048, "gpus": 0, "network_mode": "no-network"},
         },
         metadata=metadata,
@@ -251,7 +252,10 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     exception = document.get("exception_info")
     exception_text = None
     if isinstance(exception, Mapping):
-        exception_text = str(exception.get("exception_message") or exception.get("exception_type") or "unknown")
+        message = str(exception.get("exception_message") or exception.get("exception_type") or "unknown")
+        # A build failure carries the whole docker log; the last lines name the cause.
+        tail = [line.strip() for line in message.splitlines() if line.strip()][-3:]
+        exception_text = " | ".join(tail)[-EXCEPTION_CHARS:]
     agent_note = None
     exit_code_path = results[0].parent / "agent" / "exit-code.txt"
     if exit_code_path.is_file() and exit_code_path.read_text(encoding="utf-8").strip() not in ("", "0"):
@@ -310,16 +314,20 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
         shutil.rmtree(jobs_path)
     try:
         oracle = run_harbor_agent(task_path, "oracle", jobs_path / "oracle", harbor=executable, timeout_s=timeout_s)
-        nop = run_harbor_agent(task_path, "nop", jobs_path / "nop", harbor=executable, timeout_s=timeout_s)
     except (RuntimeError, ValueError, OSError) as exc:
         return OracleResult(is_solvable=False, reason=str(exc)[:500])
     if oracle.reward is None or oracle.reward < 1.0:
+        # A task the reference solution does not solve is refused here; the nop run would only cost a build.
         reason = f"the reference solution scored {oracle.reward}, not 1"
         if oracle.exception is not None:
             reason = f"{reason}; the trial ended with {oracle.exception}"
         if oracle.agent_note is not None:
             reason = f"{reason}; {oracle.agent_note}"
-        return OracleResult(is_solvable=False, reason=reason, oracle_reward=oracle.reward, nop_reward=nop.reward)
+        return OracleResult(is_solvable=False, reason=reason, oracle_reward=oracle.reward)
+    try:
+        nop = run_harbor_agent(task_path, "nop", jobs_path / "nop", harbor=executable, timeout_s=timeout_s)
+    except (RuntimeError, ValueError, OSError) as exc:
+        return OracleResult(is_solvable=False, reason=str(exc)[:500], oracle_reward=oracle.reward)
     if nop.reward is None or nop.reward >= 1.0:
         reason = f"doing nothing scored {nop.reward}, not below 1"
         if nop.exception is not None:

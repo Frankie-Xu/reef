@@ -35,7 +35,7 @@ HARBOR_REPLY = "Here is the task.\n\n```json\n" + json.dumps(HARBOR_DOCUMENT, in
 
 def record(name: str, without: float, with_hint: float, code: str = "", skill: str | None = "deduction") -> PlayRecord:
     return PlayRecord(
-        name=name, skill=skill, return_without_hint=without, return_with_hint=with_hint, code_excerpt=code
+        name=name, skill=skill, return_without_hint=without, return_with_hint=with_hint, instruction_excerpt=code
     )
 
 
@@ -92,7 +92,7 @@ def test_the_experience_is_sorted_into_frontier_mastered_and_out_of_reach_with_t
     # The frontier lists the higher regret first, and only frontier records show their code.
     assert frontier < text.index("harbor-00001-004-deduction") < text.index("harbor-00001-000-deduction") < mastered
     assert "Repair the broken cron entry." in text and "Find the port the service wrote." in text
-    assert "earlier environment" in text
+    assert "earlier instruction" in text
     assert mastered < text.index("harbor-00001-001-deduction") < out_of_reach
     assert out_of_reach < text.index("harbor-00001-002-deduction") < text.index("harbor-00001-003-deduction")
     assert "without hint +0.00, with hint +1.00" in text
@@ -112,7 +112,7 @@ def test_the_grounding_is_fenced_so_its_text_cannot_speak_as_the_prompt() -> Non
     assert "Never mention the document" in text
 
 
-def test_a_long_grounding_and_a_long_code_excerpt_are_cut() -> None:
+def test_a_long_grounding_and_a_long_instruction_excerpt_are_cut() -> None:
     text = designer_prompt(
         request(grounding="x" * 7000, experience=(record("harbor-00001-000-deduction", 0.3, 0.9, "y" * 2000),))
     )
@@ -166,7 +166,7 @@ def test_a_play_record_knows_its_outcome_and_regret(
         ({"name": "bad name\nwith a newline"}, "task name"),
         ({"name": ""}, "task name"),
         ({"skill": "Deduction"}, "skill"),
-        ({"code_excerpt": 3}, "code_excerpt"),
+        ({"instruction_excerpt": 3}, "instruction_excerpt"),
     ],
 )
 def test_a_bad_play_record_is_refused(fields: dict[str, object], message: str) -> None:

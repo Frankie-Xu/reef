@@ -489,7 +489,7 @@ class Generation:
             skill=skill,
             return_without_hint=mean_reward(plain),
             return_with_hint=mean_reward(hint) if hint else mean_reward(plain),
-            code_excerpt=task.instruction[:INSTRUCTION_EXCERPT_CHARS],
+            instruction_excerpt=task.instruction[:INSTRUCTION_EXCERPT_CHARS],
         )
         measure = TaskMeasure(
             name=task.name,
