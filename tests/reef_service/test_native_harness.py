@@ -1513,6 +1513,7 @@ class _ProbingModel(_FakeModel):
         return _reply(content=f"done: {body['messages'][-1]['content']}")
 
 
+@pytest.mark.sandbox
 def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
     require_nested_jail()
     model = _ProbingModel()
