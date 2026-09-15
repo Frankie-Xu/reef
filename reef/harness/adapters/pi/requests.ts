@@ -278,9 +278,14 @@ export default function requests(pi) {
   const requestRecord = async (recordId) => {
     const path = `/reef/scenarios/${encodeURIComponent(scenario)}/records/${encodeURIComponent(recordId)}`;
     const response = await fetchWithTimeout(`${serviceUrl}${path}`, { headers: reefHeaders() });
+    if (response.status === 404) return null; // the service no longer knows the request: its scenario was reset
     if (!response.ok) throw new Error(`reef refused the record read (HTTP ${response.status})`);
     return await response.json();
   };
+
+  // A request the service no longer knows is dropped and said once, instead of a watch that never settles.
+  const goneText = (id8) =>
+    `reef: request ${id8} is no longer on the service (its scenario was reset); ask again with /reef-harness`;
 
   // A promoted row stays pending in the catalog; the promote is a later row naming it, so with the rows given
   // the pending row reads "promoted at step N".
@@ -534,7 +539,7 @@ export default function requests(pi) {
     const id8 = recordId.slice(0, 8);
     const deadline = Date.now() + WATCH_CAP_MS;
     // startedAt is the first poll that saw a step holding the request; the footer counts from it.
-    const mine = { timer: null, polling: false, startedAt: null, status: null };
+    const mine = { timer: null, polling: false, startedAt: null, status: null, missing: 0 };
     const show = (status) => {
       if (status === mine.status) return; // the footer is redrawn only when its text changes
       mine.status = status;
@@ -556,7 +561,7 @@ export default function requests(pi) {
         // Headless, nothing is asked: the report names the next step. At a session start the update notice
         // offers the install itself, so only a settle seen live offers it here.
         if (ctx.hasUI) await offerNextStep(step, rows, ask, ctx);
-        resumeStored(rows, ctx); // another filed request still waiting takes the watch over
+        await resumeStored(rows, ctx); // another filed request still waiting takes the watch over
         return;
       }
       if (Date.now() >= deadline) {
@@ -566,13 +571,22 @@ export default function requests(pi) {
         return;
       }
       if (mine.startedAt === null) {
+        let record;
         try {
-          const record = await requestRecord(recordId);
-          if (record && typeof record.compacted_at === "number") mine.startedAt = Date.now();
+          record = await requestRecord(recordId);
         } catch {
-          // A failed record read keeps the footer as it was; the next tick reads again.
+          record = undefined; // a failed record read keeps the footer as it was; the next tick reads again
         }
         if (watch !== mine) return;
+        // Two polls in a row without the record: one 404 can be a record not written yet, two is a reset.
+        mine.missing = record === null ? mine.missing + 1 : 0;
+        if (mine.missing >= 2) {
+          stopWatch(ctx);
+          forgetRequest(recordId);
+          ctx.ui.notify(goneText(id8), "warning");
+          return;
+        }
+        if (record && typeof record.compacted_at === "number") mine.startedAt = Date.now();
       }
       if (mine.startedAt !== null) {
         show(`reef: step for request ${id8} running for ${elapsedText(Date.now() - mine.startedAt)}`);
@@ -602,13 +616,24 @@ export default function requests(pi) {
 
   // The stored requests against the catalog, at a session start and after a settle: each with a row is reported
   // and dropped; the newest still running takes the watch, the others wait for it to settle.
-  const resumeStored = (rows, ctx) => {
+  const resumeStored = async (rows, ctx) => {
     let running = null;
     for (const entry of storedRequests()) {
       const step = rows.findIndex((row) => requestIdOf(row) === entry.id);
       if (step >= 0) {
         forgetRequest(entry.id);
         deliverReport(step, rows, entry.text, ctx);
+        continue;
+      }
+      let record;
+      try {
+        record = await requestRecord(entry.id);
+      } catch {
+        record = undefined; // unreadable now: keep it stored and watch it
+      }
+      if (record === null) {
+        forgetRequest(entry.id);
+        ctx.ui.notify(goneText(entry.id.slice(0, 8)), "warning");
       } else {
         running = entry;
       }

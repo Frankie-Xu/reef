@@ -1002,19 +1002,24 @@ def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
     return next((step for step, row in enumerate(rows) if _request_of(row).get("id") == record_id), None)
 
 
-def _step_started(upstream: str, scenario: str, token: str | None, record_id: str) -> bool:
-    """Whether a step has taken the request: its record's ``compacted_at`` is set once one consumed it.
+def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
+    """Where the request stands by its record: ``started`` once a step took it (``compacted_at`` set), ``gone``
+    when the service answers 404 (its scenario was reset), else ``waiting``.
 
-    A read that fails is no reason to stop waiting, so it reads as not
-    started and the next poll asks again."""
+    A read that fails for any other reason is no reason to stop waiting, so
+    it reads as waiting and the next poll asks again."""
     path = f"/reef/scenarios/{urllib.parse.quote(scenario, safe='')}/records/{urllib.parse.quote(record_id, safe='')}"
     req = urllib.request.Request(f"{upstream}{path}", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             record = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return "gone" if exc.code == 404 else "waiting"
     except (OSError, ValueError):
-        return False
-    return isinstance(record, Mapping) and record.get("compacted_at") is not None
+        return "waiting"
+    if isinstance(record, Mapping) and record.get("compacted_at") is not None:
+        return "started"
+    return "waiting"
 
 
 def _await_step(
@@ -1027,14 +1032,17 @@ def _await_step(
     *,
     timeout_s: float,
     poll_s: float,
-) -> tuple[int, list[dict[str, Any]]] | None:
-    """Poll the catalog until a step has consumed the request: its index and the catalog; None once ``timeout_s`` passes.
+) -> tuple[int, list[dict[str, Any]]] | str:
+    """Poll the catalog until a step has consumed the request: its index and the catalog.
 
-    One line says when the request's record shows a step took it, so the
-    wait is seen to move; the timeout line says where the verdict shows
-    later, the step still running."""
+    ``"timeout"`` once ``timeout_s`` passes, the step still running, and
+    ``"gone"`` when two polls in a row find no record of the request (its
+    scenario was reset; one missing read can be a record not written yet).
+    One line says when the record shows a step took it, so the wait is seen
+    to move."""
     deadline = time.monotonic() + timeout_s
     started = False
+    missing = 0
     while True:
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
@@ -1044,10 +1052,19 @@ def _await_step(
             print(
                 f"reef-{adapter}: no verdict yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
             )
-            return None
-        if not started and _step_started(upstream, scenario, token, record_id):
-            started = True
-            print(f"reef-{adapter}: the step started; usually one to three minutes")
+            return "timeout"
+        if not started:
+            state = _request_state(upstream, scenario, token, record_id)
+            missing = missing + 1 if state == "gone" else 0
+            if missing >= 2:
+                print(
+                    f"reef-{adapter}: request {record_id[:8]} is no longer on the service (its scenario was reset); "
+                    "ask again"
+                )
+                return "gone"
+            if state == "started":
+                started = True
+                print(f"reef-{adapter}: the step started; usually one to three minutes")
         time.sleep(poll_s)
 
 
@@ -1202,8 +1219,10 @@ def harness(
     settled = _await_step(
         upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
-    if settled is None:
+    if settled == "timeout":
         return 2
+    if settled == "gone":
+        return 1
     step, rows = settled
     print(f"reef-{adapter}: {_verdict_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
     uncovered = _uncovered(rows[step])

@@ -1224,7 +1224,10 @@ def test_session_start_reports_a_stored_request_that_settled_and_re_arms_the_wat
         f"reef: '{ASK}' is published as release rel-1111. Restart reef-pi to install it (the update notice offers it)."
         " Details: /reef-versions 1.\nNot covered: two way replies; idle detection"
     )
-    assert [event["kind"] for event in out["events"]][:5] == ["fetch", "notify", "message", "notify", "status"]
+    # The still-running entry's record is read once (unanswered here: the runner knows no such route) before
+    # the watch takes it, so a request the service no longer knows is dropped instead of watched.
+    kinds = [event["kind"] for event in out["events"]]
+    assert kinds[:6] == ["fetch", "notify", "message", "notify", "fetch", "status"]
     assert out["events"][1] == {"kind": "notify", "message": first, "type": "info"}
     assert out["events"][2] == {
         "kind": "message",
@@ -1232,7 +1235,8 @@ def test_session_start_reports_a_stored_request_that_settled_and_re_arms_the_wat
         "options": {"triggerTurn": False},
     }
     assert out["events"][3] == {"kind": "notify", "message": report, "type": "info"}
-    assert out["events"][4] == {"kind": "status", "key": "reef", "text": "reef: request q-9 queued"}
+    assert out["events"][4]["url"].endswith("/reef/scenarios/code-repair/records/q-9")
+    assert out["events"][5] == {"kind": "status", "key": "reef", "text": "reef: request q-9 queued"}
     assert len(_of_kind(out, "message")) == 1  # the stale entry's row is in the catalog; it is not reported
     assert len([event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]) >= 3
     assert [entry["id"] for entry in _stored(tmp_path)] == ["q-9"]
@@ -1642,3 +1646,42 @@ def test_versions_promote_runs_the_install_flow_through_the_wrapper(tmp_path: Pa
         {"kind": "confirm", "title": "Install release rel-4444 now?", "message": promoted},
         {"kind": "notify", "message": INSTALL_LATER, "type": "info"},
     ]
+
+
+def test_a_request_the_service_no_longer_knows_ends_the_watch_with_one_notice_and_is_dropped(tmp_path: Path) -> None:
+    """Two polls in a row that find no record of the request (a 404, the scenario reset under it) end the watch
+    with one warning, clear the footer and drop the stored entry; a single 404 is a record not written yet."""
+    agent_dir = _install_root(tmp_path)
+    other = {**SELECTED_ROW, "metrics": {"selected": True, "training_request": {"id": "q-other", "text": "x"}}}
+    answers = {
+        **_catalog_with(other),
+        f"GET {RECORD_PATH}": [{"status": 404, "body": {"error": "no record"}}] * 3,
+    }
+    out = _ask(tmp_path, agent_dir, answers, text=LONG_TEXT, REEF_HARNESS_WATCH_MS="10", TEST_WAIT_MS="200")
+    assert out["error"] is None
+    gone = "reef: request q-1 is no longer on the service (its scenario was reset); ask again with /reef-harness"
+    assert [event for event in _notices(out) if event["type"] == "warning"] == [
+        {"kind": "notify", "message": gone, "type": "warning"}
+    ]
+    assert [event["text"] for event in _of_kind(out, "status")][-1] is None
+    assert len([call for call in _fetches(out) if call["url"].endswith(RECORD_PATH)]) == 2
+    assert json.loads((tmp_path / REQUESTS_FILE).read_text(encoding="utf-8")) == []
+
+
+def test_session_start_drops_a_stored_request_the_service_no_longer_knows(tmp_path: Path) -> None:
+    """A stored request whose row is not in the catalog and whose record the service answers with 404 is said
+    to be gone, once, and dropped instead of taking the watch."""
+    agent_dir = _install_root(tmp_path)
+    (tmp_path / REQUESTS_FILE).write_text(
+        json.dumps([{"id": "q-9", "text": "log when blocked", "filed_at": time.time() - 60}]), encoding="utf-8"
+    )
+    answers = {
+        "GET /reef/harness/releases": {"status": 200, "body": {"scenario": "code-repair", "releases": [CREATION_ROW]}},
+        "GET /reef/scenarios/code-repair/records/q-9": {"status": 404, "body": {"error": "no record"}},
+    }
+    out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(answers), TEST_WAIT_MS="60")
+    assert out["error"] is None
+    gone = "reef: request q-9 is no longer on the service (its scenario was reset); ask again with /reef-harness"
+    assert {"kind": "notify", "message": gone, "type": "warning"} in _notices(out)
+    assert _of_kind(out, "status") == []
+    assert json.loads((tmp_path / REQUESTS_FILE).read_text(encoding="utf-8")) == []

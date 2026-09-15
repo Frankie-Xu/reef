@@ -1454,7 +1454,11 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
 def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(tmp_path, capsys) -> None:
     # The catalog holds another request's step only: ours is still running.
     rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
-    reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}, rows=rows)
+    reef = _FakeReef(
+        {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"},
+        rows=rows,
+        record={"agent_record_id": "q-1", "compacted_at": None},  # queued the whole wait
+    )
     compose, captures = _ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
         assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.05, poll_s=0.01) == 2
@@ -1490,17 +1494,27 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     record_reads = [call for call in reef.seen if call["path"] == record_path]
     assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
-    # Queued (compacted_at null) or unanswered (404): no line, and the record is read again at every poll.
-    for name, record in (("queued", {"agent_record_id": "q-1", "compacted_at": None}), ("missing", None)):
-        reef = _FakeReef(answer, rows=rows, record=record)
-        (tmp_path / name).mkdir()
-        compose, captures = _ask_tree(tmp_path / name, reef.port)
-        with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
-            assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
-        reef.close()
-        out = capsys.readouterr().out.splitlines()
-        assert len(out) == 4 and out[3].startswith("reef-pi: no verdict yet")
-        assert len([call for call in reef.seen if call["path"] == record_path]) >= 3
+    # Queued (compacted_at null): no line, and the record is read again at every poll.
+    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "compacted_at": None})
+    (tmp_path / "queued").mkdir()
+    compose, captures = _ask_tree(tmp_path / "queued", reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 4 and out[3].startswith("reef-pi: no verdict yet")
+    assert len([call for call in reef.seen if call["path"] == record_path]) >= 3
+    # Unanswered (404) twice in a row: the service no longer knows the request (its scenario was reset), so the
+    # wait ends with one line and exit 1 instead of polling until the timeout.
+    reef = _FakeReef(answer, rows=rows, record=None)
+    (tmp_path / "missing").mkdir()
+    compose, captures = _ask_tree(tmp_path / "missing", reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=5.0, poll_s=0.01) == 1
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert out[3] == "reef-pi: request q-1 is no longer on the service (its scenario was reset); ask again"
+    assert len(out) == 4 and len([call for call in reef.seen if call["path"] == record_path]) == 2
 
 
 @pytest.mark.unit
