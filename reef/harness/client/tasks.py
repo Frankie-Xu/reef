@@ -28,10 +28,11 @@ from reef_client.client import ReefClient, ReefClientError
 from reef.core.tasks import HarborTaskError, manifest_task_paths, read_harbor_task
 from reef.harness.client.wrapper import CaptureProxy
 
-#: Terminus 2 with its model and endpoint left to the binding; the same placeholders the adapter descriptors use.
+#: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
+#: LiteLLM routes to api_base only under a provider prefix and strips it before the call, so Reef sees the model name.
 DEFAULT_AGENT: Mapping[str, object] = {
     "name": "terminus-2",
-    "model_name": "{model}",
+    "model_name": "openai/{model}",
     "kwargs": {"api_base": "{base_url}/v1", "llm_kwargs": {"api_key": "{api_key}"}},
 }
 

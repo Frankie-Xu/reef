@@ -154,10 +154,9 @@ def test_bound_agent_fills_the_placeholders_wherever_they_sit() -> None:
         "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_API_KEY": "k"},
         "kwargs": {"flags": ["--model", "m"], "retries": 2},
     }
-    assert bound_agent(DEFAULT_AGENT, model="m", base_url="http://h:2", api_key="k")["kwargs"] == {
-        "api_base": "http://h:2/v1",
-        "llm_kwargs": {"api_key": "k"},
-    }
+    default = bound_agent(DEFAULT_AGENT, model="m", base_url="http://h:2", api_key="k")
+    assert default["model_name"] == "openai/m", "LiteLLM honours api_base only under a provider prefix"
+    assert default["kwargs"] == {"api_base": "http://h:2/v1", "llm_kwargs": {"api_key": "k"}}
 
 
 @pytest.mark.parametrize(
@@ -204,7 +203,7 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     assert call["tags"] == {"task": "t1", "episode": played.episode_id, "arm": "hint"}
     assert call["overrides"] == {"environment": {"type": "docker"}, "extra_instruction_paths": [str(hint)]}
     agent = call["agent"]
-    assert agent["name"] == "terminus-2" and agent["model_name"] == "qwen3.8:27b"
+    assert agent["name"] == "terminus-2" and agent["model_name"] == "openai/qwen3.8:27b"
     assert agent["kwargs"]["api_base"].startswith("http://127.0.0.1:") and agent["kwargs"]["api_base"].endswith("/v1")
     assert agent["kwargs"]["llm_kwargs"] == {"api_key": "tok"}
 
