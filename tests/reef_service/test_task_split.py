@@ -181,7 +181,7 @@ def test_a_split_side_that_is_not_iterable_is_refused() -> None:
 @pytest.mark.parametrize("version", ["1.0", "true", '"1"'])
 def test_a_manifest_version_that_is_not_the_integer_is_refused(tmp_path: Path, version: str) -> None:
     (tmp_path / "split.json").write_text(
-        '{"version": %s, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": []}' % version
+        f'{{"version": {version}, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": []}}'
     )
     with pytest.raises(TaskSplitError, match="not a version 1"):
         read_split_manifest(tmp_path / "split.json")
