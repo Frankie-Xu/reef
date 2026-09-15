@@ -33,9 +33,9 @@ HARBOR_DOCUMENT = {
 HARBOR_REPLY = "Here is the task.\n\n```json\n" + json.dumps(HARBOR_DOCUMENT, indent=2) + "\n```\n"
 
 
-def record(name: str, without: float, with_hint: float, code: str = "") -> PlayRecord:
+def record(name: str, without: float, with_hint: float, code: str = "", skill: str | None = "deduction") -> PlayRecord:
     return PlayRecord(
-        name=name, skill="deduction", return_without_hint=without, return_with_hint=with_hint, code_excerpt=code
+        name=name, skill=skill, return_without_hint=without, return_with_hint=with_hint, code_excerpt=code
     )
 
 
@@ -61,6 +61,12 @@ def test_the_prompt_names_the_container_the_verifier_and_the_reference_solution(
     assert "TWO NETWORK PHASES" in text and "no heredocs" in text and "at least 80 characters" in text
     assert "NO PROCESS SURVIVES THE BUILD" in text and "sleep infinity" in text
     assert "step by step" in text and text.count("```json") == 1 and "```python" not in text
+
+
+def test_a_request_without_a_skill_names_the_description_alone() -> None:
+    text = designer_prompt(request(skill=None, experience=(record("harbor-00001-000", 0.3, 0.6, skill=None),)))
+    assert "that tests: infer a hidden rule from feedback." in text
+    assert "  harbor-00001-000: without hint +0.30, with hint +0.60" in text
 
 
 def test_the_messages_carry_the_system_role_and_the_prompt() -> None:

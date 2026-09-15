@@ -82,10 +82,10 @@ class GeneratedHarborTask:
     """One harbor environment as the Designer emitted it, with where it came from."""
 
     reply: HarborReply
-    skill: str
     generation: int
     index: int
     source_record_id: str
+    skill: str | None = None
     step: int = 0
     difficulty: str | None = None
     document_id: str | None = None
@@ -96,7 +96,7 @@ class GeneratedHarborTask:
             raise ValueError("reply must be a HarborReply")
         if self.category is not None and self.category not in CATEGORIES:
             raise ValueError(f"category must be one of {CATEGORIES}")
-        if not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill):
+        if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
             raise ValueError(f"skill {self.skill!r} must match {SKILL_PATTERN.pattern}")
         for label, number in (("generation", self.generation), ("index", self.index), ("step", self.step)):
             if isinstance(number, bool) or not isinstance(number, int) or number < 0:
@@ -109,8 +109,9 @@ class GeneratedHarborTask:
 
     @property
     def name(self) -> str:
-        """The task directory name: unique per generation and index, readable by skill."""
-        return f"harbor-{self.generation:05d}-{self.index:03d}-{self.skill}"
+        """The task directory name: unique per generation and index, readable by skill when there is one."""
+        name = f"harbor-{self.generation:05d}-{self.index:03d}"
+        return name if self.skill is None else f"{name}-{self.skill}"
 
 
 @dataclass(frozen=True)
@@ -200,18 +201,19 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
         raise ValueError("the reply is not a substantive task: " + "; ".join(errors))
     metadata: dict[str, object] = {
         "kind": "harbor",
-        "skill": task.skill,
         "generation": task.generation,
         "step": task.step,
         "index": task.index,
     }
+    if task.skill is not None:
+        metadata["skill"] = task.skill
     if task.difficulty is not None:
         metadata["difficulty"] = task.difficulty
     if task.document_id is not None:
         metadata["document"] = task.document_id
     if task.category is not None:
         metadata["category"] = task.category
-        metadata["tags"] = [task.category, task.skill]
+        metadata["tags"] = [tag for tag in (task.category, task.skill) if tag is not None]
     reply = task.reply
     return HarborTask(
         name=task.name,

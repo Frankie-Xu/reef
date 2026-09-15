@@ -203,6 +203,19 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
     assert load_experience(result.report_path) == result.experience
 
 
+def test_a_generation_without_skills_takes_the_description_as_the_target(tmp_path: Path) -> None:
+    run, designer, solver, _ = generation(tmp_path)
+    result = run.run(request(skills=(), count=2))
+    assert [measure.name for measure in result.measures] == ["harbor-00004-000", "harbor-00004-001"]
+    assert designer.calls[0]["tags"] == {"role": "designer", "generation": "4"}
+    prompt = designer.calls[0]["messages"][1]["content"]
+    assert "that tests: shell tasks with hidden state under /var and /etc." in prompt
+    assert all("skill" not in call["tags"] for call in solver.calls)
+    assert "skill" not in designer.reports[0]["metadata"] and result.experience[0].skill is None
+    document = json.loads(result.report_path.read_text())
+    assert document["tasks"][0]["skill"] is None and load_experience(result.report_path) == result.experience
+
+
 def test_a_reply_the_parser_refuses_is_reported_as_zero_and_the_generation_goes_on(tmp_path: Path) -> None:
     designer = StandInDesigner(scripted=["no json here", reply_for(2)])
     run, designer, solver, _ = generation(tmp_path, designer=designer)
@@ -248,7 +261,7 @@ def test_a_task_already_under_the_root_is_not_written_twice(tmp_path: Path) -> N
 
 
 def test_experience_for_puts_this_skill_and_the_frontier_first_and_caps_the_records() -> None:
-    def record(name: str, skill: str, plain: float, hint: float) -> PlayRecord:
+    def record(name: str, skill: str | None, plain: float, hint: float) -> PlayRecord:
         return PlayRecord(name=name, skill=skill, return_without_hint=plain, return_with_hint=hint)
 
     records = [
@@ -268,6 +281,8 @@ def test_experience_for_puts_this_skill_and_the_frontier_first_and_caps_the_reco
     ]
     many = [record(f"t-{index:02d}", "inspection", 0.5, 0.6) for index in range(20)]
     assert len(experience_for(many, "inspection")) == 12
+    unskilled = [record("t-a", None, 0.5, 0.6), record("t-b", None, 0.0, 0.2), record("t-c", "repair", 0.5, 0.9)]
+    assert [item.name for item in experience_for(unskilled, None)] == ["t-c", "t-a", "t-b"]
 
 
 def test_mean_reward_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
@@ -283,7 +298,7 @@ def test_mean_reward_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_
     ("overrides", "message"),
     [
         ({"description": " "}, "description must be non-empty text"),
-        ({"skills": ()}, "skills must name at least one skill"),
+        ({"skills": ("",)}, "skills must be a tuple of skill names"),
         ({"count": 0}, "count must be at least 1"),
         ({"plays": 0}, "plays must be at least 1"),
         ({"eval_fraction": 1.0}, "eval_fraction must be in"),

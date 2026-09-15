@@ -221,7 +221,7 @@ class GenerationRequest:
     """What one generation asks the Designer for and how the solver measures what it gets."""
 
     description: str
-    skills: tuple[str, ...]
+    skills: tuple[str, ...] = ()
     count: int = 8
     generation: int = 0
     difficulty: str = "medium"
@@ -236,8 +236,10 @@ class GenerationRequest:
     def __post_init__(self) -> None:
         if not isinstance(self.description, str) or not self.description.strip():
             raise GenerationError("description must be non-empty text")
-        if not self.skills or not all(isinstance(skill, str) and skill for skill in self.skills):
-            raise GenerationError("skills must name at least one skill")
+        if not isinstance(self.skills, tuple) or not all(isinstance(skill, str) and skill for skill in self.skills):
+            raise GenerationError(
+                "skills must be a tuple of skill names; empty when the description alone is the target"
+            )
         for label, value in (("count", self.count), ("generation", self.generation), ("seed", self.seed)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise GenerationError(f"{label} must be a non-negative integer")
@@ -257,7 +259,7 @@ class Proposal:
     """One Designer call and what became of it."""
 
     index: int
-    skill: str
+    skill: str | None
     designer_record_id: str
     task_name: str | None
     refusal: str
@@ -273,7 +275,7 @@ class TaskMeasure:
     """A written task after both arms played: the rewards, the regret and the band."""
 
     name: str
-    skill: str
+    skill: str | None
     task_path: Path
     digest: str
     plain_rewards: tuple[float, ...]
@@ -305,6 +307,11 @@ class GenerationResult:
         return tuple(measure.record for measure in self.measures)
 
 
+def skill_tag(skill: str | None) -> dict[str, str]:
+    """The skill as a tag or metadata entry, absent when the generation has no skill axis."""
+    return {} if skill is None else {"skill": skill}
+
+
 def is_unplayed(play: TaskPlay) -> bool:
     """An episode that never ran: no reward and an error (the agent could not start, the trial raised)."""
     return play.reward is None and bool(play.error)
@@ -319,11 +326,14 @@ def mean_reward(plays: Sequence[TaskPlay]) -> float:
 
 
 def experience_for(
-    records: Sequence[PlayRecord], skill: str, limit: int = MAX_EXPERIENCE_RECORDS
+    records: Sequence[PlayRecord], skill: str | None, limit: int = MAX_EXPERIENCE_RECORDS
 ) -> tuple[PlayRecord, ...]:
-    """The records a prompt gets: this skill's first, the frontier by regret, then the two bands as examples."""
+    """The records a prompt gets: this skill's first when there is one, the frontier by regret, then the two bands."""
     rank = {"frontier": 0, "out_of_reach": 1, "mastered": 2}
-    ordered = sorted(records, key=lambda record: (record.skill != skill, rank[record.outcome], -record.regret))
+    ordered = sorted(
+        records,
+        key=lambda record: (skill is not None and record.skill != skill, rank[record.outcome], -record.regret),
+    )
     return tuple(ordered[:limit])
 
 
@@ -366,8 +376,8 @@ class Generation:
         proposals: list[Proposal] = []
         measures: list[TaskMeasure] = []
         for index in range(request.count):
-            skill = request.skills[index % len(request.skills)]
-            tags = {"role": "designer", "generation": str(request.generation), "skill": skill}
+            skill = request.skills[index % len(request.skills)] if request.skills else None
+            tags = {"role": "designer", "generation": str(request.generation), **skill_tag(skill)}
             designer_request = DesignerRequest(
                 skill=skill,
                 skill_description=request.description,
@@ -415,7 +425,12 @@ class Generation:
         return hashes
 
     def written_task(
-        self, answer: DesignerAnswer, skill: str, index: int, request: GenerationRequest, known_hashes: set[str]
+        self,
+        answer: DesignerAnswer,
+        skill: str | None,
+        index: int,
+        request: GenerationRequest,
+        known_hashes: set[str],
     ) -> tuple[HarborTask | None, str]:
         """Parse, write and check one proposal; the written task, or None and why it was refused."""
         try:
@@ -445,14 +460,16 @@ class Generation:
         known_hashes.add(digest)
         return task, ""
 
-    def measured(self, task: HarborTask, skill: str, request: GenerationRequest) -> tuple[TaskMeasure | None, str]:
+    def measured(
+        self, task: HarborTask, skill: str | None, request: GenerationRequest
+    ) -> tuple[TaskMeasure | None, str]:
         """Both arms played: the plain arm reported as training data, the hint arm measured only.
 
         A task the solver could not play at all (every plain episode ended before the agent ran) is no
         measure of the solver; it comes back as None with the first episode's error.
         """
         task_path = self.tasks_root / task.name
-        tags = {"generation": str(request.generation), "skill": skill}
+        tags = {"generation": str(request.generation), **skill_tag(skill)}
         plain = self.solver.play(
             task_path, arm="plain", plays=request.plays, is_reporting=True, extra_instruction_paths=(), tags=tags
         )
@@ -493,7 +510,7 @@ class Generation:
         """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
         if not self.is_reporting_designer:
             return proposal
-        metadata: dict[str, object] = {"generation": request.generation, "skill": proposal.skill}
+        metadata: dict[str, object] = {"generation": request.generation, **skill_tag(proposal.skill)}
         if measure is None:
             score = 0.0
             metadata["refusal"] = proposal.refusal
@@ -582,7 +599,9 @@ def main(
     parser.add_argument("--tasks-root", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, default=Path("work/spade"))
     parser.add_argument("--description", required=True, help="what the environments are about")
-    parser.add_argument("--skills", required=True, help="comma separated skill names, cycled over the proposals")
+    parser.add_argument(
+        "--skills", default="", help="comma separated skill names, cycled over the proposals; none by default"
+    )
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--generation", type=int, default=0)
     parser.add_argument("--difficulty", default="medium")
@@ -670,7 +689,7 @@ def main(
         parser.error(str(exc))
     measures = {measure.name: measure for measure in result.measures}
     for proposal in result.proposals:
-        line: dict[str, object] = {"index": proposal.index, "skill": proposal.skill}
+        line: dict[str, object] = {"index": proposal.index, **skill_tag(proposal.skill)}
         if proposal.is_written and proposal.task_name in measures:
             measure = measures[proposal.task_name]
             line.update(

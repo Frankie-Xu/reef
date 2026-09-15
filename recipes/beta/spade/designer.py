@@ -45,15 +45,15 @@ class PlayRecord:
     """What the agent did on one earlier environment: its mean return over the rollouts without and with the hint."""
 
     name: str
-    skill: str
     return_without_hint: float
     return_with_hint: float
+    skill: str | None = None
     code_excerpt: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not TASK_NAME_PATTERN.fullmatch(self.name):
             raise ValueError(f"a play record's name must be a task name matching {TASK_NAME_PATTERN.pattern}")
-        if not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill):
+        if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
             raise ValueError(f"a play record's skill must match {SKILL_PATTERN.pattern}")
         for label, value in (
             ("return_without_hint", self.return_without_hint),
@@ -81,17 +81,17 @@ class PlayRecord:
 
 @dataclass(frozen=True)
 class DesignerRequest:
-    """One Designer call: the skill to test, how hard, what the agent did last time, and a grounding text."""
+    """One Designer call: what to test (a description, an optional skill), how hard, what the agent did last time, a grounding text."""
 
-    skill: str
     skill_description: str
+    skill: str | None = None
     difficulty: str = "medium"
     turn_limit: int = DEFAULT_TURN_LIMIT
     grounding: str | None = None
     experience: tuple[PlayRecord, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill):
+        if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
             raise ValueError(f"skill {self.skill!r} must match {SKILL_PATTERN.pattern}")
         if not isinstance(self.skill_description, str) or not self.skill_description.strip():
             raise ValueError("skill_description must be non-empty text")
@@ -125,11 +125,11 @@ def designer_messages(request: DesignerRequest) -> list[dict[str, str]]:
 
 def designer_prompt(request: DesignerRequest) -> str:
     """The user turn of a Designer call: target, what the agent did last time, grounding, the rules, output."""
+    target = request.skill_description.strip()
+    if request.skill is not None:
+        target = f"{request.skill} ({target})"
     parts = [
-        (
-            "Create ONE Harbor task, a container with files, an instruction and a verifier, that tests: "
-            f"{request.skill} ({request.skill_description.strip()})."
-        ),
+        f"Create ONE Harbor task, a container with files, an instruction and a verifier, that tests: {target}.",
         (
             f"DIFFICULTY: {request.difficulty}. The agent has at most {request.turn_limit} turns; a careful agent "
             "finishes in fewer, a careless one fails."
@@ -183,9 +183,9 @@ def experience_text(experience: Sequence[PlayRecord]) -> str:
 def record_lines(records: Sequence[PlayRecord], *, is_code_shown: bool) -> list[str]:
     lines = []
     for record in records:
+        label = record.name if record.skill is None else f"{record.name} ({record.skill})"
         lines.append(
-            f"  {record.name} ({record.skill}): without hint {record.return_without_hint:+.2f}, "
-            f"with hint {record.return_with_hint:+.2f}"
+            f"  {label}: without hint {record.return_without_hint:+.2f}, with hint {record.return_with_hint:+.2f}"
         )
         if is_code_shown and record.code_excerpt.strip():
             lines.append(untrusted_text(record.code_excerpt.strip()[:CODE_EXCERPT_CHARS], "earlier environment"))
