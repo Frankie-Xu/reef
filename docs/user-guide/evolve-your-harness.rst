@@ -547,16 +547,15 @@ filing answers with the link to the request's page. A footer status shows
 the request queued, then the step running and for how long, and the
 verdict is reported when it settles, with the same next actions as
 ``--wait`` and the step whose page has the details, as a message the chat
-keeps beside a notice. The session then asks for the next step: for a
-selected release ``Install release <id8> now?``, which runs ``reef-pi
-update`` for that release, asks once for what it needs from you (a value
-for an ``env`` item, typed into the session and kept by ``reef-pi setup``
-in its env file; a yes before a check runs) and ends with ``Installed
-release <id8>. Type /reload to load it now.``; for a pending release
-``Promote release <id8> now?`` with the link to its page to read first,
-then the same install; a no names the command for later, and a session
-without the ``reef-pi`` wrapper on disk hears the commands instead. A
-request filed before a restart, or settled while you were away, is
+keeps beside a notice. This background result opens no dialog, so you can
+keep talking to the agent. When ready, use ``/reef-versions <step> install``
+for a published release, or ``/reef-versions <step> promote`` for a pending
+one. These explicit actions ask for confirmation before installing or
+promoting. Installation runs ``reef-pi update`` for that release, collects
+its setup items and ends with ``Installed release <id8>. Type /reload to
+load it now.`` You can also use ``reef-pi update`` and ``reef-pi setup``
+from a separate terminal. A request filed before a restart, or settled
+while you were away, is
 reported at the next session start, where the update notice offers the
 install. A session start also says the commands exist and counts the
 releases awaiting your review, with the ``/reef-versions <step> promote``
@@ -668,7 +667,8 @@ command also prints the promote curl, a trial install with ``?release_id=``
 that replaces the tree at your install root, and the head's reinstall to
 return to it; ``/reef-versions <step> promote`` runs the promote from the
 TUI after you confirm it, then asks ``Install release <id8> now?`` and runs
-the install and the setup as after a verdict. When the step recorded the
+the install and setup flow. ``/reef-versions <step> install`` starts that
+flow for a published step when you are ready. When the step recorded the
 proposer's plan and its review, ``/reef-versions <step>`` also prints
 ``design:`` and ``not covered:``. The command also prints a curl that
 fetches the page with the

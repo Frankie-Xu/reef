@@ -13,13 +13,11 @@
 // restarted pi reports their verdicts at its next session start. /reef-versions
 // lists the release chain with each step's verdict and request, prints a
 // step's page link and, for a pending release, the promote action and a trial
-// install, and runs the promote after a confirmation. After a verdict, with a
-// UI, the session offers the next step: the install of a selected release
-// through the reef-pi wrapper (its update, then a setup loop that asks once
-// for what the release needs from the person and hands each answer to the
-// wrapper), or the promote of a pending one and then the same install; a
-// decline names the commands for later. Nothing here writes a mutation. Kept
-// free of annotations on purpose: plain JavaScript in a .ts file, so plain
+// install, and runs the promote after a confirmation. A verdict only reports
+// the result and the commands to act on it, leaving the user's input free.
+// /reef-versions <step> install starts the install and setup flow on demand;
+// promote also offers the install of the head it creates. Nothing here writes
+// a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
 // node can parse it in CI and pi's TS loader accepts it unchanged. Gate
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
 // gate never sees the commands or the tools.
@@ -312,8 +310,8 @@ export default function requests(pi) {
     const details = ` Details: /reef-versions ${step}.`;
     if (verdict === "selected") {
       return (
-        `reef: '${ask}' is published as release ${release}. Restart reef-pi to install it (the update notice ` +
-        `offers it).${details}`
+        `reef: '${ask}' is published as release ${release}. Install when ready with /reef-versions ${step} install.` +
+        details
       );
     }
     if (verdict === "pending") {
@@ -496,31 +494,10 @@ export default function requests(pi) {
     return typeof answer.release_id === "string" && answer.release_id ? answer.release_id : null;
   };
 
-  // The promote, then the install offer for the head it made; the settle and the command share it.
+  // An explicit promote command also offers the install of the head it made.
   const promoteThenInstall = async (step, row, ctx) => {
     const headId = await promoteRelease(step, row, ctx);
     if (headId) await offerInstall(headId, promotedText(step, headId), ctx);
-  };
-
-  // After the report, with a UI, the next step: a selected release installs after a confirmation; a pending one
-  // promotes after a confirmation that links its page, then installs after another; a decline names the command.
-  const offerNextStep = async (step, rows, ask, ctx) => {
-    const row = rows[step];
-    const verdict = verdictOf(row, rows);
-    const releaseId = String(row.release_id || "");
-    if (verdict === "selected") {
-      await offerInstall(releaseId, settledText(step, rows, ask), ctx);
-    } else if (verdict === "pending") {
-      const confirmed = await ctx.ui.confirm(
-        `Promote release ${releaseId.slice(0, 8)} now?`,
-        `It changes an extension. Read it first: ${stepPageLink(step)}`,
-      );
-      if (!confirmed) {
-        ctx.ui.notify(`/reef-versions ${step} promote when you have read it`, "info");
-        return;
-      }
-      await promoteThenInstall(step, row, ctx);
-    }
   };
 
   // The watch: one at a time, so a second filing replaces the first; session_shutdown clears it.
@@ -558,9 +535,7 @@ export default function requests(pi) {
         stopWatch(ctx);
         forgetRequest(recordId);
         deliverReport(step, rows, text, ctx);
-        // Headless, nothing is asked: the report names the next step. At a session start the update notice
-        // offers the install itself, so only a settle seen live offers it here.
-        if (ctx.hasUI) await offerNextStep(step, rows, ask, ctx);
+        // A background result never opens a dialog: the report names the commands for when the person is ready.
         await resumeStored(rows, ctx); // another filed request still waiting takes the watch over
         return;
       }
@@ -809,14 +784,17 @@ export default function requests(pi) {
   };
 
   pi.registerCommand("reef-versions", {
-    description: "List this harness's versions, or show one: /reef-versions [step] [promote]",
+    description: "List this harness's versions, or show one: /reef-versions [step] [promote|install]",
     handler: async (args, ctx) => {
       const words = (args || "").trim().split(/\s+/).filter(Boolean);
       const promote = words[1] === "promote";
+      const install = words[1] === "install";
       // Digits only before Number(): "1e1" and "0x3" are numbers to it and no step to the catalog.
-      const usable = words.length === 0 || (/^\d+$/.test(words[0]) && (words.length === 1 || (promote && words.length === 2)));
+      const usable =
+        words.length === 0 ||
+        (/^\d+$/.test(words[0]) && (words.length === 1 || ((promote || install) && words.length === 2)));
       if (!usable) {
-        ctx.ui.notify("Usage: /reef-versions [step] [promote]", "warning");
+        ctx.ui.notify("Usage: /reef-versions [step] [promote|install]", "warning");
         return;
       }
       const step = words.length ? Number(words[0]) : null;
@@ -836,11 +814,19 @@ export default function requests(pi) {
         ctx.ui.notify(`no step ${step}: the catalog holds steps 0 to ${rows.length - 1}`, "warning");
         return;
       }
+      const verdict = verdictOf(row, rows);
+      if (install) {
+        if (["pending", "rejected", "skipped"].includes(verdict) || verdict.startsWith("promoted")) {
+          ctx.ui.notify(`step ${step} is ${verdict}; choose a published step to install with /reef-versions`, "warning");
+          return;
+        }
+        await offerInstall(String(row.release_id), `Read the change first: ${stepPageLink(step)}`, ctx);
+        return;
+      }
       if (!promote) {
         ctx.ui.notify(stepLines(step, rows).join("\n"), "info");
         return;
       }
-      const verdict = verdictOf(row, rows);
       if (verdict.startsWith("promoted")) {
         ctx.ui.notify(`step ${step} is already ${verdict}; nothing to promote`, "warning");
         return;

@@ -607,8 +607,8 @@ two commands, two tools and two event handlers:
   abort signal with a 10 s deadline (``REEF_HARNESS_FETCH_MS`` shortens it),
   so a hung read costs one poll, not every later tick. When the row appears,
   the report quotes the request's first 60 characters and names the next
-  action by verdict: a selected release says to restart ``reef-pi`` (the
-  update notice offers it); a pending one says ``This release changes an
+  action by verdict: a selected release names ``/reef-versions <step> install``;
+  a pending one says ``This release changes an
   extension, so it is not installed until you promote it: /reef-versions
   <step> promote. Page: <link>``; a rejected step quotes
   ``selection.reason`` and says to rephrase or split the request; a skipped
@@ -622,16 +622,14 @@ two commands, two tools and two event handlers:
   renders and the session file keeps, and as a notice, which the next
   status line may overwrite. Past the cap the watch says ``/reef-versions``
   shows the verdict when it settles.
-- The next step, after the report of a settle the watch saw, with a UI: for
-  a selected release ``Install release <id8> now?`` with the verdict line;
-  yes runs the install below, no notifies ``reef: install it later with
-  reef-pi update, then reef-pi setup``. For a pending release ``Promote
-  release <id8> now?`` with ``It changes an extension. Read it first: <step
-  page link>``; yes posts the promote, notifies the promoted line and offers
-  the install of the head the promote made; no notifies ``/reef-versions
-  <step> promote when you have read it``. Headless nothing is asked, and a
-  report delivered at ``session_start`` offers nothing either: the update
-  notice offers the install there.
+- A background verdict opens no confirmation, selection or input dialog,
+  whether the agent is busy or idle. The report names the next command,
+  leaving the person free to keep chatting. ``/reef-versions <step> install``
+  explicitly starts the install of a published step after a confirmation
+  linking its page. Pending, rejected and skipped steps cannot be installed
+  through that action; use ``/reef-versions <step> promote`` to review and
+  promote a pending release first. The automatic update notice at session
+  start remains a separate entry point.
 - The install, through the ``reef-pi`` wrapper (``REEF_HARNESS_WRAPPER``,
   which ``run_agent`` exports, else ``reef-pi`` beside the release file;
   with neither on disk the notice is ``reef: no reef-pi wrapper found;
@@ -668,7 +666,7 @@ two commands, two tools and two event handlers:
   and says how to see and promote them: ``N release(s) await your review:
   /reef-versions <step>[, <step>] (promote with /reef-versions <step>
   promote)``.
-- ``/reef-versions [step] [promote]``: lists the release chain with each
+- ``/reef-versions [step] [promote|install]``: lists the release chain with each
   step's verdict and request. With a step it prints ``design:`` (the
   proposer's plan, first 200 characters) and ``not covered:`` when the row
   carries ``proposal_notes``, then the step's page link (``GET
@@ -676,8 +674,7 @@ two commands, two tools and two event handlers:
   query parameters) and a curl that fetches the page with the headers into
   a file, and, for a pending release, the promote action and a trial
   install command; ``/reef-versions <step> promote`` runs the promote after
-  a confirmation, then offers the install of the head the promote made, the
-  way a settle does.
+  a confirmation, then offers the install of the head the promote made.
 
 The writing happens on the service, where the evolve step hands the request
 to the recipe's ``propose`` and the commit records it under
