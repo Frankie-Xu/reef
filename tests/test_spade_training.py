@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.beta.spade import SpadePreparer, SpadeProcessor, SpadeRecipe
 from recipes.beta.spade.processor import reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.core.trajectories import make_trajectory
+from reef.inference.http import InferenceProxyRuntime
 from reef.train.algos.registry import resolve_preparer
 from reef.train.processors.reported import GroupDecision
 from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem, trajectory_groups
@@ -114,3 +116,15 @@ def test_the_recipe_binds_the_processor_the_preparer_and_tinkers_loss() -> None:
     assert spec.processor is SpadeProcessor and spec.step_preparer == "spade"
     assert spec.loss_family == "importance_sampling"
     assert SpadeRecipe.report_type.fget(SpadeRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
+    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
+    training_runtime = StubTrainingRuntime()
+    recipe = SpadeRecipe(training_runtime=training_runtime, runtime=runtime)
+    assert recipe.processor_config() == {"tasks_per_step": 4, "rollouts_per_task": 4, "scaffold_tolerance": 8}
+    with pytest.raises(ValueError, match="scaffold_tolerance"):
+        SpadeRecipe(training_runtime=training_runtime, runtime=runtime, scaffold_tolerance=-1)
+
+
+def test_the_assembly_spans_an_episodes_turns_and_realigns_the_think_scaffold() -> None:
+    assembly = processor()._assembly
+    assert assembly.accept_multi_turn and assembly.scaffold_tolerance == 8
+    assert processor(scaffold_tolerance=2)._assembly.scaffold_tolerance == 2

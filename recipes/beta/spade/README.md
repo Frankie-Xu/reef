@@ -47,14 +47,18 @@ export REEF_TOKEN=reef-local REEF_SPADE_STATE_DIR="$PWD/work/spade-tinker"   # a
 reef serve -c recipes/beta/spade/examples/tinker/serve.yaml
 ```
 
-`SpadeRecipe` is a weight training recipe: the served model is the solver, its episodes on the generated tasks are its training data. Every plain episode the task player reports names its task under `metadata.task`; `SpadeProcessor` groups the reports by task, a group is complete at `rollouts-per-task` episodes, and a batch holds `tasks-per-step` complete groups. `SpadePreparer` centers and scales each episode's reward within its task group (a group with one reward everywhere gives 0), and Tinker's built in `importance_sampling` loss puts that advantage on every response token, so the recipe runs on the `tinker` backend today and fails at selection on Slime, which has no loss family of that name. With the deployment up, play the train split of a manifest `rollouts-per-task` times per task and watch the scenario's step count:
+`SpadeRecipe` is a weight training recipe: the served model is the solver, its episodes on the generated tasks are its training data. Every plain episode the task player reports names its task under `metadata.task`; `SpadeProcessor` groups the reports by task, a group is complete at `rollouts-per-task` episodes, and a batch holds `tasks-per-step` complete groups. `SpadePreparer` centers and scales each episode's reward within its task group (a group with one reward everywhere gives 0), and Tinker's built in `importance_sampling` loss puts that advantage on every response token, so the recipe runs on the `tinker` backend today and fails at selection on Slime, which has no loss family of that name. With the deployment up, play the train split of a manifest `rollouts-per-task` times per task, with thinking off, and watch the scenario's step count:
 
 ```bash
+AGENT='{"name": "terminus-2", "model_name": "openai/{model}", "kwargs": {"api_base": "{base_url}/v1", "llm_kwargs": {"api_key": "{api_key}",
+  "extra_body": {"chat_template_kwargs": {"enable_thinking": false}}}}}'
 for rollout in 1 2 3 4; do
   python -m reef.harness.client.tasks --reef-url http://127.0.0.1:8900 --scenario spade --model Qwen/Qwen3-8B \
-    --manifest tasks/manifest-00000.json --tasks-root tasks --side train --work-dir work/play-$rollout
+    --manifest tasks/manifest-00000.json --tasks-root tasks --side train --work-dir work/play-$rollout --agent-json "$AGENT"
 done
 curl -s -H "Authorization: Bearer $REEF_TOKEN" http://127.0.0.1:8900/reef/status | python -m json.tool | grep -A 3 '"spade"'
 ```
+
+Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold-tolerance` lets the assembly realign those masked tokens. A work directory under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
 
 A generation whose solver is this deployment (`--reef-url` the same service, `--plays` at least `rollouts-per-task`) trains as it plays: the plain arm's reports are the batch. The Designer's own training, its regret as the reward of its proposals, follows.

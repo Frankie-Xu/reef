@@ -17,6 +17,8 @@ from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, Tra
 
 DEFAULT_TASKS_PER_STEP = 4
 DEFAULT_ROLLOUTS_PER_TASK = 4
+# Qwen3 with thinking off ends the generation prompt with an empty think block of four tokens.
+DEFAULT_SCAFFOLD_TOLERANCE = 8
 
 
 def reported_task_name(report: AgentRecord) -> str | None:
@@ -43,6 +45,7 @@ class SpadeProcessor(ReportedFeedbackProcessor):
             raise ValueError("rollouts_per_task must be at least two: a group of one has no relative reward")
         # An agent's episode is many model calls that extend one conversation; the sample spans them.
         config.setdefault("accept_multi_turn_policy_samples", True)
+        config.setdefault("scaffold_tolerance", DEFAULT_SCAFFOLD_TOLERANCE)
         self._assembly = SampleAssembly.from_config(context.with_config(config))
         # One unit of the batch is one complete task group.
         super().__init__(context.with_config({**config, "batch_size": self.tasks_per_step}))

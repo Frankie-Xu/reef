@@ -18,6 +18,8 @@ recipe:
     # A batch is tasks-per-step complete groups of rollouts-per-task episodes of one task.
     tasks-per-step: 2
     rollouts-per-task: 4
+    # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+    scaffold-tolerance: 8
     checkpoint-every-n-versions: 1
 training:
   backend: tinker

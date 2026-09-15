@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from recipes.beta.spade.preparer import LOSS_FAMILY, SpadePreparer
-from recipes.beta.spade.processor import DEFAULT_ROLLOUTS_PER_TASK, DEFAULT_TASKS_PER_STEP, SpadeProcessor
+from recipes.beta.spade.processor import (
+    DEFAULT_ROLLOUTS_PER_TASK,
+    DEFAULT_SCAFFOLD_TOLERANCE,
+    DEFAULT_TASKS_PER_STEP,
+    SpadeProcessor,
+)
 from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
@@ -18,6 +23,9 @@ class SpadeRecipe(WeightTrainingRecipe):
     name: str = "spade"
     tasks_per_step: int = config_field(DEFAULT_TASKS_PER_STEP, env="REEF_SPADE_TASKS_PER_STEP")
     rollouts_per_task: int = config_field(DEFAULT_ROLLOUTS_PER_TASK, env="REEF_SPADE_ROLLOUTS_PER_TASK")
+    # A thinking template's generation prompt ends with a think scaffold the history drops; the assembly may
+    # realign that many masked tokens ahead of the previous response.
+    scaffold_tolerance: int = config_field(DEFAULT_SCAFFOLD_TOLERANCE, env="REEF_SPADE_SCAFFOLD_TOLERANCE")
 
     @property
     def report_type(self) -> type[ReportBase]:
@@ -34,3 +42,5 @@ class SpadeRecipe(WeightTrainingRecipe):
             raise ValueError("tasks_per_step must be positive")
         if self.rollouts_per_task < 2:
             raise ValueError("rollouts_per_task must be at least two")
+        if self.scaffold_tolerance < 0:
+            raise ValueError("scaffold_tolerance must be non-negative")
