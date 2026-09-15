@@ -147,11 +147,19 @@ function clarifyMessage(text) {
     text,
     "```",
     "",
-    "Before filing it with reef_file_request, think through what it needs: when it triggers, what state the " +
-      "harness must know and how it learns it, what the user must set up, what is ambiguous. If an open point " +
-      "would change what gets built, ask with reef_ask_user: at most 3 questions, each with 2 to 4 concrete " +
-      "options; the user can always type their own. Then call reef_file_request with the user's original words " +
-      "as `request` and the answers as `clarifications`. Do not write the change yourself: reef's service writes it.",
+    "Before filing it with reef_file_request, decide what would be built: when the behavior triggers, what it " +
+      "does, what state it keeps and how it learns that state. Ask with reef_ask_user only about a decision that " +
+      "changes what gets built and that the request leaves open. Rules for the questions:",
+    "- at most 3, one decision per question, worded so the user can answer without knowing how the harness works;",
+    "- 2 to 4 options that are concrete, mutually exclusive and cover the likely answers; no two options that " +
+      "mean the same thing; the user can always type their own;",
+    "- never ask for a value or a setup detail the user provides when the change is installed: a phone number, " +
+      "a credential, an account, a permission, or which app or service to use when the request already names " +
+      "one; reef-pi setup collects those once, after the install;",
+    "- do not ask what a reasonable default settles; choose the default and say so in a clarification line.",
+    "Then call reef_file_request with the user's original words as `request` and the answers as " +
+      "`clarifications`, one line per answer and one per default you chose. Do not write the change yourself: " +
+      "reef's service writes it.",
   ].join("\n");
 }
 
@@ -614,8 +622,10 @@ export default function requests(pi) {
     name: "reef_ask_user",
     label: "Ask the user",
     description:
-      "Ask the user up to 4 questions before filing a harness change with reef_file_request. Each question " +
-      "offers 2 to 4 concrete options; the user can always type an answer of their own.",
+      "Ask the user up to 4 questions before filing a harness change with reef_file_request, each about one " +
+      "decision that changes what gets built, with 2 to 4 concrete options that do not overlap; the user can " +
+      "always type an answer of their own. Never ask for a setup value (a phone number, a credential, an " +
+      "account, a permission): reef-pi setup collects those after the install.",
     parameters: ASK_USER_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return { content: [{ type: "text", text: NO_UI_TEXT }], details: {} };

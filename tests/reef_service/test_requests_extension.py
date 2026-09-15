@@ -732,8 +732,9 @@ def test_the_command_with_a_ui_hands_the_request_to_the_session_model_and_files_
     assert _fetches(out) == [] and _of_kind(out, "status") == []
     (sent,) = _of_kind(out, "user_message")
     assert sent["options"] is None
-    assert sent["text"].startswith(CLARIFY_HEAD + "reef_file_request, think through what it needs: ")
-    assert "ask with reef_ask_user: at most 3 questions, each with 2 to 4 concrete options" in sent["text"]
+    assert sent["text"].startswith(CLARIFY_HEAD + "reef_file_request, decide what would be built: ")
+    assert "- at most 3, one decision per question" in sent["text"]
+    assert "never ask for a value or a setup detail the user provides when the change is installed" in sent["text"]
     assert sent["text"].endswith("Do not write the change yourself: reef's service writes it.")
     assert _notices(out) == [{"kind": "notify", "message": "reef: clarifying, then filing", "type": "info"}]
     # The release file is checked before the model is engaged: without it nothing is sent or asked.
