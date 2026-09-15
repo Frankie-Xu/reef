@@ -208,7 +208,7 @@ def test_a_manifest_write_that_fails_keeps_the_old_manifest_and_raises_a_split_e
     with pytest.raises(TaskSplitError, match="cannot write split manifest"):
         write_split_manifest(tmp_path / "blocked", first)
     with pytest.raises(TaskSplitError, match="names no file"):
-        write_split_manifest(tmp_path, first)
+        write_split_manifest(Path("/"), first)
     assert read_split_manifest(tmp_path / "split.json") == first
     assert sorted(p.name for p in tmp_path.iterdir()) == [".staging", "blocked", "missing", "split.json"]
     assert list((tmp_path / ".staging").iterdir()) == []
