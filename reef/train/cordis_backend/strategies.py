@@ -9,6 +9,7 @@ always receives a typed instance.
 from __future__ import annotations
 
 import inspect
+import math
 import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -236,6 +237,29 @@ def resolve_proposer(value: object) -> Proposer:
         if callable(resolved):
             return _CallableProposer(resolved)
     raise ValueError("propose must be a Proposer instance, a callable, or a dotted 'module:attribute' reference")
+
+
+def verifier_reward(task: str, result: EpisodeResult) -> float:
+    """The Harbor verifier's reward for a task directory episode; ``evaluate`` for a gate fed by a task manifest.
+
+    The terminus runner writes one ``verifier`` row per episode with the task it played and the reward
+    its verifier wrote. A failed episode, a verifier that wrote nothing, or an agent exit other than 0
+    scores 0; a row for another task or a reward that is not a finite number is an error.
+    """
+    if result.exit_code:
+        return 0.0
+    rows = [event for event in result.trajectory if event.get("type") == "verifier"]
+    if len(rows) != 1:
+        raise ValueError(f"expected one verifier record for {task!r}, found {len(rows)}")
+    row = rows[0]
+    if row.get("task") != task:
+        raise ValueError(f"the verifier record names {row.get('task')!r}, not {task!r}")
+    if row.get("failed") or row.get("reward") is None:
+        return 0.0
+    reward = row["reward"]
+    if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
+        raise ValueError(f"the verifier reward for {task!r} must be a finite number, not {reward!r}")
+    return float(reward)
 
 
 def resolve_episode_scorer(value: object) -> EpisodeScorer:

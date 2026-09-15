@@ -465,8 +465,14 @@ class SampleAssembly:
             raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
         if (sample.training.get("turn_count", 1) > 1) and not self.accept_multi_turn:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
-        return sample.with_metadata(
-            feedback=context.report.payload.get("feedback"),
-            report_agent_record_id=context.report.agent_record_id,
-            references=list(context.references),
-        )
+        fields: dict[str, Any] = {
+            "feedback": context.report.payload.get("feedback"),
+            "report_agent_record_id": context.report.agent_record_id,
+            "references": list(context.references),
+        }
+        # A report that names the task it played (metadata.task: name, path, digest) lets a recipe group samples by task.
+        report_metadata = context.report.payload.get("metadata")
+        task = report_metadata.get("task") if isinstance(report_metadata, Mapping) else None
+        if isinstance(task, Mapping):
+            fields["task"] = dict(task)
+        return sample.with_metadata(**fields)
