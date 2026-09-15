@@ -1,4 +1,4 @@
-"""The page per catalog step: why a version exists, what it changed, the gate's verdict, its setup and its chain.
+"""The page per catalog step: why a version exists, what it changed, the evaluation's result, its setup and its chain.
 
 ``GET /reef/harness/releases/{step}/page`` renders it from the releases row,
 the step being the row's position oldest first with the creation row as 0. The
@@ -15,6 +15,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
 from reef_service.test_harness_requests import _post, _request
@@ -25,7 +26,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
-from reef.service.release_page import before_release_id, build_release_page, served_step, verdict_of
+from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -143,7 +144,7 @@ def _chain(tmp_path: Path) -> Dispatcher:
 
     asyncio.run(run())
     rows = list(reversed(scenario.releases()))
-    assert [verdict_of(row) for row in rows] == ["creation", "selected", "rejected", "rejected", "pending"]
+    assert [result_of(row) for row in rows] == ["creation", "selected", "rejected", "rejected", "pending"]
     assert ["training_request" in (row.get("metrics") or {}) for row in rows] == [False, True, True, False, True]
     return dispatcher
 
@@ -189,31 +190,34 @@ def _section(page: str, name: str) -> str:
 
 
 def _sub(page: str) -> str:
-    """The line under the title: the release id, the verdict, current on the served head, the commit time."""
+    """The line under the title: the release id, the result, current on the served head, the commit time."""
     return next(line for line in page.splitlines() if line.startswith('<p class="sub">'))
 
 
-def test_the_page_for_a_published_step_carries_the_request_the_verdict_and_the_chain(tmp_path: Path) -> None:
+def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_chain(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
         page = _page(dispatcher, 1)
         assert page.startswith("<title>Harness step 1</title>")
         assert "<h1>Harness step 1</h1>" in page
-        assert _sections(page) == ["Why", "What changed", "Verdict", "Setup", "Chain"]
+        assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
         assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
         changed = _section(page, "What changed")
         assert '<span class="tag">update</span>r1 <span class="tag">rules</span>' in changed
         assert "<pre>marker rules</pre>" in changed
-        verdict = _section(page, "Verdict")
-        assert '<td class="selected">selected</td>' in verdict
-        assert "<th>wins</th><td>1</td>" in verdict and "<th>losses</th><td>0</td>" in verdict
-        assert "<th>candidate score</th><td>1.0</td>" in verdict and "<th>current score</th><td>0.0</td>" in verdict
-        assert "<th>episode failures</th><td>0</td>" in verdict
+        selection_result = _section(page, "Result")
+        assert '<td class="selected">selected</td>' in selection_result
+        assert "<th>wins</th><td>1</td>" in selection_result and "<th>losses</th><td>0</td>" in selection_result
+        assert (
+            "<th>candidate score</th><td>1.0</td>" in selection_result
+            and "<th>current score</th><td>0.0</td>" in selection_result
+        )
+        assert "<th>episode failures</th><td>0</td>" in selection_result
         assert "nothing to set up" in _section(page, "Setup")
         chain = _section(page, "Chain")
         assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
-        # The pending extension update was gated against this head, so it is this release's child.
+        # The pending extension update was evaluated against this head, so it is this release's child.
         assert f"<li>step 4 <span class=\"id\">{rows[4]['release_id']}</span>" in chain
         data = _data(page)
         assert data["release_id"] == rows[1]["release_id"] and data["metrics"]["training_request"]["text"] == FIRST
@@ -238,8 +242,8 @@ def test_the_page_for_a_pending_extension_step_diffs_the_file_against_the_head(t
         assert "if (1 &lt; 2) return;" in changed
         # The rules bump that made the composite win rides beside it.
         assert "<pre>marker marker rules</pre>" in changed
-        verdict = _section(page, "Verdict")
-        assert '<td class="pending">pending</td>' in verdict and "waits for a promote" in verdict
+        selection_result = _section(page, "Result")
+        assert '<td class="pending">pending</td>' in selection_result and "waits for a promote" in selection_result
         chain = _section(page, "Chain")
         assert f'<tr><th>parent</th><td class="id">{rows[1]["release_id"]}</td></tr>' in chain
         assert rows[4]["release_id"] in chain and "<li>" not in chain
@@ -256,9 +260,9 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
         page = _page(dispatcher, 2)
         assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
         assert "<pre>Answer briefly, with care.</pre>" in _section(page, "What changed")
-        verdict = _section(page, "Verdict")
-        assert '<td class="rejected">rejected</td>' in verdict and "the head stayed" in verdict
-        assert "<th>wins</th><td>0</td>" in verdict and "<th>losses</th><td>1</td>" in verdict
+        selection_result = _section(page, "Result")
+        assert '<td class="rejected">rejected</td>' in selection_result and "the head stayed" in selection_result
+        assert "<th>wins</th><td>0</td>" in selection_result and "<th>losses</th><td>1</td>" in selection_result
         chain = _section(page, "Chain")
         assert rows[2]["release_id"] == rows[1]["release_id"]
         assert f'{rows[1]["release_id"]} (the head at this step; the candidate published nothing)' in chain
@@ -275,14 +279,14 @@ def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_
         changed = _section(page, "What changed")
         assert '<span class="tag">create</span>s1 <span class="tag">skill</span>' in changed
         assert "<pre># notes</pre>" in changed and "notes" in changed
-        assert '<td class="rejected">rejected</td>' in _section(page, "Verdict")
+        assert '<td class="rejected">rejected</td>' in _section(page, "Result")
         # The trainer writes training_request on every request step's row; an automatic step has none.
         assert "training_request" not in _data(page)["metrics"]
     finally:
         dispatcher.close()
 
 
-def test_the_chain_lists_the_steps_gated_against_a_release_as_its_children(tmp_path: Path) -> None:
+def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
@@ -290,7 +294,7 @@ def test_the_chain_lists_the_steps_gated_against_a_release_as_its_children(tmp_p
         assert "<title>Harness step 0</title>" in page
         assert "no step made it" in _section(page, "Why")
         assert "the seed as the recipe rendered it" in _section(page, "What changed")
-        assert '<td class="creation">creation</td>' in _section(page, "Verdict")
+        assert '<td class="creation">creation</td>' in _section(page, "Result")
         chain = _section(page, "Chain")
         # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
         assert chain.count("<li>step ") == 1
@@ -395,14 +399,17 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "<script>alert" not in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     assert "caf&#233;" in page
     assert "<pre>&lt;b&gt;bold&lt;/b&gt;</pre>" in page
-    verdict = _section(page, "Verdict")
-    assert "<th>ties</th><td>1</td>" in verdict and "<th>episode failures</th><td>1</td>" in verdict
+    selection_result = _section(page, "Result")
+    assert "<th>ties</th><td>1</td>" in selection_result and "<th>episode failures</th><td>1</td>" in selection_result
     assert (
-        "<th>proposer input tokens</th><td>1200</td>" in verdict
-        and "<th>proposer output tokens</th><td>80</td>" in verdict
+        "<th>proposer input tokens</th><td>1200</td>" in selection_result
+        and "<th>proposer output tokens</th><td>80</td>" in selection_result
     )
-    assert "<th>gate tokens</th><td>950 in, 75 out</td>" in verdict
-    assert '<td class="id">/srv/reef/steps/agents/1</td>' in verdict and "candidate won 2 of 3" in verdict
+    assert "<th>evaluation tokens</th><td>950 in, 75 out</td>" in selection_result
+    assert (
+        '<td class="id">/srv/reef/steps/agents/1</td>' in selection_result
+        and "candidate won 2 of 3" in selection_result
+    )
     setup = _section(page, "Setup")
     assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th></tr></thead>" in setup
     assert '<tr><td>SLACK_WEBHOOK</td><td>env</td><td class="id">SLACK_WEBHOOK</td><td></td></tr>' in setup
@@ -414,7 +421,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "reef-pi setup" in setup and "carried from earlier steps" not in setup
     assert "refused by the step" not in setup
     # No proposal notes on the row: no Design and no Review section.
-    assert _sections(page) == ["Why", "What changed", "Verdict", "Setup", "Chain"]
+    assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     data = _data(page)
     assert data["metrics"]["training_request"]["text"] == "caf\u00e9 <script>alert(1)</script>"
     assert data["metrics"]["training_request"]["requires"][1]["check"] == "osascript -e '1 < 2'"
@@ -525,17 +532,20 @@ def test_a_promoted_pending_step_reads_promoted_at_the_promote_step(tmp_path: Pa
         dispatcher.promote(SCENARIO, pending_id)
         rows = list(reversed(scenario.releases()))
         assert rows[5]["operation"] == "promote" and rows[5]["rollback_target_release_id"] == pending_id
-        assert rows[4]["pending"] is True and verdict_of(rows[4]) == "pending"
-        assert verdict_of(rows[4], rows) == "promoted at step 5"
+        assert rows[4]["pending"] is True and result_of(rows[4]) == "pending"
+        assert result_of(rows[4], rows) == "promoted at step 5"
         assert served_step(rows) == 5
         page = _page(dispatcher, 4)
         sub = _sub(page)
         assert '<span class="promoted">promoted at step 5</span>' in sub and "current" not in sub
-        verdict = _section(page, "Verdict")
-        assert '<td class="promoted">promoted at step 5</td>' in verdict
-        assert "won the gate and was promoted at step 5; the release that step published serves it" in verdict
-        assert "waits for a promote" not in verdict
-        # The step still diffs against the head it was gated on; the promote's own page names it as the target.
+        selection_result = _section(page, "Result")
+        assert '<td class="promoted">promoted at step 5</td>' in selection_result
+        assert (
+            "passed the checks and was promoted at step 5; the release that step published serves it"
+            in selection_result
+        )
+        assert "waits for a promote" not in selection_result
+        # The step still diffs against the head it was evaluated on; the promote's own page names it as the target.
         assert f"+++ pi-agent/extensions/hello.ts ({pending_id[:8]})" in _section(page, "What changed")
         promoted = _page(dispatcher, 5)
         assert "| current" in _sub(promoted)
@@ -568,7 +578,7 @@ def test_a_step_that_published_nothing_chains_to_the_head_it_ran_on() -> None:
     assert before_release_id(skipped) == "rel-1" and served_step(rows) == 1
     # Chain is the last section, so cut it before the data block, which carries the row's own parent id.
     chain = _section(build_release_page(2, rows), "Chain").partition("</main>")[0]
-    assert '<tr><th>ran on</th><td class="id">rel-1 (the head at this step; nothing was gated)</td></tr>' in chain
+    assert '<tr><th>ran on</th><td class="id">rel-1 (the head at this step; nothing was evaluated)</td></tr>' in chain
     assert "none (the candidate published nothing)" in chain
     assert "<th>parent</th>" not in chain and "<th>this release</th>" not in chain and "rel-0" not in chain
     published = _section(build_release_page(1, rows), "Chain").partition("</main>")[0]
@@ -602,12 +612,13 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
 
 
-def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> None:
+@pytest.mark.parametrize("review_key", ["result", "verdict"])
+def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_key) -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     notes = {
         "design": "Add an <away> command.\n\nA rule alone would assume the state holds.",
         "review": {
-            "verdict": "partial",
+            review_key: "partial",
             "covered": ["the /away command toggles the state", "the rule reads a < b"],
             "uncovered": ["no <b>notice</b> when the state clears"],
         },
@@ -621,7 +632,7 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Verdict", "Setup", "Chain"]
+    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
     design = _section(page, "Design")
     assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
     review = _section(page, "Review")
@@ -638,23 +649,23 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
     assert "<away>" not in page and "<b>notice" not in page and "X<Y" not in page
     assert _data(page)["metrics"]["proposal_notes"] == notes
     # A complete review with nothing left uncovered says so.
-    complete = {"review": {"verdict": "complete", "covered": ["the command"], "uncovered": []}}
+    complete = {"review": {"result": "complete", "covered": ["the command"], "uncovered": []}}
     review = _section(
         build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": complete}}]), "Review"
     )
     assert '<span class="complete">complete</span>' in review
     assert '<h3>uncovered</h3><p class="empty">nothing left uncovered</p>' in review
     assert "no requires item names them" not in review
-    # The review call failed: no verdict on record, but the undeclared variables still show.
+    # The review call failed: no result on record, but the undeclared variables still show.
     failed = {"design": "One command.", "undeclared_env": ["TWILIO_SID"]}
     page = build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": failed}}])
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Verdict", "Setup", "Chain"]
+    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
     review = _section(page, "Review")
     assert '<p class="empty">no review on record</p>' in review and "<h3>covered</h3>" not in review
     assert '<span class="id">TWILIO_SID</span>' in review
 
 
-def test_the_verdict_names_why_the_proposer_produced_nothing_when_the_step_recorded_it() -> None:
+def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_recorded_it() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     failure = "model call failed after 58.2 s (max_tokens=16384): model endpoint returned <non-text> content"
     row = {
@@ -669,12 +680,12 @@ def test_the_verdict_names_why_the_proposer_produced_nothing_when_the_step_recor
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    # A failure alone adds no Design or Review section; the Verdict table names it after the skip row, escaped.
-    assert _sections(page) == ["Why", "What changed", "Verdict", "Setup", "Chain"]
+    # A failure alone adds no Design or Review section; the Result table names it after the skip row, escaped.
+    assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     assert (
         "<tr><th>skipped</th><td>no proposal</td></tr><tr><th>proposer failure</th><td>model call failed after "
         "58.2 s (max_tokens=16384): model endpoint returned &lt;non-text&gt; content</td></tr>"
-    ) in _section(page, "Verdict")
+    ) in _section(page, "Result")
     assert "<non-text>" not in page.partition("<script")[0]
     # Without the note, or with one that is not text, there is no such row.
     for notes in ({}, {"failure": "  "}, {"failure": 3}):
@@ -683,13 +694,13 @@ def test_the_verdict_names_why_the_proposer_produced_nothing_when_the_step_recor
     # A design written before the reply came to nothing keeps its section beside the row.
     designed = {**row, "metrics": {**row["metrics"], "proposal_notes": {"design": "A tool.", "failure": failure}}}
     page = build_release_page(1, [creation, designed])
-    assert _sections(page) == ["Why", "Design", "What changed", "Verdict", "Setup", "Chain"]
-    assert "<th>proposer failure</th>" in _section(page, "Verdict")
+    assert _sections(page) == ["Why", "Design", "What changed", "Result", "Setup", "Chain"]
+    assert "<th>proposer failure</th>" in _section(page, "Result")
 
 
 def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    plain = ["Why", "What changed", "Verdict", "Setup", "Chain"]
+    plain = ["Why", "What changed", "Result", "Setup", "Chain"]
     for metrics in (
         {"selected": True},
         {"selected": True, "proposal_notes": {}},
@@ -702,7 +713,8 @@ def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
         assert _sections(page) == plain and "Design" not in page.partition("<script")[0]
 
 
-def test_the_verdict_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran() -> None:
+@pytest.mark.parametrize("sides_key", ["evaluation_sides", "gate_sides"])
+def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran(sides_key) -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     row = {
         "release_id": "rel-1",
@@ -713,7 +725,7 @@ def test_the_verdict_lists_the_floor_metrics_and_omits_the_current_score_when_no
             "passed": 1,
             "failed": 0,
             "floor_score": 1.0,
-            "gate_sides": ["candidate"],
+            sides_key: ["candidate"],
             "candidate_score": 1.0,
             "episode_failures": 0,
             "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},
@@ -724,21 +736,27 @@ def test_the_verdict_lists_the_floor_metrics_and_omits_the_current_score_when_no
             },
         },
     }
-    verdict = _section(build_release_page(1, [creation, row]), "Verdict")
-    assert '<td class="selected">selected</td>' in verdict
-    assert "<th>passed</th><td>1</td>" in verdict and "<th>failed</th><td>0</td>" in verdict
-    assert "<th>floor score</th><td>1.0</td>" in verdict and "<th>gate sides</th><td>candidate</td>" in verdict
-    assert "<th>candidate score</th><td>1.0</td>" in verdict and "<th>episode failures</th><td>0</td>" in verdict
+    selection_result = _section(build_release_page(1, [creation, row]), "Result")
+    assert '<td class="selected">selected</td>' in selection_result
+    assert "<th>passed</th><td>1</td>" in selection_result and "<th>failed</th><td>0</td>" in selection_result
+    assert (
+        "<th>floor score</th><td>1.0</td>" in selection_result
+        and "<th>evaluation sides</th><td>candidate</td>" in selection_result
+    )
+    assert (
+        "<th>candidate score</th><td>1.0</td>" in selection_result
+        and "<th>episode failures</th><td>0</td>" in selection_result
+    )
     for absent in ("current score", "wins", "losses", "ties"):
-        assert f"<th>{absent}</th>" not in verdict
+        assert f"<th>{absent}</th>" not in selection_result
     # The floor fields sit between the comparison's and the scores.
-    assert verdict.index("<th>passed</th>") < verdict.index("<th>candidate score</th>")
-    assert "<th>gate tokens</th><td>300 in, 20 out</td>" in verdict
-    assert "candidate met the floor on all 1 tasks" in verdict
-    both = {**row, "metrics": {**row["metrics"], "gate_sides": ["candidate", "current"], "ties": 0}}
-    verdict = _section(build_release_page(1, [creation, both]), "Verdict")
-    assert "<th>gate sides</th><td>candidate, current</td>" in verdict
-    assert verdict.index("<th>ties</th>") < verdict.index("<th>passed</th>")
+    assert selection_result.index("<th>passed</th>") < selection_result.index("<th>candidate score</th>")
+    assert "<th>evaluation tokens</th><td>300 in, 20 out</td>" in selection_result
+    assert "candidate met the floor on all 1 tasks" in selection_result
+    both = {**row, "metrics": {**row["metrics"], "evaluation_sides": ["candidate", "current"], "ties": 0}}
+    selection_result = _section(build_release_page(1, [creation, both]), "Result")
+    assert "<th>evaluation sides</th><td>candidate, current</td>" in selection_result
+    assert selection_result.index("<th>ties</th>") < selection_result.index("<th>passed</th>")
 
 
 def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reasons() -> None:

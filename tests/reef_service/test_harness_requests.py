@@ -538,7 +538,7 @@ def test_the_manifest_and_the_install_script_carry_the_addressed_releases_requir
             assert row["metrics"]["published"] is True
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] != base["release_id"]
-            assert head["requires"] == REQUIRES and head["gate"]["training_request"]["requires"] == REQUIRES
+            assert head["requires"] == REQUIRES and head["evaluation"]["training_request"]["requires"] == REQUIRES
             pinned = await client.get("/reef/harness", params={"release_id": base["release_id"]}, headers=headers)
             assert (await pinned.json())["requires"] == []
             # The script embeds the list it will refuse on, and the parent's script an empty one.
@@ -604,7 +604,7 @@ def test_the_manifest_and_the_install_script_carry_the_chains_requires(tmp_path:
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] == r3 and head["parent_release_id"] == r2
             # Step 3 named one item of its own; its release still needs what step 2 named.
-            assert head["gate"]["training_request"]["requires"] == [second] and head["requires"] == REQUIRES
+            assert head["evaluation"]["training_request"]["requires"] == [second] and head["requires"] == REQUIRES
             for release_id, requires in ((r2, [first]), (r1, []), (base, [])):
                 pinned = await client.get("/reef/harness", params={"release_id": release_id}, headers=headers)
                 assert (await pinned.json())["requires"] == requires
@@ -709,7 +709,7 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             promoted = (await response.json())["release_id"]
             assert promoted not in (base, pending["release_id"])
             head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] == promoted and head["gate"] is None and head["requires"] == REQUIRES
+            assert head["release_id"] == promoted and head["evaluation"] is None and head["requires"] == REQUIRES
             rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
             (row,) = [row for row in rows if row["release_id"] == promoted]
             assert row["operation"] == "promote" and row["rollback_target_release_id"] == pending["release_id"]

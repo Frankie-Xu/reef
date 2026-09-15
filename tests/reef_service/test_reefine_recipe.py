@@ -29,7 +29,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
-    # The floor: the candidate alone must pass every gate task; the current release is not run.
+    # The floor: the candidate alone must pass every evaluation task; the current release is not run.
     assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
     assert built.candidate_plugin.floor_score == 1.0
     assert [entry["id"] for entry in built.seed] == [

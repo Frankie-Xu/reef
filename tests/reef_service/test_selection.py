@@ -3,7 +3,7 @@
 A candidate-evaluation plugin is one class that both measures (``evaluate``)
 and decides (``decide``). The built-in policies are abstract mixins a plugin
 composes at class-definition time — :class:`AlwaysSelectMixin`,
-:class:`RegressionGateMixin`, cordis's :class:`ScoreComparisonMixin` — paired
+:class:`RegressionCheckMixin`, cordis's :class:`ScoreComparisonMixin` — paired
 with :class:`BackendEvaluateMixin` when the measurement comes from the training
 backend. Each implements one half of the contract and leaves the other
 abstract, so only the pairing is instantiable.
@@ -24,7 +24,7 @@ from reef.train.evaluation import (
     CandidateEvaluator,
     CandidateSelector,
     EvaluationResult,
-    RegressionGateMixin,
+    RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
 )
@@ -76,7 +76,7 @@ def test_built_ins_explicitly_implement_their_public_contracts() -> None:
         assert callable(plugin.decide)
     # The policies are mixins: they supply decide() and stay abstract on the half
     # they do not implement, so a mixin cannot stand up as a plugin on its own.
-    for mixin in (AlwaysSelectMixin, RegressionGateMixin, ScoreComparisonMixin, FloorMixin):
+    for mixin in (AlwaysSelectMixin, RegressionCheckMixin, ScoreComparisonMixin, FloorMixin):
         assert callable(mixin.decide)
         assert mixin.__abstractmethods__ == frozenset({"evaluate"})
     assert BackendEvaluateMixin.__abstractmethods__ == frozenset({"decide"})

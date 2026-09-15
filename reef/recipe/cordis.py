@@ -146,7 +146,7 @@ class CordisRecipe(Recipe):
     least ``floor_score``, default ``1.0``; ``always``;
     or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's
-    steps write the proposer's model calls, the parsed proposal and each gate
+    steps write the proposer's model calls, the parsed proposal and each evaluation
     episode's trajectory files, so the decision is reconstructible; off by
     default),
     optional ``client_models`` (further model names the installed client
@@ -328,7 +328,7 @@ class CordisRecipe(Recipe):
                 )
             if evolution.get("promote_failures", False):
                 raise RecipeConfigError(
-                    "evolution.promote_failures adds prompts to a gate whose tasks are directories"
+                    "evolution.promote_failures adds prompts to an evaluation whose tasks are directories"
                 )
             try:
                 task_paths = manifest_task_paths(
@@ -414,7 +414,7 @@ class CordisRecipe(Recipe):
             if selection != "floor":
                 raise RecipeConfigError("evolution.floor_score applies only to the floor selection")
             candidate_plugin = FloorPluginFactory(floor_score=float(floor_score))
-        # A recheck compares two trees; the floor gates one.
+        # A recheck compares two trees; the floor evaluates one.
         if selection == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
         publish = evolution.get("publish", "auto")

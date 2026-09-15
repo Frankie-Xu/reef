@@ -1,4 +1,4 @@
-"""The engine half of closing the loop with the person who asked (#435): the ``floor`` selection gates the
+"""The engine half of closing the loop with the person who asked (#435): the ``floor`` selection evaluates the
 candidate alone, a ``StepProposal`` carries notes the step records, ``entries`` reaches a proposer that names
 it, and the ``requires`` a proposer added but the step refused are recorded beside the kept ones."""
 
@@ -79,7 +79,7 @@ def test_floor_selects_only_when_every_task_meets_the_floor() -> None:
     }
 
     nothing = plugin.decide(candidate, _evaluation(()))
-    assert not nothing.selected and nothing.reason == "no gate task was scored"
+    assert not nothing.selected and nothing.reason == "no evaluation task was scored"
 
     for bad in (0, -1.0, True, float("nan"), "1"):
         with pytest.raises(ValueError, match="floor_score must be a positive number"):
@@ -100,7 +100,7 @@ def test_the_floor_plugin_gates_the_candidate_alone() -> None:
     assert calls == [(candidate, ("candidate",))]
 
 
-def test_a_candidate_only_gate_runs_no_current_episode_and_still_settles(tmp_path: Path, monkeypatch) -> None:
+def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(tmp_path: Path, monkeypatch) -> None:
     sides: list[str] = []
     original = reef_cordis_backend.run_episode
 
@@ -120,7 +120,7 @@ def test_a_candidate_only_gate_runs_no_current_episode_and_still_settles(tmp_pat
     evaluation = b.evaluate(candidate, sides=("candidate",))
     assert sides == ["candidate"]
     assert evaluation.metrics["candidate_scores"] == (1.0,) and evaluation.metrics["current_scores"] == ()
-    assert evaluation.metrics["gate_sides"] == ["candidate"]
+    assert evaluation.metrics["evaluation_sides"] == ["candidate"]
     assert set(evaluation.metrics) == {
         "candidate_scores",
         "current_scores",
@@ -131,18 +131,18 @@ def test_a_candidate_only_gate_runs_no_current_episode_and_still_settles(tmp_pat
         "candidate_score",
         "candidate_agents",
         "candidate_paths",
-        "gate_sides",
+        "evaluation_sides",
     }
-    # The default pair is unchanged and records no gate_sides.
+    # The default pair is unchanged and records no evaluation_sides.
     paired = b.evaluate(candidate).metrics
-    assert sides == ["candidate", "candidate", "current"] and "gate_sides" not in paired
+    assert sides == ["candidate", "candidate", "current"] and "evaluation_sides" not in paired
     assert paired["current_scores"] == (0.0,) and paired["current_score"] == 0.0
 
     plugin = FloorPlugin(b)
     result = b.settle_step(prepared, plugin.decide(candidate, evaluation))
     assert result.metrics["selected"] is True and result.metrics["selection"]["policy"] == "floor"
     assert (result.metrics["passed"], result.metrics["failed"], result.metrics["floor_score"]) == (1, 0, 1.0)
-    assert result.metrics["gate_sides"] == ["candidate"] and result.metrics["candidate_score"] == 1.0
+    assert result.metrics["evaluation_sides"] == ["candidate"] and result.metrics["candidate_score"] == 1.0
     assert not {key for key in result.metrics if key.startswith("current_")}
     assert result.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 0}
     assert isinstance(result.publication, SavedArtifactPublication)
@@ -221,12 +221,12 @@ def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
 
 def test_step_proposal_notes_are_recorded_bounded_under_proposal_notes(tmp_path: Path) -> None:
     long_text = "x" * (RECORD_TEXT_CAP + 10)
-    notes = {"design": long_text, "review": {"verdict": "partial", "covered": ["a"], "uncovered": ["b"]}}
+    notes = {"design": long_text, "review": {"result": "partial", "covered": ["a"], "uncovered": ["b"]}}
     b = backend(tmp_path, lambda n, s, m: StepProposal((MARKER,), notes))
     result = run_backend_step(b, batch(), b.initial_state())
     assert result.metrics["selected"] is True and result.metrics["mutation"]["id"] == "r1"
     recorded = result.metrics["proposal_notes"]
-    assert recorded["review"] == {"verdict": "partial", "covered": ["a"], "uncovered": ["b"]}
+    assert recorded["review"] == {"result": "partial", "covered": ["a"], "uncovered": ["b"]}
     assert recorded["design"] == "x" * RECORD_TEXT_CAP + "... [clipped 10 chars]"
     json.loads(json.dumps(result.metrics, allow_nan=False))
 
@@ -327,22 +327,22 @@ def test_step_progress_names_the_phase_while_a_step_runs_and_clears_when_it_sett
     assert b.step_progress is None
     before = time.time()
     prepared = b.prepare_step(_instruction(), b.initial_state(), 0)
-    # The proposer ran under "proposing" with the instruction's id; a candidate now waits for the gate.
+    # The proposer ran under "proposing" with the instruction's id; a candidate now waits for the evaluation.
     assert seen == [StepProgress("req-1", "proposing", seen[0].started_at, None)]
     assert before <= seen[0].started_at <= time.time()
-    gating = b.step_progress
-    assert gating == replace(seen[0], phase="gating") and gating.episodes_total is None
+    evaluating = b.step_progress
+    assert evaluating == replace(seen[0], phase="evaluating") and evaluating.episodes_total is None
     candidate = prepared.candidate
     assert candidate is not None
     evaluation = b.evaluate(candidate)
-    # One task, one repeat, both sides: the gate's size once the episodes are laid out.
-    assert b.step_progress == replace(gating, episodes_total=2)
+    # One task, one repeat, both sides: the evaluation's size once the episodes are laid out.
+    assert b.step_progress == replace(evaluating, episodes_total=2)
     b.settle_step(prepared, ScoreComparisonPlugin(b).decide(candidate, evaluation))
     assert b.step_progress is None
 
     # An automatic step names no request; an abort clears the progress too.
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
-    assert seen[-1].request_id is None and b.step_progress is not None and b.step_progress.phase == "gating"
+    assert seen[-1].request_id is None and b.step_progress is not None and b.step_progress.phase == "evaluating"
     b.abort_step(prepared)
     assert b.step_progress is None
 

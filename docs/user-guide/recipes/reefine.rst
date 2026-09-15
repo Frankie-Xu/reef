@@ -34,20 +34,20 @@ How it works
    "<text>"`` posts the same instruction to ``POST /reef/train``; add
    ``--wait`` to stay until the step settles. Either ask prints the
    request's page link (``GET /reef/harness/requests/<id>/page``), which
-   reloads every five seconds, naming the step's state, until the verdict
+   reloads every five seconds, naming the step's state, until the result
    is on it.
 2. Step. In ``training-mode: manual`` the service runs one evolve step for
    each accepted instruction. The served model writes a design first (the
    request in one sentence, what triggers the behavior, what state the
    harness must know and where it comes from, what only you can provide as
    ``requires`` items with a ``prompt`` each), then the entries, and a
-   second call reviews them against the request. The gate runs the
+   second call reviews them against the request. The evaluation runs the
    candidate on the health task: it publishes when the tree still works,
    and the step's page carries the design and the review either way.
-3. Verdict. The session that asked reports it in the chat when the step
+3. Result. The session that asked reports it in the chat when the step
    settles, and ``reef-pi harness ... --wait`` prints the same line:
    published as a release, ready but waiting for your review because it
-   changes an extension, rejected by the gate, or skipped with the reason,
+   changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
 4. Promote. A release that touches a ``code_extension`` waits as pending.
    The session links its page (``/reef-versions <step>``, ``reef-pi page
@@ -73,7 +73,7 @@ Behavior and configuration
   Requests and update notices are enabled in the seed by default.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
-* ``evolution.selection: floor`` is the default: the gate runs the candidate
+* ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
   ``evolution.floor_score`` (``1.0``). The current release is not run, and an
   episode that could not run misses the floor.
@@ -90,7 +90,7 @@ Behavior and configuration
 The health floor
 ----------------
 
-The profile's one gate task is a health check:
+The profile's one evaluation task is a health check:
 
 .. code:: yaml
 
@@ -118,9 +118,9 @@ them:
 
 * ``design``: the proposer's plan for the request, a few sentences, as the
   page's Design section.
-* ``review``: the second call's verdict, ``complete`` or ``partial``, with
+* ``review``: the second call's result, ``complete`` or ``partial``, with
   the points of the request the entries cover and the ones they leave
-  uncovered, as the Review section; the verdict line in the session and
+  uncovered, as the Review section; the result line in the session and
   from ``--wait`` names the uncovered points. Absent when the review call
   failed, which never blocks the step.
 * ``refused_requires``: the ``requires`` items the proposer wrote that could
@@ -135,8 +135,8 @@ them:
   failed (how long it took, the reply budget and the endpoint's error; a
   reply without text adds that a thinking model may have spent the budget
   on its reasoning and names ``REEF_PROPOSER_MAX_TOKENS``) or the reply
-  held no usable entry. The verdict line in the session and from ``--wait``
-  quotes it, and the page shows it as ``proposer failure`` in the Verdict
+  held no usable entry. The result line in the session and from ``--wait``
+  quotes it, and the page shows it as ``proposer failure`` in the Result
   section.
 
 All ``CordisRecipe`` evolution settings remain available, including custom

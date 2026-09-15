@@ -7,20 +7,20 @@
 // training, and every filing answers with a link to the request's page. The
 // service proposer writes the change, and a watch here polls the catalog, shows
 // in the footer whether the request is queued or its step is running and for
-// how long, and reports the step's verdict in the session as a custom message
+// how long, and reports the step's result in the session as a custom message
 // the chat keeps, with why the proposer produced nothing when it did. The
 // filed requests not yet reported are kept beside the release file, so a
-// restarted pi reports their verdicts at its next session start. /reef-versions
-// lists the release chain with each step's verdict and request, prints a
+// restarted pi reports their results at its next session start. /reef-versions
+// lists the release chain with each step's result and request, prints a
 // step's page link and, for a pending release, the promote action and a trial
-// install, and runs the promote after a confirmation. A verdict only reports
+// install, and runs the promote after a confirmation. A result only reports
 // the result and the commands to act on it, leaving the user's input free.
 // /reef-versions <step> install starts the install and setup flow on demand;
 // promote also offers the install of the head it creates. Nothing here writes
 // a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
-// node can parse it in CI and pi's TS loader accepts it unchanged. Gate
+// node can parse it in CI and pi's TS loader accepts it unchanged. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
-// gate never sees the commands or the tools.
+// evaluation never sees the commands or the tools.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -287,7 +287,7 @@ export default function requests(pi) {
 
   // A promoted row stays pending in the catalog; the promote is a later row naming it, so with the rows given
   // the pending row reads "promoted at step N".
-  const verdictOf = (row, rows = []) => {
+  const resultOf = (row, rows = []) => {
     if (row.pending) {
       const promoted = rows.findIndex(
         (other) => other.operation === "promote" && other.rollback_target_release_id === row.release_id,
@@ -306,33 +306,33 @@ export default function requests(pi) {
     const row = rows[step];
     const metrics = metricsOf(row);
     const release = String(row.release_id || "").slice(0, 8);
-    const verdict = verdictOf(row, rows);
+    const selectionResult = resultOf(row, rows);
     const details = ` Details: /reef-versions ${step}.`;
-    if (verdict === "selected") {
+    if (selectionResult === "selected") {
       return (
         `reef: '${ask}' is published as release ${release}. Install when ready with /reef-versions ${step} install.` +
         details
       );
     }
-    if (verdict === "pending") {
+    if (selectionResult === "pending") {
       return (
         `reef: '${ask}' is ready as release ${release}. This release changes an extension, so it is not ` +
         `installed until you promote it: /reef-versions ${step} promote. Page: ${stepPageLink(step)}`
       );
     }
-    if (verdict === "rejected") {
+    if (selectionResult === "rejected") {
       const reason = metrics.selection && metrics.selection.reason ? metrics.selection.reason : "no reason recorded";
       return (
-        `reef: '${ask}' did not pass the gate (${reason}). Nothing changed; rephrase or split the request.` + details
+        `reef: '${ask}' did not pass the checks (${reason}). Nothing changed; rephrase or split the request.` + details
       );
     }
-    if (verdict === "skipped") {
+    if (selectionResult === "skipped") {
       // The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
       const failure = failureOf(row);
       const why = failure ? `${metrics.skipped}: ${failure}` : String(metrics.skipped);
       return `reef: '${ask}' produced no change (${why}). Nothing changed.${details}`;
     }
-    return `reef: '${ask}' settled as ${verdict} (release ${release}); /reef-versions ${step} shows it.`;
+    return `reef: '${ask}' settled as ${selectionResult} (release ${release}); /reef-versions ${step} shows it.`;
   };
 
   // The filed requests not yet reported, newest last, filed_at in seconds since the epoch as the service records
@@ -358,7 +358,7 @@ export default function requests(pi) {
   };
   const forgetRequest = (recordId) => writeStoredRequests(storedRequests().filter((entry) => entry.id !== recordId));
 
-  // The report for a settled step: the verdict line and what the review left uncovered. It is appended to the
+  // The report for a settled step: the result line and what the review left uncovered. It is appended to the
   // session as a custom message, which the chat renders and the session file keeps, and shown as a notice, the
   // one line a person sees at once but the next status line may overwrite.
   const deliverReport = (step, rows, text, ctx) => {
@@ -540,9 +540,9 @@ export default function requests(pi) {
         return;
       }
       if (Date.now() >= deadline) {
-        // The request stays stored: the next session start reports the verdict once the catalog has it.
+        // The request stays stored: the next session start reports the result once the catalog has it.
         stopWatch(ctx);
-        ctx.ui.notify(`reef: no verdict yet for '${ask}'; /reef-versions shows it when it settles`, "warning");
+        ctx.ui.notify(`reef: no result yet for '${ask}'; /reef-versions shows it when it settles`, "warning");
         return;
       }
       if (mine.startedAt === null) {
@@ -577,7 +577,7 @@ export default function requests(pi) {
       }
     };
     mine.timer = setInterval(poll, watchIntervalMs());
-    // A headless session exits when its turn ends; the timer must not hold the process open for the verdict.
+    // A headless session exits when its turn ends; the timer must not hold the process open for the result.
     if (typeof mine.timer.unref === "function") mine.timer.unref();
     watch = mine;
     show(`reef: request ${id8} queued`);
@@ -704,7 +704,7 @@ export default function requests(pi) {
   // nothing and carry the head's id. The catalog's own current flag sits on the newest row, whatever it is.
   const headStep = (rows) => {
     for (let index = rows.length - 1; index >= 0; index--) {
-      if (!["pending", "rejected", "skipped"].includes(verdictOf(rows[index]))) return index;
+      if (!["pending", "rejected", "skipped"].includes(resultOf(rows[index]))) return index;
     }
     return -1;
   };
@@ -719,7 +719,7 @@ export default function requests(pi) {
     [
       String(step),
       String(rows[step].release_id || "").slice(0, 8),
-      verdictOf(rows[step], rows),
+      resultOf(rows[step], rows),
       step === headStep(rows) ? "current" : "",
       requestText(rows[step]),
     ]
@@ -736,17 +736,17 @@ export default function requests(pi) {
     return lines;
   };
 
-  // What the step's model calls cost in tokens, when the endpoint reported them: the proposer's and the gate's.
+  // What the step's model calls cost in tokens, when the endpoint reported them: the proposer's and the evaluation's.
   const tokenText = (row) => {
     const metrics = metricsOf(row);
     const over = (side, key) =>
       Object.values(side || {}).reduce((total, agent) => total + (Number(agent && agent[key]) || 0), 0);
     const proposerIn = Number(metrics.proposer_input_tokens) || 0;
     const proposerOut = Number(metrics.proposer_output_tokens) || 0;
-    const gateIn = over(metrics.candidate_agents, "input_tokens") + over(metrics.current_agents, "input_tokens");
-    const gateOut = over(metrics.candidate_agents, "output_tokens") + over(metrics.current_agents, "output_tokens");
-    if (!proposerIn && !proposerOut && !gateIn && !gateOut) return "";
-    return `tokens: proposer ${proposerIn} in / ${proposerOut} out, gate ${gateIn} in / ${gateOut} out`;
+    const evaluationIn = over(metrics.candidate_agents, "input_tokens") + over(metrics.current_agents, "input_tokens");
+    const evaluationOut = over(metrics.candidate_agents, "output_tokens") + over(metrics.current_agents, "output_tokens");
+    if (!proposerIn && !proposerOut && !evaluationIn && !evaluationOut) return "";
+    return `tokens: proposer ${proposerIn} in / ${proposerOut} out, evaluation ${evaluationIn} in / ${evaluationOut} out`;
   };
 
   const pageUrl = (step) => `${serviceUrl}/reef/harness/releases/${step}/page`;
@@ -761,14 +761,14 @@ export default function requests(pi) {
   const stepLines = (step, rows) => {
     const row = rows[step];
     const head = headStep(rows);
-    const verdict = verdictOf(row, rows);
+    const selectionResult = resultOf(row, rows);
     const lines = [
-      `Harness step ${step}: ${row.release_id} (${verdict}${step === head ? ", current" : ""})`,
+      `Harness step ${step}: ${row.release_id} (${selectionResult}${step === head ? ", current" : ""})`,
       ...notesLines(row),
       `page: ${stepPageLink(step)}`,
       `read it: ${curl()}'${pageUrl(step)}' > harness-step-${step}.html`,
     ];
-    if (verdict === "pending") {
+    if (selectionResult === "pending") {
       const body = JSON.stringify({ release_id: row.release_id });
       lines.push(
         `promote: ${curl()}-X POST -H 'content-type: application/json' -d '${body}' ` +
@@ -814,10 +814,10 @@ export default function requests(pi) {
         ctx.ui.notify(`no step ${step}: the catalog holds steps 0 to ${rows.length - 1}`, "warning");
         return;
       }
-      const verdict = verdictOf(row, rows);
+      const selectionResult = resultOf(row, rows);
       if (install) {
-        if (["pending", "rejected", "skipped"].includes(verdict) || verdict.startsWith("promoted")) {
-          ctx.ui.notify(`step ${step} is ${verdict}; choose a published step to install with /reef-versions`, "warning");
+        if (["pending", "rejected", "skipped"].includes(selectionResult) || selectionResult.startsWith("promoted")) {
+          ctx.ui.notify(`step ${step} is ${selectionResult}; choose a published step to install with /reef-versions`, "warning");
           return;
         }
         await offerInstall(String(row.release_id), `Read the change first: ${stepPageLink(step)}`, ctx);
@@ -827,12 +827,12 @@ export default function requests(pi) {
         ctx.ui.notify(stepLines(step, rows).join("\n"), "info");
         return;
       }
-      if (verdict.startsWith("promoted")) {
-        ctx.ui.notify(`step ${step} is already ${verdict}; nothing to promote`, "warning");
+      if (selectionResult.startsWith("promoted")) {
+        ctx.ui.notify(`step ${step} is already ${selectionResult}; nothing to promote`, "warning");
         return;
       }
-      if (verdict !== "pending") {
-        ctx.ui.notify(`step ${step} is not pending (${verdict}); nothing to promote`, "warning");
+      if (selectionResult !== "pending") {
+        ctx.ui.notify(`step ${step} is not pending (${selectionResult}); nothing to promote`, "warning");
         return;
       }
       const confirmed = await ctx.ui.confirm(
@@ -853,7 +853,7 @@ export default function requests(pi) {
     return `${steps.length} release(s) await your review: /reef-versions ${steps.join(", ")} (promote with ${promote})`;
   };
 
-  // Said once per session start with a UI: the two commands exist, what waits for a review, and the verdict of
+  // Said once per session start with a UI: the two commands exist, what waits for a review, and the result of
   // any request filed before a restart or reported while the person was away.
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
@@ -861,7 +861,7 @@ export default function requests(pi) {
     let rows = [];
     try {
       rows = await releases();
-      const waiting = rows.map((row, step) => (verdictOf(row, rows) === "pending" ? step : -1)).filter((step) => step >= 0);
+      const waiting = rows.map((row, step) => (resultOf(row, rows) === "pending" ? step : -1)).filter((step) => step >= 0);
       if (waiting.length) lines.push(reviewLine(waiting));
     } catch {
       // The catalog is a courtesy here: the first line stands without it, and a stored request gets the watch.

@@ -108,7 +108,7 @@ model step, ``ctx.run_tools()`` runs the last message's tool calls,
 ``ctx.log(event, data)`` writes a ``loop/<event>`` line to the session. Hooks,
 tools, budgets, the session log and the sandbox stay Reef's; a loop that
 raises, or calls the context past its budget of transitions, ends the turn
-with ``LOOP_ERROR`` and loses the gate, and the first end of a turn is final
+with ``LOOP_ERROR`` and fails the checks, and the first end of a turn is final
 whatever the loop code catches. Loop code runs inside the loop's own
 process, so a win that creates, changes or removes a ``native_loop`` is always
 a pending release a person promotes, whether or not ``evolution.review_kinds``
@@ -165,7 +165,7 @@ together with the current harness and model bindings. In ``hybrid``,
 ``batch_size`` and possibly none (scored traces, or
 records under ``data.batch_policy: records``), so the method answers the
 request with the failures beside it; in ``manual`` it is empty. Its mutations pass
-through the same gate and ``evolution.publish`` policy. Pending agent
+through the same evaluation and ``evolution.publish`` policy. Pending agent
 proposals and periodic rollback rechecks cannot take the step an
 instruction owns. The tutorial's ``propose`` takes ``requests``; a
 failure-only proposer must be extended with a ``requests`` branch first.
@@ -176,7 +176,7 @@ failure-only proposer must be extended with a ``requests`` branch first.
    Batch :: scored reports with existing inference references
    ``propose`` :: one proposal, a mutation or a sequence applied as one, or ``None``
    Episodes* :: run the candidate and current tree on the same tasks
-   Verdict :: publish the candidate or restore the snapshot
+   Result :: publish the candidate or restore the snapshot
 
 With the reports policy, inference traffic alone does not trigger evolution.
 Every valid scored report with at least one existing inference reference
@@ -187,7 +187,7 @@ trajectory sample carrying every referenced exchange in order, which is what
 across the receipts as separate reports instead). When ``batch_size``
 trace samples have accumulated, one step runs the loop once. With
 ``evolution.promote_failures: true`` a failing trace's prompt is added to the
-gate as a permanent task, so the seed tasks are the floor of a suite that
+evaluation as a permanent task, so the seed tasks are the floor of a suite that
 grows from real failures and no later candidate can win while bringing one
 back (the method's ``evaluate`` must score an arbitrary prompt); an
 instruction step in ``hybrid`` promotes the failures it carries the same way.
@@ -209,11 +209,11 @@ recipe config, and
 recorded traffic alone batches, unscored, for methods that judge for
 themselves.
 
-A publish passes the gate as the suite stood at the time, so a suite that
+A publish passes the evaluation as the suite stood at the time, so a suite that
 keeps growing can later expose a published tree as a regression on a task the
-gate had not seen yet. ``evolution.recheck_every: N`` (0, off, by default)
+evaluation had not seen yet. ``evolution.recheck_every: N`` (0, off, by default)
 closes that gap: every ``N`` steps, and at once when the served model or the
-adapter version has changed since the publish, the loop re-gates the last
+adapter version has changed since the publish, the loop re-evaluates the last
 published tree against the tree it replaced on the current suite instead of
 proposing. If
 the older tree now wins, the loop publishes it, which rolls the deployment
@@ -223,21 +223,21 @@ it, so the recheck reverts one bad publish rather than walking the whole
 history back.
 
 Two more settings shape the search itself. ``evolution.min_win_margin: M``
-(0 by default) is a noise floor on the verdict: the candidate must win more
+(0 by default) is a noise floor on the result: the candidate must win more
 than ``M`` task pairings beyond its losses, so on a stochastic episode a
 single lucky flip does not publish. ``evolution.max_rejected_history: N``
 (25 by default, 0 off) keeps the last ``N`` rejected proposals in the
 scenario state, each with its step, its mutations with the options they
-carried, and the verdict's reason; a ``propose`` whose signature names
-``rejected`` receives them and can stop re-proposing what the gate already
+carried, and the result's reason; a ``propose`` whose signature names
+``rejected`` receives them and can stop re-proposing what the evaluation already
 refused.
 
-By default a gate win is served at once. ``evolution.publish: review`` holds
+By default a successful evaluation is served at once. ``evolution.publish: review`` holds
 every win as a pending release instead, and ``evolution.review_kinds`` (a
 list of node kinds, empty by default) holds only the wins that touch those
 kinds, so ``[code_extension]`` lets rules and config auto publish while code
 waits for a person; a win that touches a ``native_loop`` waits whether or not
-the list names it. A pending release sits in the catalog with its gate
+the list names it. A pending release sits in the catalog with its evaluation
 metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
 names it; the loop keeps evolving from it in the meantime, so promoting the
 latest pending release serves everything accumulated since the head.
@@ -279,8 +279,8 @@ episode that could not run ranks below every real score, so a candidate
 cannot win on a crash, and when both sides fail the step is a tie; a native
 episode whose turn ended on an error (a tree that cannot load, a graph that
 cannot run) counts as one that could not run, whatever its text. When the
-verdict is a rejection, Reef restores the snapshot it took before the
-mutation. Every verdict is recorded in the scenario's commit log together
+result is a rejection, Reef restores the snapshot it took before the
+mutation. Every result is recorded in the scenario's commit log together
 with its mutation (op, id and the full options, so a rejected rewrite is
 readable too), both score vectors, how many model calls the proposer made,
 the seconds they took and the tokens the endpoint counted for them
@@ -292,7 +292,7 @@ names the loop exited in order and the reason its turn ended
 episode, with ``error`` and ``errored_agent`` when a turn ended on an error,
 beside ``candidate_agents``).
 
-The commit log holds the verdict; the step record holds what decided it.
+The commit log holds the result; the step record holds what decided it.
 ``evolution.step_record_dir`` (off by default) names a directory, made
 absolute at build, under which each scenario's steps write
 ``<scenario>/<step>/proposer.json``, one entry per model call the proposer
@@ -302,7 +302,7 @@ for a built-in ``chat`` binding, the ``response`` for ``complete``, or the
 ``error``, and the ``seconds`` it took; ``<scenario>/<step>/mutations.json``,
 the parsed proposal with its options, written before admission so a refused
 proposal is on file; and ``<scenario>/<step>/episodes/<side>-<task index>/``,
-each gate episode's trajectory files as the adapter writes them
+each evaluation episode's trajectory files as the adapter writes them
 (``session.jsonl`` and ``agents/*.jsonl`` on native, the vendor's own session
 tree on pi and the others) copied out of the throwaway root before it is
 removed, beside an ``episode.json`` with the task, the exit code, stdout and
@@ -408,7 +408,7 @@ mutation.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
-published release, the gate metrics, and the evolved ``SKILL.md``,
+published release, the evaluation metrics, and the evolved ``SKILL.md``,
 then stops the service.
 
 Watch it learn
@@ -429,7 +429,7 @@ still running:
 
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one failing task entered the
-window, the served model proposed a new skill beside the starter, and the gate
+window, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
 notebook run repeats the arc with no GPU at all, on ollama ``qwen2.5:7b``. The run has succeeded when one
 task fails, the failing report opens the window, one evolve step runs, and
@@ -509,18 +509,18 @@ from the release metadata file and the oldest pending session's id, or a fresh s
 when nothing is spooled. A request can execute without inference receipts;
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
-gate: the wrapper prints ``watch it here: <link>``, the request's page
+evaluation: the wrapper prints ``watch it here: <link>``, the request's page
 (``GET /reef/harness/requests/<id>/page`` with the scenario and the token
 as query parameters, so a browser opens it as is), and says ``reef is
 running the step; add --wait to stay here, or check /reef-versions later``.
 With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
 release catalog every 5 s for the step that consumed the request, says
 ``the step started; usually one to three minutes`` once the request's
-record shows a step took it, and prints one line with the verdict and the
+record shows a step took it, and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``
 for; a pending one with ``This release changes an extension, so it is not
 installed until you promote it: /reef-versions <step> promote. Page:
-<link>``; a rejected step with the gate's reason; a skipped step with why
+<link>``; a rejected step with the evaluation's reason; a skipped step with why
 (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
 points the change left out. The exit status is 0 for a selected or pending
@@ -545,7 +545,7 @@ typed answer per question, then files the request with the answers;
 ``/reef-harness --direct <request>`` files it as is, and either way the
 filing answers with the link to the request's page. A footer status shows
 the request queued, then the step running and for how long, and the
-verdict is reported when it settles, with the same next actions as
+result is reported when it settles, with the same next actions as
 ``--wait`` and the step whose page has the details, as a message the chat
 keeps beside a notice. This background result opens no dialog, so you can
 keep talking to the agent. When ready, use ``/reef-versions <step> install``
@@ -568,7 +568,7 @@ owns request persistence, scheduling, retry and acknowledgement, and records
 ``training_request: {id, session, release_id, text, requires}`` in commit
 metrics.
 
-Admission screens the proposed mutations and the gate evaluates them.
+Admission screens the proposed mutations and the evaluation evaluates them.
 Reef's entries (``reef-version-check``, ``reef-requests``,
 ``reef-pi-extension-api``) are reserved ids no proposal may change. An
 evolved extension runs in pi's process with your privileges, so the
@@ -582,7 +582,7 @@ set none of the three. The built-in ``reef.recipe.reefine:ReefineRecipe`` is ava
 ``reef serve --recipe reefine``. ``tutorials/reefine/`` runs this path end to
 end on one machine, from the ask to the install and a session on the new
 tree, with a bug fix flow demo, a research loop demo and a measurement of
-which requests won the gate (``./run.sh bugfix``, ``./run.sh research``,
+which requests passed the checks (``./run.sh bugfix``, ``./run.sh research``,
 ``./run.sh measure``).
 
 A release can need something from you before it runs. A request may carry
@@ -647,7 +647,7 @@ start without your yes.
 
 See what a version is with ``/reef-versions`` in a ``reef-pi`` session: one
 line per catalog row, oldest first, with the step, the first eight characters
-of the release id, the verdict (``selected``, ``rejected``, ``skipped``,
+of the release id, the result (``selected``, ``rejected``, ``skipped``,
 ``pending``, ``promoted at step N`` once a later promote serves a pending
 release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
 ``recovery``), ``current`` on the served head and the request text the step
@@ -657,11 +657,11 @@ as query parameters so a browser opens it as is, one self contained HTML
 page with
 five sections: Why (the request, else the proposal's reason, else a failure
 in the batch), What changed (the mutations; an extension update as a line
-diff against the release it ran on), Verdict (the gate's verdict and numbers,
+diff against the release it ran on), Result (the evaluation's result and numbers,
 and the step record directory when ``evolution.step_record_dir`` is set),
 Setup (what the release needs from you: the step's own items, then those
 carried from earlier steps) and Chain (the parent, this release, and its
-children: the steps gated on it and any promote or rollback made on it; for
+children: the steps evaluated on it and any promote or rollback made on it; for
 a rejected or skipped step, the head it ran on). For a pending release the
 command also prints the promote curl, a trial install with ``?release_id=``
 that replaces the tree at your install root, and the head's reinstall to
@@ -731,7 +731,7 @@ Serve the harness as a resident process
 ---------------------------------------
 
 The native adapter has a second form. ``reef-native -p`` is the episode
-form: one process, one turn, what the gate runs. ``reef-native serve`` is
+form: one process, one turn, what the evaluation runs. ``reef-native serve`` is
 the serve form: one resident process per installed tree that holds the tree
 as a live composition and follows the release Reef serves while it runs. A
 publish reaches the process as a mount between two steps of the open turn,
@@ -802,11 +802,12 @@ are over.
 
 ``--self-tools`` gives the model three built-in tools. The tree cannot
 remove them or take their names, and they are absent in the episode form,
-so a candidate cannot win the gate by calling them:
+so a candidate cannot pass the checks by calling them:
 
 - ``harness_inspect(what)``: ``tree`` is the live entries and the mounted
-  release; ``graph`` is ``main`` and every named graph; ``verdicts`` is the
-  newest releases with the gate metrics that admitted each, and the
+  release; ``graph`` is ``main`` and every named graph; ``results`` (also
+  accepted as ``verdicts`` for existing sessions) is the
+  newest releases with the evaluation metrics that admitted each, and the
   rejected proposals when Reef exposes them; ``status`` is the status above.
 - ``harness_try(mutations)``: mounts the served entries plus the mutations
   on this process for the rest of the turn. The change applies from the
@@ -816,7 +817,7 @@ so a candidate cannot win the gate by calling them:
 - ``harness_propose(mutations, reason)``: sends ``POST
   /reef/harness/proposals`` with the mounted release and the session id.
   Reef admits or refuses at once, and an admitted proposal goes through the
-  gate like the method's own before it is served. A Reef without the route
+  evaluation like the method's own before it is served. A Reef without the route
   answers a tool error and the turn continues.
 
 The order is inspect, then try, then propose. Every call is a ``tool/call``
@@ -826,7 +827,7 @@ itself and what it changed is in the record.
 The serve process runs on your machine with your privileges and runs tree
 code in process, as the episode form does: every hook imports and listens
 there, and a tool call runs there unless ``REEF_NATIVE_ENFORCE=bwrap`` is
-set; the gate's sandbox does not apply to it. Under ``--follow head``,
+set; the evaluation's sandbox does not apply to it. Under ``--follow head``,
 whoever can publish to the scenario
 runs code on the machine the process serves on. ``--follow pinned`` keeps a
 person in that loop.

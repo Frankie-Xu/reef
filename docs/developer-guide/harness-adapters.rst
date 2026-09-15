@@ -188,12 +188,12 @@ workspace with the other tools importable by name (``import read_file;
 read_file.run({"path": "x"}, WORKDIR)``), so a tree can move from one call
 per tool to code that calls tools without a loop change. An adapter that declares no ``files.native_tool`` path
 refuses to render that kind, so the mutation fails under it instead of
-silently dropping the tool. The admission gate refuses ``code`` that does not
+silently dropping the tool. The admission check refuses ``code`` that does not
 compile; a tool module the loop cannot read (the file cannot be opened or
 does not parse, no top level statement binds ``run``, or the last top level
 assignment to a declaration constant is not a literal) ends the episode
 with reason ``error`` and code ``LOAD_ERROR`` before any model call, so the
-tree that carries it loses the gate instead of running without it; a file
+tree that carries it fails the checks instead of running without it; a file
 that parses but does not compile fails its first call like a top level that
 raises. The read takes the last binding at module scope in source order: it
 follows the bodies of ``if``, ``try``, ``with``, ``for``, ``while`` and
@@ -331,7 +331,7 @@ last assistant text stays the root's answer and which agent did what is read
 off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
 ``pre_execute`` hook that answers ``ask`` inside an agent's turn ends the
 turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
-the parent graph is the one that can answer. The gate's verdict carries
+the parent graph is the one that can answer. The evaluation's result carries
 ``candidate_agents`` and ``current_agents``, the turns, steps, tool calls,
 tool errors and, when the endpoint reported usage, the input and output
 tokens per agent summed over each side's episodes. It also carries
@@ -382,7 +382,7 @@ with the turn's reason. The transition guard is the graph's: past ``(max_steps
 + 1) * 16`` calls to ``model``, ``run_tools``, ``agent``, ``say`` and ``log``,
 or any exception out of ``run_turn`` (``SystemExit`` included;
 ``KeyboardInterrupt`` propagates), the turn ends with ``LOOP_ERROR`` and exit
-status 1, and the gate ranks the episode as one that could not run; that leaves
+status 1, and the evaluation ranks the episode as one that could not run; that leaves
 about 16 context calls per model step, ``log`` and ``say`` included. The first
 end is final: after ``max-steps``, ``ctx.end`` or an abort, every call into
 the context that acts raises the end again and writes nothing, so a turn has
@@ -607,7 +607,7 @@ two commands, two tools and two event handlers:
   abort signal with a 10 s deadline (``REEF_HARNESS_FETCH_MS`` shortens it),
   so a hung read costs one poll, not every later tick. When the row appears,
   the report quotes the request's first 60 characters and names the next
-  action by verdict: a selected release names ``/reef-versions <step> install``;
+  action by result: a selected release names ``/reef-versions <step> install``;
   a pending one says ``This release changes an
   extension, so it is not installed until you promote it: /reef-versions
   <step> promote. Page: <link>``; a rejected step quotes
@@ -621,8 +621,8 @@ two commands, two tools and two event handlers:
   ``customType: "reef-harness"`` and ``triggerTurn: false``), which the chat
   renders and the session file keeps, and as a notice, which the next
   status line may overwrite. Past the cap the watch says ``/reef-versions``
-  shows the verdict when it settles.
-- A background verdict opens no confirmation, selection or input dialog,
+  shows the result when it settles.
+- A background result opens no confirmation, selection or input dialog,
   whether the agent is busy or idle. The report names the next command,
   leaving the person free to keep chatting. ``/reef-versions <step> install``
   explicitly starts the install of a published step after a confirmation
@@ -660,14 +660,14 @@ two commands, two tools and two event handlers:
   once reported. At ``session_start`` each stored id whose row the catalog
   holds gets its report as the custom message and the notice; one the
   catalog does not hold yet gets the watch again. So a restarted pi, or a
-  report the person missed, still gets the verdict in the chat.
+  report the person missed, still gets the result in the chat.
 - ``session_start``: with a UI, one info line says the two commands exist,
   and a second line counts the pending releases no promote has named yet
   and says how to see and promote them: ``N release(s) await your review:
   /reef-versions <step>[, <step>] (promote with /reef-versions <step>
   promote)``.
 - ``/reef-versions [step] [promote|install]``: lists the release chain with each
-  step's verdict and request. With a step it prints ``design:`` (the
+  step's result and request. With a step it prints ``design:`` (the
   proposer's plan, first 200 characters) and ``not covered:`` when the row
   carries ``proposal_notes``, then the step's page link (``GET
   /reef/harness/releases/{step}/page`` with the scenario and the token as

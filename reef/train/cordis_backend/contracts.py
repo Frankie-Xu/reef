@@ -18,7 +18,7 @@ class StepRecords(ABC):
     def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
 
 
-class ProposalGate(ABC):
+class ProposalValidator(ABC):
     """Admit proposed mutations and expose their scenario inbox."""
 
     @property
@@ -38,7 +38,7 @@ class StepProgress:
     ``request_id`` names the instruction the step answers, ``None`` for an
     automatic step or an agent's proposal. ``phase`` is ``proposing`` from
     the moment the step claims its directory until a candidate exists, then
-    ``gating`` while the episodes run; ``episodes_total`` is the gate's
+    ``evaluating`` while the episodes run; ``episodes_total`` is the evaluation's
     episode count once ``evaluate`` has laid the episodes out, else ``None``.
     """
 
@@ -55,3 +55,7 @@ class StepProgressReader(ABC):
     @property
     @abstractmethod
     def step_progress(self) -> StepProgress | None: ...
+
+
+# Compatibility for adapters that implement the earlier interface name.
+ProposalGate = ProposalValidator

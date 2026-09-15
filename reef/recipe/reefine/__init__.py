@@ -23,7 +23,7 @@ class ReefineRecipe(CordisRecipe):
     """Refine a pi harness once per instruction, with extensions held for review.
 
     Configuration defaults enable harness requests and update notices.
-    Selection is ``floor``: the gate runs the candidate alone on the
+    Selection is ``floor``: the evaluation runs the candidate alone on the
     profile's health task and publishes it when every task scores at least
     ``evolution.floor_score``. The floor checks that the tree still works
     (the model binding, the tools, the extensions load), not that the

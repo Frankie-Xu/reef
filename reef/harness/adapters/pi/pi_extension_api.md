@@ -108,7 +108,7 @@ fetch is global. Pass signal. Reef's own routes take the headers { "x-reef-scena
 
 ## Rules for a reef tree entry
 
-- Return before registering anything when process.env.PI_OFFLINE is set: gate episodes are hermetic and must see no network calls, prompts or timers.
+- Return before registering anything when process.env.PI_OFFLINE is set: evaluation episodes are hermetic and must see no network calls, prompts or timers.
 - Credentials come from process.env at run time, never from the file: admission refuses a credential shaped literal, and the tree persists every version.
 - Keep state in tool result details, not in module variables, so a resumed or forked session rebuilds it.
 - Never throw out of an event handler for an expected condition: log with ctx.ui.notify or return nothing.

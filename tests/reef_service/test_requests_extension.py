@@ -6,9 +6,9 @@ hands the request to the session model, which asks what is unclear through
 or headless it posts the request with the session id and the release file's
 release, leaves inference receipts available for feedback, and reports
 durable acceptance with a link to the request's page. A watch then reports
-the step's verdict in the session as a custom message the chat keeps, and
+the step's result in the session as a custom message the chat keeps, and
 the filed requests are stored beside the release file until reported, so a
-session start reports what settled while pi was away. The verdict opens no
+session start reports what settled while pi was away. The result opens no
 dialog; /reef-versions <step> install starts the install through the
 ``reef-pi`` wrapper (its update, then the setup loop that asks once for what
 the release needs). The versions command lists the chain, prints a step's
@@ -461,7 +461,7 @@ def test_versions_with_a_step_prints_the_tokens_its_row_carries(tmp_path: Path) 
     (notice,) = _notices(out)
     lines = notice["message"].splitlines()
     assert lines[0] == "Harness step 1: rel-1111-selected (selected, current)"
-    assert lines[-1] == "tokens: proposer 1200 in / 80 out, gate 950 in / 75 out"
+    assert lines[-1] == "tokens: proposer 1200 in / 80 out, evaluation 950 in / 75 out"
     # A row without usage prints no token line.
     (tmp_path / "other").mkdir()
     out = _versions(tmp_path / "other", _install_root(tmp_path / "other"), CATALOG, args="4", REEF_TOKEN="tok")
@@ -511,7 +511,7 @@ def test_versions_with_a_step_prints_the_page_url_and_for_a_pending_release_the_
         lines[2]
         == "read it: curl -fsS -H 'x-reef-scenario: code-repair' 'http://reef:8900/reef/harness/releases/1/page' > harness-step-1.html"
     )
-    assert lines[3] == "tokens: proposer 1200 in / 80 out, gate 950 in / 75 out"
+    assert lines[3] == "tokens: proposer 1200 in / 80 out, evaluation 950 in / 75 out"
     assert len(lines) == 4 and "promote" not in notice["message"]
 
 
@@ -868,7 +868,7 @@ ASK = f"{LONG_TEXT[:57]}..."
 REQUEST_ROW = {"training_request": {"id": "q-1", "text": LONG_TEXT}}
 REVIEW = {
     "design": "A tool that texts you.",
-    "review": {"verdict": "partial", "covered": ["texting"], "uncovered": []},
+    "review": {"result": "partial", "covered": ["texting"], "uncovered": []},
 }
 SELECTED_ROW = {
     "release_id": "rel-1111-selected",
@@ -938,7 +938,7 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
         ),
         (
             REJECTED_ROW,
-            f"reef: '{ASK}' did not pass the gate (candidate missed the floor on 1 of 1 tasks). Nothing changed; "
+            f"reef: '{ASK}' did not pass the checks (candidate missed the floor on 1 of 1 tasks). Nothing changed; "
             "rephrase or split the request. Details: /reef-versions 1.",
         ),
         (
@@ -952,7 +952,7 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
     ],
     ids=["selected", "pending", "rejected", "skipped", "skipped-failure"],
 )
-def test_the_watch_reports_the_verdict_and_what_the_review_left_uncovered(
+def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     tmp_path: Path, row: dict[str, Any], expected: str
 ) -> None:
     out = _ask(
@@ -981,7 +981,7 @@ def test_the_watch_reports_the_verdict_and_what_the_review_left_uncovered(
     assert _stored(tmp_path) == []
 
 
-def test_the_watch_gives_up_after_its_cap_and_says_where_the_verdict_will_show(tmp_path: Path) -> None:
+def test_the_watch_gives_up_after_its_cap_and_says_where_the_result_will_show(tmp_path: Path) -> None:
     # The catalog never carries the request: the clock jumps past 30 minutes after a few polls.
     answers = _catalog_with({**SKIPPED_ROW, "metrics": {"skipped": "no proposal"}})
     out = _ask(
@@ -1001,10 +1001,10 @@ def test_the_watch_gives_up_after_its_cap_and_says_where_the_verdict_will_show(t
     assert out["events"][-2] == {"kind": "status", "key": "reef", "text": None}
     assert out["events"][-1] == {
         "kind": "notify",
-        "message": f"reef: no verdict yet for '{ASK}'; /reef-versions shows it when it settles",
+        "message": f"reef: no result yet for '{ASK}'; /reef-versions shows it when it settles",
         "type": "warning",
     }
-    # The filing stays stored past the cap: the next session start reports the verdict once the catalog has it.
+    # The filing stays stored past the cap: the next session start reports the result once the catalog has it.
     (entry,) = _stored(tmp_path)
     assert entry["id"] == "q-1" and entry["text"] == LONG_TEXT
     # A catalog read failing is one missed poll, never a notice: the polls go on.
@@ -1129,7 +1129,7 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
 def test_versions_with_a_step_prints_the_design_and_what_the_review_left_uncovered(tmp_path: Path) -> None:
     notes = {
         "design": "D" * 300,
-        "review": {"verdict": "partial", "covered": ["x"], "uncovered": ["two way replies", "idle detection"]},
+        "review": {"result": "partial", "covered": ["x"], "uncovered": ["two way replies", "idle detection"]},
     }
     rows = [
         row if index != 1 else {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
@@ -1183,7 +1183,7 @@ def test_a_filing_is_stored_beside_the_release_file_the_newest_ten_and_none_olde
 def test_session_start_reports_a_stored_request_that_settled_and_re_arms_the_watch_for_one_still_running(
     tmp_path: Path,
 ) -> None:
-    """A request filed before a restart, or settled while the person was away: its verdict is delivered at the
+    """A request filed before a restart, or settled while the person was away: its result is delivered at the
     next session start as the custom message and the notice, and dropped; one the catalog does not hold yet gets
     the watch again and stays stored. An entry older than a day is not reported, and a catalog that cannot be
     read still leaves the stored request with the watch."""
@@ -1265,7 +1265,7 @@ def test_a_hung_read_ends_at_the_fetch_deadline_so_the_watch_goes_on_and_a_filin
     assert _of_kind(hung, "status") == []
 
 
-# -- the next step after a verdict: the install through the wrapper, and for a pending release the promote first --
+# -- the next step after a result: the install through the wrapper, and for a pending release the promote first --
 
 NO_WRAPPER = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup"
 INSTALL_LATER = "reef: install it later with reef-pi update, then reef-pi setup"
@@ -1306,7 +1306,7 @@ def _exec_answers(listing: dict[str, Any] = LISTING, **answers: Any) -> str:
 def _settle(
     tmp_path: Path, agent_dir: Path, row: dict[str, Any], answers: dict[str, Any] | None = None, **env: str
 ) -> list[dict[str, Any]]:
-    """The events after the verdict's report, for a request whose step settled as ``row``."""
+    """The events after the result's report, for a request whose step settled as ``row``."""
     out = _ask(
         tmp_path,
         agent_dir,

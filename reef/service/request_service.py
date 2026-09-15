@@ -36,7 +36,7 @@ from reef.service.request_page import build_request_page
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.train.cordis_backend.contracts import ProposalGate, StepProgressReader, StepRecords
+from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 
 logger = logging.getLogger(__name__)
@@ -494,12 +494,12 @@ class RequestService:
         )
 
     def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
-        """The served tree plus its parent release and gate metrics.
+        """The served tree plus its parent release and evaluation metrics.
 
         ``release_id`` addresses one catalog release instead of the
         serving head, so a consumer can pin or roll back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
-        naming it. The gate field carries the metrics of the training step
+        naming it. The ``evaluation`` field carries the metrics of the training step
         that published the served release, so a consumer can audit what a
         pulled tree changed and why it was admitted before running it.
         Read-only: never creates a scenario.
@@ -512,7 +512,7 @@ class RequestService:
         scenario: Scenario,
         release_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact, gate = scenario.artifact_with_metrics(release_id)
+        artifact, evaluation_metrics = scenario.artifact_with_metrics(release_id)
         tree = scenario.surface.files
         if tree is None:
             raise ArtifactNotFound(
@@ -532,8 +532,9 @@ class RequestService:
             "parent_release_id": artifact.ref.parent_release_id,
             "content_id": artifact.ref.content_id,
             "files": dict(files),
-            "gate": gate,
-            # The union over the chain, not this gate's list: a release whose request named nothing still installs an earlier extension.
+            "evaluation": evaluation_metrics,
+            "gate": evaluation_metrics,  # Legacy clients read this manifest field.
+            # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
         }
 
@@ -557,7 +558,7 @@ class RequestService:
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
         backend = scenario.trainer.candidate_backend
-        if not isinstance(backend, ProposalGate) or backend.proposals is None:
+        if not isinstance(backend, ProposalValidator) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
                 "evolution recipe with a proposal inbox"
@@ -589,7 +590,7 @@ class RequestService:
         return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
 
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
-        """The scenario's release catalog with per-release gate metrics, newest last.
+        """The scenario's release catalog with per-release evaluation metrics, newest last.
 
         The list side of the update channel: every committed release stays
         addressable through the manifest read's ``release_id``, and each
@@ -739,7 +740,7 @@ class RequestService:
         an installed tree needs one written beside it: the release's own
         entries (the recipe's seed for the base release no step published)
         plus the descriptor's binding template, the base URL taken from the
-        request's Host, the model from the gate the release ran against (the
+        request's Host, the model from the evaluation the release ran against (the
         recipe's served model for the base release), and the token left as a
         placeholder the script fills from the client's environment. Empty
         when any of those is unknown, and the script then installs the
@@ -749,8 +750,12 @@ class RequestService:
         # A gateway in front of Reef names the address the client reached in the forwarded
         # headers; the binding goes there, so the installed harness calls back through it.
         host = normalized.get("x-forwarded-host") or normalized.get("host")
-        gate = manifest.get("gate") or {}
-        model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
+        evaluation_metrics = manifest.get("evaluation", manifest.get("gate")) or {}
+        model = (
+            (evaluation_metrics.get("evaluation_context", evaluation_metrics.get("gated_against")) or {}).get("model")
+            if isinstance(evaluation_metrics, Mapping)
+            else None
+        )
         info = scenario.surface.harness
         if not isinstance(model, str) or not model:
             model = None if info is None else info.served_model

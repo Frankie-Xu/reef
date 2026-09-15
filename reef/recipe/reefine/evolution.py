@@ -58,8 +58,8 @@ _PREVIEW_CHARS = 240
 #: How much of a design the step records: a few sentences, never a second copy of the entries.
 _DESIGN_CHARS = 1500
 
-#: The two words a review verdict may be.
-REVIEW_VERDICTS = ("complete", "partial")
+#: The two words a review result may be.
+REVIEW_RESULTS = ("complete", "partial")
 
 #: How many covered or uncovered points a review keeps: the record is a summary, not a transcript.
 _REVIEW_ITEMS = 20
@@ -150,9 +150,9 @@ REVIEW_PROMPT = (
     "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none), a value the user must "
     "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
     "Respond with one JSON object and nothing else:\n"
-    '{{"verdict": "complete" or "partial", "covered": ["<one point per item>"], '
+    '{{"result": "complete" or "partial", "covered": ["<one point per item>"], '
     '"uncovered": ["<one point per item>"]}}\n'
-    "The verdict is complete only when uncovered is empty."
+    "The result is complete only when uncovered is empty."
 )
 
 #: The prompt section carrying the failures a step in training_mode hybrid hands over beside the request.
@@ -213,7 +213,7 @@ def propose(
     failure never crashes the step: on the failure path it returns
     ``None``, and for a request a :class:`StepProposal` without mutations
     whose notes say why under ``failure``, so the skipped step's record and
-    the session's verdict line carry the reason.
+    the session's result line carry the reason.
     """
     if requests:
         return _answer_request(nodes, requests[0], samples, models, entries)
@@ -398,7 +398,7 @@ def _review(
     mutations: Sequence[Mutation],
     requires: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
-    """The served model's reading of its entries against the request, ``{verdict, covered, uncovered}``; ``None``
+    """The served model's reading of its entries against the request, ``{result, covered, uncovered}``; ``None``
     when the call or the parse failed, which costs the step its review and nothing else."""
     written: list[dict[str, Any]] = [{"op": m.op, "id": m.id, **(m.options or {})} for m in mutations]
     if requires:
@@ -414,15 +414,15 @@ def _review(
 
 
 def _parse_review(reply: str) -> dict[str, Any] | None:
-    """The review object in the model's text; ``None`` when there is none or its verdict is not one of the two words."""
+    """The review object in the model's text; ``None`` when there is none or its result is not one of the two words."""
     value = _json_in(reply, openers=("{",))
     if not isinstance(value, dict):
         return None
-    verdict = str(value.get("verdict", "")).strip().lower()
-    if verdict not in REVIEW_VERDICTS:
+    review_result = str(value.get("result", value.get("verdict", ""))).strip().lower()
+    if review_result not in REVIEW_RESULTS:
         return None
     return {
-        "verdict": verdict,
+        "result": review_result,
         "covered": _strings_of(value.get("covered")),
         "uncovered": _strings_of(value.get("uncovered")),
     }

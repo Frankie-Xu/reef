@@ -32,11 +32,11 @@ When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are bloc
   ``--wait`` the wrapper polls the release catalog every 5 s for the step
   that consumed the request (``--timeout`` seconds, 1800 by default), says
   once when the request's record shows a step took it, and prints the
-  verdict with the next action (a pending release says it is not installed
+  result with the next action (a pending release says it is not installed
   until promoted and names its page link; a skipped step's line quotes why
   the proposer produced nothing): exit 0 for a selected or pending release,
   1 for a rejected or skipped step, 2 when the timeout passes first. On a
-  terminal the verdict hands over the next step: a selected release asks
+  terminal the result hands over the next step: a selected release asks
   ``Install now? [Y/n]`` and, on yes, runs the setup prompts for it and
   then ``update``, closing with ``Installed release <id>. Restart reef-pi
   to use it.``; a pending release names its page, asks ``Promote now?
@@ -713,7 +713,7 @@ def _met(item: Mapping[str, Any], record: Mapping[str, Any] | None) -> bool:
     """Whether a check off meets an item: it names it and the check it recorded is the item's.
 
     A check off without a recorded check, from an older release file, counts by
-    name; the install script's gate applies the same rule."""
+    name; the install script's evaluation applies the same rule."""
     return record is not None and ("check" not in record or record.get("check") == item.get("check"))
 
 
@@ -797,7 +797,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
 
 
 def _reportable(turn: Mapping[str, Any]) -> bool:
-    """A captured exchange with a receipt that was not a trial's: a trial never reaches the gate."""
+    """A captured exchange with a receipt that was not a trial's: a trial never reaches the evaluation."""
     return bool(turn.get("receipt")) and "trial" not in (turn.get("tags") or {})
 
 
@@ -928,8 +928,8 @@ def _request_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
     return request if isinstance(request, Mapping) else {}
 
 
-def _verdict_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
-    """A row's verdict as the extension reads it.
+def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
+    """A row's result as the extension reads it.
 
     A pending row stays pending in the catalog; a later promote row naming
     it makes it ``promoted at step N``. A settled step is ``selected``,
@@ -967,8 +967,8 @@ def _failure_of(row: Mapping[str, Any]) -> str:
     return failure.strip() if isinstance(failure, str) else ""
 
 
-def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
-    """One line for a settled step: its verdict and the next action, quoting the request's first 60 characters.
+def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
+    """One line for a settled step: its result and the next action, quoting the request's first 60 characters.
 
     The extension's watch says the same in the session; ``harness --wait``
     and ``doctor`` say it here. ``page`` is the step's page link, which the
@@ -977,24 +977,24 @@ def _verdict_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], pa
     metrics = _metrics_of(row)
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
     release = str(row.get("release_id") or "")[:8]
-    verdict = _verdict_of(row, rows)
-    if verdict == "selected":
+    selection_result = result_of(row, rows)
+    if selection_result == "selected":
         return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
-    if verdict == "pending":
+    if selection_result == "pending":
         return (
             f"'{ask}' is ready as release {release}. This release changes an extension, so it is not installed "
             f"until you promote it: /reef-versions {step} promote. Page: {page}"
         )
-    if verdict == "rejected":
+    if selection_result == "rejected":
         selection = metrics.get("selection")
         reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
-        return f"'{ask}' did not pass the gate ({reason}). Nothing changed; rephrase or split the request."
-    if verdict == "skipped":
+        return f"'{ask}' did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
+    if selection_result == "skipped":
         # The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
         failure = _failure_of(row)
         why = f"{metrics.get('skipped')}: {failure}" if failure else str(metrics.get("skipped"))
         return f"'{ask}' produced no change ({why}). Nothing changed."
-    return f"'{ask}' settled as {verdict} (release {release}); reef-{adapter} page {step} shows it."
+    return f"'{ask}' settled as {selection_result} (release {release}); reef-{adapter} page {step} shows it."
 
 
 def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
@@ -1050,7 +1050,7 @@ def _await_step(
             return step, rows
         if time.monotonic() >= deadline:
             print(
-                f"reef-{adapter}: no verdict yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
+                f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
             )
             return "timeout"
         if not started:
@@ -1105,9 +1105,9 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
     return head
 
 
-def _next_commands(adapter: str, step: int, verdict: str) -> str:
+def _next_commands(adapter: str, step: int, selection_result: str) -> str:
     """The commands that take the next step by hand, for a person who declined it or has no terminal."""
-    if verdict == "pending":
+    if selection_result == "pending":
         return f"/reef-versions {step} promote in a reef-{adapter} session, then reef-{adapter} setup and reef-{adapter} update"
     return f"reef-{adapter} setup, then reef-{adapter} update"
 
@@ -1131,7 +1131,7 @@ def _next_step(
     token: str | None,
     row: Mapping[str, Any],
     step: int,
-    verdict: str,
+    selection_result: str,
 ) -> int:
     """After a release, hand the person the next step: install a selected one, promote then install a pending one.
 
@@ -1139,22 +1139,22 @@ def _next_step(
     the commands are printed for later. 0 unless a step the person took
     failed, then its status."""
     release = str(row.get("release_id") or "")
-    if verdict not in ("selected", "pending") or not release:
+    if selection_result not in ("selected", "pending") or not release:
         return 0
     if not sys.stdin.isatty():
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, verdict)}")
+        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
         return 0
-    if verdict == "pending":
+    if selection_result == "pending":
         print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
         if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
-            print(f"reef-{adapter}: next: {_next_commands(adapter, step, verdict)}")
+            print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
             return 0
         head = _promote(upstream, scenario, adapter, token, release)
         if head is None:
             return 1
         release = head
     elif not _confirm(adapter, "Install now? [Y/n]", default_yes=True):
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, verdict)}")
+        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
         return 0
     return _install(scenario, adapter, compose_dir, release)
 
@@ -1169,10 +1169,10 @@ def harness(
     timeout_s: float = 1800.0,
     poll_s: float = 5.0,
 ) -> int:
-    """Submit a native manual training request, leaving feedback receipts available; with ``wait``, report its verdict.
+    """Submit a native manual training request, leaving feedback receipts available; with ``wait``, report its result.
 
     The status is 0 once the request is accepted. With ``wait`` it is the
-    verdict's: 0 for a release to install or review, 1 for a step that
+    result's: 0 for a release to install or review, 1 for a step that
     changed nothing, 2 when the timeout passes first; on a terminal a
     release hands over its next step and a failed step's status stands."""
     text = text.strip()
@@ -1215,21 +1215,21 @@ def harness(
     if not wait:
         print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /reef-versions later")
         return 0
-    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its verdict")
+    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
     settled = _await_step(
         upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
-    print(f"reef-{adapter}: {_verdict_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
+    print(f"reef-{adapter}: {result_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
     uncovered = _uncovered(rows[step])
     if uncovered:
         print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
-    verdict = _verdict_of(rows[step], rows)
-    if verdict in ("rejected", "skipped"):
+    selection_result = result_of(rows[step], rows)
+    if selection_result in ("rejected", "skipped"):
         return 1
-    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, verdict)
+    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result)
 
 
 def _page_cache_dir() -> Path:
@@ -1626,7 +1626,7 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     if state.row is None:
         print(f"reef-{adapter} update: no served release yet", file=sys.stderr)
         return 1
-    # The env items the environment or the env file meets are checked off, so the script's gate sees them met.
+    # The env items the environment or the env file meets are checked off, so the script's evaluation sees them met.
     _save_setup(compose_dir, state)
     unmet = state.unmet()
     if unmet:
@@ -1810,7 +1810,7 @@ def main() -> None:
     elif args and args[0] == "harness":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} harness")
         parser.add_argument("request", nargs="*", help="what the harness should do, in plain words")
-        parser.add_argument("--wait", action="store_true", help="stay until the step settles and print its verdict")
+        parser.add_argument("--wait", action="store_true", help="stay until the step settles and print its result")
         parser.add_argument(
             "--timeout", type=float, default=1800.0, metavar="SECONDS", help="how long --wait waits (default 1800)"
         )

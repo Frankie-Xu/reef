@@ -1,13 +1,13 @@
-"""One HTML page per filed harness request: where its step stands, then the verdict once the step settles.
+"""One HTML page per filed harness request: where its step stands, then the result once the step settles.
 
 ``GET /reef/harness/requests/{record_id}/page`` builds it from the request's
 agent record, the scenario's catalog rows and the running step's progress.
 The catalog row whose ``metrics.training_request.id`` is the record id
-settles the request: the page then shows that row's verdict as the version
+settles the request: the page then shows that row's result as the version
 page words it, the mutations, what the review left uncovered, why the
 proposer produced nothing when the step recorded that, and links the
 version page. Until then the page names the state the request is in
-(``queued`` before a step takes it, ``proposing`` and ``gating`` from the
+(``queued`` before a step takes it, ``proposing`` and ``evaluating`` from the
 backend's progress, ``running`` while the trainer holds the request and the
 backend reports no phase, ``settling`` while the row that consumed the
 record lands) and reloads itself every ``REFRESH_SECONDS``, so a person
@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
-from reef.service.release_page import _esc, _requires_table, mutations_of, verdict_of
+from reef.service.release_page import _esc, _requires_table, mutations_of, result_of
 from reef.train.cordis_backend.contracts import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -70,7 +70,7 @@ border:1px solid var(--line);border-radius:100px;padding:6px 12px;font-size:12px
 .tone-selected,.tone-promoted{--status:var(--good);--status-bg:var(--good-bg)}
 .tone-pending,.tone-skipped{--status:var(--warn);--status-bg:var(--warn-bg)}
 .tone-rejected{--status:var(--bad);--status-bg:var(--bad-bg)}
-.tone-queued,.tone-proposing,.tone-gating,.tone-running,.tone-settling{--status:var(--accent);--status-bg:var(--soft)}
+.tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-settling{--status:var(--accent);--status-bg:var(--soft)}
 .status{color:var(--status);background:var(--status-bg);border-color:transparent}
 .journey{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:0 0 28px;padding:24px 28px;
 list-style:none;background:var(--card);border:1px solid var(--line);border-radius:12px}
@@ -141,7 +141,7 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 STATE_WORDS = {
     "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
     "proposing": "the proposer is writing the change: the served model reads the request and the tree",
-    "gating": "the gate is running the candidate through its episodes",
+    "evaluating": "the evaluation is running the candidate through its episodes",
     "running": "the step holds the request and reports no phase; its row follows",
     "settling": "the step that consumed the request is committing its row",
 }
@@ -168,7 +168,7 @@ def elapsed(seconds: float) -> str:
 STATUS_LABELS = {
     "queued": "Queued",
     "proposing": "Designing the change",
-    "gating": "Checking the harness",
+    "evaluating": "Checking the harness",
     "running": "In progress",
     "settling": "Saving the result",
     "selected": "Published",
@@ -192,7 +192,7 @@ def request_state(record: Mapping[str, object], progress: StepProgress | None, c
     consumed by a commit whose row is about to show, since the row that
     names the request lands in the same commit as the compaction."""
     if progress is not None and progress.request_id == record["agent_record_id"]:
-        return progress.phase
+        return "evaluating" if progress.phase == "gating" else progress.phase
     if consumed:
         return "running"
     return "queued" if record.get("compacted_at") is None else "settling"
@@ -236,7 +236,9 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
     if progress is not None and progress.request_id == record["agent_record_id"]:
         lines.append(f"<div><dt>Step time</dt><dd>{_esc(elapsed(now - progress.started_at))} into the step</dd></div>")
         if progress.episodes_total is not None:
-            lines.append(f"<div><dt>Gate episodes</dt><dd>{progress.episodes_total} in the gate</dd></div>")
+            lines.append(
+                f"<div><dt>Evaluation episodes</dt><dd>{progress.episodes_total} in the evaluation</dd></div>"
+            )
         if progress.step_record:
             lines.append(f'<div><dt>Step record</dt><dd class="id">{_esc(progress.step_record)}</dd></div>')
     else:
@@ -250,35 +252,35 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
     )
 
 
-def meaning(verdict: str, row: Mapping[str, object], metrics: Mapping[str, object]) -> str:
-    """What the verdict means for the person who asked, with the next action; the words the session prints."""
+def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[str, object]) -> str:
+    """What the result means for the person who asked, with the next action; the words the session prints."""
     release = str(row.get("release_id") or "-")[:8]
-    if verdict == "selected":
+    if selection_result == "selected":
         return f"Published as release {release}. Your current session keeps its installed harness until you choose to update."
-    if verdict == "pending":
+    if selection_result == "pending":
         return (
             f"Release {release} is ready. This change includes an extension, "
             "so it needs your review before installation."
         )
-    if verdict.startswith("promoted"):
-        return f"won the gate and was {verdict}; the release that step published serves it"
-    if verdict == "rejected":
+    if selection_result.startswith("promoted"):
+        return f"passed the checks and was {selection_result}; the release that step published serves it"
+    if selection_result == "rejected":
         selection = metrics.get("selection")
         reason = selection.get("reason") if isinstance(selection, Mapping) else None
-        return f"did not pass the gate ({reason or 'the gate refused it'}); nothing changed: rephrase or split the request"
-    if verdict == "skipped":
+        return f"did not pass the checks ({reason or 'the checks failed'}); nothing changed: rephrase or split the request"
+    if selection_result == "skipped":
         return f"produced no change ({metrics.get('skipped')}); nothing changed"
-    return f"the step ended as {verdict}"
+    return f"the step ended as {selection_result}"
 
 
-def verdict_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Mapping[str, str] | None) -> str:
+def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Mapping[str, str] | None) -> str:
     row = rows[step]
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
-    verdict = verdict_of(row, rows)
+    selection_result = result_of(row, rows)
     parts = [
-        f'<div class="outcome-summary"><div class="status">{span(verdict)}</div>'
-        f"<p>{_esc(meaning(verdict, row, metrics))}</p></div>",
+        f'<div class="outcome-summary"><div class="status">{span(selection_result)}</div>'
+        f"<p>{_esc(meaning(selection_result, row, metrics))}</p></div>",
         '<dl class="fact-list">',
         f"<div><dt>Step</dt><dd>{step}</dd></div>",
         f'<div><dt>Release</dt><dd class="id">{_esc(row.get("release_id"))}</dd></div>',
@@ -294,10 +296,10 @@ def verdict_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Ma
     if link_query:
         # Carry the scenario and authentication to the version page without displaying the token.
         href += "?" + urlencode(dict(link_query))
-    if verdict == "pending":
+    if selection_result == "pending":
         command = f"/reef-versions {step} promote"
         action = "Review, then promote"
-    elif verdict == "selected":
+    elif selection_result == "selected":
         command = f"/reef-versions {step} install"
         action = "Install when ready"
     else:
@@ -333,7 +335,7 @@ def what_changed(metrics: Mapping[str, object]) -> str:
 
 
 def review_html(metrics: Mapping[str, object]) -> str:
-    """The Review section, only when the step recorded one: the verdict and what the entries left uncovered."""
+    """The Review section, only when the step recorded one: the result and what the entries left uncovered."""
     notes = metrics.get("proposal_notes")
     review = notes.get("review") if isinstance(notes, Mapping) else None
     if not isinstance(review, Mapping):
@@ -343,7 +345,7 @@ def review_html(metrics: Mapping[str, object]) -> str:
     listed = "<ul>" + "".join(f"<li>{_esc(item)}</li>" for item in items) + "</ul>" if items else ""
     return (
         f'<section class="card review-card">\n<h2>Review</h2>\n<p>Coverage of the request: '
-        f'{span(str(review.get("verdict") or "unknown"))}</p>\n'
+        f'{span(str(review.get("result", review.get("verdict")) or "unknown"))}</p>\n'
         + (f"<h3>Still uncovered</h3>{listed}\n" if items else '<p class="empty">Nothing left uncovered.</p>\n')
         + "</section>\n"
     )
@@ -372,20 +374,20 @@ def build_request_page(
     record_id = str(record["agent_record_id"])
     now = time.time() if now is None else now
     step = settled_step(rows, record_id)
-    state = verdict_of(rows[step], rows) if step is not None else request_state(record, progress, consumed)
+    state = result_of(rows[step], rows) if step is not None else request_state(record, progress, consumed)
     title = f"Harness request {record_id[:8]}"
     head = "" if step is not None else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
     state_class = state.split(" ")[0]
     if step is None:
         body = f'<section class="card outcome-card">\n<h2>Progress</h2>\n{progress_html(record, state, progress, now)}</section>\n'
         subtitle = "Follow your request from instruction to outcome."
-        current_stage = {"queued": 0, "proposing": 1, "gating": 1, "running": 1, "settling": 2}.get(state, 1)
+        current_stage = {"queued": 0, "proposing": 1, "evaluating": 1, "running": 1, "settling": 2}.get(state, 1)
     else:
         metrics = rows[step].get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
         change_label = "Proposed changes" if state in ("pending", "rejected", "skipped") else "What changed"
         body = (
-            f'<section class="card outcome-card">\n<h2>Verdict</h2>\n{verdict_html(step, rows, link_query)}</section>\n'
+            f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
             f"{review_html(metrics)}"
         )
@@ -393,9 +395,9 @@ def build_request_page(
         current_stage = 3
     stages = (
         ("Received", "Request accepted"),
-        ("Processing", "Proposal & gate"),
+        ("Processing", "Proposal & evaluation"),
         ("Recording", "Save result"),
-        ("Outcome", "Final verdict"),
+        ("Outcome", "Final result"),
     )
     journey = []
     for index, (label, description) in enumerate(stages):

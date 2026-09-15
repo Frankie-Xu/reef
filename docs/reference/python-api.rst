@@ -34,7 +34,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | propose a harness edit and grade an episode | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| gate a produced candidate                   | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
+| evaluate a produced candidate               | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | a new tensor objective                      | `Loss family                                     | rarely                       |
 |                                             | <../developer-guide/loss-families.rst>`__        |                              |

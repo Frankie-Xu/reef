@@ -1256,7 +1256,7 @@ CREATION_ROW = {"release_id": "rel-0", "parent_release_id": None, "operation": "
 
 
 def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_id: str = "q-1") -> dict:
-    """The catalog row of the step that consumed request ``request_id``, with the verdict ``metrics`` carry."""
+    """The catalog row of the step that consumed request ``request_id``, with the result ``metrics`` carry."""
     return {
         "release_id": release_id,
         "parent_release_id": "rel-0",
@@ -1298,7 +1298,7 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
             ),
             1,
             [
-                "reef-pi: 'text me when you are blocked' did not pass the gate (candidate missed the floor on 1 of 1 "
+                "reef-pi: 'text me when you are blocked' did not pass the checks (candidate missed the floor on 1 of 1 "
                 "tasks). Nothing changed; rephrase or split the request."
             ],
         ),
@@ -1325,7 +1325,7 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
     ],
     ids=["selected", "pending", "rejected", "skipped", "skipped-failure"],
 )
-def test_harness_wait_prints_the_verdict_line_and_exits_by_it(tmp_path, capsys, row, status, lines) -> None:
+def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, row, status, lines) -> None:
     reef = _FakeReef(
         {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}, rows=[CREATION_ROW, row]
     )
@@ -1342,7 +1342,7 @@ def test_harness_wait_prints_the_verdict_line_and_exits_by_it(tmp_path, capsys, 
     assert out[:3] == [
         "reef-pi: training request q-1 accepted",
         f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy",
-        "reef-pi: reef is running the step; waiting up to 5 s for its verdict",
+        "reef-pi: reef is running the step; waiting up to 5 s for its result",
     ]
     # The pending line names the step's page link, the scenario and the token as query parameters.
     page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&token=dummy"
@@ -1466,7 +1466,7 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     reef.close()
 
     out = capsys.readouterr().out.splitlines()
-    assert out[3] == "reef-pi: no verdict yet for 'text me' after 0.05 s; /reef-versions shows it when it settles"
+    assert out[3] == "reef-pi: no result yet for 'text me' after 0.05 s; /reef-versions shows it when it settles"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 2
     link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy"
     assert out[-3:] == [
@@ -1490,7 +1490,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     reef.close()
     out = capsys.readouterr().out.splitlines()
     assert out[3] == "reef-pi: the step started; usually one to three minutes"
-    assert out[4].startswith("reef-pi: no verdict yet for 'text me' after 0.1 s") and len(out) == 5
+    assert out[4].startswith("reef-pi: no result yet for 'text me' after 0.1 s") and len(out) == 5
     record_reads = [call for call in reef.seen if call["path"] == record_path]
     assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
@@ -1502,7 +1502,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
         assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
     reef.close()
     out = capsys.readouterr().out.splitlines()
-    assert len(out) == 4 and out[3].startswith("reef-pi: no verdict yet")
+    assert len(out) == 4 and out[3].startswith("reef-pi: no result yet")
     assert len([call for call in reef.seen if call["path"] == record_path]) >= 3
     # Unanswered (404) twice in a row: the service no longer knows the request (its scenario was reset), so the
     # wait ends with one line and exit 1 instead of polling until the timeout.
@@ -2203,7 +2203,7 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
 ) -> None:
     """The script comes from the install route with the token and the scenario header and runs with bash for the
     install root, the token in its environment; an unmet item is printed and nothing fetched, exit 3; an env item
-    the environment meets is checked off before the script runs, so its gate sees it; a failing script, an unknown
+    the environment meets is checked off before the script runs, so its evaluation sees it; a failing script, an unknown
     release and a route that has no script are exit 1."""
     rows = [_row("v1"), _row("v2", [{"name": "SMTP", "kind": "env", "prompt": "The SMTP host"}])]
     reef = _ReleasesReef(rows, install=INSTALL_SCRIPT)

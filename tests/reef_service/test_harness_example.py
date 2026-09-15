@@ -482,7 +482,7 @@ ENTRIES = (
 
 DESIGN = "The user wants the tests run before every answer. Trigger: every task; no state. Nothing to set up."
 
-REVIEW = {"verdict": "partial", "covered": ["the tests run first"], "uncovered": ["no second reviewer"]}
+REVIEW = {"result": "partial", "covered": ["the tests run first"], "uncovered": ["no second reviewer"]}
 
 
 def designed(*entries: dict, design: str = DESIGN, requires: list | None = None) -> str:
@@ -543,7 +543,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     # The review reads the request, fenced as data, the design and the entries as written.
     assert REQUEST["text"] in review_prompt and "[BEGIN user request" in review_prompt
     assert DESIGN in review_prompt and '"id": "run-tests"' in review_prompt and "# improved" in review_prompt
-    assert '"verdict": "complete" or "partial"' in review_prompt
+    assert '"result": "complete" or "partial"' in review_prompt
     assert "a value the user must provide that the extension asks for or stores itself instead of declaring" in (
         review_prompt
     )
@@ -566,7 +566,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
 def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stand(evolution) -> None:
     for review in (
         "no json here",
-        json.dumps({"verdict": "done", "covered": []}),
+        json.dumps({"result": "done", "covered": []}),
         json.dumps(["complete"]),
         ModelBindingError("model endpoint unreachable: connection refused"),
     ):
@@ -575,10 +575,17 @@ def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stan
         assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
         assert proposal.notes == {"design": DESIGN} and model.calls == 3
     # The verdict's case and the lists are read leniently: strings only, trimmed, anything else dropped.
-    lenient = {"verdict": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
+    lenient = {"result": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
     model = Model(designed(skill("run-tests")), json.dumps(lenient))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.notes["review"] == {"verdict": "complete", "covered": ["a", "b"], "uncovered": []}
+    assert proposal.notes["review"] == {"result": "complete", "covered": ["a", "b"], "uncovered": []}
+
+
+def test_legacy_review_key_is_normalized_to_result(evolution) -> None:
+    review = {"verdict": "partial", "covered": ["tests"], "uncovered": ["review"]}
+    model = Model(designed(skill("run-tests")), json.dumps(review))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["review"] == {"result": "partial", "covered": ["tests"], "uncovered": ["review"]}
 
 
 def test_a_failed_model_call_is_the_request_steps_failure_note_and_still_a_skip_on_the_failure_path(
@@ -1359,7 +1366,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     assert [e["id"] for e in seed_release["entries"]] == ["read_file", "main"]
     assert published["diff"] == {"added": [{"id": "answer-format", "kind": "rules"}], "updated": [], "removed": []}
     assert published["proposal"] == {"id": "p1", "session": "s1", "release_id": "r1"}
-    assert published["verdict"]["wins"] == 2 and published["verdict"]["reason"].startswith("candidate won")
+    assert published["result"]["wins"] == 2 and published["result"]["reason"].startswith("candidate won")
     assert [(s["session"], s["release_id"], len(s["events"])) for s in data["sessions"]] == [
         ("s1", "r1", 6),
         ("s2", "r2", 5),
@@ -1432,7 +1439,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         ("published", 1, "r2"),
         ("rollback", 2, "r1"),
     ]
-    assert with_rollback["releases"][2]["verdict"] is None
+    assert with_rollback["releases"][2]["result"] is None
     assert with_rollback["releases"][2]["entries"] == with_rollback["releases"][1]["entries"]
 
     # An empty work directory still renders a page.

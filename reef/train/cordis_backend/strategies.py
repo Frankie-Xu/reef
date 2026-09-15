@@ -27,7 +27,7 @@ from reef.train.types import TrajectoryItem
 class StepProposal:
     """A proposer's mutations with notes the step records and never reads.
 
-    ``notes`` is a JSON mapping (a plan, a review verdict, what the method
+    ``notes`` is a JSON mapping (a plan, a review result, what the method
     could not honor) that the commit metrics carry under ``proposal_notes``,
     bounded like the rest of the step record. Empty ``mutations`` skip the
     step as ``None`` does.
@@ -86,7 +86,7 @@ class Proposer(ABC):
     ``batch_size`` and possibly none (scored traces, or
     records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
     instructions. It generates mutations against the current tree, then the
-    same gate and publication policy used by automatic evolution apply.
+    same evaluation and publication policy used by automatic evolution apply.
 
     ``requires`` is what the person said the change needs from their
     machine: a list of ``{name, kind, check}`` items, ``kind`` one of
@@ -295,7 +295,7 @@ def resolve_episode_scorer(value: object) -> EpisodeScorer:
 
 
 class Promoter(ABC):
-    """Base class for choosing which trace prompts become permanent gate tasks.
+    """Base class for choosing which trace prompts become permanent evaluation tasks.
 
     Implement ``__call__``: given the step's trace samples, return the prompts
     to promote. Reef still dedupes, screens for credentials, and caps them.
@@ -309,7 +309,7 @@ class Promoter(ABC):
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:
-        """Return the prompts this step should promote into the gate."""
+        """Return the prompts this step should promote into the evaluation."""
 
 
 def resolve_promoter(value: object) -> Promoter:
