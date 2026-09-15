@@ -596,6 +596,10 @@ def main(
     )
     parser.add_argument("--model", required=True, help="the served model, Designer and solver alike")
     parser.add_argument("--token", default=os.environ.get("REEF_TOKEN") or None)
+    parser.add_argument("--designer-reef-url", default=None, help="the Designer's Reef service; --reef-url by default")
+    parser.add_argument("--designer-scenario", default=None, help="the Designer's scenario; --scenario by default")
+    parser.add_argument("--designer-model", default=None, help="the Designer's served model; --model by default")
+    parser.add_argument("--designer-token", default=None, help="the Designer's service token; --token by default")
     parser.add_argument("--tasks-root", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, default=Path("work/spade"))
     parser.add_argument("--description", required=True, help="what the environments are about")
@@ -657,10 +661,10 @@ def main(
             designer
             if designer is not None
             else ReefDesigner(
-                reef_url=arguments.reef_url,
-                scenario=arguments.scenario,
-                model=arguments.model,
-                token=arguments.token,
+                reef_url=arguments.designer_reef_url or arguments.reef_url,
+                scenario=arguments.designer_scenario or arguments.scenario,
+                model=arguments.designer_model or arguments.model,
+                token=arguments.designer_token or arguments.token,
                 request_options=designer_options,
                 timeout_s=arguments.designer_timeout_s,
             )

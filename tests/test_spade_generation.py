@@ -483,3 +483,32 @@ def test_main_refuses_a_request_it_cannot_run(tmp_path: Path) -> None:
             solver=StandInSolver(),
             checks=StandInChecks(),
         )
+
+
+def test_main_points_the_designer_at_its_own_service_and_model(tmp_path: Path, monkeypatch) -> None:
+    seen: list[dict[str, object]] = []
+
+    class RecordingDesigner(StandInDesigner):
+        def __init__(self, **options: object) -> None:
+            seen.append(options)
+            super().__init__()
+
+    monkeypatch.setattr("recipes.beta.spade.generation.ReefDesigner", RecordingDesigner)
+    shared = ["--reef-url", "http://127.0.0.1:8900", "--scenario", "spade", "--model", "m", "--token", "t"]
+    request = ["--description", "shell tasks", "--count", "1", "--plays", "1", "--tasks-root"]
+    own = [
+        "--designer-reef-url",
+        "http://127.0.0.1:8901",
+        "--designer-scenario",
+        "designer",
+        "--designer-model",
+        "strong",
+    ]
+    stand_ins: dict[str, object] = {"solver": StandInSolver(), "checks": StandInChecks()}
+    assert main([*shared, *request, str(tmp_path / "shared")], **stand_ins) == 0
+    assert main([*shared, *request, str(tmp_path / "own"), *own, "--designer-token", "t2"], **stand_ins) == 0
+    keys = ("reef_url", "scenario", "model", "token")
+    assert [tuple(options[key] for key in keys) for options in seen] == [
+        ("http://127.0.0.1:8900", "spade", "m", "t"),
+        ("http://127.0.0.1:8901", "designer", "strong", "t2"),
+    ]
