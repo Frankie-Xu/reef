@@ -242,7 +242,7 @@ def test_a_task_toml_table_reef_did_not_write_is_refused(tmp_path: Path, table: 
         read_harbor_task(root)
 
 
-def test_a_directory_without_reef_provenance_is_refused(tmp_path: Path) -> None:
+def test_a_directory_without_the_reef_table_is_refused(tmp_path: Path) -> None:
     root = write_harbor_task(task(), tmp_path)
     (root / "task.toml").write_text('version = "1.0"\n[metadata]\nauthor_name = "Reef"\n')
     with pytest.raises(HarborTaskError, match=r"no \[metadata\.reef\] table"):

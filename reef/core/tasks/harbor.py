@@ -101,7 +101,7 @@ class HarborTask:
 
     @property
     def digest(self) -> str:
-        """sha256 over the task's content and provenance, the same for the same task however it was built."""
+        """sha256 over the task's content and its source record ids, the same for the same task however it was built."""
         canonical = json.dumps(
             {
                 "name": self.name,
@@ -119,7 +119,7 @@ class HarborTask:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def task_toml(self) -> str:
-        """The task.toml text: the version, the tables in Harbor's order, reef's provenance under metadata."""
+        """The task.toml text: the version, the tables in Harbor's order, reef's digest and source ids under metadata."""
         document: dict[str, Any] = {"version": TASK_CONFIG_VERSION}
         document["metadata"] = {
             **self.metadata,
