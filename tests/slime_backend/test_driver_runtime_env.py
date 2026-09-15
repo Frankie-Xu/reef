@@ -77,6 +77,11 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
 
     args = SimpleNamespace(
         hf_checkpoint="model",
+        seed=1,
+        offload_rollout=False,
+        fp16=False,
+        use_rollout_routing_replay=False,
+        megatron_lora_rank=0,
         rollout_num_gpus=4,
         rollout_num_gpus_per_engine=2,
         num_gpus_per_node=4,

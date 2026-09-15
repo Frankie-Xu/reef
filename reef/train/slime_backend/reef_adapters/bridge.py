@@ -35,6 +35,7 @@ from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
@@ -43,7 +44,12 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    CheckpointStorage,
+    RetentionConfig,
+    critic_checkpoint_due,
+)
 
 # One training step (train + checkpoint + publish) legitimately takes hours;
 # this bounds a single Ray RPC from the bridge to its workers.
@@ -98,6 +104,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         critic_group=None,
         critic_steps_per_actor: int | None = None,
         critic_only_steps: int = 0,
+        critic_save_interval: int = 1,
         loss_family: str | None = None,
         loss_family_config: object | None = None,
         loss_runtime: SlimeAlgorithm | None = None,
@@ -106,6 +113,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         self._group = actor_group
         self._critic_group = critic_group
         self._critic_save_root = critic_save_root if critic_group is not None else None
+        if (
+            not isinstance(critic_save_interval, int)
+            or isinstance(critic_save_interval, bool)
+            or critic_save_interval < 1
+        ):
+            raise ValueError("critic_save_interval must be a positive integer")
+        self.critic_save_interval = critic_save_interval
         self._batch_processor = batch_processor
         self._save_hf_template = save_hf_template
         self._config = TrainingCoordinationConfig(
@@ -131,6 +145,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 hf_template=save_hf_template,
                 megatron_root=megatron_save_root,
                 critic_root=self._critic_save_root,
+                critic_save_interval=critic_save_interval,
                 source_hf=source_hf,
                 source_megatron=source_megatron,
                 lora=lora,
@@ -264,9 +279,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         checkpoint = job.checkpoint
         rollout_id = checkpoint.rollout_id
         self._group.save_model(rollout_id, force_sync=True)
-        if self._critic_save_root is not None:
-            # Critic-only warmup also needs paired optimizer recovery; the
-            # critic checkpoint never becomes a serving model/HF export.
+        if self._critic_save_root is not None and critic_checkpoint_due(rollout_id, self.critic_save_interval):
+            # Persist the critic's weights and optimizer alongside the actor
+            # pair: every commit by default, critic-only warmup included,
+            # otherwise the value head cold-starts on every reboot (SAO's
+            # stated cold-start concern). A larger interval skips the full
+            # critic save on the commits in between. No HF export: the
+            # critic never serves.
             self._critic_group.save_model(rollout_id, force_sync=True)
         if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
@@ -407,9 +426,9 @@ def prepare_bridge(
 
 
 def create_training_backend(
-    args: Any,
-    actor_group: Any,
-    critic_group: Any | None,
+    args: SlimeArguments,
+    actor_group: SlimeTrainGroup,
+    critic_group: SlimeTrainGroup | None,
     *,
     preparation: BridgePreparation,
     loss_family_config: object | None = None,
@@ -421,19 +440,20 @@ def create_training_backend(
         actor_group,
         batch_processor=TrainingBatchProcessor(args, actor_group.train_parallel_config),
         save_hf_template=args.save_hf,
-        start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
+        start_rollout_id=args.start_rollout_id or 0,
         storage_config=preparation.retention,
         megatron_save_root=args.save,
-        critic_save_root=getattr(args, "critic_save", None),
-        source_hf=getattr(args, "hf_checkpoint", None),
-        source_megatron=getattr(args, "load", None),
-        colocate=bool(getattr(args, "colocate", False)),
+        critic_save_root=args.critic_save,
+        source_hf=args.hf_checkpoint,
+        source_megatron=args.load,
+        colocate=bool(args.colocate),
         lora=preparation.lora,
         adapter_capacity=lora_engine_slots(args) if preparation.lora else None,
-        keep_lora_base_resident=bool(getattr(args, "keep_lora_base_resident", False)),
+        keep_lora_base_resident=bool(args.keep_lora_base_resident),
         critic_group=critic_group,
-        critic_steps_per_actor=getattr(args, "critic_steps_per_actor", None),
-        critic_only_steps=getattr(args, "num_critic_only_steps", 0),
+        critic_steps_per_actor=args.critic_steps_per_actor,
+        critic_only_steps=args.num_critic_only_steps,
+        critic_save_interval=args.critic_save_interval,
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
     )

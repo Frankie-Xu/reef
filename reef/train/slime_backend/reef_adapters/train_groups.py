@@ -18,6 +18,7 @@ from reef.runtime.executor import Executor, ExecutorConfig, resolve
 from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.interfaces import RuntimeLoadId
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
 )
@@ -359,12 +360,12 @@ class SlimeTrainGroup:
             serving.collective_rpc("continue_generation", timeout=TRAIN_RPC_TIMEOUT_S)
 
 
-def prepare_critic_args(args: Any) -> Any:
+def prepare_critic_args(args: SlimeArguments) -> SlimeArguments:
     """Derive a critic namespace and apply Reef's role-specific policy."""
     if args.megatron_config_path is not None:
         from slime.utils.arguments import parse_megatron_role_args
 
-        critic_args = parse_megatron_role_args(args, args.megatron_config_path, role="critic")
+        critic_args = SlimeArguments(**vars(parse_megatron_role_args(args, args.megatron_config_path, role="critic")))
     else:
         critic_args = copy.deepcopy(args)
         critic_args.disable_param_buffers_cpu_backup = False
@@ -373,37 +374,51 @@ def prepare_critic_args(args: Any) -> Any:
     # The value model may train faster than the policy (SAO uses 5e-6 against
     # a 1e-6 policy lr); --critic-lr scopes that to the critic role without
     # the --megatron-config-path role surgery.
-    critic_lr = getattr(critic_args, "critic_lr", None)
+    critic_lr = critic_args.critic_lr
     if critic_lr is not None:
         critic_args.lr = float(critic_lr)
-    # LoRA is an actor-only serving adapter. Restore a user's provider for the
-    # critic instead of sending the critic through Reef's actor LoRA wrapper.
-    critic_args.megatron_lora_rank = 0
-    critic_args.megatron_lora_alpha = None
-    critic_args.megatron_lora_target_modules = None
-    critic_args.custom_model_provider_path = getattr(critic_args, "reef_chained_model_provider_path", None)
-    _apply_critic_checkpoint_roots(critic_args)
+    # A LoRA actor gets a LoRA critic: the value model keeps the same frozen
+    # base with its own adapters and a trainable value head (Slime swaps the
+    # head in after Reef's provider wraps the model), so a critic the size of
+    # the policy fits beside it. Without LoRA the critic trains every
+    # parameter through the user's own provider, as before.
+    if not critic_args.megatron_lora_rank:
+        critic_args.megatron_lora_alpha = None
+        critic_args.megatron_lora_target_modules = None
+        critic_args.custom_model_provider_path = critic_args.reef_chained_model_provider_path
+    apply_critic_checkpoint_roots(critic_args)
     return critic_args
 
 
-def _apply_critic_checkpoint_roots(critic_args: Any) -> None:
-    critic_save = getattr(critic_args, "critic_save", None)
+def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
+    critic_save = critic_args.critic_save
     if not critic_save:
         return
     critic_args.save = critic_save
-    tracker = Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt"
-    if tracker.is_file():
-        critic_args.load = critic_save
-        critic_args.no_load_optim = False
-        critic_args.no_load_rng = False
-        critic_args.finetune = False
-        critic_args.ckpt_step = None
-        logger.info("critic resumes from its own checkpoint root %s", critic_save)
+    critic_init = critic_args.critic_init
+    if (Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt").is_file():
+        load, reason = critic_save, "resumes from its own checkpoint root"
+    elif critic_init and (Path(critic_init).expanduser() / "latest_checkpointed_iteration.txt").is_file():
+        # A value model trained on earlier episodes: its weights and optimizer
+        # come from --critic-init once, and every later start resumes from
+        # what this run has saved since. The learning-rate schedule is this
+        # run's, not the checkpoint's: the earlier run may have used another
+        # batch size, and Megatron otherwise refuses a schedule whose total
+        # iteration count differs.
+        critic_args.override_opt_param_scheduler = True
+        load, reason = critic_init, "starts from the checkpoint in --critic-init"
     else:
         logger.info(
             "critic checkpoint root %s has no checkpoint yet; using the inherited load fallback",
             critic_save,
         )
+        return
+    critic_args.load = load
+    critic_args.no_load_optim = False
+    critic_args.no_load_rng = False
+    critic_args.finetune = False
+    critic_args.ckpt_step = None
+    logger.info("critic %s %s", reason, load)
 
 
 def create_train_groups(

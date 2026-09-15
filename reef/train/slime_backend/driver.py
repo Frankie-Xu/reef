@@ -58,12 +58,13 @@ def _parse_slime_args(arguments: Sequence[str]):
     try:
         from slime.utils.arguments import parse_args
 
+        from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
         from reef.train.slime_backend.reef_adapters.slime_arguments import (
             add_reef_slime_arguments,
             finalize_reef_slime_args,
         )
 
-        args = parse_args(add_custom_arguments=add_reef_slime_arguments)
+        args = SlimeArguments(**vars(parse_args(add_custom_arguments=add_reef_slime_arguments)))
         finalize_reef_slime_args(args, prepared_arguments)
         return args
     finally:

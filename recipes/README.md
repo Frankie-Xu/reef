@@ -48,7 +48,7 @@ learns from each score before the next task arrives.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
-| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md) |
+| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md), [SAO on CEO-Bench](sao/examples/ceobench/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
 | Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
 
@@ -56,6 +56,17 @@ learns from each score before the next task arrives.
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
 run in order by `run.py`, each driving six scored rollouts through Reef with a
 verifiable binary reward, and every scored rollout is one training step.
+
+[SAO on CEO-Bench](sao/examples/ceobench/README.md) runs
+[CEO-Bench](https://ceobench.com), a 500-day simulated startup, as one Harbor
+task. The harness is the benchmark's own bash agent, played from the host
+with its prompt, tools, and tool executor taken from the pinned checkout in
+the task image and its model calls served by Reef; the two simulator roles
+stay outside Reef, the verifier scores the run from its `world.nmdb`, and
+each finished week's change in company value is reported against the
+week's decision turns while the episode runs. It demonstrates how to adopt
+a benchmark's agent as a Reef harness and how to shape an online,
+per-period reward for one long episode.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto
