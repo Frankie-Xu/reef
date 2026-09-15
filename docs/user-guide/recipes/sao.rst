@@ -19,7 +19,7 @@ weights it produced.
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
-| Example     | ``recipes/sao/examples/sao/``                              |
+| Example     | ``recipes/sao/examples/imo_answerbench/``                  |
 +-------------+------------------------------------------------------------+
 
 What it does
@@ -68,7 +68,7 @@ Configuration
 Run the example
 ---------------
 
-The `example <../../../recipes/sao/examples/sao>`__ runs three IMOAnswerBench
+The `example <../../../recipes/sao/examples/imo_answerbench>`__ runs three IMOAnswerBench
 problems in order on a two-GPU stack. For each problem the agent makes six
 attempts through Reef, extracts the ``\boxed{}`` answer, then checks it against
 the gold answer for a binary reward and finally reports the result against its
@@ -76,7 +76,7 @@ receipt. The next problem is served by the weights the previous one produced.
 
 .. code:: bash
 
-   cd recipes/sao/examples/sao
+   cd recipes/sao/examples/imo_answerbench
    pip install -e . "reef-eval[harbor]"
    hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
    ./run.sh

@@ -16,7 +16,7 @@ SERVICE_CONFIGS = (
     "recipes/basic/local-sglang.yaml",
     "recipes/basic/external-provider.yaml",
     "recipes/openclawrl/examples/openclawrl/serve.yaml",
-    "recipes/sao/examples/sao/serve.yaml",
+    "recipes/sao/examples/imo_answerbench/serve.yaml",
     "recipes/beta/coral/examples/coral_demo/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
@@ -32,7 +32,7 @@ EVOLUTION_CONFIGS = (
 )
 
 TRAINING_CONFIGS = (
-    "recipes/sao/examples/sao/serve.yaml",
+    "recipes/sao/examples/imo_answerbench/serve.yaml",
     "recipes/beta/coral/examples/coral_demo/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",

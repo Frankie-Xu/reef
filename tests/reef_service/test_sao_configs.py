@@ -369,7 +369,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
@@ -390,7 +390,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
         "tutorials/evolve-your-harness/configs/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
@@ -482,7 +482,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
 @pytest.mark.unit
 def test_sao_config_uses_the_hook_based_contract() -> None:
-    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "sao" / "serve.yaml"
+    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "imo_answerbench" / "serve.yaml"
     args, spec, options, _ = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)

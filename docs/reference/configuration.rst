@@ -550,7 +550,7 @@ examples, and harness evolution ships as a tutorial.
 +-------------------------------------------------------------+----------------------------------------------------------+
 
 Each weight-training example ships its stack as ``serve.yaml``.
-``recipes/sao/examples/sao/serve.yaml`` is the smallest, two GPUs for one
+``recipes/sao/examples/imo_answerbench/serve.yaml`` is the smallest, two GPUs for one
 actor and one rollout engine; ``recipes/tttd/examples/tttd/serve.yaml`` adds
 LoRA training, and ``recipes/openclawrl/examples/openclawrl/serve.yaml`` adds
 a PRM engine and a student model.

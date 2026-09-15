@@ -1,4 +1,4 @@
-# SAO functional-smoke config for recipes/sao/examples/sao/run.sh.
+# SAO functional-smoke config for recipes/sao/examples/imo_answerbench/run.sh.
 #
 # SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) trains one
 # rollout at a time with no comparison group: batch_size 1 means the dispatcher

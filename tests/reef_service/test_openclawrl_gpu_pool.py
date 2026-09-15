@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="
 @pytest.mark.parametrize(
     "recipe,capacity",
     [
-        ("sao/examples/sao", 2),
+        ("sao/examples/imo_answerbench", 2),
         ("tttd/examples/tttd", 2),
         ("tttd/examples/guidance_ttt", 2),
         ("openclawrl/examples/openclawrl", 5),
