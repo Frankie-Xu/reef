@@ -26,6 +26,7 @@ from reef.train.algos import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters import bridge
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.preparation import _build_payload
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig, _allocated_bytes
 from reef.train.types import TrainingBatch
@@ -575,9 +576,17 @@ def _loss_family_durable_actor(
     return actor, group, manager, payload
 
 
-def _bridge_args(**overrides) -> SimpleNamespace:
+def bridge_args(**overrides) -> SlimeArguments:
     values = {
         "num_rollout": 1,
+        "keep_lora_base_resident": False,
+        "megatron_lora_rank": 0,
+        "use_critic": False,
+        "critic_save": None,
+        "critic_save_interval": 1,
+        "hf_checkpoint": None,
+        "load": None,
+        "custom_megatron_init_path": None,
         "save_hf": "/checkpoints/hf/{rollout_id}",
         "save": "/checkpoints/megatron",
         "compute_advantages_and_returns": False,
@@ -590,7 +599,7 @@ def _bridge_args(**overrides) -> SimpleNamespace:
         "offload_train": False,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return SlimeArguments(**values)
 
 
 @pytest.mark.unit
@@ -1684,7 +1693,7 @@ def test_training_preflight_rejects_configuration_without_local_inference(
     message,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        bridge.prepare_bridge(_bridge_args(**overrides))
+        bridge.prepare_bridge(bridge_args(**overrides))
 
 
 @pytest.mark.unit
@@ -1703,7 +1712,7 @@ def test_training_preflight_rejects_ambiguous_marker_before_creating_workers(tmp
         "create_train_groups",
         lambda *args: pytest.fail("workers started before marker validation"),
     )
-    args = _bridge_args(save_hf=template, save=str(root / "megatron"))
+    args = bridge_args(save_hf=template, save=str(root / "megatron"))
 
     with pytest.raises(RuntimeError, match="ambiguous" if status == "RUNNING" else "restore the committed checkpoint"):
         bridge.prepare_bridge(args, retention=RetentionConfig(max_storage_bytes=100))
@@ -1725,7 +1734,7 @@ def test_training_preflight_rejects_blocked_storage_before_creating_workers(tmp_
         "create_train_groups",
         lambda *args: pytest.fail("workers started before storage validation"),
     )
-    args = _bridge_args(
+    args = bridge_args(
         save_hf=str(root / "hf" / "{rollout_id}"),
         save=str(root / "megatron"),
     )
@@ -1757,7 +1766,7 @@ def test_training_preparation_keeps_a_resolvable_loss_family_reference(tmp_path,
     monkeypatch.setattr(
         bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
     )
-    args = _bridge_args(save_hf="~/checkpoints/hf/{rollout_id}", save="~/checkpoints/megatron")
+    args = bridge_args(save_hf="~/checkpoints/hf/{rollout_id}", save="~/checkpoints/megatron")
     try:
         prepared = bridge.prepare_bridge(args, loss_family="external_family")
         assert prepared.loss_family == "external_family_pkg:ALGORITHM"

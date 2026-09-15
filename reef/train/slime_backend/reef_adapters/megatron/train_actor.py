@@ -13,6 +13,7 @@ import torch.distributed as dist
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.memory_utils import clear_memory, print_memory
+from slime.utils.misc import Box
 from slime.utils.reloadable_process_group import destroy_process_groups, reload_process_groups
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
@@ -135,7 +136,12 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         self.activate_scenario(scenario)
         self._with_lora_engines(lambda: self.weight_updater.publish_lora_adapter(lora_name))
 
-    def train(self, rollout_id, rollout_data_ref, external_data=None):
+    def train(
+        self,
+        rollout_id: int,
+        rollout_data_ref: Box,
+        external_data: dict[str, list[torch.Tensor]] | None = None,
+    ) -> dict[str, list[torch.Tensor]] | None:
         result = super().train(rollout_id, rollout_data_ref, external_data=external_data)
         if not self.args.offload_train:
             # A resident model shares its GPUs with the colocated other one.

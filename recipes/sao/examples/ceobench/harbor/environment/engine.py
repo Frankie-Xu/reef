@@ -74,7 +74,8 @@ def zipapp(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
 
 
 def chown_tree(root: Path, user: str) -> None:
-    for directory, _dirs, files in os.walk(root):
+    for directory_entry in os.walk(root):
+        directory, files = directory_entry[0], directory_entry[2]
         shutil.chown(directory, user, user)
         for name in files:
             shutil.chown(os.path.join(directory, name), user, user)
@@ -172,7 +173,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         try:
             http_get(port, "/health", timeout=2)
             break
-        except Exception:
+        except (OSError, ValueError):
             time.sleep(0.5)
     else:
         raise RuntimeError("engine did not answer /health after 30s")
@@ -218,7 +219,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
     port, session_id = int(config["api_server_port"]), str(config["session_id"])
     try:
         final = http_get(port, "/game-status")
-    except Exception:
+    except (OSError, ValueError):
         final = dict(STATUS_FALLBACK)
     stopped = zipapp(workspace, "stop-server", "--session", session_id)
     time.sleep(2.0)  # the engine drains its pending writes on shutdown

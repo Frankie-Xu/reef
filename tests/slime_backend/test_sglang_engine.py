@@ -328,6 +328,11 @@ def _training_inference_values(**options):
         types.SimpleNamespace(
             **{
                 "hf_checkpoint": "model",
+                "seed": 1,
+                "offload_rollout": False,
+                "fp16": False,
+                "use_rollout_routing_replay": False,
+                "megatron_lora_rank": 0,
                 "rollout_num_gpus": 1,
                 "rollout_num_gpus_per_engine": 1,
                 "num_gpus_per_node": 1,

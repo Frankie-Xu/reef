@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
 
 #: Slime flags that are not engine options even though they carry the prefix.
@@ -23,7 +24,7 @@ def inference_config(args: Any) -> dict[str, Any]:
         "num_gpus": args.rollout_num_gpus,
         "gpus_per_engine": args.rollout_num_gpus_per_engine,
         "gpus_per_node": args.num_gpus_per_node,
-        "options": _engine_options(args),
+        "options": engine_options(args),
         "models": _model_groups(args),
         "external_engines": tuple(getattr(args, "rollout_external_engine_infos", ()) or ()),
         "router_host": getattr(args, "sglang_router_ip", None),
@@ -48,7 +49,7 @@ def inference_config(args: Any) -> dict[str, Any]:
     }
 
 
-def _engine_options(args: Any) -> dict[str, Any]:
+def engine_options(args: SlimeArguments) -> dict[str, Any]:
     """SGLang ``ServerArgs`` values: Slime's ``sglang_*`` flags plus what Reef serving needs."""
     options = {
         key.removeprefix("sglang_"): value
@@ -58,8 +59,8 @@ def _engine_options(args: Any) -> dict[str, Any]:
     options.update(
         model_path=args.hf_checkpoint,
         trust_remote_code=True,
-        random_seed=getattr(args, "seed", 1),
-        enable_memory_saver=bool(getattr(args, "offload_rollout", False)),
+        random_seed=args.seed,
+        enable_memory_saver=bool(args.offload_rollout),
         enable_draft_weights_cpu_backup=True,
         skip_server_warmup=True,
         enable_metrics=True,
@@ -69,11 +70,11 @@ def _engine_options(args: Any) -> dict[str, Any]:
         disable_radix_cache=True,
         incremental_streaming_output=True,
     )
-    if getattr(args, "fp16", False):
+    if args.fp16:
         options["dtype"] = "float16"
-    if getattr(args, "use_rollout_routing_replay", False):
+    if args.use_rollout_routing_replay:
         options["enable_return_routed_experts"] = True
-    rank = int(getattr(args, "megatron_lora_rank", 0) or 0)
+    rank = args.megatron_lora_rank
     if rank > 0:
         options.update(_lora_options(args, rank))
     return options

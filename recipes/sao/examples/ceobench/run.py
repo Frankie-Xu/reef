@@ -45,7 +45,7 @@ TRAIN_DRAIN_TIMEOUT_S = 7200.0
 
 
 #: The service is gone or rejecting requests; waiting cannot help.
-_SERVICE_GONE = -1
+SERVICE_GONE = -1
 
 
 def training_release_count() -> int | None:
@@ -63,10 +63,10 @@ def training_release_count() -> int | None:
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read())
     except urllib.error.HTTPError:
-        return _SERVICE_GONE
+        return SERVICE_GONE
     except urllib.error.URLError as error:
-        if isinstance(getattr(error, "reason", None), ConnectionRefusedError):
-            return _SERVICE_GONE
+        if isinstance(error.reason, ConnectionRefusedError):
+            return SERVICE_GONE
         return None
     except TimeoutError:
         return None
@@ -78,7 +78,7 @@ def wait_for_training() -> int:
     deadline = time.time() + TRAIN_DRAIN_TIMEOUT_S
     last, last_change = training_release_count(), time.time()
     while time.time() < deadline:
-        if last == _SERVICE_GONE:
+        if last == SERVICE_GONE:
             print("    WARNING: the Reef service is not reachable; skipping the training drain")
             return 0
         time.sleep(10)
@@ -91,7 +91,7 @@ def wait_for_training() -> int:
     return last or 0
 
 
-async def main():
+async def main() -> None:
     lab = Lab(HERE / "work" / "lab")
     agent = {"name": "harness:HarborAgent", "model_name": MODEL, "kwargs": {"seed": SEED, "days": DAYS}}
     # The scenario is part of the episode's identity: the untrained baseline and a trained

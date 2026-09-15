@@ -48,7 +48,8 @@ import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import NamedTuple
+from dataclasses import dataclass, field
+from typing import TypedDict
 
 from reef_client import ReefClient
 
@@ -130,7 +131,7 @@ def post_week_reports(
     it only read; ``score`` is the scaled ``credit`` and is what Reef trains
     on, the rest travels along for the record.
     """
-    decisions = sum(1 for _receipt, _tokens, decision in turns if decision is not None)
+    decisions = sum(1 for receipt, tokens, decision in turns if decision is not None)
     feedback = (
         f"ceobench week {week} (from day {day}): credit {credit:.4f}, score {score:.2f};"
         f" value {value_start:.0f} -> {value_end:.0f} (cash {cash_start:.0f} -> {cash_end:.0f})"
@@ -179,16 +180,6 @@ DASHBOARD_RE = re.compile(
 )
 #: The listed plan prices in the same dashboard's configuration block.
 PRICES_RE = re.compile(r"--- Current Config ---\s*\nPrices: A=\$(\d+), B=\$(\d+), C=\$(\d+)")
-#: The engine's own monthly recurring revenue: every live subscription at its
-#: effective price times its seats (an individual subscription has one).
-MRR_SQL = (
-    "SELECT COALESCE(SUM(effective_price * COALESCE(seat_count, 1)), 0) AS mrr"
-    " FROM subscriptions WHERE status = 'subscribed' AND end_day IS NULL"
-)
-MRR_FALLBACK_SQL = (
-    "SELECT COALESCE(SUM(effective_price), 0) AS mrr FROM subscriptions"
-    " WHERE status = 'subscribed' AND end_day IS NULL"
-)
 #: SDK calls and CLI commands that change the company: money spent, prices,
 #: targeting, research, deals, posts, and the week advanced. Everything else
 #: the agent can do (queries, status, reading docs, files in its workspace)
@@ -220,7 +211,8 @@ DECISION_RE = re.compile(r"\b(" + "|".join(re.escape(call) for call in DECISION_
 SCRIPT_RUN_RE = re.compile(r"\bpython3?\s+(?!-c\b)(\S+\.py)\b")
 
 
-class WeekStart(NamedTuple):
+@dataclass(frozen=True)
+class WeekStart:
     """A week's opening state as its dashboard shows it, plus the engine's own MRR when read."""
 
     week: int
@@ -243,6 +235,23 @@ class WeekStart(NamedTuple):
             return self.mrr
         listed = [price for price in self.prices if price > 0]
         return self.subscribers * (min(listed) if listed else 0.0) + self.seats * self.prices[2]
+
+
+@dataclass
+class WeekRecord:
+    """The opening state and captured decision turns of one simulated week."""
+
+    start: WeekStart
+    turns: list[tuple[str, int, str | None]] = field(default_factory=list)
+
+
+class TurnRecord(TypedDict):
+    """A successfully served turn linked to its receipt and simulated week."""
+
+    receipt: str
+    tokens: int
+    week: int
+    decision: str | None
 
 
 def dashboards(content: str) -> list[WeekStart]:
@@ -344,29 +353,29 @@ class WeekRecords:
         self.horizon_weeks = horizon_weeks
         self.credit_weeks = credit_weeks
         self.discount = discount
-        self.weeks: dict[int, dict] = {}  # week -> {"start": WeekStart, "turns": [(receipt, tokens, decision)]}
-        self.turns: list[dict] = []  # {"receipt", "tokens", "week", "decision"} per captured turn
+        self.weeks: dict[int, WeekRecord] = {}
+        self.turns: list[TurnRecord] = []
         self.posted: set[int] = set()
         self.scores: dict[int, float] = {}  # week -> the scaled score it was posted with
-        self._scripts: dict[str, str] = {}
+        self.scripts: dict[str, str] = {}
 
     def open_week(self, start: WeekStart) -> None:
-        self.weeks.setdefault(start.week, {"start": start, "turns": []})
+        self.weeks.setdefault(start.week, WeekRecord(start))
 
-    def add_turns(self, week: int, captured: list[dict]) -> list[dict]:
+    def add_turns(self, week: int, captured: list[dict]) -> list[TurnRecord]:
         """File captured turns under ``week``; return the records of the ones Reef served."""
         records = []
         for turn in captured:
             if turn.get("status") != 200 or not turn.get("receipt"):
                 continue
-            record = {
+            record: TurnRecord = {
                 "receipt": turn["receipt"],
                 "tokens": turn_tokens(turn),
                 "week": week,
-                "decision": turn_decision(turn, self._scripts),
+                "decision": turn_decision(turn, self.scripts),
             }
             self.turns.append(record)
-            self.weeks[week]["turns"].append((record["receipt"], record["tokens"], record["decision"]))
+            self.weeks[week].turns.append((record["receipt"], record["tokens"], record["decision"]))
             records.append(record)
         return records
 
@@ -374,7 +383,7 @@ class WeekRecords:
         """What a week's opening state is worth, given the weeks left after it."""
         return valuation(start.cash, start.run_rate, self.total_weeks - start.week, self.horizon_weeks)
 
-    def _closing(
+    def closing(
         self, ordered: list[int], position: int, final_cash: float | None
     ) -> tuple[float, float, float] | None:
         """``(cash_end, value_end, credit)`` of the week at ``position``, or ``None`` while it is open.
@@ -389,9 +398,9 @@ class WeekRecords:
         closing: tuple[float, float] | None = None
         for offset in range(self.credit_weeks):
             index = position + offset
-            value = self.value(self.weeks[ordered[index]]["start"])
+            value = self.value(self.weeks[ordered[index]].start)
             if index + 1 < len(ordered):
-                start = self.weeks[ordered[index + 1]]["start"]
+                start = self.weeks[ordered[index + 1]].start
                 cash_end, value_end = start.cash, self.value(start)
             elif final_cash is not None:
                 cash_end, value_end = final_cash, final_cash
@@ -412,7 +421,7 @@ class WeekRecords:
         for position, week in enumerate(ordered):
             if week in self.posted:
                 continue
-            closing = self._closing(ordered, position, final_cash)
+            closing = self.closing(ordered, position, final_cash)
             if closing is not None:
                 finished.append((week, *closing))
         return finished
@@ -422,8 +431,8 @@ class WeekRecords:
         rows = []
         for position, week in enumerate(ordered):
             entry = self.weeks[week]
-            start: WeekStart = entry["start"]
-            closing = self._closing(ordered, position, final_cash) or (None, None, None)
+            start: WeekStart = entry.start
+            closing = self.closing(ordered, position, final_cash) or (None, None, None)
             rows.append(
                 {
                     "week": week,
@@ -437,8 +446,8 @@ class WeekRecords:
                     "value_end": closing[1],
                     "credit": closing[2],
                     "score": self.scores.get(week),
-                    "turns": len(entry["turns"]),
-                    "decisions": sum(1 for _receipt, _tokens, decision in entry["turns"] if decision is not None),
+                    "turns": len(entry.turns),
+                    "decisions": sum(1 for receipt, tokens, decision in entry.turns if decision is not None),
                     "reported": week in self.posted,
                 }
             )
@@ -457,11 +466,11 @@ class ScenarioReleases(ReleaseCount):
     """The scenario's release list on the Reef service."""
 
     def __init__(self, service_url: str, scenario: str, token: str) -> None:
-        self._url = f"{service_url}/reef/scenarios/{scenario}/releases"
-        self._token = token
+        self.url = f"{service_url}/reef/scenarios/{scenario}/releases"
+        self.token = token
 
     def training_releases(self) -> int | None:
-        request = urllib.request.Request(self._url, headers={"Authorization": f"Bearer {self._token}"})
+        request = urllib.request.Request(self.url, headers={"Authorization": f"Bearer {self.token}"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read())
@@ -483,29 +492,29 @@ class TrainingPacer:
     def __init__(self, batch_size: int, timeout_s: float, releases: ReleaseCount, logger: logging.Logger) -> None:
         self.batch_size = int(batch_size)
         self.timeout_s = float(timeout_s)
-        self._releases = releases
-        self._logger = logger
-        self._base: int | None = None
-        self._forgiven = 0
-        self._lock = threading.Lock()
+        self.releases = releases
+        self.logger = logger
+        self.base: int | None = None
+        self.forgiven = 0
+        self.lock = threading.Lock()
 
     def expected_releases(self, posted_turns: int) -> int:
-        return posted_turns // self.batch_size - self._forgiven
+        return posted_turns // self.batch_size - self.forgiven
 
     def wait(self, week: int, posted_turns: int) -> float:
         """Block until the trainer caught up; return the seconds spent waiting."""
         started = time.time()
-        with self._lock:
-            if self._base is None:
-                self._base = self._releases.training_releases() or 0
+        with self.lock:
+            if self.base is None:
+                self.base = self.releases.training_releases() or 0
             expected = self.expected_releases(posted_turns)
             while True:
-                observed = (self._releases.training_releases() or 0) - self._base
+                observed = (self.releases.training_releases() or 0) - self.base
                 if observed >= expected:
                     break
                 if time.time() - started >= self.timeout_s:
-                    self._forgiven += expected - observed
-                    self._logger.warning(
+                    self.forgiven += expected - observed
+                    self.logger.warning(
                         "week %d: trainer committed %d of %d expected releases after %.0fs; going on",
                         week,
                         observed,

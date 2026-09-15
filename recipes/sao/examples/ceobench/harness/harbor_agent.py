@@ -83,8 +83,9 @@ import os
 import shlex
 import threading
 import time
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
-from typing import Any, NamedTuple
+from typing import NamedTuple, TextIO
 
 import httpx
 import openai
@@ -102,8 +103,6 @@ from .report import (
     DEFAULT_SCORE_FLOOR,
     DEFAULT_VALUE_HORIZON_WEEKS,
     INITIAL_CASH,
-    MRR_FALLBACK_SQL,
-    MRR_SQL,
     ScenarioReleases,
     ScoreScale,
     TrainingPacer,
@@ -113,6 +112,7 @@ from .report import (
     post_week_reports,
 )
 from .tools import DEFAULT_BASH_TIMEOUT_S, ContainerTools
+from .values import JsonValue
 
 #: Episode defaults; ``kwargs`` on the Harbor agent config override them.
 DEFAULT_SEED = 42
@@ -160,9 +160,21 @@ try:
         path = "/dashboard" if request["op"] == "dashboard" else "/game-status"
         with urllib.request.urlopen(urllib.request.Request(url + path), timeout=30) as response:
             print(json.dumps(json.loads(response.read())))
-except Exception as error:
+except (OSError, ValueError) as error:
     print(json.dumps({"error": f"{type(error).__name__}: {error}"}))
 """
+
+
+#: The engine's own monthly recurring revenue: every live subscription at its
+#: effective price times its seats (an individual subscription has one).
+MRR_SQL = (
+    "SELECT COALESCE(SUM(effective_price * COALESCE(seat_count, 1)), 0) AS mrr"
+    " FROM subscriptions WHERE status = 'subscribed' AND end_day IS NULL"
+)
+MRR_FALLBACK_SQL = (
+    "SELECT COALESCE(SUM(effective_price), 0) AS mrr FROM subscriptions"
+    " WHERE status = 'subscribed' AND end_day IS NULL"
+)
 
 
 class Session(NamedTuple):
@@ -197,9 +209,9 @@ class TaskContainer:
         *,
         environ: dict[str, str] | None = None,
     ) -> None:
-        self._environment = environment
-        self._loop = loop
-        self._environ = dict(os.environ if environ is None else environ)
+        self.environment = environment
+        self.loop = loop
+        self.environ = dict(os.environ if environ is None else environ)
         self.session: Session | None = None
 
     def exec(
@@ -210,13 +222,13 @@ class TaskContainer:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: float,
-    ) -> dict[str, Any]:
+    ) -> dict[str, JsonValue]:
         """Run ``command`` in the container (``stdin`` piped in) and return its last line as JSON."""
         if stdin is not None:
             encoded = base64.b64encode(stdin.encode("utf-8")).decode("ascii")
             command = f"printf %s {encoded} | base64 -d | {command}"
         future = asyncio.run_coroutine_threadsafe(
-            self._environment.exec(command, cwd=cwd, env=env, timeout_sec=int(timeout_s)), self._loop
+            self.environment.exec(command, cwd=cwd, env=env, timeout_sec=int(timeout_s)), self.loop
         )
         result = future.result(timeout=timeout_s + 60.0)
         lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
@@ -233,7 +245,7 @@ class TaskContainer:
             raise RuntimeError(str(payload["error"]))
         return payload
 
-    def _require_session(self) -> Session:
+    def require_session(self) -> Session:
         if self.session is None:
             raise RuntimeError("the engine has not been started")
         return self.session
@@ -262,7 +274,7 @@ class TaskContainer:
         answer = self.exec(
             f"{CHECKOUT_PYTHON} {ENGINE_SCRIPT} {shlex.join(arguments)}",
             cwd=CHECKOUT_DIR,
-            env=forwarded_environment(self._environ),
+            env=forwarded_environment(self.environ),
             timeout_s=ENGINE_START_TIMEOUT_S,
         )
         self.session = Session(
@@ -285,30 +297,30 @@ class TaskContainer:
         )
         return Contract(system_prompt=str(answer["system_prompt"]), tools=list(answer["tools"]))
 
-    def _read(self, op: str, **fields: Any) -> dict[str, Any]:
-        session = self._require_session()
+    def read(self, op: str, **fields: JsonValue) -> dict[str, JsonValue]:
+        session = self.require_session()
         return self.exec(
             f"python3 -c {shlex.quote(ENGINE_READ_SCRIPT)}",
             stdin=json.dumps({"op": op, "port": session.port, **fields}),
             timeout_s=ENGINE_READ_TIMEOUT_S,
         )
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> dict[str, JsonValue]:
         """``/game-status``; the benchmark's fallback when the engine does not answer."""
         try:
-            return self._read("status")
+            return self.read("status")
         except RuntimeError:
             return {"day": 0, "cash": 0, "subscribers": 0, "timed_out": False}
 
     def dashboard(self) -> str:
         try:
-            return str(self._read("dashboard").get("dashboard", ""))
+            return str(self.read("dashboard").get("dashboard", ""))
         except RuntimeError:
             return "(Dashboard unavailable)"
 
     def query(self, sql: str) -> list[dict]:
         """Rows of one read-only SQL statement against the engine's live books."""
-        answer = self._read("query", sql=sql)
+        answer = self.read("query", sql=sql)
         if answer.get("success") is False:
             raise RuntimeError(str(answer.get("error") or "query failed"))
         data = answer.get("data", answer)
@@ -316,16 +328,16 @@ class TaskContainer:
 
     def commit_weeks(self, sim_day: int) -> None:
         """Snapshot the workspace for every week reached, as the runner does at week boundaries."""
-        session = self._require_session()
+        session = self.require_session()
         self.exec(
             f"{CHECKOUT_PYTHON} {ENGINE_SCRIPT} commit --run-dir {shlex.quote(session.run_dir)} --day {int(sim_day)}",
             cwd=CHECKOUT_DIR,
             timeout_s=ENGINE_READ_TIMEOUT_S,
         )
 
-    def stop_engine(self) -> dict[str, Any]:
+    def stop_engine(self) -> dict[str, JsonValue]:
         """The final status; the engine stopped and ``world.nmdb`` copied for the verifier."""
-        session = self._require_session()
+        session = self.require_session()
         return self.exec(
             f"{CHECKOUT_PYTHON} {ENGINE_SCRIPT} stop --run-dir {shlex.quote(session.run_dir)}",
             cwd=CHECKOUT_DIR,
@@ -339,55 +351,51 @@ class HarborAgent(BaseAgent):
     def __init__(self, *args, seed: int = DEFAULT_SEED, days: int = DEFAULT_DAYS, **kwargs):
         super().__init__(*args, **kwargs)
         environ = os.environ
-        self._service_url = environ.get("REEF_SERVICE_URL", "").rstrip("/")
-        if not self._service_url:
+        self.service_url = environ.get("REEF_SERVICE_URL", "").rstrip("/")
+        if not self.service_url:
             raise ValueError("the ceobench harness requires REEF_SERVICE_URL")
-        self._scenario = environ.get("REEF_SCENARIO", "ceobench-sao")
-        self._token = environ.get("REEF_TOKEN", "reef-local")
-        self._seed = int(seed)
-        self._days = int(days)
-        self._client = ReefClient(
-            self._service_url, token=self._token, timeout_s=float(environ.get("REEF_TIMEOUT_S", "7200"))
+        self.scenario = environ.get("REEF_SCENARIO", "ceobench-sao")
+        self.token = environ.get("REEF_TOKEN", "reef-local")
+        self.seed = int(seed)
+        self.days = int(days)
+        self.client = ReefClient(
+            self.service_url, token=self.token, timeout_s=float(environ.get("REEF_TIMEOUT_S", "7200"))
         )
-        self._llm_timeout_s = float(environ.get("CEOBENCH_LLM_TIMEOUT_S", "") or 1800.0)
-        self._reasoning_effort = environ.get("CEOBENCH_REASONING_EFFORT", "none") or None
-        self._max_completion_tokens = int(
+        self.llm_timeout_s = float(environ.get("CEOBENCH_LLM_TIMEOUT_S", "") or 1800.0)
+        self.reasoning_effort = environ.get("CEOBENCH_REASONING_EFFORT", "none") or None
+        self.max_completion_tokens = int(
             environ.get("CEOBENCH_MAX_COMPLETION_TOKENS", "") or DEFAULT_MAX_COMPLETION_TOKENS
         )
-        self._tool_user = environ.get("CEOBENCH_TOOL_USER", "") or DEFAULT_TOOL_USER
-        self._bash_timeout_s = int(environ.get("CEOBENCH_BASH_TIMEOUT_S", "") or DEFAULT_BASH_TIMEOUT_S)
-        self._init_week_reporting()
-
-    def _init_week_reporting(self) -> None:
-        environ = os.environ
-        self._capture = CaptureStore()
-        self._records = WeekRecords(
-            total_weeks=self._days // DAYS_PER_WEEK,
+        self.tool_user = environ.get("CEOBENCH_TOOL_USER", "") or DEFAULT_TOOL_USER
+        self.bash_timeout_s = int(environ.get("CEOBENCH_BASH_TIMEOUT_S", "") or DEFAULT_BASH_TIMEOUT_S)
+        self.capture = CaptureStore()
+        self.records = WeekRecords(
+            total_weeks=self.days // DAYS_PER_WEEK,
             horizon_weeks=int(environ.get("CEOBENCH_VALUE_HORIZON_WEEKS", "") or DEFAULT_VALUE_HORIZON_WEEKS),
             credit_weeks=int(environ.get("CEOBENCH_CREDIT_WEEKS", "") or DEFAULT_CREDIT_WEEKS),
             discount=float(environ.get("CEOBENCH_CREDIT_DISCOUNT", "") or DEFAULT_CREDIT_DISCOUNT),
         )
-        self._scale = ScoreScale(
+        self.scale = ScoreScale(
             clip=float(environ.get("CEOBENCH_SCORE_CLIP", "") or DEFAULT_SCORE_CLIP),
             floor=float(environ.get("CEOBENCH_SCORE_FLOOR", "") or DEFAULT_SCORE_FLOOR),
         )
-        self._engine_reads = (environ.get("CEOBENCH_ENGINE_READS", "1") or "1") != "0"
-        self._reports = (environ.get("CEOBENCH_REPORTS", "1") or "1") != "0"
-        self._max_tokens = int(environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
+        self.engine_reads = (environ.get("CEOBENCH_ENGINE_READS", "1") or "1") != "0"
+        self.reports = (environ.get("CEOBENCH_REPORTS", "1") or "1") != "0"
+        self.max_tokens = int(environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
         # Nothing is reported for an untrained baseline, so nothing trains and
         # there is no batch to wait for.
-        batch = int(environ.get("CEOBENCH_PACE_BATCH", "0") or 0) if self._reports else 0
-        self._pacer = (
+        batch = int(environ.get("CEOBENCH_PACE_BATCH", "0") or 0) if self.reports else 0
+        self.pacer = (
             TrainingPacer(
                 batch,
                 float(environ.get("CEOBENCH_PACE_TIMEOUT_S", "1800") or 1800),
-                ScenarioReleases(self._service_url, self._scenario, self._token),
+                ScenarioReleases(self.service_url, self.scenario, self.token),
                 self.logger,
             )
             if batch > 0
             else None
         )
-        self._current_week: int | None = None
+        self.current_week: int | None = None
 
     @staticmethod
     def name() -> str:
@@ -405,33 +413,33 @@ class HarborAgent(BaseAgent):
         # container commands it issues.
         loop = asyncio.get_running_loop()
         task = TaskContainer(environment, loop)
-        proxy = self._start_proxy()
+        proxy = self.start_proxy()
         try:
-            outcome = await asyncio.to_thread(self._play, task, environment, loop, proxy.server_address[1])
+            outcome = await asyncio.to_thread(self.play, task, environment, loop, proxy.server_address[1])
         finally:
             proxy.shutdown()
-        turns = self._capture.snapshot()
-        weeks = self._records.summary(final_cash=outcome["final_cash"])
+        turns = self.capture.snapshot()
+        weeks = self.records.summary(final_cash=outcome["final_cash"])
         if task.session is not None:
             await environment.download_dir(RUNS_DIR, self.logs_dir / "ceobench")
         context.metadata = {
             **(context.metadata or {}),
             "reef": {
-                "agent_record_ids": [turn["receipt"] for turn in self._records.turns],
-                "agent_record_tokens": [turn["tokens"] for turn in self._records.turns],
-                "agent_record_weeks": [turn["week"] for turn in self._records.turns],
-                "agent_record_decisions": [turn["decision"] for turn in self._records.turns],
+                "agent_record_ids": [turn["receipt"] for turn in self.records.turns],
+                "agent_record_tokens": [turn["tokens"] for turn in self.records.turns],
+                "agent_record_weeks": [turn["week"] for turn in self.records.turns],
+                "agent_record_decisions": [turn["decision"] for turn in self.records.turns],
             },
             "ceobench": {
-                "seed": self._seed,
-                "days": self._days,
-                "horizon_weeks": self._records.horizon_weeks,
-                "credit_weeks": self._records.credit_weeks,
-                "discount": self._records.discount,
-                "score_clip": self._scale.clip,
-                "score_floor": self._scale.floor,
-                "engine_reads": self._engine_reads,
-                "reports": self._reports,
+                "seed": self.seed,
+                "days": self.days,
+                "horizon_weeks": self.records.horizon_weeks,
+                "credit_weeks": self.records.credit_weeks,
+                "discount": self.records.discount,
+                "score_clip": self.scale.clip,
+                "score_floor": self.scale.floor,
+                "engine_reads": self.engine_reads,
+                "reports": self.reports,
                 "turns": len(turns),
                 "weeks": weeks,
                 **outcome,
@@ -441,31 +449,31 @@ class HarborAgent(BaseAgent):
         context.n_input_tokens = sum(int(item.get("prompt_tokens") or 0) for item in usage)
         context.n_output_tokens = sum(int(item.get("completion_tokens") or 0) for item in usage)
 
-    def _start_proxy(self) -> ThreadingHTTPServer:
+    def start_proxy(self) -> ThreadingHTTPServer:
         """A local reef-client proxy: the agent's OpenAI client talks to it, Reef gets the calls."""
         config = ServeConfig(
-            upstream=self._service_url,
+            upstream=self.service_url,
             listen_host="127.0.0.1",
             listen_port=0,  # an ephemeral port, so concurrent trials never collide
-            override_headers={"x-reef-scenario": self._scenario, "authorization": f"Bearer {self._token}"},
+            override_headers={"x-reef-scenario": self.scenario, "authorization": f"Bearer {self.token}"},
         )
-        self._capture = CaptureStore()
-        server = ThreadingHTTPServer((config.listen_host, config.listen_port), build_handler(config, self._capture))
+        self.capture = CaptureStore()
+        server = ThreadingHTTPServer((config.listen_host, config.listen_port), build_handler(config, self.capture))
         threading.Thread(target=server.serve_forever, name="ceobench-proxy", daemon=True).start()
         return server
 
-    def _play(
+    def play(
         self, task: TaskContainer, environment: BaseEnvironment, loop: asyncio.AbstractEventLoop, proxy_port: int
     ) -> dict:
         """The benchmark runner's episode, with the weeks credited as they close."""
         model = self.model_name or "reef"
         session = task.start_engine(
-            seed=self._seed,
-            days=self._days,
+            seed=self.seed,
+            days=self.days,
             cash=INITIAL_CASH,
             model=model,
-            reasoning_effort=self._reasoning_effort,
-            tool_user=self._tool_user,
+            reasoning_effort=self.reasoning_effort,
+            tool_user=self.tool_user,
         )
         contract = task.contract(session.total_days, model)
         tools = ContainerTools(
@@ -473,14 +481,14 @@ class HarborAgent(BaseAgent):
             loop,
             workspace=session.workspace,
             port=session.port,
-            user=self._tool_user,
-            bash_timeout_s=self._bash_timeout_s,
+            user=self.tool_user,
+            bash_timeout_s=self.bash_timeout_s,
             logger=self.logger,
         )
         tools.install()
         self.logger.info(
             "ceobench seed=%s days=%s: session %s, engine port %d, %d tools, prompt %d chars",
-            self._seed,
+            self.seed,
             session.total_days,
             session.session_id,
             session.port,
@@ -490,7 +498,7 @@ class HarborAgent(BaseAgent):
         client = openai.OpenAI(
             base_url=f"http://127.0.0.1:{proxy_port}/v1",
             api_key="reef",  # the proxy replaces it with the Reef token
-            timeout=httpx.Timeout(self._llm_timeout_s),
+            timeout=httpx.Timeout(self.llm_timeout_s),
         )
         agent = BashAgent(
             client,
@@ -498,17 +506,17 @@ class HarborAgent(BaseAgent):
             contract.system_prompt,
             contract.tools,
             tools,
-            reasoning_effort=self._reasoning_effort,
-            max_completion_tokens=self._max_completion_tokens,
+            reasoning_effort=self.reasoning_effort,
+            max_completion_tokens=self.max_completion_tokens,
             logger=self.logger,
         )
         with open(self.logs_dir / "turns.jsonl", "a", encoding="utf-8") as turn_log:
-            outcome = self._rounds(task, tools, agent, session.total_days, turn_log)
+            outcome = self.rounds(task, tools, agent, session.total_days, turn_log)
         task.commit_weeks(int(outcome.get("sim_day", 0) or 0))
         final = task.stop_engine()
         status = final.get("final") or {}
         final_cash = float(status.get("cash", outcome.get("cash", 0.0)) or 0.0)
-        self._post_finished_weeks(final_cash=final_cash)
+        self.post_finished_weeks(final_cash=final_cash)
         return {
             "outcome": outcome["outcome"],
             "final_cash": final_cash,
@@ -519,15 +527,17 @@ class HarborAgent(BaseAgent):
             "agent_output_tokens": agent.total_output_tokens,
         }
 
-    def _rounds(self, task: TaskContainer, tools: ContainerTools, agent: BashAgent, total_days: int, turn_log) -> dict:
+    def rounds(
+        self, task: TaskContainer, tools: ContainerTools, agent: BashAgent, total_days: int, turn_log: TextIO
+    ) -> dict:
         """The runner's outer loop: rounds of at most ``TURNS_PER_ROUND`` turns, each opened by the dashboard."""
         sim_day = 0
         cash = 0.0
-        for _round in range(1, total_days + 1):
+        for round_index in range(1, total_days + 1):
             status = task.status()
             sim_day = int(status.get("day", sim_day) or 0)
             dashboard = task.dashboard()
-            self._log_turn(turn_log, sim_day, 0, "_dashboard", {}, dashboard)
+            self.log_turn(turn_log, sim_day, 0, "_dashboard", {}, dashboard)
             observation = dashboard
             info = {"day": sim_day, "cash": status.get("cash", 0)}
             turns = 0
@@ -535,10 +545,10 @@ class HarborAgent(BaseAgent):
             while not day_ended and turns < TURNS_PER_ROUND:
                 turns += 1
                 week = sim_day // DAYS_PER_WEEK
-                self._enter_week(task, week, sim_day)
-                seen = len(self._capture)
+                self.enter_week(task, week, sim_day)
+                seen = len(self.capture)
                 action = agent.act(observation, info)
-                self._records.add_turns(week, self._capture.snapshot()[seen:])
+                self.records.add_turns(week, self.capture.snapshot()[seen:])
                 outcome = tools.execute(action.tool, action.arguments)
                 if outcome.timeout is not None:
                     self.logger.warning("next-week timed out on sim day %d: %s", sim_day, outcome.timeout)
@@ -546,7 +556,7 @@ class HarborAgent(BaseAgent):
                 observation = outcome.result
                 if action.tool == "bash":
                     agent.check_day_advanced(observation)
-                self._log_turn(turn_log, sim_day, agent.total_turns, action.tool, action.arguments, observation)
+                self.log_turn(turn_log, sim_day, agent.total_turns, action.tool, action.arguments, observation)
                 if agent.day_advanced:
                     day_ended = True
                     agent.clear_day_advanced()
@@ -562,7 +572,9 @@ class HarborAgent(BaseAgent):
                 if cash < 0:
                     return {"outcome": "bankrupt", "sim_day": sim_day, "cash": cash}
             if not day_ended:
-                self.logger.info("round of %d turns on sim day %d without a week advance; going on", turns, sim_day)
+                self.logger.info(
+                    "round %d: %d turns on sim day %d without a week advance; going on", round_index, turns, sim_day
+                )
             status = task.status()
             sim_day = int(status.get("day", sim_day) or 0)
             cash = float(status.get("cash", 0) or 0)
@@ -573,7 +585,7 @@ class HarborAgent(BaseAgent):
         return {"outcome": "completed" if sim_day >= total_days else "incomplete", "sim_day": sim_day, "cash": cash}
 
     @staticmethod
-    def _log_turn(turn_log, day: int, turn: int, tool: str, arguments: dict, result: str) -> None:
+    def log_turn(turn_log: TextIO, day: int, turn: int, tool: str, arguments: dict, result: str) -> None:
         turn_log.write(
             json.dumps(
                 {"at": time.time(), "day": day, "turn": turn, "tool": tool, "arguments": arguments, "result": result}
@@ -582,14 +594,14 @@ class HarborAgent(BaseAgent):
         )
         turn_log.flush()
 
-    def _enter_week(self, task: TaskContainer, week: int, sim_day: int) -> None:
+    def enter_week(self, task: TaskContainer, week: int, sim_day: int) -> None:
         """Before a model call: open a new week, report the weeks it finishes, wait for the trainer."""
-        if self._current_week is None or week > self._current_week:
-            self._current_week = week
+        if self.current_week is None or week > self.current_week:
+            self.current_week = week
             if week > 0:
                 task.commit_weeks(sim_day)
-            start = self._week_start(task, week, sim_day)
-            self._records.open_week(start)
+            start = self.week_start(task, week, sim_day)
+            self.records.open_week(start)
             self.logger.info(
                 "week %d starts (day %d): cash %.0f, %d subscribers, %d seats, run-rate %.0f/month (%s)",
                 week,
@@ -600,19 +612,21 @@ class HarborAgent(BaseAgent):
                 start.run_rate,
                 "engine MRR" if start.mrr is not None else "listed-price estimate",
             )
-            self._post_finished_weeks()
-        if self._pacer is None:
+            self.post_finished_weeks()
+        if self.pacer is None:
             return
         posted = sum(
-            self._reportable(entry["turns"])
-            for posted_week, entry in self._records.weeks.items()
-            if posted_week in self._records.posted
+            1
+            for posted_week, entry in self.records.weeks.items()
+            if posted_week in self.records.posted
+            for receipt, tokens, decision in entry.turns
+            if decision is not None and (not self.max_tokens or tokens <= self.max_tokens)
         )
-        waited = self._pacer.wait(week, posted)
+        waited = self.pacer.wait(week, posted)
         if waited > 1.0:
             self.logger.info("week %d held %.0fs for training", week, waited)
 
-    def _week_start(self, task: TaskContainer, week: int, sim_day: int) -> WeekStart:
+    def week_start(self, task: TaskContainer, week: int, sim_day: int) -> WeekStart:
         """The week's opening state from the engine's dashboard, valued at its own MRR when readable."""
         parsed = dashboards(task.dashboard())
         start = parsed[0] if parsed else None
@@ -626,13 +640,13 @@ class HarborAgent(BaseAgent):
                 seats=0,
                 prices=(0.0, 0.0, 0.0),
             )
-        if self._engine_reads:
-            mrr = self._engine_mrr(task)
+        if self.engine_reads:
+            mrr = self.engine_mrr(task)
             if mrr is not None:
-                start = start._replace(mrr=mrr)
+                start = replace(start, mrr=mrr)
         return start
 
-    def _engine_mrr(self, task: TaskContainer) -> float | None:
+    def engine_mrr(self, task: TaskContainer) -> float | None:
         """The engine's own monthly recurring revenue, or ``None`` when its books cannot be read."""
         for sql in (MRR_SQL, MRR_FALLBACK_SQL):
             try:
@@ -643,29 +657,22 @@ class HarborAgent(BaseAgent):
             if not rows:
                 return 0.0
             row = rows[0]
-            value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+            value = row["mrr"]
             return float(value or 0.0)
         return None
 
-    def _reportable(self, turns) -> int:
-        return sum(
-            1
-            for _receipt, tokens, decision in turns
-            if decision is not None and (not self._max_tokens or tokens <= self._max_tokens)
-        )
-
-    def _post_finished_weeks(self, final_cash: float | None = None) -> int:
+    def post_finished_weeks(self, final_cash: float | None = None) -> int:
         """Post the unreported weeks whose closing state is known; return how many."""
-        finished = self._records.finished_weeks(final_cash)
+        finished = self.records.finished_weeks(final_cash)
         for week, cash_end, value_end, credit in finished:
-            entry = self._records.weeks[week]
-            start: WeekStart = entry["start"]
-            value_start = self._records.value(start)
-            score = self._scale.scale(credit)
+            entry = self.records.weeks[week]
+            start: WeekStart = entry.start
+            value_start = self.records.value(start)
+            score = self.scale.scale(credit)
             posted = (
                 post_week_reports(
-                    self._client,
-                    self._scenario,
+                    self.client,
+                    self.scenario,
                     week=week,
                     day=start.day,
                     cash_start=start.cash,
@@ -674,18 +681,18 @@ class HarborAgent(BaseAgent):
                     value_end=value_end,
                     credit=credit,
                     score=score,
-                    turns=entry["turns"],
-                    max_tokens=self._max_tokens,
+                    turns=entry.turns,
+                    max_tokens=self.max_tokens,
                 )
-                if self._reports
+                if self.reports
                 else []
             )
-            self._records.posted.add(week)
-            self._records.scores[week] = score
+            self.records.posted.add(week)
+            self.records.scores[week] = score
             self.logger.info(
                 "%s week %d (credit %.4f, score %.2f; value %.0f -> %.0f, cash %.0f -> %.0f)"
                 " against %d of %d decision turns (%d turns)",
-                "reported" if self._reports else "recorded",
+                "reported" if self.reports else "recorded",
                 week,
                 credit,
                 score,
@@ -694,7 +701,7 @@ class HarborAgent(BaseAgent):
                 start.cash,
                 cash_end,
                 len(posted),
-                sum(1 for _receipt, _tokens, decision in entry["turns"] if decision is not None),
-                len(entry["turns"]),
+                sum(1 for receipt, tokens, decision in entry.turns if decision is not None),
+                len(entry.turns),
             )
         return len(finished)

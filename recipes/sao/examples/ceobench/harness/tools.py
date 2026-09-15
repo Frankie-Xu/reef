@@ -29,12 +29,14 @@ import json
 import logging
 import shlex
 import tempfile
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple, TypeVar
 
 from harbor.environments.base import BaseEnvironment
 
 from .agent import Workspace
+from .values import JsonValue
 
 #: Where the script lands in the container, and the interpreter it runs with:
 #: the pinned checkout's, so the agent's ``python`` is the one the benchmark's
@@ -93,7 +95,7 @@ def run_bash(workspace, port, timeout, args):
         proc.kill()
         try:
             partial_stdout, partial_stderr = proc.communicate(timeout=5)
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             partial_stdout, partial_stderr = "", ""
         if NEXT_WEEK in command:
             return {
@@ -214,6 +216,9 @@ def main():
         print(json.dumps({"memory": memory.read_text() if memory.exists() else None}))
         return
     name, args = call["name"], call.get("args") or {}
+    if not isinstance(args, dict):
+        print(json.dumps({"result": "Error: Tool arguments must be a JSON object"}))
+        return
     handlers = {
         "read_file": read_file,
         "write_file": write_file,
@@ -228,12 +233,15 @@ def main():
             print(json.dumps({"result": handlers[name](workspace, args)}))
         else:
             print(json.dumps({"result": f"Error: Unknown tool '{name}'"}))
-    except Exception as error:
+    except (OSError, ValueError, KeyError, TypeError) as error:
         print(json.dumps({"result": f"Error: {error}"}))
 
 
 main()
 '''
+
+
+Result = TypeVar("Result")
 
 
 class ToolOutcome(NamedTuple):
@@ -258,17 +266,17 @@ class ContainerTools(Workspace):
         python: str = CHECKOUT_PYTHON,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._environment = environment
-        self._loop = loop
+        self.environment = environment
+        self.loop = loop
         self.workspace = workspace
         self.port = int(port)
         self.user = user
         self.bash_timeout_s = int(bash_timeout_s)
         self.python = python
-        self._logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logging.getLogger(__name__)
 
-    def _await(self, coroutine, timeout_s: float):
-        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result(timeout=timeout_s)
+    def await_result(self, coroutine: Coroutine[object, object, Result], timeout_s: float) -> Result:
+        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result(timeout=timeout_s)
 
     def install(self) -> None:
         """Put the executor script in the container, where the agent user can read it."""
@@ -276,16 +284,16 @@ class ContainerTools(Workspace):
             handle.write(TOOL_SCRIPT)
             local = Path(handle.name)
         try:
-            self._await(self._environment.upload_file(local, SCRIPT_PATH), EXEC_MARGIN_S)
-            self._await(self._environment.exec(f"chmod 644 {SCRIPT_PATH}"), EXEC_MARGIN_S)
+            self.await_result(self.environment.upload_file(local, SCRIPT_PATH), EXEC_MARGIN_S)
+            self.await_result(self.environment.exec(f"chmod 644 {SCRIPT_PATH}"), EXEC_MARGIN_S)
         finally:
             local.unlink(missing_ok=True)
 
-    def _run(self, call: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+    def run(self, call: dict[str, JsonValue], timeout_s: float) -> dict[str, JsonValue]:
         encoded = base64.b64encode(json.dumps(call).encode("utf-8")).decode("ascii")
         command = f"printf %s {encoded} | base64 -d | {shlex.quote(self.python)} {SCRIPT_PATH}"
-        result = self._await(
-            self._environment.exec(command, user=self.user, timeout_sec=int(timeout_s)), timeout_s + 60.0
+        result = self.await_result(
+            self.environment.exec(command, user=self.user, timeout_sec=int(timeout_s)), timeout_s + 60.0
         )
         lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
         try:
@@ -308,12 +316,12 @@ class ContainerTools(Workspace):
             "port": self.port,
             "bash_timeout": self.bash_timeout_s,
         }
-        payload = self._run(call, self.bash_timeout_s + EXEC_MARGIN_S)
+        payload = self.run(call, self.bash_timeout_s + EXEC_MARGIN_S)
         if payload.get("timeout"):
             return ToolOutcome(result=str(payload.get("partial_stdout") or ""), timeout=str(payload["timeout"]))
         return ToolOutcome(result=str(payload.get("result", "")))
 
     def memory(self) -> str | None:
-        payload = self._run({"op": "memory", "workspace": self.workspace}, EXEC_MARGIN_S)
+        payload = self.run({"op": "memory", "workspace": self.workspace}, EXEC_MARGIN_S)
         memory = payload.get("memory")
         return str(memory) if memory is not None else None

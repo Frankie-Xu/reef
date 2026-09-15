@@ -296,7 +296,12 @@ def _parse_config(config_path: Path):
     tokens = _strip_sglang_flags(tokens)
 
     parser = _build_slime_parser()
-    args, leftover = parser.parse_known_args(tokens)
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
+    # The full parser adds these bootstrap flags before its Slime option provider.
+    parser.add_argument("--debug-train-only", action="store_true")
+    parser.add_argument("--debug-rollout-only", action="store_true")
+    args, leftover = parser.parse_known_args(tokens, namespace=SlimeArguments())
 
     index = 0
     while index < len(leftover):

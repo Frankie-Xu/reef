@@ -28,15 +28,24 @@ def driver_environment(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def expand_references(config: Mapping[str, Any], value: Any) -> Any:
-    """``value`` with every ``${dotted.path}`` string reference resolved against ``config``."""
-    if isinstance(value, str):
-        return interpolate_config(config, value)
-    if isinstance(value, Mapping):
-        return {key: expand_references(config, item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [expand_references(config, item) for item in value]
-    return value
+OptionValue = bool | int | float | str | list["OptionValue"] | dict[str, "OptionValue"] | None
+
+
+def expand_option_references(
+    config: Mapping[str, object], options: Mapping[str, OptionValue]
+) -> dict[str, OptionValue]:
+    """Resolve configuration references in nested native training and inference options."""
+
+    def _expand(value: OptionValue) -> OptionValue:
+        if isinstance(value, str):
+            return interpolate_config(config, value)
+        if isinstance(value, dict):
+            return {key: _expand(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_expand(item) for item in value]
+        return value
+
+    return {name: _expand(value) for name, value in options.items()}
 
 
 def driver_arguments(config: Mapping[str, Any]) -> list[str]:
@@ -49,7 +58,7 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
     # The deploy layer leaves references such as ``${reef.model_path}`` in the
     # managed options so the model resolves once for the HTTP service and the
     # driver alike; they are expanded here, against the same resolved config.
-    training_options = expand_references(config, reef.get("training_backend_options", {}))
+    training_options = expand_option_references(config, reef.get("training_backend_options", {}))
     arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
@@ -63,7 +72,7 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
         options["offload-rollout"] = True
         if "offload-train" not in training_options:
             options["offload-train"] = True
-    for name, value in expand_references(config, reef.get("inference_options", {})).items():
+    for name, value in expand_option_references(config, reef.get("inference_options", {})).items():
         # Slime has dedicated router bind flags and passes other router flags
         # directly to RouterArgs. Engine flags are all prefixed by Slime.
         flag = (

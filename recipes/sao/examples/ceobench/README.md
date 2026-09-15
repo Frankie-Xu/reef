@@ -54,7 +54,8 @@ credited, and how long the game waits for the trainer.
   turn and any further calls in the same response are answered with
   `[Skipped - only one tool per turn ...]`. The benchmark's feedback texts
   for a response without a tool call or with arguments that are not JSON are
-  kept, and so are its retry rules for API errors. The prompt and the tool
+  kept, and so are its retry rules for API errors. Internal programming errors
+  propagate to Harbor instead of being retried as model failures. The prompt and the tool
   definitions are not copied into this repository. When an episode starts
   the harness reads them from the pinned checkout in the task image, built
   by the benchmark's own classes, so they are the benchmark's byte for byte.

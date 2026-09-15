@@ -529,8 +529,8 @@ def _install_slime_parser_stubs() -> None:
             sys.modules[name] = module
 
 
-def _critic_prep_args(**overrides):
-    from types import SimpleNamespace
+def critic_prep_args(**overrides):
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
     values = {
         "megatron_config_path": None,
@@ -544,6 +544,10 @@ def _critic_prep_args(**overrides):
         "sao_critic_lambda": 1.0,
         "lambd": 1.0,
         "critic_save": None,
+        "critic_init": None,
+        "critic_lr": None,
+        "megatron_lora_rank": 0,
+        "custom_megatron_init_path": None,
         "load": "/ckpt/megatron",
         "save": "/ckpt/megatron",
         "no_load_optim": True,
@@ -553,7 +557,7 @@ def _critic_prep_args(**overrides):
         "disable_param_buffers_cpu_backup": True,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return SlimeArguments(**values)
 
 
 @pytest.mark.unit
@@ -561,7 +565,7 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 
-    args = _critic_prep_args()
+    args = critic_prep_args()
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
@@ -583,7 +587,7 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
 
     # No checkpoint of its own yet: the value model trained on an earlier
     # episode is loaded, weights and optimizer, and saves go to the save root.
-    args = _critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
+    args = critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
     assert (critic_args.load, critic_args.save) == (str(critic_init), str(critic_save))
@@ -594,13 +598,13 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     # Once the critic has saved, its own checkpoint wins over the init.
     critic_save.mkdir()
     (critic_save / "latest_checkpointed_iteration.txt").write_text("7", encoding="utf-8")
-    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init)))
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init)))
     assert critic_args.load == str(critic_save)
 
     # An init directory without a checkpoint changes nothing.
     empty = tmp_path / "empty"
     empty.mkdir()
-    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
     assert critic_args.load == "/ckpt/megatron"
 
 
@@ -609,7 +613,7 @@ def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 
-    args = _critic_prep_args(critic_lr=5e-6, lr=1e-6)
+    args = critic_prep_args(critic_lr=5e-6, lr=1e-6)
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
@@ -622,7 +626,7 @@ def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 
-    args = _critic_prep_args(lr=1e-6)
+    args = critic_prep_args(lr=1e-6)
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
@@ -642,7 +646,7 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
 
     # The state finalize_reef_slime_args leaves for a LoRA actor: alpha
     # defaulted, Reef's provider installed, the user's provider chained.
-    args = _critic_prep_args(
+    args = critic_prep_args(
         megatron_lora_rank=32,
         megatron_lora_alpha=32,
         megatron_lora_dropout=0.0,
@@ -664,7 +668,7 @@ def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 
-    args = _critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
+    args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
@@ -681,7 +685,7 @@ def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path
     critic_root.mkdir()
     (critic_root / "latest_checkpointed_iteration.txt").write_text("7\n", encoding="utf-8")
 
-    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(critic_root)))
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_root)))
 
     assert critic_args.save == str(critic_root)
     assert critic_args.load == str(critic_root)
@@ -696,7 +700,7 @@ def test_prepare_critic_args_first_boot_keeps_the_inherited_load_fallback(tmp_pa
 
     critic_root = tmp_path / "megatron-critic"  # no checkpoint tracker yet
 
-    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(critic_root)))
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_root)))
 
     # Saves go to the critic root from the first commit on, but the first boot
     # still loads from the inherited fallback (actor checkpoint / base model).
@@ -719,7 +723,7 @@ def test_megatron_config_critic_role_pins_lambda(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    args = _critic_prep_args(megatron_config_path=str(config_path))
+    args = critic_prep_args(megatron_config_path=str(config_path))
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
