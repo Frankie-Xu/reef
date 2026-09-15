@@ -193,7 +193,7 @@ reef.post(
 
 使用模型 API 改进 harness 技能，无需 GPU。
 
-harness 进化 recipe 自带 profile，只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
+harness 进化 recipe 自带部署配置，只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
 reef serve --recipe harness-evolve \
@@ -204,8 +204,8 @@ reef serve --recipe harness-evolve \
 该示例连接本地 Ollama 服务。使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
 `REEF_UPSTREAM_API_KEY`。
-该 profile 监听 `127.0.0.1:8900`，不设 token，状态保存在 `.reef/harness-evolve/`。
-需要修改其他内容时，复制[该 profile](reef/service/profiles/harness-evolve.yaml) 并用 `-c` 传入你的副本。
+使用此配置时，Reef 监听 `127.0.0.1:8900`，不设 token，状态保存在 `.reef/harness-evolve/`。
+需要修改其他内容时，复制[该部署配置](reef/service/profiles/harness-evolve.yaml) 并用 `-c` 传入你的副本。
 
 在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`）安装 harness 并运行任务：
 
