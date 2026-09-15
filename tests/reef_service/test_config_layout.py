@@ -250,14 +250,7 @@ def test_shipped_reef_yamls_use_the_public_layout():
     configs = []
     for directory in ("recipes", "tutorials", "reef/service/profiles", "tests/packaging"):
         for path in (root / directory).rglob("*.yaml"):
-            parts = path.relative_to(root).parts
-            if "work" in parts:
-                continue
-            if "results" in parts:
-                # A results directory records the deployment a past run used.
-                # Migrating it to the current schema would make it a config
-                # that was never executed, which is worse than an old one: the
-                # record's whole value is that it is what ran.
+            if "work" in path.relative_to(root).parts:
                 continue
             text = path.read_text()
             if not re.search(r"(?m)^(schema-version|reef|implementation):", text):

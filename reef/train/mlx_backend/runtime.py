@@ -22,12 +22,7 @@ from typing import Any
 
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.deployment import RuntimeBuild, RuntimeFactory, register_runtime_kind
-from reef.runtime.interfaces import (
-    ModelCandidate,
-    PreparedTrainingStep,
-    RuntimeContractError,
-    TrainingRuntime,
-)
+from reef.runtime.interfaces import ModelCandidate, PreparedTrainingStep, RuntimeContractError, TrainingRuntime
 from reef.train.algos.registry import resolve_preparer
 from reef.train.mlx_backend.rows import DistillationRow, TeacherCandidate, TrainingRow
 from reef.train.mlx_backend.serving import MLXServingRuntime

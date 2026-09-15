@@ -136,7 +136,7 @@ records only the variable name.
 ## Files
 
 - `learning_curve.png`, `curve.csv` — the run, from [`learning_curve.py`](../learning_curve.py).
-- `serve.yaml` — the deployment (policy on MLX, judge + student on GLM-5.3).
+- `serve.yaml` — the deployment. The run used the configuration schema of its date; the file carries the same values in the schema the repository loads today.
 - [runtime notes](../mlx-runtime-notes.md) — runtime-general operational notes:
   topology, reading a step's training metrics, the adapter artifact format, and
   the measured capacity envelope.

@@ -6,7 +6,7 @@ sequencing 72 sessions — against a host-native Reef+MLX service where the poli
 both serves and trains in one process. Earlier MLX records here used a
 Mac-native driver standing in for Hermes; this one does not.
 
-Every candidate passes the [candidate gate](../../../candidate_evaluator.py)
+Every candidate passes the [candidate gate](../../../../candidate_evaluator.py)
 before it can reach serving.
 
 **What this run establishes** is a runtime result, not a learning result: the
@@ -99,5 +99,5 @@ Three operational notes, each of which cost a discarded run:
 
 - `curve.csv`, `learning_curve.png` — the 72 sessions, from [`learning_curve.py`](../learning_curve.py).
 - `gate.csv` — per-step gate outcome, probe clean rate, running best, `answered_rate`, `gold_rate`.
-- `serve.yaml` — the deployment, including the `evaluation` section that turns the gate on.
+- `serve.yaml` — the deployment. The run used the configuration schema of its date; the file carries the same values in the schema the repository loads today.
 - [runtime notes](../mlx-runtime-notes.md) — topology, training metrics, the adapter artifact format, the capacity envelope, and the serving-latency measurement above.
