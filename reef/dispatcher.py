@@ -38,7 +38,7 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
-from reef.storage.records import RecordRetention
+from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.train.types import TrainStepResult
 
@@ -382,42 +382,61 @@ class Dispatcher:
             return self._accept_record(current, item)
 
     def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
-        if item.request_type is RequestType.TRAIN:
-            if (existing := current.records.existing_receipt(item)) is not None:
-                return existing
-            if current.trainer.training_mode == "auto":
-                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-            if current.trainer.candidate_backend is None:
-                raise ValueError("explicit training requests require a training backend")
-            request = TrainingRequest.from_dict(item.payload)
-            if item.references:
-                raise ValueError("training instructions do not reference inference receipts")
-            refusal = training_request_refusal(request.text, request.requires)
-            if refusal is not None:
-                raise ValueError(refusal)
-        # Schema enforcement: reject a malformed report before it is durably
-        # appended, so the producer's POST fails with the violation naming
-        # the broken field instead of the record dying silently at training
-        # time. An undeclared schema keeps open ingress.
-        if item.request_type is RequestType.REPORT:
-            # An identical retry remains valid after its sources were compacted.
-            if (existing := current.records.existing_receipt(item)) is not None:
-                return existing
-            validate_report_payload(item.payload)
-            if (report_type := current.report_type) is not None:
-                report_type.from_dict(item.payload)
-            if len(set(item.references)) != len(item.references):
-                raise ReportValidationError("report references must be unique")
-            for reference in item.references:
-                stored_reference = current.records.get_for_audit(item.scenario, reference)
-                if stored_reference is None or stored_reference.item.request_type is not RequestType.INFERENCE:
-                    raise ReportValidationError(
-                        f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
-                    )
-        appended = current.records.append_result(item)
+        try:
+            if item.request_type is RequestType.TRAIN:
+                if (existing := current.records.existing_receipt(item)) is not None:
+                    current.operations.increment("ingest/duplicates_total")
+                    return existing
+                if current.trainer.training_mode == "auto":
+                    raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
+                if current.trainer.candidate_backend is None:
+                    raise ValueError("explicit training requests require a training backend")
+                request = TrainingRequest.from_dict(item.payload)
+                if item.references:
+                    raise ValueError("training instructions do not reference inference receipts")
+                refusal = training_request_refusal(request.text, request.requires)
+                if refusal is not None:
+                    raise ValueError(refusal)
+            # Schema enforcement: reject a malformed report before it is durably
+            # appended, so the producer's POST fails with the violation naming
+            # the broken field instead of the record dying silently at training
+            # time. An undeclared schema keeps open ingress.
+            if item.request_type is RequestType.REPORT:
+                # An identical retry remains valid after its sources were compacted.
+                if (existing := current.records.existing_receipt(item)) is not None:
+                    current.operations.increment("ingest/duplicates_total")
+                    return existing
+                validate_report_payload(item.payload)
+                if (report_type := current.report_type) is not None:
+                    report_type.from_dict(item.payload)
+                if len(set(item.references)) != len(item.references):
+                    raise ReportValidationError("report references must be unique")
+                for reference in item.references:
+                    stored_reference = current.records.get_for_audit(item.scenario, reference)
+                    if stored_reference is None or stored_reference.item.request_type is not RequestType.INFERENCE:
+                        raise ReportValidationError(
+                            f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
+                        )
+        except ReportValidationError:
+            current.operations.increment("ingest/rejected_report_total")
+            raise
+        except RecordConflict:
+            current.operations.increment("ingest/rejected_conflict_total")
+            raise
+        except ValueError:
+            current.operations.increment("ingest/rejected_request_total")
+            raise
+        try:
+            with current.operations.measure("ingest/write"):
+                appended = current.records.append_result(item)
+        except RecordConflict:
+            current.operations.increment("ingest/rejected_conflict_total")
+            raise
         stored = appended.item
         if not appended.inserted:
+            current.operations.increment("ingest/duplicates_total")
             return stored
+        current.operations.increment("ingest/accepted_total")
         if current.training_runtime is not None:
             self._training.ready.set()
             return stored
@@ -506,24 +525,22 @@ class Dispatcher:
 
     def record_operational_metrics(self) -> None:
         """Publish numeric state only; one unavailable scenario must not hide others."""
-        with self._training.lock:
-            failures = dict(self._training.failure_counts)
-            errors = frozenset(self._training.errors)
-            storage_blocked = self._training.storage_status is not None
         for current in self._registry.loaded_scenarios():
-            if current.trainer.candidate_backend is None:
-                continue
-            try:
-                metrics = current.trainer.operational_metrics()
-                metrics["training/failed_attempts_total"] = failures.get(current.name, 0)
-                metrics["training/error"] = int(current.name in errors)
+            self.record_scenario_operational_metrics(current)
+
+    def record_scenario_operational_metrics(self, current: Scenario) -> None:
+        """Keep recipe, storage, and provider sampling failures local to one scenario."""
+        try:
+            metrics = current.trainer.operational_metrics()
+            metrics.update(current.operations.snapshot())
+            with self._training.lock:
+                metrics["training/failed_attempts_total"] = self._training.failure_counts.get(current.name, 0)
+                metrics["training/error"] = int(current.name in self._training.errors)
                 if current.training_runtime is not None:
-                    metrics["training/checkpoint_storage_blocked"] = int(storage_blocked)
-                current.trainer.processor.experiment_logger.log(metrics, namespace="operations")
-            except Exception as exc:
-                logger.warning(
-                    "operational metrics unavailable for scenario %r (%s)", current.name, type(exc).__name__
-                )
+                    metrics["training/checkpoint_storage_blocked"] = int(self._training.storage_status is not None)
+            current.trainer.processor.experiment_logger.log(metrics, namespace="operations")
+        except Exception as exc:
+            logger.warning("operational metrics unavailable for scenario %r (%s)", current.name, type(exc).__name__)
 
     def _start_training(self, scenario: Scenario) -> None:
         """Start the training drain thread if it hasn't been started yet.

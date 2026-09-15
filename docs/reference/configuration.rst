@@ -981,7 +981,8 @@ Those become ``recipe/*`` and ``processor/*``, each namespace on its own
 Operational metrics
 ~~~~~~~~~~~~~~~~~~~
 
-With W&B enabled, the dispatcher samples each loaded training scenario every
+With W&B enabled, the dispatcher samples each loaded scenario, including
+inference-only scenarios, every
 10 seconds and once during graceful shutdown. Samples use the existing scenario
 run under ``operations/*``, with Unix time in ``operations/time_seconds`` as
 their horizontal axis. They do not advance ``train/step`` and do not wait for a
@@ -996,6 +997,38 @@ The following names are relative to ``operations/``:
 
    * - Metric
      - Meaning
+   * - ``serve/request/*``
+     - Inference requests after scenario resolution, including admission,
+       backend calls, retries, and record acceptance. Streaming requests remain
+       active until their completion record is accepted; an incomplete stream
+       or cancelled request counts as failed.
+   * - ``serve/admission/*``
+     - Time acquiring runtime admission. ``active`` is the number waiting for
+       admission; immediate admissions also contribute to count and duration.
+   * - ``serve/retries_total``, ``serve/timeouts_total``
+     - Additional buffered inference attempts and requests that exhaust the
+       inference retry deadline. Retries do not create extra request counts.
+   * - ``serve/version_mismatch_total``
+     - Responses rejected by runtime-load-ID verification, including missing
+       engine version information and buffered or deferred streaming responses.
+       This is a counter of observed rejections, not a background drift probe.
+   * - ``ingest/accepted_total``, ``ingest/duplicates_total``
+     - New records appended and identical retries acknowledged by the dispatcher.
+       Accepted records include incomplete-stream diagnostics; acceptance does
+       not imply a trainable record or successful training.
+   * - ``ingest/rejected_report_total``, ``ingest/rejected_request_total``
+     - Report schema/reference violations and invalid training instructions
+       detected during dispatcher record validation.
+   * - ``ingest/rejected_conflict_total``
+     - Record identities reused with different content.
+   * - ``ingest/write/*``
+     - Record-store append calls, including identical retries that reach the
+       store. ``failed_total`` counts append exceptions, including conflicts;
+       validation rejections before append do not count as write failures.
+   * - ``runtime/stale_batches_total``
+     - Training submissions the runtime rejects as stale, such as an exact
+       version mismatch or an exceeded bounded-staleness window. This does not
+       count compatible older samples as errors or increment on status reads.
    * - ``records/unread_count``
      - Training-visible records after the processor's read cursor. These may
        still need feedback or filtering; this is not a ready-batch count.
@@ -1032,21 +1065,34 @@ The following names are relative to ``operations/``:
      - Runtime-scheduler weight activation/update calls, including resumed
        transfers. This covers the call's full duration, not only network time.
 
-The execution and weight-sync families expose ``active`` (zero/one),
-``elapsed_seconds`` while active, ``completed_total``, ``failed_total``,
-``duration_seconds_total``, and ``last_duration_seconds`` after a call finishes.
+All operation families expose ``started_total``, ``active`` (in-flight count),
+``elapsed_seconds`` (age of the oldest active call, zero when idle),
+``completed_total``, ``failed_total``, ``duration_seconds_total``, and
+``last_duration_seconds`` after a call finishes. Execution and weight-sync calls
+are serial, so their active count is zero or one. Request and admission calls
+can overlap. Durations are in seconds; cumulative durations sum individual
+calls, so concurrent work may accumulate faster than wall time. Divide the
+change in total duration by the change in completed plus failed count to obtain
+a mean completed-call latency for an interval.
 An execution returning a skip, stale drop, or storage retry is a completed
 backend call, not necessarily a committed training step. These measurements
 reset when their trainer or scheduler is rebuilt, including recovery; the
 corresponding ``training/started_at_seconds`` and ``runtime/started_at_seconds``
-identify that reset. They are not persisted training history.
+identify that reset. Stale-batch counts share the scheduler lifetime. Request
+and ingestion measurements reset when the scenario is rebuilt, including
+recovery, with ``operations/started_at_seconds`` identifying that reset. They
+are not persisted training history. Malformed HTTP payloads/headers and
+failures before scenario resolution are outside these scenario measurements.
+No arbitrary scenario names, rejection messages, or record IDs become metric
+keys. Ingestion counters start at the dispatcher's typed-record boundary;
+wire-payload normalization failures are outside that boundary.
 
 Additional finite numeric processor status fields appear under
 ``operations/processor/``. Sampling does not advance processor readiness or
 consume its queue. If ingestion or commit holds the trainer lock, that sample
 omits queue gauges while still reporting execution measurements. Operational
 samples contain no request bodies, record IDs, or error messages. They are
-low-frequency training diagnostics; underlying inference engines retain their
+low-frequency service and training diagnostics; underlying inference engines retain their
 own high-frequency monitoring. Uploading these values does not configure
 alert notifications.
 

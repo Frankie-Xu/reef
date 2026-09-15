@@ -112,8 +112,10 @@ What you see in W&B: one group per scenario and one run per scenario, plus a new
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
-processor queues, waiting ages, active training and weight-sync durations, and
-recorded training failures while a step is still running. These samples do not
+processor queues, waiting ages, active training and weight-sync durations,
+request counts and latency, admission waits, record acceptance/rejection,
+version-mismatch rejections, and stale training batches. Pure inference
+scenarios also upload these samples. These samples do not
 require status polling or a successful training commit. Read the `metric
 definitions <../reference/configuration.rst#operational-metrics>`__ before
 interpreting queue counts: a reserved batch may be executing, and manual-mode

@@ -13,6 +13,7 @@ from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.artifact import LiveWeightArtifactRef
 from reef.core import RuntimeLoadSpan
+from reef.observability.operations import OperationMetrics
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.connection import RayCoordinatorClient, RayRuntimeError, RemoteRayCoordinatorClient
 from reef.runtime.interfaces import (
@@ -1243,6 +1244,7 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
     updated = runtime.execute_training_job({"rollout_id": 0})
 
     class Scenario:
+        operations = OperationMetrics(("serve/request", "serve/admission"))
         recipe = "test"
         repository = None
         surface = create_weight_surface()
@@ -1301,6 +1303,9 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         ]
         await asyncio.sleep(0)
         assert backend.versions == []
+        queued_metrics = scenario.operations.snapshot()
+        assert queued_metrics["serve/request/active"] == 8 * 64
+        assert queued_metrics["serve/admission/active"] == 8 * 64
         scenario.ref = LiveWeightArtifactRef(
             content_id="live:new",
             release_id="live:proc:engine:1:1",
@@ -1316,6 +1321,11 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
 
     asyncio.run(run())
     assert backend.versions == ["engine:1"] * (8 * 64)
+    metrics = scenario.operations.snapshot()
+    assert metrics["serve/request/active"] == 0
+    assert metrics["serve/request/completed_total"] == 8 * 64
+    assert metrics["serve/admission/active"] == 0
+    assert metrics["serve/admission/duration_seconds_total"] > 0
 
 
 @pytest.mark.unit
@@ -1331,6 +1341,7 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
     )
 
     class Scenario:
+        operations = OperationMetrics(("serve/request", "serve/admission"))
         recipe = "test"
         repository = None
         surface = create_weight_surface()
@@ -1444,7 +1455,27 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         recorded = stream_record(deferred, body, complete=True)
         item = service.record_stream(deferred_pending, recorded)
         assert item.payload["runtime_load_id"] == "engine:0"
+        assert Scenario.operations.snapshot()["serve/request/completed_total"] == 2
         assert runtime.inference_admission_status == {"open": True, "active": 0}
+
+        mismatched, mismatched_pending = await service.start_stream(
+            {"x-reef-scenario": "math"},
+            {"stream": True},
+            "/v1/chat/completions",
+            DeferredStreamingBackend(),
+        )
+        body = b"".join([chunk async for chunk in mismatched.chunks])
+        mismatched.record_response = {
+            "metadata": {"runtime_load_id": "engine:1"},
+            "training": {"runtime_load_id": "engine:1"},
+        }
+        with pytest.raises(RuntimeLoadMismatch):
+            service.record_stream(mismatched_pending, stream_record(mismatched, body, complete=True))
+        await mismatched.close()
+        metrics = Scenario.operations.snapshot()
+        assert metrics["serve/version_mismatch_total"] == 1
+        assert metrics["serve/request/failed_total"] == 1
+        assert metrics["serve/request/active"] == 0
 
         with pytest.raises(RuntimeLoadMismatch, match="atomic record_response"):
             await service.start_stream(
