@@ -291,13 +291,27 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("harness_evolve requires an 'evolution' config section")
         tasks = evolution.get("tasks")
         manifest = evolution.get("task_manifest")
+        tasks_root = evolution.get("tasks_root")
         if manifest is not None:
             if tasks is not None:
                 raise RecipeConfigError("evolution.tasks and evolution.task_manifest cannot both be set")
-            tasks_root = evolution.get("tasks_root")
             if not isinstance(manifest, str) or not manifest or not isinstance(tasks_root, str) or not tasks_root:
                 raise RecipeConfigError(
                     "evolution.task_manifest and evolution.tasks_root must both be non-empty paths"
+                )
+            adapter_name = str(evolution.get("adapter", "pi"))
+            try:
+                descriptor = get_adapter(adapter_name)
+            except DescriptorError as exc:
+                raise RecipeConfigError(str(exc)) from exc
+            if not descriptor.prompt_is_task_directory:
+                raise RecipeConfigError(
+                    f"evolution.task_manifest needs an adapter that takes a task directory, not a prompt; "
+                    f"{adapter_name!r} takes a prompt (terminus takes a task directory)"
+                )
+            if evolution.get("promote_failures", False):
+                raise RecipeConfigError(
+                    "evolution.promote_failures adds prompts to a gate whose tasks are directories"
                 )
             try:
                 task_paths = manifest_task_paths(Path(manifest).expanduser(), Path(tasks_root).expanduser(), "eval")
@@ -306,6 +320,8 @@ class CordisRecipe(Recipe):
             if not task_paths:
                 raise RecipeConfigError(f"evolution.task_manifest {manifest} names no eval tasks")
             tasks = [str(path) for path in task_paths]
+        elif tasks_root is not None:
+            raise RecipeConfigError("evolution.tasks_root is only read with evolution.task_manifest")
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
             raise RecipeConfigError(
                 "evolution.tasks must be a non-empty list of prompts, or set evolution.task_manifest with evolution.tasks_root"

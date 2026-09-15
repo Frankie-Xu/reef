@@ -2525,10 +2525,22 @@ def test_yaml_config_takes_the_gate_tasks_from_a_split_manifest(tmp_path: Path, 
         "evaluate": "demo_evolution:evaluate",
         "task_manifest": str(tmp_path / "split.json"),
         "tasks_root": str(root),
-        "adapter": "pi",
+        "adapter": "terminus",
     }
     built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
     assert built.tasks == (str(root / "held-1"), str(root / "held-2"))
+    assert get_adapter("terminus").prompt_is_task_directory and not get_adapter("pi").prompt_is_task_directory
+
+    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="promote_failures adds prompts"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "promote_failures": True}}, runtime=runtime()
+        )
+    with pytest.raises(RecipeConfigError, match=r"only read with evolution\.task_manifest"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "task_manifest": None, "tasks": ["x"]}}, runtime=runtime()
+        )
 
     with pytest.raises(RecipeConfigError, match="cannot both be set"):
         CordisRecipe.from_environment({}, config={"evolution": {**evolution, "tasks": ["x"]}}, runtime=runtime())

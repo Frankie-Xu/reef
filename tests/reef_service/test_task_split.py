@@ -279,3 +279,9 @@ def test_a_side_that_is_not_train_or_eval_is_refused(tmp_path: Path) -> None:
     write_split_manifest(tmp_path / "split.json", TaskSplit((), (), 0, 0))
     with pytest.raises(TaskSplitError, match="side must be"):
         manifest_task_paths(tmp_path / "split.json", tmp_path, "test")
+
+
+@pytest.mark.parametrize("name", ["../x", "/abs/x", "./t1", "T1", "a b", "t1/"])
+def test_a_side_name_that_is_not_a_task_directory_name_is_refused(name: str) -> None:
+    with pytest.raises(TaskSplitError, match="task names"):
+        TaskSplit((), (name,), 0, 1)

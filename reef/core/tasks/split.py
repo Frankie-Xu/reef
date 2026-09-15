@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.errors import ReefError
-from reef.core.tasks.harbor import HarborTaskError, read_harbor_task
+from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, read_harbor_task
 
 MANIFEST_VERSION = 1
 STAGING_DIRECTORY = ".staging"
@@ -58,8 +58,10 @@ def checked_side(side: str, names: object) -> tuple[str, ...]:
     if isinstance(names, str) or not isinstance(names, Iterable):
         raise TaskSplitError(f"{side} must be a sequence of task names")
     listed = tuple(names)
-    if any(not isinstance(name, str) or not name for name in listed):
-        raise TaskSplitError(f"{side} must be a sequence of task names")
+    if any(not isinstance(name, str) or not TASK_NAME_PATTERN.fullmatch(name) or ".." in name for name in listed):
+        raise TaskSplitError(
+            f"{side} must be a sequence of task names (a task name matches {TASK_NAME_PATTERN.pattern})"
+        )
     if len(set(listed)) != len(listed):
         raise TaskSplitError(f"{side} lists a task twice")
     return tuple(sorted(listed))

@@ -17,6 +17,7 @@
 # tasks. Declarative trees can use the default local runner with Docker.
 name: terminus
 binary: reef-terminus
+prompt_is_task_directory: true
 argv:
   - --task
   - "{prompt}"
