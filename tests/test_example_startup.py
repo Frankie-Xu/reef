@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES = ("recipes/basic", "recipes/sao/examples/sao")
+EXAMPLES = ("recipes/basic", "recipes/sao/examples/imo_answerbench")
 
 
 def _write_command(directory: Path, name: str, source: str) -> None:

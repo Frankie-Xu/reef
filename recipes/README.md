@@ -48,11 +48,11 @@ learns from each score before the next task arrives.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
-| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md), [SAO on CEO-Bench](sao/examples/ceobench/README.md) |
+| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/imo_answerbench/README.md), [SAO on CEO-Bench](sao/examples/ceobench/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
 | Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
 
-[SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
+[SAO](sao/examples/imo_answerbench/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
 run in order by `run.py`, each driving six scored rollouts through Reef with a
 verifiable binary reward, and every scored rollout is one training step.
@@ -153,7 +153,7 @@ for example `--inference.model-path /models/demo` or `--reef.port 9000`. The
 [`reef/recipe/base.py`](../reef/recipe/base.py); a stack that binds a method
 lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the
 smallest weight-training one is
-[`recipes/sao/examples/sao/serve.yaml`](sao/examples/sao/serve.yaml)).
+[`recipes/sao/examples/imo_answerbench/serve.yaml`](sao/examples/imo_answerbench/serve.yaml)).
 Two contracts hold the set honest:
 [`test_training_server.py`](../tests/reef_service/test_training_server.py)
 boots the internal service from every cookbook stack, and

@@ -48,7 +48,7 @@ localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
 shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs the same
 invocation non-interactively.
 
-The cookbook ``recipes/sao/examples/sao/serve.yaml`` requests one actor GPU
+The cookbook ``recipes/sao/examples/imo_answerbench/serve.yaml`` requests one actor GPU
 and one rollout GPU through Slime flags. Reef manages the shared Ray runtime,
 and Slime schedules its model workers there. Its ``run.sh`` defaults the local
 Ray pool to two visible devices; an external cluster controls its own pool.
@@ -64,7 +64,7 @@ through the bridge, and stops the stack on exit. Method-specific dependencies
 are implemented by the Recipe. Copy the closest example and edit it.
 
 - `SAO rollout training <recipes/sao.rst>`__ uses
-  ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
+  ``recipes/sao/examples/imo_answerbench/serve.yaml``, the smallest: two GPUs, one actor
   with the critic colocated on it, one rollout engine.
 - `TTT-Discover test-time training <recipes/tttd.rst>`__ uses
   ``recipes/tttd/examples/tttd/serve.yaml``, two GPUs with LoRA training.
@@ -111,9 +111,9 @@ Run the example
 
 .. code:: bash
 
-   export REEF_TOKEN=reef-local     # the token recipes/sao/examples/sao/serve.yaml declares
+   export REEF_TOKEN=reef-local     # the token recipes/sao/examples/imo_answerbench/serve.yaml declares
 
-   reef serve -c recipes/sao/examples/sao/serve.yaml \
+   reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
      --inference.model-path ~/models/Qwen2.5-1.5B-Instruct
 
 Any config value can be overridden on the command line. Startup takes several
@@ -138,7 +138,7 @@ publishes it to the engine, and records a new version.
 
 .. code:: bash
 
-   export SCENARIO=<the x-reef-scenario you sent>   # examples/sao uses sao-smoke
+   export SCENARIO=<the x-reef-scenario you sent>   # examples/imo_answerbench uses sao-smoke
 
    curl -sS -H "Authorization: Bearer reef-local" \
      http://127.0.0.1:8900/reef/scenarios/$SCENARIO/releases

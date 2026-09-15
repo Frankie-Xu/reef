@@ -1,14 +1,14 @@
-"""Harbor verifier for IMO problem_idx 4 (gold: $2^{u-2}$).
+"""Harbor verifier for IMO problem_idx 8 (gold: $-\\frac{2023}{2024^2}$).
 
 Extracts \\boxed{} from /workspace/answer.txt and checks it against the gold
 answer with the same strict equivalence checker the math-eval harness uses
-(recipes/sao/examples/sao/math_eval/eval.py). Binary reward: 1.0 correct, 0.0 wrong.
+(recipes/sao/examples/imo_answerbench/math_eval/eval.py). Binary reward: 1.0 correct, 0.0 wrong.
 """
 
 import re
 from pathlib import Path
 
-GOLD_ANSWER = r"$2^{u-2}$"
+GOLD_ANSWER = r"$-\frac{2023}{2024^2}$"
 
 
 def _latex_to_float(expression):

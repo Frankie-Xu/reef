@@ -369,7 +369,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
@@ -390,7 +390,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
         "tutorials/evolve-your-harness/configs/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
