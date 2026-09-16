@@ -8,6 +8,7 @@ import shutil
 import sys
 import threading
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -21,11 +22,6 @@ from reef.record2dataset.harbor import (
     reply_errors,
     run_harbor_agent,
 )
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
 
 REPLY = HarborReply(
     instruction=(

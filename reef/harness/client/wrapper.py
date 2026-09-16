@@ -86,6 +86,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -98,11 +99,6 @@ from typing import Any
 
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
 
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
@@ -406,7 +402,7 @@ def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/_captures", timeout=0.5)
             return True
-        except OSError:  # noqa: PERF203
+        except OSError:
             time.sleep(0.05)
     return False
 

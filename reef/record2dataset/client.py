@@ -142,7 +142,7 @@ class HttpGenerator(Generator):
             ):
                 status = response.status
                 text = await response.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GeneratorError(f"{method} {path} did not reach the generator at {self.url}: {exc}") from exc
         if status == 204:
             return status, {}

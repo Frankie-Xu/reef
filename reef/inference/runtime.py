@@ -93,7 +93,7 @@ class ExecutorInferenceRuntime(InferenceRuntime):
             if _serving_available(status):
                 try:
                     return await asyncio.wait_for(super().acquire_inference(), timeout=min(0.25, remaining))
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
             await asyncio.sleep(min(0.25, remaining))
 

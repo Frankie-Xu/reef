@@ -4,17 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 
 import pytest
 
 from reef.harness import compose
 from reef.harness.compose import FiberState
-
-if sys.version_info >= (3, 11):
-    from builtins import ExceptionGroup
-else:
-    from reef.harness.compose.events import _ExceptionGroup as ExceptionGroup
 
 
 def test_effect_disposers_run_lifo() -> None:

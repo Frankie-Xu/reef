@@ -70,7 +70,7 @@ class EvaluationWorkerPool:
                 for future in pending:
                     try:
                         results.append(future.result())
-                    except Exception as exc:  # noqa: PERF203 -- drain every submitted RPC before raising
+                    except Exception as exc:
                         if first_error is None:
                             first_error = exc
                 if first_error is not None:

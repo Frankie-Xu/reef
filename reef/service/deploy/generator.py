@@ -4,7 +4,8 @@ A deployment with a ``generator`` section gets a ``generator`` service before th
 depends on it, so ``${endpoints.generator}`` is published by the time the HTTP child and its recipe read
 their configuration. The generator reads the same resolved deployment through ``REEF_CONFIG``; it needs
 no arguments. Its executor is the ``generator`` role of ``execution:``, so a deployment can place it on a
-host with Docker and the ``harbor`` command line while the rest stays local.
+host with Docker and the ``harbor`` command line while the rest stays local. It runs under the
+same interpreter as the other children (``REEF_PYTHON``, otherwise the launcher's).
 """
 
 from __future__ import annotations
@@ -34,13 +35,6 @@ class GeneratorSettings:
     tasks_root: str = config_option(help="The directory generated tasks, manifests and Harbor job files live under.")
     host: str = config_option("127.0.0.1", help="The generator's bind address.")
     port: int = config_option(DEFAULT_PORT, help="The generator's bind port.")
-    python: str | None = config_option(
-        None,
-        help=(
-            "The interpreter that runs the generator, the launching one when unset or empty; playing tasks needs "
-            "reef-eval, which needs Python 3.12 or later."
-        ),
-    )
     work_dir: str | None = config_option(
         None, help="Where the task player keeps trials; <tasks-root>/.play by default."
     )
@@ -102,21 +96,6 @@ def generator_settings(section: Mapping[str, Any]) -> GeneratorSettings:
     return GeneratorSettings(**values)
 
 
-def serve_log(message: str) -> None:
-    print(f"[reef] {message}", file=sys.stderr)
-
-
-def generator_interpreter(generator: GeneratorSettings) -> tuple[str, str]:
-    """The interpreter that runs the generator and where the choice came from; an empty setting counts as unset."""
-    configured = (generator.python or "").strip()
-    if configured:
-        return configured, "generator.python"
-    launcher = os.environ.get("REEF_PYTHON", "").strip()
-    if launcher:
-        return launcher, "REEF_PYTHON; generator.python is unset"
-    return sys.executable, "the launching interpreter; generator.python is unset"
-
-
 def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
     """The generator's process definition, or None when the deployment has no ``generator`` section."""
     section = config.get("generator")
@@ -126,8 +105,8 @@ def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
         generator = generator_settings(section)
     except ValueError as exc:
         raise DeployConfigError(f"generator: {exc}") from exc
-    python, source = generator_interpreter(generator)
-    serve_log(f"generator: runs under {python} ({source})")
+    # The same interpreter as every child reef serve starts; reef-infra[terminus] is installed for it.
+    python = os.environ.get("REEF_PYTHON", sys.executable)
     probe_host = "127.0.0.1" if generator.host in ("0.0.0.0", "") else generator.host
     probe_host = f"[{probe_host}]" if ":" in probe_host and not probe_host.startswith("[") else probe_host
     return {

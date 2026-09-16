@@ -214,7 +214,7 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
             for name, tensor in self._iter_hf_tensors():
                 try:
                     self._snapshot[name] = read_hf(name)
-                except KeyError:  # noqa: PERF203 - the fallback is intentionally per tensor name
+                except KeyError:
                     self._snapshot[name] = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().reshape(-1)
                     logger.warning("seed: %s absent from hf_checkpoint; using current weights", name)
         except BaseException as exc:

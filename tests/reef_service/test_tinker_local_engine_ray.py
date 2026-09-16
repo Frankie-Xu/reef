@@ -148,7 +148,6 @@ def _training_item(version: str, index: int):
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(sys.version_info < (3, 11), reason="the Tinker SDK client requires Python 3.11")
 def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, monkeypatch):
     ray = pytest.importorskip("ray")
     for key in list(os.environ):

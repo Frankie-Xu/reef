@@ -71,8 +71,8 @@ uv pip install -e ".[dev]" -e ./third_party/reef-client
 pre-commit install
 ```
 
-Reef supports Python 3.10 and newer; CI tests 3.10, 3.11, and 3.12. Keep source
-syntax compatible with 3.10. Git LFS is required for artifact/checkpoint work.
+Reef requires Python 3.12 or newer, one interpreter for the service and every
+child it starts; CI tests 3.12. Git LFS is required for artifact/checkpoint work.
 
 Training-related work may also need:
 

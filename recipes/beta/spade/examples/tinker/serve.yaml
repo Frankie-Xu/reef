@@ -1,6 +1,6 @@
 # SPADE on Tinker: the served model writes tasks as the Designer and trains on them as the Reasoning Agent.
-# Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state,
-# REEF_GENERATOR_PYTHON an interpreter with reef-infra[terminus] (Python 3.12 or later) for the generator service.
+# Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
+# The generator service runs under the same interpreter as Reef, which needs reef-infra[terminus] for it.
 schema-version: 2
 reef:
   host: 127.0.0.1
@@ -16,7 +16,6 @@ inference:
 # The generator service: writes, checks and plays the Designer's tasks, on the host that has Docker and harbor.
 generator:
   tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
-  python: ${REEF_GENERATOR_PYTHON}
   # The Reasoning Agent's Harbor agent, thinking off: a thinking model's episode never assembles into one sample.
   agent:
     name: terminus-2

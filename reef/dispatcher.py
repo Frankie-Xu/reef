@@ -512,7 +512,7 @@ class Dispatcher:
         for scenario in scenarios:
             try:
                 self.get_or_create_scenario(scenario)
-            except Exception as exc:  # noqa: PERF203
+            except Exception as exc:
                 logger.exception("failed to preload scenario %r", scenario)
                 self._registry.record_preload_error(scenario, f"{type(exc).__name__}: {exc}")
 
@@ -726,7 +726,7 @@ class Dispatcher:
                 while self._process_training():
                     pass
                 return
-            except _ScenarioTrainingError as failure:  # noqa: PERF203
+            except _ScenarioTrainingError as failure:
                 name = failure.scenario
                 logger.exception("training thread failed to commit for scenario %r", name)
                 self._record_training_error(name, self._error_text(failure.cause))
@@ -759,7 +759,7 @@ class Dispatcher:
         for name in names:
             try:
                 progressed = self._process_training_scenario(name) or progressed
-            except Exception as exc:  # noqa: PERF203
+            except Exception as exc:
                 raise _ScenarioTrainingError(name, exc) from exc
         return progressed
 
@@ -998,7 +998,7 @@ class Dispatcher:
             # observes a closed store.
             try:
                 scenario.close()
-            except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
+            except BaseException as exc:
                 errors.append(exc)
         try:
             self._storage.close()

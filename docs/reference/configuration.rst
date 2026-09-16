@@ -938,17 +938,17 @@ Absent by default. When present, ``reef serve`` starts the generator service
 (``python -m reef.record2dataset``) before the HTTP service, which depends on
 it, and publishes its address as ``${endpoints.generator}`` for the recipe to
 consume. The generator writes, checks and plays Harbor tasks for a task
-generating processor such as SPADE. Its host needs Docker, the ``harbor``
-command line and ``reef-infra[terminus]`` on Python 3.12 or later; the Reef
-service itself does not. ``execution.generator`` selects its executor, so a
-deployment can place it on the host that has Docker.
+generating processor such as SPADE, under the same interpreter as the Reef
+service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker, the
+``harbor`` command line and ``reef-infra[terminus]``; the Reef service itself
+does not. ``execution.generator`` selects its executor, so a deployment can
+place it on the host that has Docker.
 
 .. config::
 
    generator.tasks-root | the directory generated tasks, manifests and Harbor job files live under. Required.
    generator.host | 127.0.0.1 | bind address
    generator.port | 8910 | bind port
-   generator.python | the launching interpreter | the interpreter that runs the generator; playing tasks needs Python 3.12 or later
    generator.work-dir | ``<tasks-root>/.play`` | where the task player keeps trials
    generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
@@ -965,7 +965,6 @@ deployment can place it on the host that has Docker.
 
    generator:
      tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
-     python: ${REEF_GENERATOR_PYTHON}
    execution:
      generator: auto
    recipe:
