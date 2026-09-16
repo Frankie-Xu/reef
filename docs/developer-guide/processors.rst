@@ -187,7 +187,7 @@ methods on the processor itself:
   rather than reporting that the task is invalid.
 
 Import the ABC from ``reef.train.processors`` and the request/result types
-from ``reef.core.tasks``. Asset paths name generator-accessible files or
+from ``reef.train.processors.task_generation``. Asset paths name generator-accessible files or
 directories, such as repository snapshots or verifier fixtures; constructing
 a request does not read them. Method-specific prompts and settings belong to
 the processor configuration.

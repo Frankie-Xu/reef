@@ -705,8 +705,10 @@ Task generation
 
 .. code:: python
 
-   from reef.core.tasks import HarborTask, TaskGenerationRequest, TaskValidationResult
-   from reef.train.processors import TaskGenerationProcessor
+   from reef.core.tasks import HarborTask
+   from reef.train.processors.task_generation import (
+       TaskGenerationProcessor, TaskGenerationRequest, TaskValidationResult,
+   )
 
 ``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
 ``async generate(request: TaskGenerationRequest) -> HarborTask`` and

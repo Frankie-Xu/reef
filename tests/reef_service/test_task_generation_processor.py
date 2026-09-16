@@ -8,14 +8,9 @@ from pathlib import Path
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.core.tasks import (
-    HarborTask,
-    TaskGenerationRequest,
-    TaskValidationResult,
-    read_harbor_task,
-    write_harbor_task,
-)
+from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.train.processors import TaskGenerationProcessor
+from reef.train.processors.task_generation import TaskGenerationRequest, TaskValidationResult
 from reef.train.types import ProcessorContext, TaskItem, TrainingBatch
 
 pytestmark = pytest.mark.unit
