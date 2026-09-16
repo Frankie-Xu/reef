@@ -700,6 +700,30 @@ Every ``ingest()`` starts with ``catch_up(now)``, then uses ``track(record)``,
 instead of failing a training step. All correlation state must be
 reconstructible from replay.
 
+Task generation
+~~~~~~~~~~~~~~~
+
+.. code:: python
+
+   from reef.core.tasks import HarborTask, TaskGenerationRequest, TaskValidationResult
+   from reef.train.processors import TaskGenerationProcessor
+
+``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
+``async generate(request: TaskGenerationRequest) -> HarborTask`` and
+``async validate(task_path: Path) -> TaskValidationResult``. Both must be
+implemented by subclasses. This ABC supplies no task execution lifecycle yet;
+implementing the hooks alone does not produce ready batches.
+
+``TaskGenerationRequest(source_records, description, assets=())`` carries a
+non-empty tuple of distinct ``AgentRecord`` values from one scenario, non-empty
+requirements text, and optional ``Path`` values for local generation assets.
+The generated task must preserve the source record ids in order.
+``TaskValidationResult(errors=())`` exposes ``is_valid``; each error is a
+non-empty explanation of a task defect. Check execution failures raise instead.
+Generation and validation must run outside the synchronous trainer-lock path.
+See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
+for lifecycle requirements.
+
 Batch
 -----
 

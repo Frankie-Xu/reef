@@ -1,5 +1,6 @@
-"""Tasks as Harbor directories: the on disk form a training batch and the harness gate share."""
+"""Harbor tasks, generation inputs and validation results shared by processors and consumers."""
 
+from reef.core.tasks.generation import TaskGenerationRequest, TaskValidationResult
 from reef.core.tasks.harbor import (
     TASK_CONFIG_VERSION,
     HarborTask,
@@ -22,8 +23,10 @@ __all__ = [
     "HarborTask",
     "HarborTaskConflict",
     "HarborTaskError",
+    "TaskGenerationRequest",
     "TaskSplit",
     "TaskSplitError",
+    "TaskValidationResult",
     "manifest_task_paths",
     "read_harbor_task",
     "read_split_manifest",

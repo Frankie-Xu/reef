@@ -3,7 +3,7 @@ Processors
 
 A processor is a scenario's batch builder: records in, one typed training
 batch out, plus the answer to what the record store may delete. This page
-explains the two engines a recipe can subclass, what each owns, and the path a
+explains the two feedback engines, the task-generation ABC, and the path a
 record takes to a batch.
 
 .. page::
@@ -168,6 +168,38 @@ engine's ``catch_up``, ``dispatch``, ``track``, and ``retire`` operations.
 It supplies ``async judge``, ``make_sample``, ``make_batch``, and ``expire`` for
 tracked records that time out. This path derives a new signal and is unchanged
 by the reported-feedback contract.
+
+Task generation contract
+------------------------
+
+``TaskGenerationProcessor(DataProcessor, ABC)`` declares two asynchronous
+methods on the processor itself:
+
+- ``generate(request: TaskGenerationRequest) -> HarborTask`` produces one
+  task specification from source records, a description and optional asset
+  paths. The source records must have distinct ids and belong to one scenario;
+  the caller must also ensure it is the processor's scenario. Preserve their
+  ordered ids in the generated task's ``source_agent_record_ids``.
+- ``validate(task_path: Path) -> TaskValidationResult`` checks a materialized
+  candidate without modifying it. The implementation chooses the required
+  structural and execution checks. Empty ``errors`` means all checks passed;
+  non-empty errors reject the task. Infrastructure failures raise exceptions
+  rather than reporting that the task is invalid.
+
+Import the ABC from ``reef.train.processors`` and the request/result types
+from ``reef.core.tasks``. Asset paths name generator-accessible files or
+directories, such as repository snapshots or verifier fixtures; constructing
+a request does not read them. Method-specific prompts and settings belong to
+the processor configuration.
+
+This is a contract only. Implementing the two hooks does not start a worker
+or make batches ready: the inherited lifecycle remains the no-update default.
+Background scheduling, retry/recovery, candidate publication and conversion
+to ``TaskItem`` batches remain future implementation work. That lifecycle
+must execute both hooks outside the trainer lock, expose only complete,
+validated directories, preserve source records until acknowledgement, and keep
+reserved tasks accessible until consumption finishes. Existing feedback
+processors are unchanged.
 
 A record's path to a batch
 --------------------------
