@@ -33,7 +33,11 @@ The first generation starts when the processor first looks for a batch; the next
 ```bash
 export REEF_TOKEN=reef-local REEF_SPADE_STATE_DIR="$PWD/work/spade" REEF_GENERATOR_PYTHON="$PWD/.venv312/bin/python"   # and TINKER_API_KEY
 reef serve -c recipes/beta/spade/examples/tinker/serve.yaml
+curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "spade"}' http://127.0.0.1:8900/reef/scenarios
 ```
+
+The scenario is what the processor belongs to, and `reef serve` creates none on its own: the `POST /reef/scenarios` above (or the first model call that names the scenario) brings it into being, and generation 0 starts on the processor's first look for a batch after that.
 
 The deployment's `generator` section makes `reef serve` start the generator service before the HTTP service and hand its address to the recipe as `${endpoints.generator}`. The generator's interpreter needs `reef-infra[terminus]` (reef-eval and Harbor) on Python 3.12 or later, Docker, and the `harbor` command line; the Reef service itself needs none of them. `execution: {generator: ray}` places it elsewhere. `generator.designer-url` and `generator.designer-model` point the Designer at another service (a strong model on OpenRouter while the Reasoning Agent is the deployment under training); by default both roles are the served model. `generator.designer-options` adds fields to the Designer's chat request: a model that thinks for thousands of tokens before writing an environment runs past the service's inference deadline, and `{"reasoning_effort": "none"}` keeps it to the reply. See [the generator section](../../../docs/reference/configuration.rst) for every key.
 
