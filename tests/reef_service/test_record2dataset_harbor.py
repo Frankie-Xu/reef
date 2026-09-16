@@ -420,6 +420,8 @@ def test_a_nop_run_that_exits_nonzero_raises_after_a_good_oracle_run(tmp_path: P
     with pytest.raises(OracleUnavailable, match="harbor run -a nop exited 3: docker daemon is not running"):
         oracle_check(root, harbor=harbor)
     assert (root.parent / ".harbor-jobs" / root.name / "oracle").is_dir(), "the oracle run happened first"
+    stderr_path = root.parent / ".harbor-jobs" / root.name / "nop" / "harbor-stderr.txt"
+    assert stderr_path.read_text() == "docker daemon is not running", "the whole stderr stays beside the run"
 
 
 def test_a_reference_solution_that_scores_zero_is_a_refusal_not_an_error(tmp_path: Path) -> None:

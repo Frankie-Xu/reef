@@ -81,6 +81,7 @@ EXCEPTION_CHARS = 300
 ORACLE_TIMEOUT_S = 1800.0
 STOP_GRACE_S = 30.0
 JOBS_DIRECTORY = ".harbor-jobs"
+STDERR_FILE = "harbor-stderr.txt"
 
 
 @dataclass(frozen=True)
@@ -373,7 +374,10 @@ def run_harbor_agent(
     if process.returncode != 0:
         if registry.is_closed:
             raise RuntimeError(f"harbor run -a {agent} was stopped with the generator")
-        raise RuntimeError(f"harbor run -a {agent} exited {process.returncode}: {stderr.strip()[:500]}")
+        # A traceback names its error last; the whole of it stays beside the run for the person who reads it.
+        jobs_path.mkdir(parents=True, exist_ok=True)
+        (jobs_path / STDERR_FILE).write_text(stderr, encoding="utf-8")
+        raise RuntimeError(f"harbor run -a {agent} exited {process.returncode}: {stderr.strip()[-500:]}")
     return trial_outcome(jobs_path)
 
 
