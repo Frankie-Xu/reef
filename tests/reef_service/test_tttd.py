@@ -9,7 +9,7 @@ import pytest
 from reef_service._trajectories import policy_trajectory
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
-from recipes.tttd.preparer import TttdPreparer
+from recipes.tttd.objective import TttdObjective
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
@@ -372,7 +372,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
     ],
 )
 def test_adaptive_entropic_advantages_match_pinned_reference(rewards, expected) -> None:
-    advantages, beta = TttdPreparer.adaptive_entropic_advantages(rewards)
+    advantages, beta = TttdObjective.adaptive_entropic_advantages(rewards)
 
     # Pinned from the original float32 torch implementation; the pure-math
     # port uses float64 so values match well within this tolerance.
@@ -508,17 +508,17 @@ def test_tttd_frozen_base_kl_executes_and_centers_masked_tokens(monkeypatch) -> 
     assert rollout_data["tttd_base_logp_diff"][0].tolist() == pytest.approx([0.05, 0.05])
 
 
-def test_tttd_preparer_flags_a_batch_of_constant_groups() -> None:
+def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     # The processor keeps one constant-reward group when every group is
-    # constant; the preparer reports that batch, whose advantages carry no
+    # constant; the objective reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
-    from reef.train.algos.registry import resolve_preparer
+    from reef.train.algos.registry import resolve_objective
     from reef.train.types import TrainingBatch
 
     def sample(record_id: str, reward: float) -> TrajectoryItem:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
-    preparer = resolve_preparer("tttd")
+    objective = resolve_objective("tttd")
     constant = TrainingBatch(
         "b",
         tuple(
@@ -536,5 +536,5 @@ def test_tttd_preparer_flags_a_batch_of_constant_groups() -> None:
         ),
     )
 
-    assert preparer(constant, {}).metrics["constant_groups_retained"] == 1
-    assert preparer(mixed, {}).metrics["constant_groups_retained"] == 0
+    assert objective.prepare(constant, {}).metrics["constant_groups_retained"] == 1
+    assert objective.prepare(mixed, {}).metrics["constant_groups_retained"] == 0

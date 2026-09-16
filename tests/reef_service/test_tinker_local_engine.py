@@ -18,8 +18,8 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.training import local_model_required, training_deployment_for
 from reef.surface.adapter import adapter_name
-from reef.train.algos.base import StepPreparer
-from reef.train.algos.registry import register_preparer, unregister_preparer
+from reef.train.algos.objective import TrainingObjective
+from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.signals import StepScheduling, StepSignal
 from reef.train.tinker_backend.backend import ADAPTER_DIR, TinkerTrainingBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
@@ -28,7 +28,7 @@ from reef.train.tinker_backend.launch import TinkerDeployment
 from reef.train.tinker_backend.training import TinkerDeploymentResources, TinkerTrainingService
 from reef.train.types import TrainingBatch, TrajectoryItem
 
-pytestmark = pytest.mark.usefixtures("preparer")
+pytestmark = pytest.mark.usefixtures("objective")
 
 
 class RemoteClient:
@@ -115,13 +115,13 @@ class Engines(InferenceBackend):
         self.events.append(("unload", name))
 
 
-class Preparer(StepPreparer):
-    name = "tinker-local-engine-preparer"
+class SampleObjective(TrainingObjective):
+    loss_family = "importance_sampling"
+    name = "tinker-local-engine-objective"
 
-    def __call__(self, batch, state):
+    def prepare(self, batch, state):
         return StepSignal(
             "train",
-            "importance_sampling",
             {"steps": state.get("steps", 0) + 1},
             advantages=tuple(1.0 for _ in batch.items),
             scheduling=StepScheduling(unit="sample", batch_size="actual"),
@@ -129,11 +129,11 @@ class Preparer(StepPreparer):
 
 
 @pytest.fixture
-def preparer():
-    value = Preparer()
-    register_preparer(value)
+def objective():
+    value = SampleObjective()
+    register_objective(value)
     yield value
-    unregister_preparer(value.name)
+    unregister_objective(value.name)
 
 
 def item(version):
@@ -167,15 +167,15 @@ class Stack:
         )
         self.coordinator = TrainingCoordinator(self.backend, self.engines)
 
-    def payload(self, preparer, *, step):
+    def payload(self, objective, *, step):
         version = self.coordinator.serving_runtime_load_id()
-        prepared = self.coordinator.prepare_training_step(TrainingBatch("b", (item(version),)), preparer.name, {})
+        prepared = self.coordinator.prepare_training_step(TrainingBatch("b", (item(version),)), objective.name, {})
         return {**prepared.payload, "scenario": "math", "rollout_id": step, "expected_runtime_load_id": version}
 
 
-def test_each_step_branches_from_the_published_checkpoint_and_loads_its_adapter(tmp_path, preparer):
+def test_each_step_branches_from_the_published_checkpoint_and_loads_its_adapter(tmp_path, objective):
     stack = Stack(tmp_path)
-    first = stack.coordinator.execute_training_job(stack.payload(preparer, step=0))
+    first = stack.coordinator.execute_training_job(stack.payload(objective, step=0))
     assert first.outcome == "checkpoint"
     checkpoint = Path(first.checkpoint_path)
     assert TinkerCheckpoint.read(checkpoint).state_path == "tinker://update-1/state"
@@ -191,25 +191,25 @@ def test_each_step_branches_from_the_published_checkpoint_and_loads_its_adapter(
     assert stack.coordinator.health()["lora_adapters"]["math"]["adapter"] == adapter_name(
         "math", published.runtime_load_id
     )
-    second = stack.coordinator.execute_training_job(stack.payload(preparer, step=1))
+    second = stack.coordinator.execute_training_job(stack.payload(objective, step=1))
     assert second.outcome == "checkpoint"
     assert stack.client.calls[1][0].state_path == "tinker://update-1/state"
 
 
-def test_a_rejected_step_leaves_the_incumbent_and_the_engines_unchanged(tmp_path, preparer):
+def test_a_rejected_step_leaves_the_incumbent_and_the_engines_unchanged(tmp_path, objective):
     stack = Stack(tmp_path)
-    first = stack.coordinator.execute_training_job(stack.payload(preparer, step=0))
+    first = stack.coordinator.execute_training_job(stack.payload(objective, step=0))
     stack.coordinator.reject_training_candidate(first.training_job_id)
     assert stack.engines.loads == []
     assert read_marker(marker_path(stack.backend.config.save_hf_template))["status"] == "REJECTED"
-    second = stack.coordinator.execute_training_job(stack.payload(preparer, step=1))
+    second = stack.coordinator.execute_training_job(stack.payload(objective, step=1))
     assert stack.client.calls[1][0].state_path == "tinker://base/state"
     assert Path(second.checkpoint_path) != Path(first.checkpoint_path)
 
 
-def test_restart_republishes_the_incumbent_from_disk_and_branches_from_it(tmp_path, preparer):
+def test_restart_republishes_the_incumbent_from_disk_and_branches_from_it(tmp_path, objective):
     stack = Stack(tmp_path)
-    first = stack.coordinator.execute_training_job(stack.payload(preparer, step=0))
+    first = stack.coordinator.execute_training_job(stack.payload(objective, step=0))
     published = stack.coordinator.update_serving_weights(first.training_job_id)
     stack.coordinator.acknowledge_training_commit(first.training_job_id)
     stack.coordinator.shutdown()
@@ -227,16 +227,16 @@ def test_restart_republishes_the_incumbent_from_disk_and_branches_from_it(tmp_pa
     ]
     assert restarted.coordinator.serving_runtime_load_id() == published.runtime_load_id
     assert restarted.client.calls == []
-    result = restarted.coordinator.execute_training_job(restarted.payload(preparer, step=1))
+    result = restarted.coordinator.execute_training_job(restarted.payload(objective, step=1))
     assert restarted.client.calls[0][0].state_path == "tinker://update-1/state"
     assert Path(result.checkpoint_path).name == "rollout_1"
 
 
-def test_the_trainer_delivers_files_and_never_sends(tmp_path, preparer):
+def test_the_trainer_delivers_files_and_never_sends(tmp_path, objective):
     stack = Stack(tmp_path)
     with pytest.raises(RuntimeError, match="no Tinker checkpoint"):
         stack.backend.adapter_files("math", "other:1")
-    first = stack.coordinator.execute_training_job(stack.payload(preparer, step=0))
+    first = stack.coordinator.execute_training_job(stack.payload(objective, step=0))
     published = stack.coordinator.update_serving_weights(first.training_job_id)
     adapter = Path(first.checkpoint_path) / ADAPTER_DIR
     # Reef's residency re-activation asks for the published revision by version, not for a send.
@@ -250,7 +250,7 @@ def test_the_trainer_delivers_files_and_never_sends(tmp_path, preparer):
             send()
     stack.coordinator.acknowledge_training_commit(first.training_job_id)
     with pytest.raises(ValueError, match="name their scenario"):
-        stack.coordinator.execute_training_job({**stack.payload(preparer, step=1), "scenario": ""})
+        stack.coordinator.execute_training_job({**stack.payload(objective, step=1), "scenario": ""})
 
 
 def _local_engine_config(tmp_path):

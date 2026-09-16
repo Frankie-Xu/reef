@@ -31,9 +31,7 @@ class CheckpointTrainer(TrainingRuntime):
     def __init__(self, checkpoint: Path) -> None:
         self.checkpoint = checkpoint
 
-    def prepare_training_step(
-        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
-    ):
+    def prepare_training_step(self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None):
         return PreparedTrainingStep("train", algorithm_state, {}, {"value": 7})
 
     def train_candidate(self, payload):

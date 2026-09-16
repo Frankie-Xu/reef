@@ -12,7 +12,7 @@ Reproduction of [Single-Rollout Asynchronous Optimization](https://arxiv.org/abs
 sao/
   recipe.py       SAORecipe: training spec, loss family "sao", runtime binding
   processor.py    reported feedback, singleton: one scored rollout is one unit
-  preparer.py     builds the per-rollout policy batch for the driver
+  objective.py     selects the SAO loss and per-sample training schedule
   slime/          the training-plane objective: DIS ratio, colocated critic
   examples/
     imo_answerbench/  the runnable loop: three IMOAnswerBench problems as Harbor tasks

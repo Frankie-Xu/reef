@@ -9,8 +9,8 @@ that picks between them, what a recipe writes on each tier, and a record's
 path to a batch — is at https://reefinfra.ai/docs/developer-guide/processors/.
 
 Everything numeric about a method — advantages, loss family — lives in its
-backend step preparer, not here: processors own the records and their
-retention, preparers own the training signal.
+backend training objective, not here: processors own the records and their
+retention, objectives own the training signal.
 """
 
 from reef.train.processors.base import DataProcessor, RetentionDecision

@@ -1,21 +1,23 @@
 Loss families
 =============
 
-A loss family is the tensor objective a weight-training recipe runs in the Slime
-backend. The step preparer decides what the signal is (advantages, which
-family); the loss family decides how the backend turns that into a loss.
+A method's ``TrainingObjective`` owns signal preparation and declares its
+``loss_family``. A loss family implements the model-dependent computation for
+one backend. Preparation runs on the full batch; tensor loss hooks run after
+the backend's forward passes.
 
-They live in two places, and the names are easy to confuse:
+- ``recipes/<name>/objective.py`` holds the backend-neutral objective.
+  ``reef/train/algos/`` defines its shared contract and registry.
+- ``reef/train/slime_backend/`` holds Slime integration machinery; each
+  method's Slime implementation lives in ``recipes/<name>/slime/``. Its spec
+  is torch-free driver code and its ``objective.py`` contains worker hooks.
+- Methods can also supply a Tinker loss implementation. TTTD shares one
+  preparation method between its Slime and Tinker implementations.
 
-- ``reef/train/algos/`` holds step preparers. Backend-neutral, no torch.
-- ``reef/train/slime_backend/`` holds the machinery (``algorithm.py``,
-  ``loss_families.py``, ``data_builder.py``); every family lives in its
-  method package, ``recipes/<name>/slime/``. The spec is torch-free driver
-  code; the objective is worker-side torch code.
-
-A recipe names its family through ``WeightTrainingSpec.loss_family``. The
-preparer's ``StepSignal.loss_family`` must carry the same string; the bridge
-rejects a payload whose ``loss`` differs from the family it booted with.
+A recipe binds ``WeightTrainingSpec(objective=..., processor=...)``.
+``WeightTrainingSpec.loss_family`` derives the family from that objective;
+``StepSignal`` carries advantages, scheduling, metrics and proposed state.
+The bridge still rejects a payload whose ``loss`` differs from its boot family.
 
 Layout
 ------

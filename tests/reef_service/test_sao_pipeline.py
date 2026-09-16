@@ -378,12 +378,10 @@ class _StubTrainingRuntime(StubTrainingRuntime):
     def serving_runtime_load_id(self):
         return self._served_version
 
-    def prepare_training_step(
-        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
-    ):
+    def prepare_training_step(self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None):
         assert isinstance(batch, TrainingBatch)
         sample = batch.items[0]
-        prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
+        prepared = prepare_slime_step(batch, objective, algorithm_state)
         assert prepared.payload is not None
         payload = {
             **prepared.payload,

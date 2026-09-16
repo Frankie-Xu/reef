@@ -53,7 +53,7 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
     def close(self):
         return
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state):
+    def prepare_training_step(self, batch, objective, algorithm_state):
         raise NotImplementedError
 
     def prepare_weights(self, runtime_load_id, *, force_full):

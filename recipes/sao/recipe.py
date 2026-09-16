@@ -43,7 +43,7 @@ class SAORecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="sao", loss_family="sao", processor=SAOProcessor)
+        return WeightTrainingSpec(objective="sao", processor=SAOProcessor)
 
     def __post_init__(self) -> None:
         super().__post_init__()

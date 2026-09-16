@@ -564,13 +564,13 @@ class RuntimeScheduler:
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedTrainingStep:
         return self.training_runtime.prepare_training_step(
             batch,
-            step_preparer,
+            objective,
             algorithm_state,
             scenario_step,
             serving_runtime_load_id=(
@@ -810,9 +810,9 @@ class TrainingCoordinator:
         )
 
     def prepare_training_step(
-        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self, batch: TrainingBatch, objective: str, algorithm_state: Mapping[str, Any]
     ) -> PreparedTrainingStep:
-        return self._training.prepare_training_step(batch, step_preparer, algorithm_state)
+        return self._training.prepare_training_step(batch, objective, algorithm_state)
 
     def shutdown(self) -> None:
         """Close training workers; deployment ownership closes inference separately."""

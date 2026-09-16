@@ -65,7 +65,7 @@ class CoordinatorClient(ABC):
 
     @abstractmethod
     def prepare_training_step(
-        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self, batch: TrainingBatch, objective: str, algorithm_state: Mapping[str, Any]
     ) -> PreparedTrainingStep: ...
 
     @abstractmethod
@@ -129,10 +129,10 @@ class ExecutorCoordinatorClient(CoordinatorClient):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
     ) -> PreparedTrainingStep:
-        return self._rpc("prepare_training_step", batch, step_preparer, dict(algorithm_state))
+        return self._rpc("prepare_training_step", batch, objective, dict(algorithm_state))
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self._rpc("execute_training_job", dict(payload))

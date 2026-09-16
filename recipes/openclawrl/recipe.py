@@ -26,7 +26,7 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     records into sessions by preferring a harness-supplied session tag and
     falling back to trace matching, judges each turn by its next state against
     the PRM's sglang server, and batches judgments directly — no external
-    grader. The step preparer then applies the verbatim upstream top-K select
+    grader. The training objective then applies the verbatim upstream top-K select
     objective.
 
     Empty ``prm_url`` is correlate-only mode: sessions resolve, nothing
@@ -62,11 +62,7 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     def training_spec(cls) -> WeightTrainingSpec:
         # The paper objective is the verbatim upstream top-K select loss
         # (recipes/openclawrl/slime), not the plain pg surrogate.
-        return WeightTrainingSpec(
-            step_preparer="openclawrl",
-            loss_family="openclawrl",
-            processor=OpenClawRLProcessor,
-        )
+        return WeightTrainingSpec(objective="openclawrl", processor=OpenClawRLProcessor)
 
     def __post_init__(self) -> None:
         super().__post_init__()

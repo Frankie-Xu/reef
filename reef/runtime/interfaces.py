@@ -611,7 +611,7 @@ class TrainingRuntime(ABC):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
         *,
@@ -725,7 +725,7 @@ class TrainingBackend(ABC):
 
     @abstractmethod
     def prepare_training_step(
-        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self, batch: TrainingBatch, objective: str, algorithm_state: Mapping[str, Any]
     ) -> PreparedTrainingStep: ...
 
     @abstractmethod

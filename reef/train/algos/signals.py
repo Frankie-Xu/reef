@@ -11,7 +11,7 @@ from typing import Any, Literal
 class StepScheduling:
     """How one reserved batch is cut into optimizer steps by the training runtime.
 
-    A processor hands the preparer one batch; the runtime may run several
+    A processor hands the objective one batch; the runtime may run several
     optimizer steps over it. The *rollout* is the unit that is never split
     across steps — a comparison set by default, or one sample with
     ``unit="sample"``.
@@ -70,7 +70,6 @@ class StepSignal:
     """Algorithm output before any backend's wire payload is materialized."""
 
     action: Literal["train", "skip"]
-    loss_family: str
     next_algorithm_state: Mapping[str, Any]
     metrics: Mapping[str, Any] = field(default_factory=dict)
     advantages: tuple[float, ...] | None = None

@@ -25,7 +25,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, Training
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
 from reef.surface.weights import create_weight_surface
-from reef.train.algos.registry import resolve_preparer
+from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
 from reef.train.trainer import Trainer
@@ -189,9 +189,13 @@ class WeightTrainingSpec:
     can still inspect a recipe class without constructing it.
     """
 
-    step_preparer: str
-    loss_family: str
+    objective: str
     processor: type[DataProcessor] | None = None
+
+    @property
+    def loss_family(self) -> str:
+        """The selected objective owns backend loss selection."""
+        return resolve_objective(self.objective).loss_family
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -201,8 +205,8 @@ class WeightTrainingRecipe(Recipe):
     Requires an independent :class:`TrainingRuntime` in ``training_runtime``
     (the first positional argument of every training recipe).
 
-    :meth:`training_spec` binds the data processor, step preparer, and backend
-    loss family. Keeping that static machinery in one structured return value
+    :meth:`training_spec` binds the data processor and training objective, which declares its
+    backend loss family. Keeping that static machinery in one structured return value
     means the dataclass fields remain the recipe's instance configuration. The
     training driver reads the selected class from the same deployment config
     and obtains its loss family from this hook; deployments do not repeat that
@@ -233,12 +237,12 @@ class WeightTrainingRecipe(Recipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        """Return the processor, preparer, and loss binding for this recipe.
+        """Return the processor and objective binding for this recipe.
 
         Concrete weight recipes override this hook. A recipe with bespoke
         trainer wiring may omit ``processor`` and override :meth:`build`.
         """
-        return WeightTrainingSpec(step_preparer="", loss_family="")
+        return WeightTrainingSpec(objective="")
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -361,7 +365,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        """Build a trainer from this recipe's processor, preparer, and report contract.
+        """Build a trainer from this recipe's processor, objective, and report contract.
 
         Override with ``Trainer.build`` for bespoke wiring such as a local
         training backend, and pass :attr:`report_type` through there too.
@@ -391,21 +395,15 @@ class WeightTrainingRecipe(Recipe):
                 f"{type(self).__name__} declares no processor: return a DataProcessor subclass "
                 f"as `processor` from training_spec() or override build() for bespoke trainer wiring"
             )
-        if not spec.step_preparer:
+        if not spec.objective:
             raise TypeError(
-                f"{type(self).__name__} declares no step_preparer: return a registered preparer name "
-                f"(see reef.train.algos) or a dotted 'module:callable' path from training_spec(), "
+                f"{type(self).__name__} declares no objective: return a registered objective name "
+                f"(see reef.train.algos) or a dotted 'module:Objective' path from training_spec(), "
                 f"or override build()"
             )
-        # Resolve the preparer now, so a recipe naming an unknown preparer
-        # fails at recipe build — before GPUs spin up — instead of at its
-        # first training step. Only the resolvability check happens here: the
-        # trainer keeps carrying the *name*, because the runtime boundary
-        # ships the string to the backend process, which resolves it again in
-        # its own registry (``TrainingRuntime.prepare_training_step``). A
-        # recipe whose preparer lives outside ``reef.train.algos`` must import
-        # that module before calling this build.
-        resolve_preparer(spec.step_preparer)
+        # Validate the method before starting workers. The runtime carries the
+        # reference and resolves it in its own process before batch partitioning.
+        resolve_objective(spec.objective)
         config = self.processor_config()
         candidate_evaluator = None
         if self.candidate_evaluation is not None:
@@ -421,7 +419,7 @@ class WeightTrainingRecipe(Recipe):
             processor_factory=lambda context: processor_class(context.with_config(config)),
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
-                spec.step_preparer,
+                spec.objective,
                 inference_runtime=self.runtime,
                 loss_family=spec.loss_family,
                 scenario=scenario,

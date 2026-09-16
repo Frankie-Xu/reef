@@ -342,11 +342,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
     ) -> PreparedTrainingStep:
         """Prepare a framework-neutral Reef batch with Slime-owned logic."""
-        prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
+        prepared = prepare_slime_step(batch, objective, algorithm_state)
         if prepared.payload is not None:
             self._algo.validate_payload(prepared.payload)
         return prepared

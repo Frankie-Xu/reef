@@ -51,13 +51,13 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
         *,
         serving_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
-        prepared = self._train_group_handle.prepare_training_step(batch, step_preparer, algorithm_state)
+        prepared = self._train_group_handle.prepare_training_step(batch, objective, algorithm_state)
         if not isinstance(prepared, PreparedTrainingStep):
             raise TrainingRuntimeError(
                 f"train group handle returned invalid prepared training step: {type(prepared).__name__}"

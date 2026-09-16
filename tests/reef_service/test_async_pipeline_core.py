@@ -66,13 +66,11 @@ class DurableRuntime(StubTrainingRuntime):
     def serving_runtime_load_id(self):
         return self.serving_version
 
-    def prepare_training_step(
-        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
-    ):
+    def prepare_training_step(self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None):
         sample = batch.items[0]
         payload = {
             "rollout_id": scenario_step,
-            "loss": step_preparer,
+            "loss": objective,
             "source": source_record_id(sample),
             "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
@@ -413,7 +411,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.scenario == "math"
     assert event.context.recipe == "test_policy"
     assert event.context.backend == "RuntimeCandidateBackend"
-    assert event.context.backend_config == {"runtime": "DurableRuntime", "step_preparer": "sft"}
+    assert event.context.backend_config == {"runtime": "DurableRuntime", "objective": "sft"}
     assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced
     assert event.metrics["train/loss"] == pytest.approx(0.25)

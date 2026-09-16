@@ -52,8 +52,8 @@ the recipe decides what they mean.
 Recipe
 ------
 
-The method a deployment runs. It binds a processor, a step preparer, a loss
-family, a runtime, and a surface. The core ``recipe`` records without
+The method a deployment runs. It binds a processor, a training objective, a
+runtime, and a surface. The core ``recipe`` records without
 producing updates.
 
 Recipe reference
@@ -117,20 +117,22 @@ typed training batch. Reported feedback uses valid reports with existing
 inference references; computed feedback derives its signal from traffic.
 The engines share batching, consumption, and retention contracts.
 
-Preparer
---------
+Training objective
+------------------
 
-The function that converts a reserved batch into a ``StepSignal`` containing
-the loss family, advantages, and next algorithm state. It is backend neutral
-and imports no training stack. A recipe names it by registered name or dotted
-path.
+The method-owned ``TrainingObjective`` declares its backend loss family and
+prepares a complete reserved batch. Its ``prepare`` method returns advantages,
+scheduling, metrics, and proposed algorithm state in a ``StepSignal`` before
+optimizer or worker partitioning. It imports no training stack. A recipe
+selects it by registered name or dotted class/instance path.
 
 Loss family
 -----------
 
-The tensor objective the training backend runs, declared by
-``WeightTrainingSpec.loss_family``. Separate from the preparer. Bundled:
-``sao``, ``tttd``, ``openclawrl``.
+The backend implementation selected by ``TrainingObjective.loss_family`` and
+exposed through ``WeightTrainingSpec.loss_family``. It computes model-dependent
+terms and the tensor loss. Shipped method families include ``sao``, ``tttd``,
+and ``openclawrl``.
 
 Harness
 -------

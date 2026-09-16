@@ -46,7 +46,7 @@ class StubTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
         *,
@@ -126,13 +126,13 @@ def runtime_bindings(value):
     return {"runtime": value}
 
 
-def candidate_backend(value, step_preparer, **kwargs):
+def candidate_backend(value, objective, **kwargs):
     from reef.train.runtime_backend import RuntimeCandidateBackend
 
     bindings = runtime_bindings(value)
     return RuntimeCandidateBackend(
         bindings["training_runtime"],
-        step_preparer,
+        objective,
         inference_runtime=bindings["runtime"],
         **kwargs,
     )

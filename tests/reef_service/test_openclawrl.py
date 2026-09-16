@@ -323,7 +323,7 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     assert isinstance(surface.inference, WeightInferenceHooks)
     trainer = recipe.build("s", SQLiteRecordStore())
     assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
-    assert trainer.candidate_backend.step_preparer == "openclawrl"
+    assert trainer.candidate_backend.objective == "openclawrl"
     trainer.close()
 
 

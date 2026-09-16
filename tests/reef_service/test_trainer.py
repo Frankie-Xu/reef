@@ -29,7 +29,7 @@ from reef.train.processors import DataProcessor
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectory_groups
 
-from ._grouped_pg import GROUPED_PG_PREPARER as _GROUPED_PG_PREPARER
+from ._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
 from ._grouped_pg import GroupedPolicyProcessor
 from ._threshold_processor import ThresholdProcessor
 
@@ -48,10 +48,10 @@ def policy_plugin(backend: object, policy: type) -> CandidateEvaluationPlugin:
 
 
 class _PreparingBackend(CandidateBackend):
-    """Dispatched test backend that commits only the preparer's state transition."""
+    """Dispatched test backend that commits only the objective's state transition."""
 
-    def __init__(self, preparer: str = "sft") -> None:
-        self._preparer = preparer
+    def __init__(self, objective: str = "sft") -> None:
+        self._objective = objective
 
     @property
     def dispatched(self) -> bool:
@@ -62,7 +62,7 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, self._preparer, state)
+        prepared = prepare_slime_step(batch, self._objective, state)
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -403,7 +403,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
         grpo_processor.ingest(inference(rid))
         grpo_processor.ingest(report("r" + rid, rid, score, comparison_set="x"))
-    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_PREPARER, {})
+    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_OBJECTIVE, {})
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
 
@@ -772,11 +772,11 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             return None
 
         def prepare_training_step(
-            self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+            self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None
         ):
-            prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
+            prepared = prepare_slime_step(batch, objective, algorithm_state)
             assert prepared.payload is not None
-            self.calls.append(("prepare", batch, step_preparer))
+            self.calls.append(("prepare", batch, objective))
             return PreparedTrainingStep(
                 action="train",
                 payload={**prepared.payload, "rollout_id": scenario_step},
@@ -807,7 +807,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     # The minimal grouped pg recipe — the cookbook grouped-method shape the
     # define-a-recipe guide describes, kept local to this suite.
     class GroupedPgRecipe(WeightTrainingRecipe):
-        step_preparer = _GROUPED_PG_PREPARER
+        objective = _GROUPED_PG_OBJECTIVE
         loss_family = "pg"
 
         def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
@@ -815,7 +815,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
                 scenario,
                 records,
                 processor_factory=lambda context: GroupedPolicyProcessor(context.with_config({"batch_size": 1})),
-                candidate_backend=candidate_backend(self.training_runtime, self.step_preparer),
+                candidate_backend=candidate_backend(self.training_runtime, self.objective),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
             )
@@ -841,7 +841,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     assert runtime.scenario_step == 1
     assert runtime.repository.current_artifact == runtime.repository.checkpoint_artifact
     prepare = training_runtime.calls[0]
-    assert prepare[2] == _GROUPED_PG_PREPARER
+    assert prepare[2] == _GROUPED_PG_OBJECTIVE
     assert trajectory_reward(trajectory_groups(prepare[1])[0][1]) == 0.8
     assert training_runtime.calls[1][1]["advantages"] == pytest.approx([-1.0, 1.0])
     assert [call[0] for call in training_runtime.calls] == ["prepare", "execute"]

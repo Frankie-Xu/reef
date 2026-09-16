@@ -35,13 +35,13 @@ Implementation
   ``<method-package>/processor.py``, subclassing a processor contract
   from ``reef/train/processors/``; extend those contracts only when they do
   not already express it.
-- Put the method's backend-neutral step preparer in
-  ``<method-package>/preparer.py`` (``reef/train/algos/`` holds the
+- Put the method's backend-neutral training objective in
+  ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
   contract). Backend-specific payload
   construction belongs to the concrete integration.
 - A method with its own tensor objective adds a loss family in
   ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
-  ``objective.py``) and names it in the recipe's ``training_spec()``;
+  ``objective.py``) and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_surface`` only when the produced artifact needs delivery
@@ -59,7 +59,7 @@ Surrounding changes
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
 - Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
-  table when the cookbook carries the method. Update the relevant processor, preparer, or surface
+  table when the cookbook carries the method. Update the relevant processor, objective, or surface
   reference if its public contract changes.
 
 Add a training integration

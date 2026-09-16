@@ -28,16 +28,16 @@ class RuntimeCandidateBackend(CandidateBackend):
     def __init__(
         self,
         training_runtime: TrainingRuntime,
-        step_preparer: str,
+        objective: str,
         *,
         inference_runtime: InferenceRuntime,
         loss_family: str | None = None,
         scenario: str | None = None,
     ) -> None:
-        if not step_preparer:
-            raise ValueError("step_preparer must be non-empty")
+        if not objective:
+            raise ValueError("objective must be non-empty")
         self.scheduler = RuntimeScheduler(training_runtime, inference_runtime)
-        self._step_preparer = step_preparer
+        self.objective = objective
         self._loss_family = loss_family
         self._scenario = scenario
 
@@ -50,17 +50,13 @@ class RuntimeCandidateBackend(CandidateBackend):
         return self.scheduler.inference_runtime
 
     @property
-    def step_preparer(self) -> str:
-        return self._step_preparer
-
-    @property
     def dispatched(self) -> bool:
         return True
 
     def experiment_config(self) -> Mapping[str, Any]:
         return {
             "runtime": type(self.training_runtime).__name__,
-            "step_preparer": self._step_preparer,
+            "objective": self.objective,
             **({"loss_family": self._loss_family} if self._loss_family is not None else {}),
         }
 
@@ -95,7 +91,7 @@ class RuntimeCandidateBackend(CandidateBackend):
     ) -> PreparedStep:
         prepared = self.prepare_training_step(
             batch,
-            self._step_preparer,
+            self.objective,
             state,
             scenario_step,
         )
@@ -175,11 +171,11 @@ class RuntimeCandidateBackend(CandidateBackend):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedTrainingStep:
-        return self.scheduler.prepare_training_step(batch, step_preparer, algorithm_state, scenario_step)
+        return self.scheduler.prepare_training_step(batch, objective, algorithm_state, scenario_step)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self.scheduler.execute_training_job(payload)

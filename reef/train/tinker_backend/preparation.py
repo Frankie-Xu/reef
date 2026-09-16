@@ -9,14 +9,14 @@ from typing import Any
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import TrainingBatch, trajectories
 from reef.runtime.interfaces import PreparedTrainingStep
-from reef.train.algos.registry import resolve_preparer
+from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import materialize_schedule, schedule_seed
 from reef.train.tinker_backend.losses import TokenRow, resolve_tinker_loss
 
 
 def prepare_tinker_step(
     batch: TrainingBatch,
-    preparer: str,
+    objective: str,
     state: Mapping[str, Any],
     *,
     batch_size: int,
@@ -28,10 +28,11 @@ def prepare_tinker_step(
     and whether any trajectory was produced under another one; without it,
     Reef's coordinator performs staleness admission from the batch itself.
     """
-    signal = resolve_preparer(preparer)(batch, state)
+    method = resolve_objective(objective)
+    signal = method.prepare(batch, state)
     if signal.action == "skip":
         return PreparedTrainingStep("skip", signal.next_algorithm_state, signal.metrics)
-    resolve_tinker_loss(signal.loss_family)
+    resolve_tinker_loss(method.loss_family)
     items = trajectories(batch)
     if signal.advantages is None or len(signal.advantages) != len(items):
         raise ValueError("Tinker policy training requires one advantage per trajectory")
@@ -76,7 +77,7 @@ def prepare_tinker_step(
         {**signal.metrics, "optimizer_steps": len(batches), "dropped_rollouts": schedule.dropped_rollouts},
         {
             "batch_id": batch.batch_id,
-            "loss": signal.loss_family,
+            "loss": method.loss_family,
             "batches": batches,
             **({"source_runtime_load_id": runtime_load_id, "stale": stale} if runtime_load_id is not None else {}),
         },

@@ -25,7 +25,7 @@ class TTTDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="tttd", loss_family="tttd", processor=TTTDProcessor)
+        return WeightTrainingSpec(objective="tttd", processor=TTTDProcessor)
 
     def __post_init__(self) -> None:
         super().__post_init__()

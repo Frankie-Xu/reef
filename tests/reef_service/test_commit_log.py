@@ -348,10 +348,8 @@ class RecordingRuntime(StubTrainingRuntime):
     def inference_handler(self):
         return None
 
-    def prepare_training_step(
-        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
-    ):
-        del step_preparer
+    def prepare_training_step(self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None):
+        del objective
         payload = {
             "rollout_id": scenario_step,
             "sources": [source_record_id(sample) for sample in batch.items],

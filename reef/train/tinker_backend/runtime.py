@@ -88,7 +88,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
         *,
@@ -96,7 +96,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
     ) -> PreparedTrainingStep:
         prepared = prepare_tinker_step(
             batch,
-            step_preparer,
+            objective,
             algorithm_state,
             batch_size=self._config.batch_size,
             runtime_load_id=serving_runtime_load_id,

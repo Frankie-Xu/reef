@@ -179,15 +179,15 @@ def test_groups_preserve_row_and_advantage_order():
     batch = TrainingBatch("groups", items)
     assert trajectories(batch) == items
     assert trajectory_groups(batch) == (items[:2], items[2:])
-    from recipes.tttd.preparer import TttdPreparer
+    from recipes.tttd.objective import TttdObjective
 
-    preparer = TttdPreparer()
+    objective = TttdObjective()
     expected = tuple(
         value
         for group in (items[:2], items[2:])
-        for value in preparer.adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
+        for value in objective.adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
     )
-    assert preparer(batch, {}).advantages == expected
+    assert objective.prepare(batch, {}).advantages == expected
 
 
 def test_noncontiguous_groups_fail_before_misaligned_training():

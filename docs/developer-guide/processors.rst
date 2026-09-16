@@ -38,7 +38,7 @@ The processor also controls retention. The trainer reads
 ``retention_decision()`` (protected vs releasable ids) and reports deletions
 back through ``compaction_applied()``.
 Nothing numeric lives here. Advantages and the loss family are the step
-preparer's. The read-only ``status()`` hook is empty by default; a processor
+objective's. The read-only ``status()`` hook is empty by default; a processor
 uses it only when a terminal outcome cannot become a batch and an external
 runner must stop waiting (TTTD reports a complete mixed-artifact step as an
 invariant failure).

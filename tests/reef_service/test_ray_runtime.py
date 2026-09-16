@@ -27,24 +27,24 @@ from reef.runtime.interfaces import (
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
 from reef.surface import RuntimeLoadMismatch, create_weight_surface
-from reef.train.algos import StepScheduling, StepSignal
+from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step as slime_prepare_step
 from reef.train.types import TaskItem, TrainingBatch, trajectories
 
-from ._grouped_pg import GROUPED_PG_PREPARER as _TEST_GROUPED_PREPARER
+from ._grouped_pg import GROUPED_PG_OBJECTIVE as _TEST_GROUPED_OBJECTIVE
 
-_TEST_SFT_PREPARER = "reef_service.test_ray_runtime:_prepare_test_sft"
+_TEST_SFT_OBJECTIVE = "reef_service.test_ray_runtime:SampleSftObjective"
 
 
-def _prepare_test_sft(batch, state) -> StepSignal:
-    """Package-test custom preparer; cookbook examples are not in the wheel."""
-    trajectories(batch)
-    return StepSignal(
-        action="train",
-        loss_family="sft",
-        next_algorithm_state={"steps": int(state.get("steps", 0)) + 1},
-    )
+class SampleSftObjective(TrainingObjective):
+    name = "test-SampleSftObjective"
+    loss_family = "sft"
+
+    def prepare(self, batch, state) -> StepSignal:
+        """Package-test custom objective; cookbook examples are not in the wheel."""
+        trajectories(batch)
+        return StepSignal(action="train", next_algorithm_state={"steps": int(state.get("steps", 0)) + 1})
 
 
 class FakeTrainGroupHandle(RayCoordinatorClient):
@@ -62,10 +62,10 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
     def prepare_training_step(
         self,
         batch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
     ) -> PreparedTrainingStep:
-        return slime_prepare_step(batch, step_preparer, algorithm_state)
+        return slime_prepare_step(batch, objective, algorithm_state)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         del payload
@@ -359,7 +359,7 @@ def test_ray_runtime_requires_deferred_weight_updates() -> None:
 def test_ray_runtime_prepares_sft_without_reef_advantages() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
-    prepared = runtime.prepare_training_step(policy_batch(), _TEST_SFT_PREPARER, {}, 3)
+    prepared = runtime.prepare_training_step(policy_batch(), _TEST_SFT_OBJECTIVE, {}, 3)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -400,16 +400,16 @@ def test_training_job_results_round_trip_across_process_boundary(result: Trainin
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("batch", "step_preparer", "state", "advantages", "loss"),
+    ("batch", "objective", "state", "advantages", "loss"),
     [
         (policy_batch(), "openclawrl", {}, (1.0, 0.5), "openclawrl"),
-        (grouped_policy_batch(), _TEST_GROUPED_PREPARER, {}, (-1.0, 1.0), "pg"),
+        (grouped_policy_batch(), _TEST_GROUPED_OBJECTIVE, {}, (-1.0, 1.0), "pg"),
     ],
 )
-def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, step_preparer, state, advantages, loss) -> None:
+def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, objective, state, advantages, loss) -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
-    prepared = runtime.prepare_training_step(batch, step_preparer, state, 9)
+    prepared = runtime.prepare_training_step(batch, objective, state, 9)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -421,23 +421,23 @@ def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, step_prepa
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("batch", "step_preparer", "error", "message"),
+    ("batch", "objective", "error", "message"),
     [
         (TrainingBatch("task", (TaskItem(Path("tasks/example")),)), "sft", TypeError, "unsupported item"),
         (
             TrainingBatch("task", (TaskItem(Path("tasks/example")),)),
-            _TEST_SFT_PREPARER,
+            _TEST_SFT_OBJECTIVE,
             TypeError,
             "unsupported item",
         ),
-        (policy_batch(), "unknown", ValueError, "unknown step preparer"),
+        (policy_batch(), "unknown", ValueError, "unknown objective"),
     ],
 )
-def test_ray_runtime_rejects_unsupported_preparer_batch_pairs(batch, step_preparer, error, message) -> None:
+def test_ray_runtime_rejects_unsupported_objective_batch_pairs(batch, objective, error, message) -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
     with pytest.raises(error, match=message):
-        runtime.prepare_training_step(batch, step_preparer, {}, 0)
+        runtime.prepare_training_step(batch, objective, {}, 0)
 
 
 @pytest.mark.unit
@@ -449,7 +449,7 @@ def test_ray_runtime_sends_heterogeneous_samples_to_exact_staleness_admission() 
     runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
     prepared = runtime.prepare_training_step(
         grouped_policy_batch(versions=("engine:0", "engine:1")),
-        _TEST_GROUPED_PREPARER,
+        _TEST_GROUPED_OBJECTIVE,
         {},
         0,
     )
@@ -665,7 +665,7 @@ def test_ray_runtime_preserves_enabled_grouped_mixed_producing_versions() -> Non
 
     prepared = runtime.prepare_training_step(
         grouped_policy_batch(versions=("engine:1", "engine:2")),
-        _TEST_GROUPED_PREPARER,
+        _TEST_GROUPED_OBJECTIVE,
         {},
         0,
     )
@@ -1498,16 +1498,19 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
     asyncio.run(run())
 
 
-def _two_epoch_sample_preparer(batch, state):
-    """A cookbook-shaped preparer: per-sample rollouts, two passes over the batch."""
-    del state
-    return StepSignal(
-        action="train",
-        loss_family="pg",
-        next_algorithm_state={},
-        advantages=(-1.0, 1.0),
-        scheduling=StepScheduling(unit="sample", batch_size="actual", epochs=2),
-    )
+class TwoEpochObjective(TrainingObjective):
+    name = "test-TwoEpochObjective"
+    loss_family = "pg"
+
+    def prepare(self, batch, state):
+        """A cookbook-shaped objective: per-sample rollouts, two passes over the batch."""
+        del state
+        return StepSignal(
+            action="train",
+            next_algorithm_state={},
+            advantages=(-1.0, 1.0),
+            scheduling=StepScheduling(unit="sample", batch_size="actual", epochs=2),
+        )
 
 
 @pytest.mark.unit
@@ -1522,7 +1525,7 @@ def test_ray_runtime_producing_versions_follow_the_step_schedule() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
     prepared = runtime.prepare_training_step(
         grouped_policy_batch(versions=("engine:0", "engine:1")),
-        "reef_service.test_ray_runtime:_two_epoch_sample_preparer",
+        "reef_service.test_ray_runtime:TwoEpochObjective",
         {},
         0,
     )

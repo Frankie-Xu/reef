@@ -250,7 +250,7 @@ class TestHintJudging:
         assert "[role: tool]" in messages[1]["content"]
 
 
-class TestTopkPreparer:
+class TestTopkTestObjective:
     def test_signals_ride_topk_channels(self):
         cand = {"hint": "h", "teacher_tokens": [7, 8, 12, 13, 14]}
         batch = TrainingBatch(
