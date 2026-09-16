@@ -13,7 +13,7 @@ import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.beta.spade import SpadeObjective, SpadeProcessor, SpadeRecipe
-from recipes.beta.spade.processor import reported_task_name
+from recipes.beta.spade.processor import GenerationJob, reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest, write_harbor_task, write_split_manifest
@@ -424,11 +424,54 @@ class InlineWorker(JudgingWorker):
         self.processor = None
 
 
+class DeferredWorker(JudgingWorker):
+    """Takes a generation the moment it is submitted and runs it on ``finish``; the outcome lands on the next poll."""
+
+    def __init__(self) -> None:
+        super().__init__(self.unbound, concurrency=1)
+        self.processor: SpadeProcessor | None = None
+        self.submitted: list[GenerationJob] = []
+        self.waiting: list[GenerationJob] = []
+        self.finished: list[SupportsReceipt] = []
+
+    async def unbound(self, job: SupportsReceipt) -> SupportsReceipt:
+        raise RuntimeError("no processor bound")
+
+    def submit(self, job: SupportsReceipt) -> bool:
+        if not isinstance(job, GenerationJob):
+            raise TypeError("the generation worker takes GenerationJob")
+        self.submitted.append(job)
+        self.waiting.append(job)
+        return True
+
+    def finish(self) -> None:
+        """Run every generation taken so far, on this thread; the next poll hands their outcomes back."""
+        if self.processor is None:
+            raise RuntimeError("no processor bound")
+        jobs, self.waiting = self.waiting, []
+        for job in jobs:
+            try:
+                self.finished.append(asyncio.run(self.processor.run_generation(job)))
+            except Exception:
+                self.finished.append(Failed(job.receipt))
+
+    def poll(self) -> list[SupportsReceipt]:
+        outcomes, self.finished = self.finished, []
+        return outcomes
+
+    def close(self) -> None:
+        self.processor = None
+
+
 def generating(
-    tmp_path: Path, generator: StandInGenerator | None = None, **config: object
+    tmp_path: Path,
+    generator: StandInGenerator | None = None,
+    *,
+    worker: InlineWorker | DeferredWorker | None = None,
+    **config: object,
 ) -> tuple[SpadeProcessor, StandInGenerator]:
     generator = generator if generator is not None else StandInGenerator(tmp_path / "tasks")
-    worker = InlineWorker()
+    worker = worker if worker is not None else InlineWorker()
     built = SpadeProcessor(
         ProcessorContext(
             "spade",
@@ -521,6 +564,28 @@ def test_the_next_generation_waits_for_batches_per_generation_and_carries_the_ex
         "generation-00000.json",
         "generation-00001.json",
     ]
+
+
+def test_batches_trained_while_a_generation_runs_count_toward_the_next_one(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, generator = generating(tmp_path, worker=worker, batches_per_generation=2, skills=())
+    assert not p.ready() and [job.generation for job in worker.submitted] == [0]
+    assert p.derivation_pending() and p.status()["generation"]["in_flight"] == 0
+    for tasks in (("harbor-00000-000", "harbor-00000-001"), ("harbor-00000-002", "harbor-00000-003")):
+        for task in tasks:
+            played(p, task, 0, 1.0)
+            played(p, task, 1, 0.0)
+        p.acknowledge(p.build_batch().batch_id)
+        assert not p.ready() and [job.generation for job in worker.submitted] == [0], "one generation at a time"
+    worker.finish()
+    assert not p.ready(), "generation 0 lands on this look and generation 1 starts on it"
+    assert [job.generation for job in worker.submitted] == [0, 1]
+    assert p.status()["generation"] == {"in_flight": 1, "next": 2, "completed": 1, "of": 3, "last_error": ""}
+    worker.finish()
+    assert len(generator.proposals) == 6
+    assert "harbor-00000-000: without hint +0.25" in generator.proposals[3]["request"].experience_text
+    assert not p.ready() and p.status()["generation"]["completed"] == 2
+    assert [job.generation for job in worker.submitted] == [0, 1], "no batch trained while generation 1 ran"
 
 
 def test_a_restarted_processor_carries_on_from_the_reports_on_disk(tmp_path: Path) -> None:
