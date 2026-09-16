@@ -29,11 +29,11 @@ import shutil
 import signal
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 from reef.core.errors import ReefError
 
@@ -63,7 +63,7 @@ class EpisodeLaunchError(Exception):
     """The process could not be launched; raised for run_episode to map."""
 
 
-class EpisodeExecutor(Protocol):
+class EpisodeExecutor(ABC):
     """Launch one episode process and return its outcome.
 
     ``run_episode`` prepares ``root`` (with ``workspace`` inside it) and the
@@ -73,9 +73,11 @@ class EpisodeExecutor(Protocol):
     ``EpisodeError`` uniformly.
     """
 
+    @abstractmethod
     def preflight(self) -> None:
         """Raise if this executor cannot establish its isolation on this host."""
 
+    @abstractmethod
     def launch(
         self,
         argv: Sequence[str],
@@ -157,7 +159,7 @@ def _inherited_env() -> dict[str, str]:
 
 
 @dataclass(frozen=True)
-class LocalExecutor:
+class LocalExecutor(EpisodeExecutor):
     """Run the binary as a plain subprocess, as the engine always has.
 
     No isolation beyond the episode root, the minimal environment, and the
@@ -211,7 +213,7 @@ class SandboxLimits:
 
 
 @dataclass(frozen=True)
-class SandboxExecutor:
+class SandboxExecutor(EpisodeExecutor):
     """Run the binary inside a bubblewrap jail.
 
     bubblewrap (``bwrap``) is an unprivileged, daemonless sandbox: it builds a

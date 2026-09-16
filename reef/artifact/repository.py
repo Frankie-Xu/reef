@@ -10,7 +10,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Protocol, runtime_checkable
 
 from reef.artifact.artifact import (
     LOCAL_RELEASE_PREFIX,
@@ -18,10 +17,11 @@ from reef.artifact.artifact import (
     ArtifactConflict,
     ArtifactPublicationError,
     ArtifactRef,
+    ArtifactRepository,
 )
 
 
-class RepositoryBackend(ABC):
+class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
 
     @abstractmethod
@@ -73,7 +73,22 @@ class StagedReleaseRepositoryBackend(RepositoryBackend):
         ...
 
 
-class CachedRepositoryBackendFactory(ABC):
+class RepositoryBackendFactory(ABC):
+    @abstractmethod
+    def __call__(self, scenario: str) -> RepositoryBackend: ...
+
+
+class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
+    @abstractmethod
+    def has_registration(self, scenario: str) -> bool: ...
+
+
+class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
+    @abstractmethod
+    def list_registrations(self) -> tuple[str, ...]: ...
+
+
+class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, EnumerableRepositoryBackendFactory):
     """Own per-scenario backend caching instead of hiding it in a closure."""
 
     _REGISTRATION_MISS_TTL_SECONDS = 5.0
@@ -151,21 +166,7 @@ class CachedRepositoryBackendFactory(ABC):
         return ()
 
 
-class RepositoryBackendFactory(Protocol):
-    def __call__(self, scenario: str) -> RepositoryBackend: ...
-
-
-@runtime_checkable
-class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory, Protocol):
-    def has_registration(self, scenario: str) -> bool: ...
-
-
-@runtime_checkable
-class EnumerableRepositoryBackendFactory(RepositoryBackendFactory, Protocol):
-    def list_registrations(self) -> tuple[str, ...]: ...
-
-
-class Repository:
+class Repository(ArtifactRepository):
     """Scenario-scoped release chain and persistence facade."""
 
     def __init__(

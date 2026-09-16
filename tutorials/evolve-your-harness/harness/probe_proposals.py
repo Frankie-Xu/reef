@@ -21,10 +21,11 @@ sys.path.insert(0, str(HERE.parent))  # the harness package
 sys.path.insert(0, str(HERE.parents[3]))  # the reef checkout, for a source run
 
 from harness import native_evolution
+from reef.core import AgentRecord, RequestType
+from reef.core.trajectories import make_trajectory
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native.seed import SEED_NODES
 from reef.harness.tree.nodes import NODE_KINDS
-from reef.train.types import TraceSample
 
 KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")
 
@@ -39,7 +40,7 @@ class _Models:
 def _seed(serve: Path) -> tuple[tuple[str, dict], ...]:
     config = yaml.safe_load(serve.read_text())
     nodes = []
-    for entry in config["evolution"]["seed"]:
+    for entry in config["recipe"]["config"]["evolution"]["seed"]:
         if isinstance(entry, str):
             nodes.extend((node["name"], node["config"]) for node in SEED_NODES)
         else:
@@ -58,10 +59,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = yaml.safe_load(args.serve.read_text())
-    task = next(t for t in config["evolution"]["tasks"] if t.startswith(args.task))
+    task = next(t for t in config["recipe"]["config"]["evolution"]["tasks"] if t.startswith(args.task))
     nodes = _seed(args.serve)
     models = _Models(ModelBinding(base_url=args.base_url, model=args.model, api_key="none"))
-    sample = TraceSample("probe", {"messages": [{"role": "user", "content": task}]}, 0.0)
+    sample = make_trajectory(
+        (
+            AgentRecord.create(
+                scenario="probe",
+                request_type=RequestType.INFERENCE,
+                agent_record_id="probe",
+                payload={"messages": [{"role": "user", "content": task}]},
+            ),
+        ),
+        reward=0.0,
+    )
 
     rows = []
     for i in range(args.samples):

@@ -27,6 +27,15 @@ When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are bloc
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics.
 
+When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
+
+  Prints one line per thing an install needs and exits 0 when they all hold:
+  the interpreter behind the wrapper and whether it imports reef and
+  reef-client, the service address and whether the token is accepted, the
+  agent binary and its version, the tools the adapter wants on PATH, the
+  installed release against the served head, and any release that waits for
+  a person's review with its step page.
+
 When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
 ``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``):
 
@@ -80,11 +89,12 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any
 
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
@@ -94,9 +104,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
+from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.train.cordis_backend.requests import required_by
 
 
 def _captures_dir() -> Path:
@@ -409,9 +419,10 @@ RELEASE_HEADER = "x-reef-release-id"
 CAPTURE_PATHS = ("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true")
 
 
-class ReleaseObserver(Protocol):
+class ReleaseObserver(ABC):
     """Where the proxy hands the release id an inference response names."""
 
+    @abstractmethod
     def observe(self, release_id: str) -> None: ...
 
 
@@ -640,6 +651,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
+    # An evolved tool that starts a second agent session finds this harness's own binary first.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -916,6 +929,102 @@ def setup(
     return 0
 
 
+def _doctor_row(ok: bool, label: str, value: str) -> str:
+    return f"{'ok' if ok else '!!'}  {label:<12} {value}"
+
+
+def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
+    """One line per thing an install needs; 0 when every line holds, 1 otherwise.
+
+    Every check exists somewhere already (an install warning, a run time
+    warning, a route error); this is the one place that runs them all and
+    says which failed."""
+    rows: list[tuple[bool, str, str]] = []
+    catalog: list[Mapping[str, Any]] | None = None
+    try:
+        from reef.core.version import __version__
+
+        rows.append((True, "interpreter", f"{sys.executable} (reef {__version__}, reef-client importable)"))
+    except Exception as exc:  # pragma: no cover - the wrapper itself imports both
+        rows.append((False, "interpreter", f"{sys.executable} does not import reef: {exc}"))
+    try:
+        upstream = _extract_reef_url(adapter, Path(compose_dir))
+    except WrapperError as exc:
+        upstream = None
+        rows.append((False, "service", f"binding unreadable: {exc}"))
+    if upstream is None:
+        rows.append((False, "service", "no Reef URL in the tree's model binding files"))
+    else:
+        upstream = _strip_v1(upstream)
+        token = _reef_token(adapter, compose_dir)
+        # The release catalog, not /reef/status: every client of a harness can read it, direct or through the
+        # API platform, which does not expose the service wide status.
+        req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                listed = json.loads(response.read()).get("releases")
+            catalog = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
+            rows.append((True, "service", f"{upstream} answers, token {'accepted' if token else 'not needed'}"))
+        except urllib.error.HTTPError as exc:
+            rows.append(
+                (False, "service", f"{upstream} answered {exc.code}: {exc.read().decode(errors='replace')[:120]}")
+            )
+        except (OSError, ValueError) as exc:
+            rows.append((False, "service", f"{upstream} unreachable: {exc}"))
+    if Path(binary).is_file():
+        try:
+            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            first = (version.stdout or version.stderr).strip().splitlines()
+            rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            rows.append((False, "binary", f"{binary} did not run: {exc}"))
+    else:
+        rows.append((False, "binary", f"{binary} missing; rerun the install"))
+    for command, package in get_adapter(adapter).client_tools:
+        found = shutil.which(command)
+        rows.append(
+            (found is not None, "tool", f"{command} {'at ' + found if found else 'missing: install ' + package}")
+        )
+    installed = _installed_release(compose_dir)
+    if installed is None:
+        rows.append(
+            (
+                False,
+                "release",
+                f"no {HARNESS_RELEASE_FILE} beside the tree; this tree did not come through the install",
+            )
+        )
+    elif catalog is not None:
+        head = next((row.get("release_id") for row in reversed(catalog) if not row.get("pending")), None)
+        if head == installed:
+            rows.append((True, "release", f"{installed[:8]} installed, the served head"))
+        else:
+            rows.append(
+                (
+                    True,
+                    "release",
+                    f"{installed[:8]} installed; served head {str(head)[:8]}, the next session offers it",
+                )
+            )
+    else:
+        rows.append((True, "release", f"{installed[:8]} installed"))
+    if catalog is not None:
+        for step, waiting in _waiting_for_review(catalog):
+            page = f"{upstream}/reef/harness/releases/{step}/page"
+            rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
+    for ok, label, value in rows:
+        print(_doctor_row(ok, label, value))
+    return 0 if all(ok for ok, _, _ in rows) else 1
+
+
+def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Mapping[str, Any]]]:
+    """The pending rows no later promote row names, each with its step: held for a person, served to nobody."""
+    promoted = {row.get("rollback_target_release_id") for row in rows if row.get("operation") == "promote"}
+    return [
+        (step, row) for step, row in enumerate(rows) if row.get("pending") and row.get("release_id") not in promoted
+    ]
+
+
 def main() -> None:
     binary = os.environ.get("REEF_HARNESS_BINARY")
     compose = os.environ.get("REEF_HARNESS_COMPOSE")
@@ -945,6 +1054,9 @@ def main() -> None:
         parser.add_argument("request", nargs=argparse.REMAINDER, help="what the harness should do, in plain words")
         ns = parser.parse_args(args[1:])
         harness(scenario, adapter, compose, " ".join(ns.request))
+    elif args and args[0] == "doctor":
+        argparse.ArgumentParser(prog=f"reef-{adapter} doctor").parse_args(args[1:])
+        sys.exit(doctor(scenario, adapter, compose, binary))
     elif args and args[0] == "setup":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} setup")
         parser.add_argument("--yes", action="store_true", help="run every check without asking (for scripts)")

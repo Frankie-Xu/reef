@@ -19,10 +19,11 @@ import shutil
 import time
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 RESUME_FORMAT_VERSION = 1
 
@@ -59,19 +60,22 @@ class GuidanceRunOutcome:
     runtime_load_id: str | None
 
 
-class SearchHarness(Protocol):
+class SearchHarness(ABC):
+    @abstractmethod
     def run_step(self, step: int) -> Sequence[Any]: ...
 
 
-class TrainingBridge(Protocol):
+class TrainingBridge(ABC):
     """Reef's durable training transaction, seen from the harness."""
 
+    @abstractmethod
     def start_step(self) -> int: ...
 
+    @abstractmethod
     def wait_for_step(self, *, expected_completed_steps: int, expected_rollout_id: int) -> Mapping[str, Any]: ...
 
 
-class RayTrainingBridge:
+class RayTrainingBridge(TrainingBridge):
     """Read the durable training job through Reef's Ray train bridge.
 
     The bridge exposes the optimizer transaction (grad norm, LoRA parameter

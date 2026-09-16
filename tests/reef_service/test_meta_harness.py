@@ -8,25 +8,27 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
-from recipes.meta_harness.method import MetaHarnessProposer, MetaHarnessSelector, mutations_between
+from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
 from recipes.meta_harness.population import Population, PopulationStore, content_id
 from recipes.meta_harness.recipe import MetaHarnessRecipe, scenario_population_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.tree.mutations import Mutation
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.records import RecordStore
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.train.cordis_backend.strategies import Mutation
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
+from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -46,7 +48,7 @@ SEED = ({"id": "rules", "name": "rules", "config": {"text": "Answer carefully."}
 IMPROVED = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER}"}},)
 ALTERNATE = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER} Check twice."}},)
 TASK = "Solve the supplied task."
-SAMPLE = TraceSample(
+SAMPLE = recorded_trajectory(
     "trace-1",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -82,6 +84,13 @@ def reply(parent_id: str, entries: tuple[dict[str, Any], ...], *, hypothesis: st
             "entries": entries,
         }
     )
+
+
+class DecideOnlyBackend:
+    """Stands in for the training backend: these cases exercise ``decide`` only."""
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        raise AssertionError("this case exercises decide(), not evaluate()")
 
 
 def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
@@ -142,7 +151,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
         AgentRecord.create(
             scenario=name,
             request_type=RequestType.INFERENCE,
-            payload=SAMPLE.payload,
+            payload=recorded_payload(SAMPLE),
             agent_record_id=f"i{suffix}",
         )
     )
@@ -150,7 +159,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
         AgentRecord.create(
             scenario=name,
             request_type=RequestType.REPORT,
-            payload={"score": 0.0, "feedback": SAMPLE.feedback, "references": [f"i{suffix}"]},
+            payload={"score": 0.0, "feedback": SAMPLE.metadata.get("feedback"), "references": [f"i{suffix}"]},
             agent_record_id=f"r{suffix}",
         )
     )
@@ -191,7 +200,7 @@ def test_a_reordered_composition_is_replaced_atomically_in_target_order() -> Non
 
 
 def test_changing_a_node_kind_is_admitted_as_remove_and_create() -> None:
-    from reef.train.cordis_backend.backend import admit_mutations
+    from reef.harness.tree.mutations import admit_mutations
 
     target = ({"id": "rules", "name": "skill", "config": {"name": "review", "text": "Check the result."}},)
     admitted, refusal = admit_mutations(SEED, mutations_between(SEED, target), get_adapter("pi"))
@@ -371,7 +380,7 @@ def test_selector_judges_against_the_frontier_the_incumbent_was_admitted_on(tmp_
     store.restore_committed(population.to_dict())
     store.begin(population.to_dict())
 
-    decision = MetaHarnessSelector(store).decide(
+    decision = MetaHarnessPlugin(DecideOnlyBackend(), store).decide(
         UpdateCandidate("backend-candidate"),
         evaluation(candidate=(0.7,), current=(0.1,)),
     )
@@ -392,7 +401,7 @@ def test_selector_retains_a_non_winner_as_a_future_parent(tmp_path: Path) -> Non
     store.restore_committed(population.to_dict())
     store.begin(population.to_dict())
 
-    decision = MetaHarnessSelector(store).decide(
+    decision = MetaHarnessPlugin(DecideOnlyBackend(), store).decide(
         UpdateCandidate("backend-candidate"),
         evaluation(candidate=(0.2,), current=(0.6,)),
     )
@@ -418,7 +427,7 @@ def test_recipe_is_adapter_agnostic(tmp_path: Path, adapter: str) -> None:
     assert isinstance(built, MetaHarnessRecipe)
     assert built.adapter == adapter
     assert built.mode == "full_history"
-    assert isinstance(built.build("general-task", RecordStore()), Trainer)
+    assert isinstance(built.build("general-task", SQLiteRecordStore()), Trainer)
 
 
 def test_recipe_rejects_a_selection_override_that_would_split_population_from_serving(tmp_path: Path) -> None:
@@ -464,6 +473,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     scenario_name = "../general-meta-harness"
     try:
@@ -472,7 +482,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         _report_once(scenario, scenario_name, "1")
         result = scenario.prepare_training_step()
         assert result is not None and result.state is not None
-        backend = scenario.trainer._training_backend
+        backend = scenario.trainer._candidate_backend
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
@@ -563,7 +573,11 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(reply(content_id(SEED), proposed))})
     initial = tmp_path / "initial"
     initial.mkdir()
-    dispatcher = Dispatcher(recipe, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"))
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
         _report_once(scenario, "terminus-meta", "1")
@@ -590,6 +604,7 @@ def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Pa
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("failed-evaluation")
@@ -619,7 +634,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     records = tmp_path / "records"
-    dispatcher = Dispatcher(recipe, factory, agent_record_dir=records)
+    dispatcher = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
     mirror = scenario_population_path(tmp_path / "meta-harness", "commit-failure")
     try:
         scenario = dispatcher.get_or_create_scenario("commit-failure")
@@ -633,11 +648,12 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
         _report_once(scenario, "commit-failure", "2")
         second = scenario.prepare_training_step()
         assert second is not None and second.artifact is None
-        backend = scenario.trainer._training_backend
+        backend = scenario.trainer._candidate_backend
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
-        commit_log = scenario.commit_log
+        assert isinstance(scenario.store, CommitLogScenarioStore)
+        commit_log = scenario.store.commit_log
         assert commit_log is not None
         monkeypatch.setattr(commit_log, "append", lambda record: (_ for _ in ()).throw(RuntimeError("offline")))
         with pytest.raises(RuntimeError, match="offline"):
@@ -649,7 +665,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     # A stale/corrupt mirror is never loaded as search state.  Recovery gets
     # the prior durable commit and rewrites the mirror from that value.
     mirror.write_text('{"stale": true}\n')
-    restarted = Dispatcher(recipe, factory, agent_record_dir=records)
+    restarted = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
     try:
         recovered = restarted.get_or_create_scenario("commit-failure")
         assert recovered is not None
@@ -672,6 +688,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("publish-failure")
@@ -679,7 +696,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         _report_once(scenario, "publish-failure", "1")
         result = scenario.prepare_training_step()
         assert result.artifact is not None
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         assert tuple(backend._entries()) == SEED
         head = scenario.current_artifact_ref()
         checkpoint = scenario.repository.require_checkpoint_artifact()
@@ -691,9 +708,10 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         if failure == "publication":
             monkeypatch.setattr(scenario.repository, "publish", fail)
         elif failure == "commit":
-            monkeypatch.setattr(scenario.commit_log, "append", fail)
+            assert isinstance(scenario.store, CommitLogScenarioStore)
+            monkeypatch.setattr(scenario.store.commit_log, "append", fail)
         else:
-            monkeypatch.setattr(scenario._commit_protocol, "_activate", fail)
+            monkeypatch.setattr(scenario._committer, "_activate", fail)
         with pytest.raises(RuntimeError, match="unavailable"):
             scenario.commit(result)
         assert scenario.trainer.state == previous

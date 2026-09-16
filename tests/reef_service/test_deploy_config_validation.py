@@ -9,7 +9,8 @@ import pytest
 
 import reef.service.deploy.orchestrator as orchestrator
 from reef.cli import main as cli_main
-from reef.service.deploy.config import DeployConfigError, load_config, validate_services
+from reef.service.deploy.config_utils import DeployConfigError, load_config
+from reef.service.deploy.execution import validate_services
 from reef.service.deploy.process import _command_argv
 
 VALID = "services:\n  - name: worker\n    command: python -c 'print(1)'\n"
@@ -19,6 +20,60 @@ def _write(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "stack.yaml"
     path.write_text(text)
     return path
+
+
+@pytest.mark.unit
+def test_relative_config_uses_working_directory_not_installation(tmp_path: Path, monkeypatch) -> None:
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    _write(installed, "reef: {recipe: wrong}\n")
+    _write(tmp_path, "reef: {recipe: selected}\n")
+    monkeypatch.setattr("reef.service.deploy.config_utils.PROJECT_ROOT", installed)
+    monkeypatch.chdir(tmp_path)
+
+    assert load_config("stack.yaml")["reef"]["recipe"] == "selected"
+    (tmp_path / "stack.yaml").unlink()
+    with pytest.raises(DeployConfigError, match="config not found") as caught:
+        load_config("stack.yaml")
+    assert str(tmp_path / "stack.yaml") in str(caught.value)
+
+
+@pytest.mark.unit
+def test_cli_config_paths_and_child_config_follow_working_directory(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class StackStub:
+        exit_code = 0
+
+        def __init__(self, config, services, run_dir, ready_timeout_default, config_path, source_root=None):
+            captured["path"] = config_path
+            captured["config"] = load_config(config_path)
+            captured["run_dir"] = run_dir.resolve()
+
+        def start(self):
+            pass
+
+        def block(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REEF_CONFIG", raising=False)
+    monkeypatch.setattr(orchestrator, "_Stack", StackStub)
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
+    path = tmp_path / "stack.yaml"
+    path.write_text("run_dir: work/stack\n" + VALID)
+    arguments = ["serve", "-c", path.name]
+
+    with pytest.raises(SystemExit) as caught:
+        cli_main(arguments)
+
+    assert caught.value.code == 0
+    assert captured["path"] == path
+    assert captured["config"]["services"][0]["name"] == "worker"
+    assert captured["run_dir"] == tmp_path / "work" / "stack"
 
 
 @pytest.mark.unit
@@ -39,6 +94,16 @@ def test_non_object_root_is_a_config_error(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_empty_file_loads_as_an_empty_config(tmp_path: Path) -> None:
     assert load_config(_write(tmp_path, "")) == {}
+
+
+@pytest.mark.unit
+def test_directory_is_reported_as_an_unreadable_config(tmp_path: Path, capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli_main(["serve", "-c", str(tmp_path)])
+    assert caught.value.code == 2
+    message = capsys.readouterr().err
+    assert f"cannot read config {tmp_path}" in message
+    assert "Traceback" not in message
 
 
 @pytest.mark.unit
@@ -90,7 +155,7 @@ def test_required_environment_values_resolve_and_optional_values_can_be_empty(tm
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("tutorial", ["evolve-your-harness", "harness-requests"])
+@pytest.mark.parametrize("tutorial", ["evolve-your-harness", "reefine"])
 def test_tutorial_missing_environment_fails_before_launch_without_traceback(tutorial, monkeypatch, capsys) -> None:
     for name in ("REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
         monkeypatch.delenv(name, raising=False)

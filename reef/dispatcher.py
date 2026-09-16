@@ -8,7 +8,6 @@ handling lives in ``reef.service``; the dispatcher is transport-free.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import shutil
 import tempfile
@@ -24,6 +23,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
@@ -34,11 +34,12 @@ from reef.observability import (
     TrainingExperimentEvent,
 )
 from reef.recipe.base import Recipe
-from reef.records import RecordRetention
-from reef.runtime.base import RuntimeContractError, TrainingRuntime
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
+from reef.storage.records import RecordConflict, RecordRetention
+from reef.storage.scenario import ScenarioStorage
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class _TrainingState:
     lock: Lock = field(default_factory=Lock)
     ready: Event = field(default_factory=Event)
     errors: dict[str, str] = field(default_factory=dict)
+    failure_counts: dict[str, int] = field(default_factory=dict)
     status_build_error: str | None = None
     storage_status: Mapping[str, Any] | None = None
     last_drain: float | None = None
@@ -94,6 +96,7 @@ class _TrainingState:
 class _LifecycleState:
     closed: Event = field(default_factory=Event)
     preload_thread: Thread | None = None
+    metrics_thread: Thread | None = None
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -138,6 +141,7 @@ class Dispatcher:
     # means the training thread is not waking. Status reads perform the check,
     # so the alarm rides the health polling that already watches the service.
     undrained_warning_seconds: float = 60.0
+    operational_metrics_interval_seconds: float = 10.0
 
     def __init__(
         self,
@@ -148,8 +152,10 @@ class Dispatcher:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        scenario_storage: ScenarioStorage,
     ) -> None:
         self._recipe = recipe
+        self._storage = scenario_storage
         self._record_retention_lock = Lock()
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         self._registry = ScenarioRegistry(
@@ -157,6 +163,7 @@ class Dispatcher:
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
+            scenario_storage=scenario_storage,
             allow_implicit_creation=allow_implicit_creation,
             experiment_tracker=self._experiment_tracker,
         )
@@ -172,6 +179,13 @@ class Dispatcher:
                 daemon=True,
             )
             self._lifecycle.preload_thread.start()
+        if self._experiment_tracker.operational_metrics_enabled:
+            self._lifecycle.metrics_thread = Thread(
+                target=self.run_operational_metrics,
+                name="reef-operational-metrics",
+                daemon=True,
+            )
+            self._lifecycle.metrics_thread.start()
 
     @property
     def published(self) -> Mapping[str, Any]:
@@ -210,9 +224,9 @@ class Dispatcher:
             return {"scenario": scenario, "training_mode": current.trainer.training_mode}
 
     def _wake_training(self, current: Scenario) -> None:
-        if isinstance(current.runtime, TrainingRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
-        elif current.trainer.training_backend is not None:
+        elif current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
@@ -221,8 +235,7 @@ class Dispatcher:
     def prune_record_archives(self, retention: RecordRetention) -> int:
         """Apply deployment-wide retention without racing scenario file moves."""
         with self._record_retention_lock:
-            directory = self._registry.agent_record_dir
-            return 0 if directory is None else retention.prune(directory)
+            return self._storage.prune(days=retention.days, max_bytes=retention.max_bytes)
 
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
         """Remove a scenario from this deployment and move its own state aside.
@@ -243,8 +256,10 @@ class Dispatcher:
             self._stop_local_backend_worker(scenario)
             self._publication.forget(scenario)
             self._record_training_error(scenario, None)
+            with self._training.lock:
+                self._training.failure_counts.pop(scenario, None)
             if dropped is not None:
-                backend = dropped.trainer.training_backend
+                backend = dropped.trainer.candidate_backend
                 if backend is not None:
                     backend.retire_scenario(scenario)
                 dropped.close()
@@ -255,15 +270,7 @@ class Dispatcher:
     def _archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        moved: list[str] = []
-        record_dir = self._registry.agent_record_dir
-        if record_dir is not None:
-            destination = record_dir / "archived" / f"{hashlib.sha256(scenario.encode('utf-8')).hexdigest()}-{stamp}"
-            for path in self._registry.state_paths(scenario):
-                if path.exists():
-                    destination.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(path), str(destination / path.name))
-                    moved.append(str(destination / path.name))
+        moved = list(self._registry.archive_store(scenario))
         for directory in self._recipe.scenario_state_dirs(scenario):
             if directory.exists():
                 destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
@@ -273,7 +280,9 @@ class Dispatcher:
         return moved
 
     def recipe_has_files(self) -> bool:
-        return self._registry.recipe_has_files()
+        """Whether the served recipe creates a file-serving surface."""
+        # Capability probe only: file serving does not depend on the scenario.
+        return self._recipe.build_surface("").files is not None
 
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
@@ -373,33 +382,65 @@ class Dispatcher:
             return self._accept_record(current, item)
 
     def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
-        if item.request_type is RequestType.TRAIN:
-            if (existing := current.records.existing_receipt(item)) is not None:
-                return existing
-            if current.trainer.training_mode == "auto":
-                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-            if current.trainer.training_backend is None:
-                raise ValueError("explicit training requests require a training backend")
-            request = TrainingRequest.from_dict(item.payload)
-            if item.references:
-                raise ValueError("training instructions do not reference inference receipts")
-            refusal = training_request_refusal(request.text, request.requires)
-            if refusal is not None:
-                raise ValueError(refusal)
-        # Schema enforcement: reject a malformed report before it is durably
-        # appended, so the producer's POST fails with the violation naming
-        # the broken field instead of the record dying silently at training
-        # time. An undeclared schema keeps open ingress.
-        if item.request_type is RequestType.REPORT and (report_type := current.report_type) is not None:
-            report_type.from_dict(item.payload)
-        appended = current.records.append_result(item)
+        try:
+            if item.request_type is RequestType.TRAIN:
+                if (existing := current.records.existing_receipt(item)) is not None:
+                    current.operations.increment("ingest/duplicates_total")
+                    return existing
+                if current.trainer.training_mode == "auto":
+                    raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
+                if current.trainer.candidate_backend is None:
+                    raise ValueError("explicit training requests require a training backend")
+                request = TrainingRequest.from_dict(item.payload)
+                if item.references:
+                    raise ValueError("training instructions do not reference inference receipts")
+                refusal = training_request_refusal(request.text, request.requires)
+                if refusal is not None:
+                    raise ValueError(refusal)
+            # Schema enforcement: reject a malformed report before it is durably
+            # appended, so the producer's POST fails with the violation naming
+            # the broken field instead of the record dying silently at training
+            # time. An undeclared schema keeps open ingress.
+            if item.request_type is RequestType.REPORT:
+                # An identical retry remains valid after its sources were compacted.
+                if (existing := current.records.existing_receipt(item)) is not None:
+                    current.operations.increment("ingest/duplicates_total")
+                    return existing
+                validate_report_payload(item.payload)
+                if (report_type := current.report_type) is not None:
+                    report_type.from_dict(item.payload)
+                if len(set(item.references)) != len(item.references):
+                    raise ReportValidationError("report references must be unique")
+                for reference in item.references:
+                    stored_reference = current.records.get_for_audit(item.scenario, reference)
+                    if stored_reference is None or stored_reference.item.request_type is not RequestType.INFERENCE:
+                        raise ReportValidationError(
+                            f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
+                        )
+        except ReportValidationError:
+            current.operations.increment("ingest/rejected_report_total")
+            raise
+        except RecordConflict:
+            current.operations.increment("ingest/rejected_conflict_total")
+            raise
+        except ValueError:
+            current.operations.increment("ingest/rejected_request_total")
+            raise
+        try:
+            with current.operations.measure("ingest/write"):
+                appended = current.records.append_result(item)
+        except RecordConflict:
+            current.operations.increment("ingest/rejected_conflict_total")
+            raise
         stored = appended.item
         if not appended.inserted:
+            current.operations.increment("ingest/duplicates_total")
             return stored
-        if isinstance(current.runtime, TrainingRuntime):
+        current.operations.increment("ingest/accepted_total")
+        if current.training_runtime is not None:
             self._training.ready.set()
             return stored
-        if current.trainer.training_backend is not None:
+        if current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
             return stored
         result = current.prepare_training_step()
@@ -444,13 +485,13 @@ class Dispatcher:
             logger.exception("experiment tracker failed to record committed training step")
 
     def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
-        backend = current.trainer.training_backend
+        backend = current.trainer.candidate_backend
         try:
             backend_config = None if backend is None else dict(backend.experiment_config())
         except Exception:
             logger.exception("training backend failed to describe experiment configuration")
             backend_config = None
-        run_segment, run_step = (0, 0) if current.commit_log is None else current.commit_log.training_run_position()
+        run_segment, run_step = current.store.training_run_position() if current.store.durable else (0, 0)
         return TrainingExperimentContext(
             scenario=current.name,
             recipe=self._recipe.name,
@@ -476,6 +517,30 @@ class Dispatcher:
                 self._registry.record_preload_error(scenario, f"{type(exc).__name__}: {exc}")
 
     # -- Background workers ---------------------------------------------
+
+    def run_operational_metrics(self) -> None:
+        """Sample while training is idle, blocked, or failing, without status polling."""
+        while not self._lifecycle.closed.wait(self.operational_metrics_interval_seconds):
+            self.record_operational_metrics()
+
+    def record_operational_metrics(self) -> None:
+        """Publish numeric state only; one unavailable scenario must not hide others."""
+        for current in self._registry.loaded_scenarios():
+            self.record_scenario_operational_metrics(current)
+
+    def record_scenario_operational_metrics(self, current: Scenario) -> None:
+        """Keep recipe, storage, and provider sampling failures local to one scenario."""
+        try:
+            metrics = current.trainer.operational_metrics()
+            metrics.update(current.operations.snapshot())
+            with self._training.lock:
+                metrics["training/failed_attempts_total"] = self._training.failure_counts.get(current.name, 0)
+                metrics["training/error"] = int(current.name in self._training.errors)
+                if current.training_runtime is not None:
+                    metrics["training/checkpoint_storage_blocked"] = int(self._training.storage_status is not None)
+            current.trainer.processor.experiment_logger.log(metrics, namespace="operations")
+        except Exception as exc:
+            logger.warning("operational metrics unavailable for scenario %r (%s)", current.name, type(exc).__name__)
 
     def _start_training(self, scenario: Scenario) -> None:
         """Start the training drain thread if it hasn't been started yet.
@@ -548,7 +613,7 @@ class Dispatcher:
             self._record_training_error(scenario, self._error_text(exc))
 
     def _reload_durable_local_scenario(self, scenario: str, current: Scenario) -> None:
-        if current.commit_log is None:
+        if not current.store.durable:
             return
         with self._registry.lock_for(scenario):
             if self._registry.get_optional(scenario) is current:
@@ -588,7 +653,7 @@ class Dispatcher:
         current = self._registry.get_optional(scenario)
         if current is None:
             raise RuntimeContractError(f"local backend scenario {scenario!r} is not loaded")
-        if current.trainer.training_backend is None:
+        if current.trainer.candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
         try:
@@ -702,7 +767,7 @@ class Dispatcher:
         current = self._registry.get_optional(name)
         if current is None:
             raise RuntimeContractError(f"training thread is not bound to scenario {name!r}")
-        runtime = current.runtime
+        runtime = current.training_runtime
         if not isinstance(runtime, TrainingRuntime):
             raise RuntimeContractError(
                 f"training thread requires a TrainingRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
@@ -711,7 +776,7 @@ class Dispatcher:
         # A crash may leave remote serving updated but paused after Reef's
         # commit, or checkpointed before the weight update. Recover that
         # pending step before deciding whether another batch is available.
-        backend = current.trainer.training_backend
+        backend = current.trainer.candidate_backend
         if backend is None or not backend.dispatched:
             raise RuntimeContractError(f"training scenario {current.name!r} has no dispatched training backend")
         backend.recover_pending_step(
@@ -750,6 +815,7 @@ class Dispatcher:
                 self._training.errors.pop(scenario, None)
             else:
                 self._training.errors[scenario] = value
+                self._training.failure_counts[scenario] = self._training.failure_counts.get(scenario, 0) + 1
 
     def _record_status_build_error(self, value: str | None) -> bool:
         """Record a failure to build training status; return whether it changed."""
@@ -859,16 +925,18 @@ class Dispatcher:
             # A version is current only after Reef commits its head
             # and reopens admission. The backend may report it
             # earlier while the update is still being published.
-            "current_runtime_load_id": (
-                runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
-            ),
+            "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
             "training_mode": current.trainer.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
-        if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
+        if (
+            runtime is not None
+            and current.training_runtime is not None
+            and current.training_runtime.concurrent_training_scenarios
+        ):
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
         return block
 
@@ -920,8 +988,11 @@ class Dispatcher:
             self._training.thread.join()
         for worker in local_workers:
             worker.thread.join()
+        if self._lifecycle.metrics_thread is not None:
+            self._lifecycle.metrics_thread.join()
+            self.record_operational_metrics()
         errors: list[BaseException] = []
-        for scenario in self._registry.close_all():
+        for scenario in self._registry.loaded_scenarios():
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
@@ -929,11 +1000,18 @@ class Dispatcher:
                 scenario.close()
             except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
                 errors.append(exc)
+        try:
+            self._storage.close()
+        except BaseException as exc:
+            errors.append(exc)
         if self._recipe.runtime is not None:
-            try:
-                self._recipe.runtime.shutdown()
-            except BaseException as exc:
-                errors.append(exc)
+            self._recipe.runtime.pause_admission()
+        for component in (self._recipe.training_runtime, self._recipe.runtime):
+            if component is not None:
+                try:
+                    component.shutdown()
+                except BaseException as exc:
+                    errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:
@@ -948,6 +1026,7 @@ def build_default_dispatcher(
     checkpoint_strategy: CheckpointStrategy | None = None,
     local_artifact_dir: Path | None = None,
     agent_record_dir: Path | None = None,
+    scenario_storage: ScenarioStorage,
 ) -> Dispatcher:
     """Build a Dispatcher serving the core record-only ``recipe``.
 
@@ -955,7 +1034,8 @@ def build_default_dispatcher(
     dispatcher. The recipe is the same base ``Recipe`` a deployment gets
     from ``reef.recipe: recipe``.
     Uses an in-memory artifact backend when ``backend_factory`` is not
-    provided.
+    provided. Record and commit storage must be supplied explicitly through
+    ``scenario_storage``; this helper does not select a record backend.
     """
     if backend_factory is None:
         root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
@@ -970,4 +1050,5 @@ def build_default_dispatcher(
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         agent_record_dir=agent_record_dir,
+        scenario_storage=scenario_storage,
     )

@@ -25,12 +25,12 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from reef.harness.client import wrapper as harness_wrapper
-from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy
+from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, ReleaseObserver
 from reef.harness.runners.native import serve
 from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.runners.native.selftools import RESERVED_NAMES
 from reef.harness.runners.native.serve import ServeError, Server, admit_mutations
-from reef.train.cordis_backend.strategies import Mutation
+from reef.harness.tree.mutations import Mutation
 
 SCENARIO = "serve-demo"
 
@@ -241,7 +241,7 @@ def _wait(condition: Callable[[], bool], timeout_s: float = 5.0) -> None:
         time.sleep(0.02)
 
 
-class _Lines:
+class _Lines(serve.EventSink):
     def __init__(self) -> None:
         self.lines: list[str] = []
 
@@ -445,7 +445,7 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
                 raise outcome
             return str(outcome)
 
-    class _ReleaseListener:
+    class _ReleaseListener(serve.ReleaseUpdateListener):
         def __init__(self) -> None:
             self.heads: list[tuple[str, str]] = []
 
@@ -454,7 +454,7 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
 
     events: list[dict[str, Any]] = []
 
-    class _Log:
+    class _Log(serve.EventWriter):
         def write(self, type_: str, data: Any) -> None:
             events.append({"type": type_, **data})
 
@@ -479,7 +479,12 @@ def test_a_manifest_fetch_that_times_out_is_retried_by_the_next_poll(tmp_path: P
         log = server.sessions_dir / serve.SERVE_LOG
         reef.hang_manifest_s = 0.6
         reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
-        _wait(lambda: server.status()["release_id"] == "r2", timeout_s=10.0)
+        # The release ID changes before installation and the mount log write finish.
+        _wait(
+            lambda: any(m["release_id"] == "r2" for m in _typed(_events(log), "harness/mount")),
+            timeout_s=10.0,
+        )
+        assert server.status()["release_id"] == "r2"
         failed = _typed(_events(log), "harness/mount-failed")
         assert [f["release_id"] for f in failed] == ["r2"] and "timed out" in failed[0]["error"]
         assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1", "r2"]
@@ -898,7 +903,7 @@ def test_the_capture_proxy_tags_calls_live_and_publishes_per_turn(
     reef.release("r1", [])
     seen: list[str] = []
 
-    class Observer:
+    class Observer(ReleaseObserver):
         def observe(self, release_id: str) -> None:
             seen.append(release_id)
 

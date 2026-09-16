@@ -15,13 +15,15 @@ from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario
-from reef.train import PreparedStep, Trainer, TrainingBackend, TrainStepResult
+from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 
 from ._threshold_processor import ThresholdProcessor
 
 
-class _LocalBackend(TrainingBackend):
+class _LocalBackend(CandidateBackend):
     """An ordinary local candidate cycle with controllable preparation/evaluation."""
 
     def __init__(self, artifact_dir: Path) -> None:
@@ -66,14 +68,14 @@ class _LocalBackend(TrainingBackend):
 
 @dataclass(frozen=True)
 class _LocalRecipe(Recipe):
-    backend: TrainingBackend
+    backend: CandidateBackend
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         return Trainer.build(
             scenario,
             records,
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-            training_backend=self.backend,
+            candidate_backend=self.backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -90,6 +92,7 @@ def local_scenario(tmp_path):
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
@@ -164,8 +167,8 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
             # A queued writer must wait on the operation lock without first
             # taking the publication lock and starving the read-side callers.
             catalog = executor.submit(scenario.releases)
-            latest = executor.submit(scenario.artifact_snapshot)
-            historical = executor.submit(scenario.artifact_snapshot, initial_ref.release_id)
+            latest = executor.submit(scenario.artifact_with_metrics)
+            historical = executor.submit(scenario.artifact_with_metrics, initial_ref.release_id)
             version = executor.submit(scenario.artifact_for_version, current_ref.release_id)
             old_version = executor.submit(scenario.artifact_for_version, initial_ref.release_id)
 
@@ -191,7 +194,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
         if operation == "commit":
             assert writer.result(timeout=2) == {"steps": 2}
             assert scenario.scenario_step == 2
-            assert scenario.artifact_snapshot()[1] == {"score": 2.0}
+            assert scenario.artifact_with_metrics()[1] == {"score": 2.0}
         else:
             with pytest.raises(ReefError, match="pending commit"):
                 writer.result(timeout=2)
@@ -212,8 +215,11 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     publication_started = Event()
     resume_publication = Event()
 
-    assert scenario.commit_log is not None
-    target = scenario.commit_log if phase == "journal" else scenario.trainer
+    assert scenario.store.durable
+    assert isinstance(scenario.store, CommitLogScenarioStore)
+    journal = scenario.store.commit_log
+    assert journal is not None
+    target = journal if phase == "journal" else scenario.trainer
     method = "append" if phase == "journal" else "commit_applied"
     original = target.append if phase == "journal" else target.commit_applied
 
@@ -231,11 +237,11 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
 
     def read_latest():
         readers_started[1].set()
-        return scenario.artifact_snapshot()
+        return scenario.artifact_with_metrics()
 
     def read_historical():
         readers_started[2].set()
-        return scenario.artifact_snapshot(previous_ref.release_id)
+        return scenario.artifact_with_metrics(previous_ref.release_id)
 
     def read_version():
         readers_started[3].set()
@@ -300,7 +306,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             "error": "storage unavailable",
         }
         second = _prepare(scenario)
-        monkeypatch.setattr(scenario._commit_protocol, "_should_checkpoint", lambda result: checkpoint)
+        monkeypatch.setattr(scenario._committer, "_should_checkpoint", lambda result: checkpoint)
 
         def unexpected_publish(*args, **kwargs):
             pytest.fail("a new release must not publish while its committed parent is unsynchronized")
@@ -309,14 +315,14 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
         with pytest.raises(ArtifactPublicationError, match="storage unavailable"):
             scenario.commit(second)
         assert scenario.scenario_step == 1
-        assert len(scenario.commit_log.records()) == 1
+        assert len(scenario.store.history()) == 1
         assert scenario.current_artifact_ref() == committed
 
     # Retry the same prepared step after storage recovers; the committed
     # parent is repaired first, and the new step advances exactly once.
     scenario.commit(second)
     assert scenario.scenario_step == 2
-    assert len(scenario.commit_log.records()) == 2
+    assert len(scenario.store.history()) == 2
     assert scenario.repository.checkpoint_artifact == backend.current()
     assert scenario.commit_status["artifact_head_sync"] == {
         "state": "synchronized",
@@ -350,7 +356,7 @@ def test_pointer_conflict_preserves_committed_step_and_blocks_rollback(local_sce
     with pytest.raises(ArtifactConflict):
         scenario.rollback(initial.release_id)
     assert scenario.scenario_step == 1
-    assert len(scenario.commit_log.records()) == 1
+    assert len(scenario.store.history()) == 1
     assert backend.current() == unrelated
 
 
@@ -368,7 +374,7 @@ def test_rollback_exposes_pointer_failure_after_its_commit(local_scenario, monke
         patch.setattr(backend, "commit_release", unavailable)
         rolled_back = scenario.rollback(initial.release_id)
     assert scenario.scenario_step == 2
-    assert scenario.commit_log.records()[-1].operation == "rollback"
+    assert scenario.store.history()[-1].operation == "rollback"
     assert scenario.current_artifact_ref() == rolled_back
     assert backend.current() == previous
     assert scenario.commit_status["artifact_head_sync"] == {
@@ -381,17 +387,20 @@ def test_rollback_exposes_pointer_failure_after_its_commit(local_scenario, monke
 def test_committed_record_retry_reports_pointer_failure_without_repeating_step(local_scenario, monkeypatch):
     scenario, _ = local_scenario
     result = _prepare(scenario)
-    append = scenario.commit_log.append
+    assert isinstance(scenario.store, CommitLogScenarioStore)
+    journal = scenario.store.commit_log
+    assert journal is not None
+    append = journal.append
 
     def lose_ack(record):
         append(record)
         raise OSError("commit acknowledgment lost")
 
     with monkeypatch.context() as patch:
-        patch.setattr(scenario.commit_log, "append", lose_ack)
+        patch.setattr(journal, "append", lose_ack)
         with pytest.raises(OSError, match="acknowledgment lost"):
             scenario.commit(result)
-    committed = scenario.commit_log.records()[-1]
+    committed = scenario.store.history()[-1]
 
     def unavailable(*args, **kwargs):
         raise ArtifactPublicationError("storage unavailable")
@@ -399,7 +408,7 @@ def test_committed_record_retry_reports_pointer_failure_without_repeating_step(l
     monkeypatch.setattr(scenario.repository.backend, "commit_release", unavailable)
     scenario.commit(result)
     assert scenario.scenario_step == 1
-    assert len(scenario.commit_log.records()) == 1
+    assert len(scenario.store.history()) == 1
     assert scenario.trainer.state == result.state
     assert scenario.current_artifact_ref() == committed.artifact_ref
     assert scenario.commit_status["artifact_head_sync"] == {

@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from recipes.coral.gateway_launcher import attach_reef_adapter, attach_reef_adapter_to_agent_manager, insert_reef_layer
-from recipes.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.gateway_launcher import (
+    attach_reef_adapter,
+    attach_reef_adapter_to_agent_manager,
+    insert_reef_layer,
+)
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
+
+
+async def downstream_app(scope, receive, send):
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
 
 
 class FakeCoralMiddleware:
@@ -25,7 +34,7 @@ class FakeManager:
         self.started = False
 
     def start(self):
-        self._middleware = FakeCoralMiddleware(app=object())
+        self._middleware = FakeCoralMiddleware(app=downstream_app)
         self.started = True
 
     def register_agent(self, agent_id, worktree_path):
@@ -52,10 +61,10 @@ def test_attach_splices_under_coral_and_keeps_register_agent_working(tmp_path):
 
 
 def test_insert_is_idempotent(tmp_path):
-    from recipes.coral.journal import CallJournal
+    from recipes.beta.coral.journal import CallJournal
 
     journal = CallJournal(tmp_path / "j.jsonl")
-    middleware = FakeCoralMiddleware(app=object())
+    middleware = FakeCoralMiddleware(app=downstream_app)
     insert_reef_layer(middleware, scenario="s", journal=journal)
     first = middleware.app
     insert_reef_layer(middleware, scenario="s", journal=journal)
@@ -63,7 +72,7 @@ def test_insert_is_idempotent(tmp_path):
 
 
 def test_insert_requires_a_started_middleware(tmp_path):
-    from recipes.coral.journal import CallJournal
+    from recipes.beta.coral.journal import CallJournal
 
     journal = CallJournal(tmp_path / "j.jsonl")
     with pytest.raises(TypeError, match="started CoralGatewayMiddleware"):

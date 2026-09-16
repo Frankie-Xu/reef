@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness import compose
 from reef.harness.adapters import get_adapter
+from reef.harness.compose import FiberState
+from reef.harness.compose.loader import Loader
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native import DEFAULT_SYSTEM_PROMPT, LoadError, Session, _Loop
 from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Run, narrow_allow
@@ -19,9 +22,6 @@ from reef.harness.runners.native.plugins import NATIVE_PLUGINS, LoaderOrder
 from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import render_composition
-from reef.train.cordis_backend import compose
-from reef.train.cordis_backend.compose import FiberState
-from reef.train.cordis_backend.compose.loader import Loader
 
 
 def _entry(id_: str, kind: str, **config):
@@ -368,4 +368,4 @@ def test_the_interpreter_reads_the_host_between_steps_and_logs_a_new_header(tmp_
     assert third["messages"][0]["content"] == fourth["messages"][0]["content"] == "Be brief and loud."
     # The pre_step hook saw the prompt the model was about to see, at every step.
     witness = host.hooks["pre_step"][0]
-    assert witness.listen.__globals__["SEEN"] == ["Be brief.", "Be brief.", "Be brief and loud.", "Be brief and loud."]
+    assert witness._module.SEEN == ["Be brief.", "Be brief.", "Be brief and loud.", "Be brief and loud."]

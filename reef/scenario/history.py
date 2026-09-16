@@ -6,8 +6,8 @@ from itertools import islice
 from typing import Any
 
 from reef.core.artifact_ref import encode_artifact_ref
-from reef.records import StoredRecord
 from reef.scenario.scenario import Scenario
+from reef.storage.records import StoredRecord
 
 
 def record_metadata(stored: StoredRecord) -> dict[str, Any]:
@@ -48,7 +48,7 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
     if len(record_ids) > 100 or any(not value or len(value) > 256 for value in record_ids):
         raise ValueError("at most 100 non-empty record_id values of at most 256 characters are accepted")
     requested = frozenset(record_ids)
-    commits = scenario.commit_log.records() if scenario.commit_log else ()
+    commits = scenario.store.history() if scenario.store.durable else ()
     matches = tuple(
         islice(
             (

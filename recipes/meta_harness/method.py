@@ -21,16 +21,18 @@ from collections.abc import Mapping, Sequence
 from statistics import fmean
 from typing import Any
 
+from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
-from reef.train.cordis_backend.strategies import Mutation, Proposer
-from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import TraceSample
+from reef.train.cordis_backend.strategies import Proposer
+from reef.train.evaluation.evaluators import BackendEvaluateMixin
+from reef.train.types import TrajectoryItem
 
 from .population import Population, PopulationStore, normalize_entries
-
 
 SEARCH_MODES = ("full_history", "incumbent_only")
 
@@ -164,7 +166,7 @@ class MetaHarnessProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
         manifest: Any = None,
@@ -270,7 +272,7 @@ class MetaHarnessProposer(Proposer):
         render_composition(_entry_nodes(entries), self._descriptor)
         return entries
 
-    def _prompt(self, population: Population, samples: Sequence[TraceSample]) -> str:
+    def _prompt(self, population: Population, samples: Sequence[TrajectoryItem]) -> str:
         records = population.candidates if self._mode == "full_history" else [population.served]
         history = [
             {
@@ -286,11 +288,11 @@ class MetaHarnessProposer(Proposer):
         ]
         traffic = [
             {
-                "source_agent_record_id": sample.source_agent_record_id,
-                "score": sample.score,
-                "feedback": sample.feedback,
-                "payload": dict(sample.payload),
-                "trajectory": [dict(event) for event in sample.trajectory],
+                "source_agent_record_id": source_record_id(sample),
+                "score": sample.metadata.get("reward"),
+                "feedback": sample.metadata.get("feedback"),
+                "payload": dict(recorded_payload(sample)),
+                "trajectory": [dict(event) for event in recorded_payloads(sample)],
             }
             for sample in samples
         ]
@@ -322,10 +324,11 @@ class MetaHarnessProposer(Proposer):
         )
 
 
-class MetaHarnessSelector:
-    """Retain every candidate and serve strict mean-score improvements."""
+class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
+    """Give a plugin a ``decide()`` that serves strict mean-score improvements."""
 
     def __init__(self, store: PopulationStore) -> None:
+        super().__init__()
         self._store = store
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
@@ -371,6 +374,14 @@ class MetaHarnessSelector:
                 "target_episode_calls": population.episode_calls,
             },
         )
+
+
+class MetaHarnessPlugin(MetaHarnessSelectorMixin, BackendEvaluateMixin):
+    """Meta-Harness's candidate evaluation: measure through the backend, decide on the population frontier."""
+
+    def __init__(self, candidate_backend: Any, store: PopulationStore) -> None:
+        super().__init__(store)
+        self._candidate_backend = candidate_backend
 
 
 def _adapter_kinds(descriptor: AdapterDescriptor) -> tuple[str, ...]:
@@ -427,4 +438,4 @@ def _evaluation_scores(values: Any) -> tuple[float, ...]:
     return scores
 
 
-__all__ = ["SEARCH_MODES", "MetaHarnessProposer", "MetaHarnessSelector", "mutations_between"]
+__all__ = ["SEARCH_MODES", "MetaHarnessPlugin", "MetaHarnessProposer", "MetaHarnessSelectorMixin", "mutations_between"]

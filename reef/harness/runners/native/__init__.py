@@ -25,14 +25,23 @@ import shutil
 import sys
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
-from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, SandboxFailed, ToolFailed, select_enforcer
+from reef.harness.runners.native.enforce import (
+    Enforcer,
+    InProcessEnforcer,
+    SandboxFailed,
+    Tool,
+    ToolFailed,
+    select_enforcer,
+)
+from reef.harness.runners.native.graph import TurnLoop
 from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
@@ -74,25 +83,28 @@ class LoadError(Exception):
     """A rendered tool or hook module the loop cannot use; the episode ends in error instead of running without it."""
 
 
-class ToolRunner(Protocol):
+class ToolRunner(ABC):
     """What a tool module's ``run`` looks like: ``run(args, workdir) -> str``."""
 
+    @abstractmethod
     def __call__(self, args: dict[str, Any], workdir: str, /) -> Any: ...
 
 
-class Next(Protocol):
+class Next(ABC):
     """A hook's ``next``: the decision of the layer below, computed once."""
 
+    @abstractmethod
     def __call__(self) -> dict[str, Any]: ...
 
 
-class HookListener(Protocol):
+class HookListener(ABC):
     """What a hook module's ``listen`` looks like: ``listen(payload, next) -> decision``."""
 
-    def __call__(self, payload: dict[str, Any], next_: Next, /) -> Any: ...
+    @abstractmethod
+    def listen(self, payload: dict[str, Any], next_: Next, /) -> Any: ...
 
 
-class ToolModule:
+class ToolModule(Tool):
     """One rendered ``native_tool`` node: its declaration for the model and its ``run``."""
 
     def __init__(
@@ -105,17 +117,32 @@ class ToolModule:
         path: Path | None = None,
         builtin_tool: bool = False,
     ) -> None:
-        self.name = name
+        self._name = name
         self.description = description
         self.parameters = dict(parameters) or {"type": "object", "properties": {}}
-        self.run = run
-        self.capabilities = tuple(str(item) for item in capabilities)
+        self._runner = run
+        self._capabilities = tuple(str(item) for item in capabilities)
         # The module file, imported only where a call runs: afresh in a sandboxing enforcer's child, or at the
         # first in process call; a tool built in code has none.
-        self.path = path
+        self._path = path
         # Reef's own code rather than the tree's (the serve form's self tools): it runs in process whatever
         # enforcer the environment names, since the enforcer confines what a tree entry may do.
         self.builtin_tool = builtin_tool
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        return self._capabilities
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    def run(self, args: dict[str, Any], workdir: str, /) -> Any:
+        return self._runner(args, workdir)
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -140,24 +167,41 @@ class ToolModule:
         return None
 
 
-class HookModule:
-    """One rendered ``native_hook`` node: the event it listens at and its ``listen``."""
+class HookModule(HookListener):
+    """One rendered hook module and its event, invoked at the script boundary."""
 
-    def __init__(self, name: str, event: str, listen: HookListener) -> None:
+    def __init__(self, name: str, event: str, module: ModuleType) -> None:
         self.name = name
         self.event = event
-        self.listen = listen
+        self._module = module
+
+    def listen(self, payload: dict[str, Any], next_: Next, /) -> Any:
+        return self._module.listen(payload, next_)
 
 
-@dataclass(frozen=True)
-class LoopModule:
+@dataclass(frozen=True, init=False)
+class LoopModule(TurnLoop):
     """One rendered ``native_loop`` node: the module whose ``run_turn(ctx)`` replaces the graph for the root turn."""
 
-    name: str
+    _name: str
     #: The module file; None for a loop built in code.
     path: Path | None
-    max_steps: int
+    _max_steps: int
     module: ModuleType
+
+    def __init__(self, name: str, path: Path | None, max_steps: int, module: ModuleType) -> None:
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "_max_steps", max_steps)
+        object.__setattr__(self, "module", module)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def max_steps(self) -> int:
+        return self._max_steps
 
     def run_turn(self, ctx: Any) -> Any:
         return self.module.run_turn(ctx)
@@ -188,24 +232,24 @@ def _modules(directory: Path, prefix: str) -> Iterator[tuple[Path, ModuleType]]:
         yield path, import_module_file(path, prefix)
 
 
-def _imported_run(path: Path) -> ToolRunner:
+def _imported_run(path: Path) -> ModuleType:
     """The ``run`` a tool module binds once imported; a name the static read saw bound may still be missing (a branch not taken) or not callable."""
-    namespace = vars(import_module_file(path, "reef_native_tool"))
+    module = import_module_file(path, "reef_native_tool")
+    namespace = vars(module)
     if "run" not in namespace:
         raise LoadError(f"tool {path.name} did not bind run(args, workdir) when imported")
     if not callable(namespace["run"]):
         raise LoadError(f"tool {path.name} binds run but it is not callable")
-    run: ToolRunner = namespace["run"]
-    return run
+    return module
 
 
-class _ModuleRun:
+class _ModuleRun(ToolRunner):
     """A tool module's ``run`` for the in process enforcer: imported at the first call, never at load, and once, so a top level that raised fails every later call the same way without running again."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.Lock()
-        self._run: ToolRunner | None = None
+        self._run: ModuleType | None = None
         self._error: LoadError | None = None
 
     def __call__(self, args: dict[str, Any], workdir: str, /) -> Any:
@@ -221,7 +265,7 @@ class _ModuleRun:
             if run is None:
                 # A fresh instance: raising the kept one again would grow its traceback at every call.
                 raise LoadError(str(self._error)) from self._error
-        return run(args, workdir)
+        return run.run(args, workdir)
 
 
 def _literal(path: Path, name: str, value: ast.expr) -> Any:
@@ -312,7 +356,7 @@ def hook_from_module(path: Path, module: ModuleType) -> HookModule:
     event = str(getattr(module, "EVENT", ""))
     if not callable(listen) or event not in NATIVE_EVENTS:
         raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known event")
-    return HookModule(str(getattr(module, "NAME", path.stem)), event, listen)
+    return HookModule(str(getattr(module, "NAME", path.stem)), event, module)
 
 
 def loop_from_module(path: Path | None, module: ModuleType, options: Mapping[str, Any]) -> LoopModule:
@@ -452,7 +496,7 @@ class Session:
         self._handle.close()
 
 
-class _Layer:
+class _Layer(Next):
     """``next`` as one hook sees it: the layer below runs once however often it is called.
 
     The hook gets a copy; the pristine decision stays here for the comparison
@@ -814,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-V", "--version", action="store_true", help="print the reef version and exit")
     args = parser.parse_args(argv)
     if args.version:
-        from reef import __version__
+        from reef.core.version import __version__
 
         print(f"reef-native {__version__}")
         return 0

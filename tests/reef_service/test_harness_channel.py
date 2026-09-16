@@ -26,6 +26,7 @@ from reef_client.client import ReefClient
 
 import reef.harness.adapters
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
@@ -33,9 +34,10 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.inference import InferenceBackend
+from reef.recipe.cordis import CordisRecipe
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.install_script import (
     HARNESS_RELEASE_FILE,
@@ -43,10 +45,10 @@ from reef.service.install_script import (
     composition_checksum,
     render_install_script,
 )
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -138,7 +140,7 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-class _EchoBackend(InferenceBackend):
+class _EchoBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del artifact, path, payload
         return {"choices": [{"message": {"content": "ok"}}]}
@@ -180,6 +182,7 @@ def _dispatcher(
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
         agent_record_dir=tmp_path / "agent-record",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
@@ -189,7 +192,7 @@ async def _gate_step(client: TestClient) -> dict:
     """Drive one gated evolution step through the wire; return the new manifest.
 
     One traced inference plus its failing report fills the batch (batch_size
-    1, max_score 0.0). The report POST only records and schedules the step;
+    1). The report POST only records and schedules the step;
     the harness read channel exposes the winner after the background commit.
     """
     response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -231,7 +234,7 @@ async def _gate_step(client: TestClient) -> dict:
 @pytest.mark.unit
 def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/status")
@@ -278,7 +281,7 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
 @pytest.mark.unit
 def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/harness/adapters")
@@ -303,7 +306,7 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
     async def run() -> None:
         mutation = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, (mutation,)), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, (mutation,)), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -349,7 +352,7 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
 def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -376,7 +379,7 @@ def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> Non
 @pytest.mark.unit
 def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             first = await _gate_step(client)
@@ -410,7 +413,7 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
 @pytest.mark.unit
 def test_unknown_version_is_a_404_naming_the_version(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -430,7 +433,7 @@ def test_unknown_version_is_a_404_naming_the_version(tmp_path) -> None:
 def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -467,7 +470,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
         dispatcher = _dispatcher(tmp_path, MUTATIONS)
         scenario = dispatcher.get_or_create_scenario("delivery")
         assert scenario is not None
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         assert backend is not None
         evaluate_candidate = backend.evaluate
 
@@ -477,7 +480,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             assert finish_evaluation.wait(_ASYNC_UPDATE_TIMEOUT_S), "evaluation was not released"
             return result
 
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         second_step = None
         try:
@@ -537,7 +540,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 def test_client_pull_writes_the_release_file_outside_the_served_tree(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -565,7 +568,7 @@ def test_crlf_content_survives_the_pull_byte_exact(tmp_path) -> None:
     crlf = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker win\r\nrules"}})
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, [crlf]), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, [crlf]), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             manifest = await _gate_step(client)
@@ -684,20 +687,28 @@ def _install_fixture(
     # reef-infra into user site-packages and change what every later
     # subprocess reports as the reef version.
     _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
-    return script, tmp_path / "dest", prefix, _source_env(shim)
+    return script, tmp_path / "dest", prefix, _source_env(shim, tmp_path / "home")
 
 
-def _source_env(shim: Path) -> dict:
-    """The test's environment with ``shim`` first on PATH and the checkout on PYTHONPATH.
+def _source_env(shim: Path, home: Path) -> dict:
+    """The test's environment with ``shim`` first on PATH, the checkout on PYTHONPATH and ``home`` as HOME.
 
     CI runs the suite against the source tree rather than an installed
     reef-infra, and the install's import check runs under ``-P``, so the
     checkout must reach the interpreter through PYTHONPATH: without it the
     check fails and the script's pip branch installs reef-infra from GitHub
-    into the user site, which every later test then sees."""
+    into the user site, which every later test then sees. The script links
+    the wrapper into ``$HOME/.local/bin``, so a home of the test's own keeps
+    the suite out of the developer's, where a test's link would replace the
+    reef-pi they use."""
     repo_root = str(Path(__file__).resolve().parents[2])
+    # The script's python3 is the interpreter running the tests, never the machine's: a fixture that
+    # writes its own shim keeps it, the others get this one.
+    if not (shim / "python3").exists():
+        _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
     return {
         **os.environ,
+        "HOME": str(home),
         "PATH": f"{shim}:{os.environ['PATH']}",
         "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
     }
@@ -809,6 +820,14 @@ if "$PYTHON" -P -c '' 2>/dev/null; then
     SAFE_PATH="-P"
 fi
 
+# reef-client (the capture proxy) and reef (the wrapper) must import in $PYTHON, which reef-pi runs.
+if ! "$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null; then
+    echo "reef: reef-client and reef-infra are not importable by $PYTHON, which reef-pi runs; install them there:" >&2
+    echo "    \"$PYTHON\" -m pip install reef-client \"reef-infra @ git+https://github.com/Human-Agent-Society/reef.git\"" >&2
+    echo "or rerun this script from a shell whose python3 has them" >&2
+    exit 1
+fi
+
 # The release file's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
 release_info_tool() {
     "$PYTHON" - "$@" <<'REEF_RELEASE_INFO_TOOL_EOF'
@@ -901,10 +920,6 @@ case " $installed " in
         ;;
 esac
 
-# Ensure reef-client (capture proxy) and reef (harness wrapper) are importable by $PYTHON, the
-# interpreter reef-pi runs.
-"$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || spin "installing reef-client and reef-infra for $PYTHON" "$PYTHON" -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true
-"$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by $PYTHON, which reef-pi runs; install them there, or rerun this script from a shell whose python3 has them" >&2
 command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
 command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
 
@@ -973,7 +988,7 @@ wrapper_text() {
 # Usage: reef-pi -p "fix the bug"     # run the agent (receipts captured)
 #        reef-pi report --score 0 --feedback "..."  # report last run's receipts
 #        reef-pi harness "what the harness should do"  # ask reef for a change
-#        reef-pi setup  # check off what the newest release requires of you
+#        reef-pi doctor  # check the install: interpreter, service, binary, tools, release
 # Runs the python3 the install resolved; rerun the install from another shell to change it.
 export REEF_HARNESS_BINARY="$BINARY_ABS"
 export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"
@@ -986,18 +1001,19 @@ REEF_WRAPPER_EOF
 if [ ! -x "$DEST/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$DEST/reef-pi")" ]; then
     wrapper_text > "$DEST/reef-pi"
     chmod +x "$DEST/reef-pi"
-    # Symlink into ~/.local/bin so reef-pi is on PATH. The link target
-    # must be absolute: DEST defaults to the relative ./reef-harness, and a
-    # relative target resolves against the link's own directory, so the link
-    # dangles and reef-pi is not runnable from anywhere.
-    DEST_ABS="$(cd "$DEST" && pwd)"
-    mkdir -p "$HOME/.local/bin"
-    ln -sf "$DEST_ABS/reef-pi" "$HOME/.local/bin/reef-pi"
-    case ":$PATH:" in
-        *":$HOME/.local/bin:"*) ;;
-        *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
-    esac
 fi
+# Symlink into ~/.local/bin so reef-pi is on PATH, on every run: the link may have been
+# pointed elsewhere since the wrapper was written (an install into another directory), and
+# ln -sf costs nothing. The link target must be absolute: DEST defaults to the relative
+# ./reef-harness, and a relative target resolves against the link's own directory, so the
+# link dangles and reef-pi is not runnable from anywhere.
+DEST_ABS="$(cd "$DEST" && pwd)"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$DEST_ABS/reef-pi" "$HOME/.local/bin/reef-pi"
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
+esac
 
 echo "reef: done"
 echo "run:     $DEST/reef-pi"
@@ -1117,14 +1133,60 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
     # binary path is baked as an absolute path
     binary_abs = str(prefix / "node_modules" / ".bin" / "pi")
     assert binary_abs in text
-    # symlinked onto PATH
-    link = Path.home() / ".local" / "bin" / "reef-pi"
+    # symlinked onto PATH, in the fixture's home
+    link = Path(env["HOME"]) / ".local" / "bin" / "reef-pi"
     assert link.is_symlink()
     assert link.resolve() == wrapper.resolve()
     assert "run:" in result.stdout
     assert "reef-pi" in result.stdout
-    # clean up the symlink so it doesn't leak between tests
-    link.unlink(missing_ok=True)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("scenario", ["sc$dollar", "sc`id`tick"])
+def test_the_wrapper_carries_a_scenario_name_with_shell_metacharacters_verbatim(tmp_path, scenario: str) -> None:
+    """A scenario name with shell metacharacters reaches the wrapper byte exact, never expanded."""
+    script, dest, prefix, env = _install_fixture(
+        tmp_path,
+        binary_version="0.84.2",
+        npm="#!/bin/sh\nexit 1\n",
+        scenario=scenario,
+    )
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    try:
+        wrapper = dest / "reef-pi"
+        line = next(
+            candidate
+            for candidate in wrapper.read_text(encoding="utf-8").splitlines()
+            if candidate.startswith("export REEF_HARNESS_SCENARIO=")
+        )
+        evaluated = subprocess.run(
+            ["sh", "-c", f"{line}; printf '%s' \"$REEF_HARNESS_SCENARIO\""],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert evaluated.returncode == 0, evaluated.stderr
+        assert evaluated.stdout == scenario
+        plain_dir = tmp_path / "plain"
+        plain_dir.mkdir()
+        plain_script, plain_dest, plain_prefix, plain_env = _install_fixture(
+            plain_dir,
+            binary_version="0.84.2",
+            npm="#!/bin/sh\nexit 1\n",
+            scenario="plain-name",
+        )
+        plain_result = _run_install(plain_script, plain_dest, plain_prefix, plain_env)
+        assert plain_result.returncode == 0, plain_result.stderr
+        plain_line = next(
+            candidate
+            for candidate in (plain_dest / "reef-pi").read_text(encoding="utf-8").splitlines()
+            if candidate.startswith("export REEF_HARNESS_SCENARIO=")
+        )
+        assert plain_line == 'export REEF_HARNESS_SCENARIO="plain-name"'
+    finally:
+        link = Path.home() / ".local" / "bin" / "reef-pi"
+        link.unlink(missing_ok=True)
 
 
 @pytest.mark.unit
@@ -1137,6 +1199,7 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     first = _run_install(script, dest, prefix, env)
     assert first.returncode == 0, first.stderr
     wrapper = dest / "reef-pi"
+    link = Path(env["HOME"]) / ".local" / "bin" / "reef-pi"
     text = wrapper.read_text(encoding="utf-8")
     before = wrapper.stat().st_mtime_ns
     second = _run_install(script, dest, prefix, env)
@@ -1157,7 +1220,14 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     fourth = _run_install(script, dest, prefix, env)
     assert fourth.returncode == 0, fourth.stderr
     assert wrapper.stat().st_mode & 0o111
-    (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
+    # A link pointed elsewhere since (another install, a target since removed) comes back on a rerun that
+    # rewrites nothing: the link is made on every run, not only when the wrapper text changes.
+    link.unlink()
+    link.symlink_to(tmp_path / "elsewhere" / "reef-pi")
+    fifth = _run_install(script, dest, prefix, env)
+    assert fifth.returncode == 0, fifth.stderr
+    assert "composition already current" in fifth.stdout
+    assert link.resolve() == wrapper.resolve()
 
 
 @pytest.mark.unit
@@ -1174,6 +1244,32 @@ def test_install_refuses_a_python3_that_prints_at_startup_instead_of_baking_garb
     assert result.returncode == 1
     assert "reef: python3 did not name its interpreter" in result.stderr
     assert not (dest / "reef-pi").exists()
+
+
+@pytest.mark.unit
+def test_install_refuses_an_interpreter_without_reef_and_installs_nothing_on_its_own(tmp_path) -> None:
+    """The import check runs before the gate and the vendor install: an interpreter that cannot import reef and
+    reef-client stops the script with the line that installs them there, and nothing is written or run."""
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version=None, npm='#!/bin/sh\necho npm >> "$0.log"\nexit 0\n', scenario="code-repair"
+    )
+    _write_executable(
+        tmp_path / "shim" / "python3",
+        '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = pip ]; then echo "pip called" >&2; exit 1; fi\n'
+        # It names itself as the interpreter, so every later call still goes through it.
+        'if [ "$1" = "-c" ] && [ "$2" = "import sys; print(sys.executable)" ]; then printf \'%s\\n\' "$0"; exit 0; fi\n'
+        'case "$*" in *reef_client.serve*) exit 1;; esac\n'
+        f'exec "{sys.executable}" "$@"\n',
+    )
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 1
+    assert "reef: reef-client and reef-infra are not importable by" in result.stderr
+    assert (
+        '-m pip install reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git"'
+        in result.stderr
+    )
+    assert "pip called" not in result.stderr
+    assert not dest.exists() and not (tmp_path / "shim" / "npm.log").exists()
 
 
 @pytest.mark.unit
@@ -1204,7 +1300,6 @@ def test_install_and_wrapper_ignore_a_reef_directory_in_the_working_directory(tm
     run = subprocess.run([str(dest / "reef-pi")], cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
     assert run.returncode == 1
     assert "reef-pi: no Reef URL in the tree's model binding files" in run.stderr
-    (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
 
 
 @pytest.mark.unit
@@ -1229,14 +1324,11 @@ def test_the_path_symlink_resolves_when_dest_is_the_relative_default(tmp_path) -
     )
     assert result.returncode == 0, result.stderr
     assert "not importable by python3" not in result.stderr  # the bootstrap short-circuited
-    link = Path.home() / ".local" / "bin" / "reef-pi"
-    try:
-        assert link.is_symlink()
-        assert Path(os.readlink(link)).is_absolute()
-        assert link.resolve() == (workdir / "reef-harness" / "reef-pi").resolve()
-        assert link.exists()  # not dangling
-    finally:
-        link.unlink(missing_ok=True)
+    link = Path(env["HOME"]) / ".local" / "bin" / "reef-pi"
+    assert link.is_symlink()
+    assert Path(os.readlink(link)).is_absolute()
+    assert link.resolve() == (workdir / "reef-harness" / "reef-pi").resolve()
+    assert link.exists()  # not dangling
 
 
 @pytest.mark.unit
@@ -1277,7 +1369,7 @@ def _pinned_env(tmp_path: Path) -> tuple[Path, dict]:
     _write_executable(prefix / "node_modules/.bin/pi", "#!/bin/sh\necho 0.84.2\n")
     shim = tmp_path / "shim"
     _write_executable(shim / "npm", "#!/bin/sh\nexit 0\n")
-    return prefix, _source_env(shim)
+    return prefix, _source_env(shim, tmp_path / "home")
 
 
 def _render_to(path: Path, files: dict[str, str], release_id: str) -> Path:
@@ -1393,7 +1485,7 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
     dispatcher = _dispatcher(tmp_path, (), seed=seed)
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             manifest = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -1428,7 +1520,7 @@ def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(t
     dispatcher = _dispatcher(tmp_path, (), seed=seed)
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -1453,7 +1545,7 @@ def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(t
 @pytest.mark.unit
 def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             first = await _gate_step(client)
@@ -1502,7 +1594,7 @@ def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_
     )
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
@@ -1525,11 +1617,12 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
+        scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("weights-only")
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get("/reef/harness/install", params={"adapter": "pi"})
@@ -1544,7 +1637,7 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
 @pytest.mark.unit
 def test_install_route_refuses_an_unknown_adapter_with_a_404_naming_it(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -1573,7 +1666,7 @@ def test_install_route_answers_400_when_the_adapter_declares_no_install_section(
 
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -1594,7 +1687,7 @@ def test_install_route_answers_400_when_the_adapter_declares_no_install_section(
 @pytest.mark.unit
 def test_install_route_refuses_an_unknown_version_with_a_404_naming_it(tmp_path) -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             response = await client.get(
@@ -1619,7 +1712,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
 
     async def run() -> None:
         dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], batch_policy="records", batch_size=2)
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             for prompt in ("first", "second"):
@@ -1753,7 +1846,7 @@ def _git_install_fixture(
         '    chmod +x "$3/bin/python"\n'
         "fi\n",
     )
-    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    env = {**os.environ, "HOME": str(tmp_path / "home"), "PATH": f"{shim}:{os.environ['PATH']}"}
     return script, tmp_path / "dest", prefix, env, log
 
 
@@ -1762,11 +1855,12 @@ def test_git_install_kind_clones_the_pinned_ref_into_a_venv_when_the_binary_is_a
     script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version=None)
     result = _run_install(script, dest, prefix, env)
     assert result.returncode == 0, result.stderr
-    # The first two python3 calls are the install's: the sys.executable resolution of the interpreter it
-    # pins, then the -P probe of it; the vendor steps follow.
-    resolve, probe, *calls = log.read_text().splitlines()
+    # The first three python3 calls are the install's: the sys.executable resolution of the interpreter it
+    # pins, the -P probe of it, then the import check; the vendor steps follow.
+    resolve, probe, check, *calls = log.read_text().splitlines()
     assert resolve == "python3 -c import sys; print(sys.executable)"
     assert probe == "python3 -P -c "
+    assert check == "python3 -P -c import reef_client.serve, reef.harness.client.wrapper"
     assert calls[0] == (
         f"git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent {prefix}/src"
     )
@@ -1834,7 +1928,7 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
 
     async def run() -> None:
         client = TestClient(
-            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_handler=_EchoBackend()))
         )
         await client.start_server()
         try:
@@ -1870,7 +1964,7 @@ def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one
     dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=seed)
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             base = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -1901,7 +1995,7 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
     dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=(notice,))
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:
             base = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
@@ -2033,7 +2127,7 @@ def test_install_script_embeds_requires_with_hostile_text_and_refuses_a_bad_list
     expected = json.dumps([{"name": "notify", "kind": "permission", "check": check}])
     assert f"REQUIRES='{expected.replace(chr(39), chr(39) + chr(92) + chr(39) * 2)}'" in script
     assert '"requires": [' in script and '"extra"' not in script
-    assert "reef-pi setup  # check off what the newest release requires of you" in script
+    assert "reef-pi doctor  # check the install: interpreter, service, binary, tools, release" in script
     with pytest.raises(ValueError, match=r"requires\[0\]\.kind must be one of"):
         render_install_script(
             descriptor=get_adapter("pi"),
@@ -2053,7 +2147,7 @@ def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_an
     shim = tmp_path / "shim"
     npm_log = tmp_path / "npm.log"
     _write_executable(shim / "npm", f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{npm_log}"\nexit 0\n')
-    env = _source_env(shim)
+    env = _source_env(shim, tmp_path / "home")
     dest = tmp_path / "dest"
     v2 = tmp_path / "install-v2.sh"
     v2.write_text(

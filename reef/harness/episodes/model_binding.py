@@ -21,13 +21,14 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.interfaces import InferenceRuntime
 
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,
 #: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.
@@ -349,9 +350,10 @@ class ModelBindings(Mapping[str, ModelBinding]):
         return 1 + len(self.named)
 
 
-class ModelBindingsResolver(Protocol):
+class ModelBindingsResolver(ABC):
     """Freeze the model configuration once for an entire evolution step."""
 
+    @abstractmethod
     def resolve(self) -> ModelBindings: ...
 
 

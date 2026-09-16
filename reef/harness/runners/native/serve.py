@@ -27,27 +27,33 @@ import sys
 import threading
 import time
 import traceback
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, WrapperError
+from reef.harness.compose import Context, FiberState
+from reef.harness.compose.loader import Loader
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, Session, _Loop, binding_from
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
 from reef.harness.runners.native.graph import Run, run_graph, run_loop_module
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.plugins import NATIVE_PLUGINS
-from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
-from reef.harness.runners.native.selftools import RESERVED_NAMES, self_tools
+from reef.harness.runners.native.release_client import (
+    EventWriter,
+    HeadWatch,
+    ReleaseClient,
+    ReleaseClientError,
+    ReleaseUpdateListener,
+)
+from reef.harness.runners.native.selftools import RESERVED_NAMES, ServeState, self_tools
+from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.nodes import flat_entry_refusal
-from reef.train.cordis_backend.backend import admit_mutations
-from reef.train.cordis_backend.compose import Context, FiberState
-from reef.train.cordis_backend.compose.loader import Loader
-from reef.train.cordis_backend.strategies import Mutation
 
 SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"
@@ -66,9 +72,10 @@ class ServeError(Exception):
     """The serve process cannot start, or a request cannot be served; the message says why."""
 
 
-class EventSink(Protocol):
+class EventSink(ABC):
     """Where a turn's events are echoed line by line: the socket connection that asked for the turn."""
 
+    @abstractmethod
     def send(self, line: str) -> None: ...
 
 
@@ -218,7 +225,7 @@ class ServeSession(Session):
                 self._sink.send(line)
 
 
-class EventLog:
+class EventLog(EventWriter):
     """Where the process's own events land: the open turn's session while one is bound, else ``serve.jsonl``."""
 
     def __init__(self, path: Path) -> None:
@@ -238,13 +245,16 @@ class EventLog:
         self._own.close()
 
 
-class BuiltinToolEnforcer:
+class BuiltinToolEnforcer(Enforcer):
     """A built-in tool runs in process whatever ``REEF_NATIVE_ENFORCE`` says: it is reef's code, not the tree's."""
 
     def __init__(self, inner: Enforcer) -> None:
         self._inner = inner
         self._local = InProcessEnforcer()
-        self.mode = inner.mode
+
+    @property
+    def mode(self) -> str:
+        return self._inner.mode
 
     @staticmethod
     def _is_builtin_tool(tool: Tool | None) -> bool:
@@ -309,8 +319,12 @@ class _Pending:
 # -- the process -------------------------------------------------------------------------------------------
 
 
-class Server:
+class Server(ServeState, ReleaseUpdateListener):
     """The resident process: the live composition, the sessions, the proxy, the release watch and the socket."""
+
+    @property
+    def client(self) -> ReleaseClient:
+        return self._client
 
     def __init__(
         self,
@@ -350,7 +364,7 @@ class Server:
             token if token is not None else (os.environ.get("REEF_TOKEN") or self._installed_binding.api_key or None)
         )
         self.binding: ModelBinding = self._installed_binding
-        self.client = ReleaseClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
+        self._client = ReleaseClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
         self._served: list[dict[str, Any]] = []
         self._release_id: str | None = None
         self._parent_release_id: str | None = None
@@ -878,7 +892,7 @@ def _error(message: str) -> dict[str, Any]:
 # -- the socket --------------------------------------------------------------------------------------------
 
 
-class _ConnectionSink:
+class _ConnectionSink(EventSink):
     """Lines to one connection; a client that went away stops the echo and never the turn."""
 
     def __init__(self, wfile: Any) -> None:
@@ -944,7 +958,7 @@ def request(path: Path, payload: Mapping[str, Any], sink: EventSink | None = Non
 # -- the subcommands ---------------------------------------------------------------------------------------
 
 
-class _Stdout:
+class _Stdout(EventSink):
     def __init__(self, quiet: bool) -> None:
         self._quiet = quiet
 

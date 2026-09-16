@@ -20,7 +20,7 @@ from typing import Any, TextIO
 
 import yaml
 
-from reef.service.deploy.config import interpolate_config
+from reef.service.deploy.config_utils import interpolate_config
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _PROCESS_REAP_TIMEOUT = 5
@@ -116,14 +116,17 @@ class ProcessWorker:
         log_fp = open(self._log_file(name), "a")  # noqa: SIM115
         self._log_fps[name] = log_fp
         # Logs stay on the worker node and are tailed through Executor RPC.
-        proc = self._spawn(
-            command,
-            env=env,
-            cwd=interpolate_config(self.config, svc["cwd"]) if svc.get("cwd") else None,
-            stdout=log_fp,
-            stderr=subprocess.STDOUT,
-            start_new_session=os.name == "posix",
-        )
+        try:
+            proc = self._spawn(
+                command,
+                env=env,
+                cwd=interpolate_config(self.config, svc["cwd"]) if svc.get("cwd") else None,
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
+                start_new_session=os.name == "posix",
+            )
+        except OSError as exc:
+            raise OSError(exc.errno, f"service {name!r} could not start: {exc.strerror}", exc.filename) from exc
         self._procs[name] = proc
         if os.name == "posix":
             self._process_groups[name] = proc.pid
@@ -266,13 +269,15 @@ class ProcessWorker:
     def probe(self, name: str, timeout: float = 5.0) -> bool:
         service = next(svc for svc in self.services if svc["name"] == name)
         if not self._is_alive(name):
-            raise RuntimeError(f"service {name!r} exited before ready")
+            proc = self._procs.get(name)
+            exit_status = f" (exit code {proc.returncode})" if proc is not None else ""
+            raise RuntimeError(f"service {name!r} exited before ready{exit_status}")
         ready = service.get("ready")
         if not ready:
             return True
         with subprocess.Popen(
-            interpolate_config(self.config, ready),
-            shell=True,
+            interpolate_config(self.config, ready) if isinstance(ready, str) else _command_argv(self.config, ready),
+            shell=isinstance(ready, str),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=self._service_env(service),

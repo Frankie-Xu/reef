@@ -8,16 +8,23 @@ import time
 from pathlib import Path
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime
 
-from reef.scenario.checkpoint_strategy import EveryNVersions
+
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
-from reef.service.deploy.config import interpolate_config
-from reef.service.deploy.settings import ServiceSettings
+from reef.service.deploy.service_config import ServiceConfig
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
+
+
+def test_configured_handler_rejects_a_function() -> None:
+    from reef.train.deployment import inference_handler_factory_for
+
+    with pytest.raises(ValueError, match="must inherit InferenceHandler"):
+        inference_handler_factory_for("reef.inference.http.provider_request_headers")
 
 
 class _Process:
@@ -56,7 +63,12 @@ def _example_owned(relative_path: str):
     )
 
 
-def _settings(**overrides) -> ServiceSettings:
+def stub_runtimes(**kwargs):
+    training = StubTrainingRuntime(**kwargs)
+    return training, training.inference
+
+
+def _settings(**overrides) -> ServiceConfig:
     recipe_settings = {
         "batch_size": 2,
         "checkpoint_every_n_versions": 3,
@@ -73,8 +85,8 @@ def _settings(**overrides) -> ServiceSettings:
         "inference_url": "http://ray-head:30000",
         "model_path": "/models/demo",
         "inference_timeout_s": 30.0,
-        "inference_backend_factory": None,
-        "inference_backend_config": {},
+        "inference_handler_factory": None,
+        "inference_handler_config": {},
         "inference_retry_initial_s": 0.05,
         "inference_retry_max_s": 1.0,
         "inference_retry_timeout_s": 30.0,
@@ -85,12 +97,12 @@ def _settings(**overrides) -> ServiceSettings:
         "recipe_settings": recipe_settings,
     }
     values.update(overrides)
-    return ServiceSettings(**values)
+    return ServiceConfig(**values)
 
 
 @pytest.mark.unit
 def test_service_config_exposes_shared_batch_controls() -> None:
-    args = deploy.service_settings_from_config({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
+    args = deploy.service_config_from_mapping({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
 
     assert args.recipe == OPENCLAWRL_RECIPE
     assert not hasattr(args, "default_recipe")
@@ -98,10 +110,10 @@ def test_service_config_exposes_shared_batch_controls() -> None:
     # default lives with its recipe.
     assert not hasattr(args, "batch_size")
     assert not hasattr(args, "groups_per_step")
-    assert args.recipe_settings["batch_size"] == "4"
+    assert args.recipe_settings["batch_size"] == 4
     assert "groups_per_step" not in args.recipe_settings
-    assert args.inference_backend_factory is None
-    assert args.inference_backend_config == {}
+    assert args.inference_handler_factory is None
+    assert args.inference_handler_config == {}
     assert (args.inference_retry_initial_s, args.inference_retry_max_s, args.inference_retry_timeout_s) == (
         0.05,
         1.0,
@@ -110,28 +122,28 @@ def test_service_config_exposes_shared_batch_controls() -> None:
 
 
 @pytest.mark.unit
-def test_service_config_preserves_inference_backend_config() -> None:
-    args = deploy.service_settings_from_config(
+def test_service_config_preserves_inference_handler_config() -> None:
+    args = deploy.service_config_from_mapping(
         {
             "reef": {
                 "recipe": OPENCLAWRL_RECIPE,
-                "inference_backend_factory": "example.factory",
-                "inference_backend_config": {"tool_call_parser": "qwen25"},
+                "inference_handler_factory": "example.factory",
+                "inference_handler_config": {"tool_call_parser": "qwen25"},
             }
         }
     )
 
-    assert args.inference_backend_config == {"tool_call_parser": "qwen25"}
+    assert args.inference_handler_config == {"tool_call_parser": "qwen25"}
 
 
 @pytest.mark.unit
 def test_service_config_preserves_candidate_evaluation_section() -> None:
     evaluation = {
-        "module": "cookbook.evaluation:build_evaluator",
+        "module": "cookbook.evaluation:CheckpointFactory",
         "config": {"threshold": 0.8},
     }
 
-    args = deploy.service_settings_from_config({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
 
     assert args.evaluation_settings == evaluation
 
@@ -139,12 +151,12 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
 @pytest.mark.unit
 def test_service_config_rejects_non_object_evaluation_section() -> None:
     with pytest.raises(ValueError, match="evaluation must be an object"):
-        deploy.service_settings_from_config({"reef": {"recipe": SAO_RECIPE}, "evaluation": "disabled"})
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": "disabled"})
 
 
 @pytest.mark.unit
 def test_service_config_selects_inference_recipe_and_interpolates_settings() -> None:
-    args = deploy.service_settings_from_config(
+    args = deploy.service_config_from_mapping(
         {
             "reef": {
                 "recipe": "recipe",
@@ -164,7 +176,7 @@ def test_service_config_selects_inference_recipe_and_interpolates_settings() -> 
 @pytest.mark.unit
 def test_service_config_requires_recipe() -> None:
     with pytest.raises(ValueError, match=r"reef\.recipe"):
-        deploy.service_settings_from_config({"reef": {}})
+        deploy.service_config_from_mapping({"reef": {}})
 
 
 @pytest.mark.unit
@@ -185,9 +197,11 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     if not config_path.exists():
         pytest.skip("repo-owned stack: shipped with the repo, not with the package")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    config = deploy.load_config(config_path)
+    from reef_service.config_helpers import load_deployment
+
+    config = load_deployment(config_path)
     service = next(item for item in config["services"] if item["name"] == "reef")
-    args = deploy.service_settings_from_config(config)
+    args = deploy.service_config_from_mapping(config)
 
     assert service["command"] == [sys.executable, "-m", "reef.service"]
     assert "REEF_TOKEN" not in service.get("env", {})
@@ -205,7 +219,9 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     ],
 )
 def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> None:
-    config = deploy.load_config(deploy.PROJECT_ROOT / relative_path)
+    from reef_service.config_helpers import load_deployment
+
+    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
 
     assert "max_staleness" not in config["reef"]
 
@@ -217,12 +233,13 @@ def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> N
 )
 def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    config = deploy.load_config(deploy.PROJECT_ROOT / relative_path)
+    from reef_service.config_helpers import load_deployment
+
+    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
     retention = config["training"]["checkpoint_retention"]
-    command = interpolate_config(
-        config,
-        next(service["command"] for service in config["services"] if service["name"] == "slime-driver"),
-    )
+    from reef.runtime.executor.arguments import native_arguments
+
+    command = " ".join(native_arguments(config["reef"]["training_backend_options"]))
 
     assert retention["max_storage_fraction"] == 0.8
     assert retention["min_free_space_fraction"] == 0.1
@@ -238,7 +255,7 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime()
+        return stub_runtimes()
 
     def factory(repository, **kwargs):
         backend["repository"] = repository
@@ -319,7 +336,7 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
 
     dispatcher = deploy.build_dispatcher(
         _settings(
-            recipe="reef.train.cordis_backend.recipe:CordisRecipe",
+            recipe="reef.recipe.cordis:CordisRecipe",
             recipe_settings={
                 "evolution": {
                     "propose": "demo_evolution:propose",
@@ -353,7 +370,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
-        connector=lambda **kwargs: StubRuntime(),
+        connector=lambda **kwargs: stub_runtimes(),
     )
     recipe = dispatcher._recipe
     captured["batch_size"] = recipe.batch_size
@@ -370,7 +387,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         lambda *args, **kwargs: lambda scenario: object(),
     )
     evaluation = {
-        "module": "reef_service._candidate_evaluation_plugin:build_evaluator",
+        "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
         "config": {"score": 1.0, "threshold": 0.0},
     }
 
@@ -381,7 +398,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={"EVALUATION_TOKEN": "secret"},
-        connector=lambda **kwargs: StubRuntime(),
+        connector=lambda **kwargs: stub_runtimes(),
     )
 
     recipe = dispatcher._recipe
@@ -401,7 +418,7 @@ def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(mon
         deploy.build_dispatcher(
             _settings(
                 recipe="recipe",
-                evaluation_settings={"module": "cookbook.evaluation:build_evaluator"},
+                evaluation_settings={"module": "cookbook.evaluation:CheckpointFactory"},
                 agent_record_dir=str(tmp_path / "agent-record"),
             )
         )
@@ -427,7 +444,7 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
                 agent_record_dir=str(tmp_path / "agent-record"),
             ),
             environ={},
-            connector=lambda **kwargs: StubRuntime(),
+            connector=lambda **kwargs: stub_runtimes(),
         )
     # The error lists what the recipe would consume.
     assert "reef.batch_size" in str(excinfo.value)
@@ -435,7 +452,7 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
 
 
 @pytest.mark.unit
-def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_loads_configured_inference_handler(monkeypatch, tmp_path) -> None:
     connected = {}
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
@@ -445,22 +462,22 @@ def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_pa
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime()
+        return stub_runtimes()
 
-    dotted_path = "reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend"
+    dotted_path = "reef.inference.sglang.chat.SGLangInferenceHandler"
     deploy.build_dispatcher(
         _settings(
-            inference_backend_factory=dotted_path,
-            inference_backend_config={"tool_call_parser": "qwen25"},
+            inference_handler_factory=dotted_path,
+            inference_handler_config={"tool_call_parser": "qwen25"},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
         connector=connector,
     )
 
-    factory = connected["inference_backend_factory"]
-    assert factory.__name__ == "SGLangChatTrainingInferenceBackend"
-    assert connected["inference_backend_config"] == {"tool_call_parser": "qwen25"}
+    factory = connected["inference_handler_factory"]
+    assert factory.__name__ == "SGLangInferenceHandler"
+    assert connected["inference_handler_config"] == {"tool_call_parser": "qwen25"}
 
 
 @pytest.mark.unit
@@ -472,7 +489,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime(max_staleness=kwargs["max_staleness"])
+        return stub_runtimes(max_staleness=kwargs["max_staleness"])
 
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
@@ -513,7 +530,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime(max_staleness=kwargs.get("max_staleness", 0))
+        return stub_runtimes(max_staleness=kwargs.get("max_staleness", 0))
 
     dispatcher = deploy.build_dispatcher(
         _settings(recipe=OPENCLAWRL_RECIPE, agent_record_dir=str(tmp_path / "agent-record")),
@@ -538,7 +555,7 @@ def test_build_dispatcher_requires_runtime_locations(attribute, monkeypatch) -> 
         deploy.build_dispatcher(
             _settings(**{attribute: ""}),
             environ={},
-            connector=lambda **kwargs: StubRuntime(),
+            connector=lambda **kwargs: stub_runtimes(),
         )
 
 
@@ -556,23 +573,23 @@ def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
             "tokens": ["bob", "", "alice", "  carol  "],
         }
     }
-    assert deploy.service_settings_from_config(config).tokens == ("alice", "bob", "carol")
+    assert deploy.service_config_from_mapping(config).tokens == ("alice", "bob", "carol")
 
 
 def test_service_tokens_rejects_non_list() -> None:
     config = {"reef": {"recipe": "openclawrl", "tokens": "alice,bob"}}
     with pytest.raises(ValueError, match=r"reef\.tokens must be a list"):
-        deploy.service_settings_from_config(config)
+        deploy.service_config_from_mapping(config)
 
 
 def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
-    """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
+    """``reef.token`` feeds ``ServiceConfig.tokens`` under another name; the
     recipe-owned remainder of the section must still exclude it, or every
     training recipe would reject the cookbook configs as unconsumed settings."""
     from reef.service.assembly import _recipe_owned_settings
 
     config = {"reef": {"recipe": "openclawrl", "token": "secret", "tokens": ["next"], "batch_size": 2}}
-    owned = _recipe_owned_settings(deploy.service_settings_from_config(config))
+    owned = _recipe_owned_settings(deploy.service_config_from_mapping(config))
     assert set(owned) == {"batch_size"}
 
 

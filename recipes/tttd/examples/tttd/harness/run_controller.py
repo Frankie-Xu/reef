@@ -7,11 +7,11 @@ import os
 import time
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
-
+from typing import Any
 
 STATE_FORMAT_VERSION = 1
 
@@ -57,17 +57,19 @@ class ScenarioTrainingStatus:
     failed_steps: tuple[ScenarioTrainingFailure, ...] = ()
 
 
-class SearchHarness(Protocol):
+class SearchHarness(ABC):
     archive: Any
 
+    @abstractmethod
     def run_step(self, step: int) -> Sequence[Any]: ...
 
 
-class TrainingStatusReader(Protocol):
+class TrainingStatusReader(ABC):
+    @abstractmethod
     def scenario_status(self, scenario: str) -> ScenarioTrainingStatus | None: ...
 
 
-class ReefTrainingStatusClient:
+class ReefTrainingStatusClient(TrainingStatusReader):
     """Read Reef's public training status without coupling the harness to Ray."""
 
     def __init__(

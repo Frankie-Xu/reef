@@ -3,7 +3,7 @@ Processors
 
 A processor is a scenario's batch builder: records in, one typed training
 batch out, plus the answer to what the record store may delete. This page
-explains the two engines a recipe can subclass, what each owns, and the path a
+explains the two feedback engines, the task-generation ABC, and the path a
 record takes to a batch.
 
 .. page::
@@ -24,11 +24,21 @@ none may block:
   the consumed record ids, which the commit record persists so recovery never
   re-ingests them.
 
+Every concrete processor produces ``TrainingBatch.items``, an ordered tuple of
+``TrainDataItem`` values: ``TrajectoryItem`` for existing trajectories or
+``TaskItem`` for Harbor tasks that an algorithm will roll out. A batch may mix
+both. ``make_sample`` constructs ATIF trajectory items, including captured
+training tensors and feedback in ``extra.reef``. ``make_batch`` collects the
+items; grouped recipes set ``group_id`` on each member. Assembly, scheduling
+and group completeness remain recipe decisions. There is no separate dataset
+container. See `batch values <../reference/python-api.rst#batch>`__ for formats
+and algorithm support.
+
 The processor also controls retention. The trainer reads
 ``retention_decision()`` (protected vs releasable ids) and reports deletions
 back through ``compaction_applied()``.
 Nothing numeric lives here. Advantages and the loss family are the step
-preparer's. The read-only ``status()`` hook is empty by default; a processor
+objective's. The read-only ``status()`` hook is empty by default; a processor
 uses it only when a terminal outcome cannot become a batch and an external
 runner must stop waiting (TTTD reports a complete mixed-artifact step as an
 invariant failure).
@@ -58,8 +68,8 @@ implements one assembly hook:
    def make_training_batch(self, batch_number, request):
        if request is not None and self.training_mode == "manual":
            # Manual runs the instruction alone; harness needs no samples.
-           self._pending_units = ()
-           return TraceBatch(request.id, ())
+           self._pending_reports = ()
+           return TrainingBatch(request.id, ())
        # Hybrid hands the instruction the units an automatic batch would take.
        return self._make_pending(batch_number)
 
@@ -106,121 +116,120 @@ mode, and a service restart starts from the recipe's configured mode.
 The two feedback paths
 ----------------------
 
-One question picks the engine: **does feedback arrive in a report, or must the
-method compute it?**
+``ReportedFeedbackProcessor`` consumes feedback already supplied in reports.
+``ComputedFeedbackProcessor`` derives feedback from traffic, potentially using
+slow model calls on its worker. Reported feedback does not have a ``judge``
+hook; the computed engine retains its asynchronous ``judge``.
 
-+-----------------+---------------------------------------------+----------------------------------------------------+
-|                 | reported: ``ReportedFeedbackProcessor``     | computed: ``ComputedFeedbackProcessor``            |
-+=================+=============================================+====================================================+
-| feedback        | reports referencing inference records       | signal mined from the traffic itself               |
-| arrives as      |                                             |                                                    |
-+-----------------+---------------------------------------------+----------------------------------------------------+
-| ``judge`` is    | a plain method                              | an ``async def``                                   |
-+-----------------+---------------------------------------------+----------------------------------------------------+
-| called          | by the engine, inside its own ``ingest``    | on a private worker, after the recipe's            |
-|                 |                                             | ``ingest`` dispatches                              |
-+-----------------+---------------------------------------------+----------------------------------------------------+
-| so it may       | only decide on data already in hand         | call models and take minutes                       |
-+-----------------+---------------------------------------------+----------------------------------------------------+
-
-Why there are two
+Reported feedback
 ~~~~~~~~~~~~~~~~~
 
-Everything else, including the ``async``, follows from that one question.
+Before accepting a new report, Reef checks its schema and verifies that every
+reference identifies an existing inference in the same scenario. Missing,
+wrong-kind, duplicate, or foreign references raise an error. Reports are not
+queued waiting for future inference records. Storage is authoritative; a record
+need not have reached the processor's in-memory cache at admission time.
 
-A report *arrives knowing what it judges*: it names its inference records.
-The decision is then a comparison on data already in hand: cheap,
-synchronous, and possible the moment the last referenced record lands. What
-it costs is bookkeeping about the reference: an index of reports waiting on
-inferences that have not arrived, ownership of the records a report claims,
-dedup for a grader that retries its POST, and a barrier for recipes whose
-unit is a whole group.
+Reports cannot opt out of training: ``metadata.training.eligible`` is rejected,
+including when its value is ``true``. Valid low or negative scores are feedback,
+not a reason to discard the report.
 
-A computed-feedback recipe has no report. Its signal does not exist until
-later traffic completes an earlier record, and judging it calls a model.
-Judgment can take seconds or minutes, which would stall serving if it ran on
-the trainer's thread. It moves to a worker instead, with different
-bookkeeping: which records still wait, a TTL for the ones whose completion
-never comes, and absorption for judgments that land without a record to
-trigger them.
+A reported-feedback recipe implements:
 
-Neither set follows from ``async``. Making the reported judge asynchronous
-would make timing uniform while keeping every structure above, and would make
-every reported recipe's readiness eventually consistent and expose it to
-losing an in-flight judgment on a crash, an exposure only the computed path
-carries today. The engines differ because the questions differ. What they
-share (hold a pending batch, be ready while it exists or once enough units
-are held, and release what it consumed) is defined once in ``base.py``. Each
-engine fills in ``_ready_count``, ``_make_pending``, and ``_consume_pending``.
+- ``make_sample(context) -> TrainDataItem``: assemble an ATIF trajectory or
+  Harbor task directly. Use ``context.require_score()`` when the method needs
+  a reward. The engine attaches the source and report ids to the returned item.
+- ``make_batch(items, batch_number)``: assemble the flat tuple of selected
+  training items into a batch. Consumption remains the engine's responsibility,
+  including selected items that the recipe removes from training.
+- ``grouping(context)`` for grouped methods: return ``(group_key, slot)``.
+  The default ``(None, None)`` makes an independent sample. A None slot uses
+  the report id; repeated slots preserve the first accepted report.
+- ``decide_group(key, items)`` for grouped methods: return ``INCOMPLETE``,
+  ``READY``, or ``DISCARD``. The items are training data, without cache wrappers.
+  The collection group can span multiple training comparison groups, as in TTTD.
 
-What a recipe writes
---------------------
+The engine handles report-id deduplication, group-slot retries, reservations,
+consumption, and retention. A batch is ready in automatic mode after
+``batch_size`` units accumulate; a unit is one sample or one complete group.
+The same batch remains reserved until acknowledged or released. Reports arriving
+later for already consumed sources cannot train those sources again.
 
-**Reported feedback:** ``judge``, ``make_batch``, ``decide_group`` when it
-groups, plus the class attributes ``output_schema``, ``exclusive_sources``,
-``ordered_groups``.
+Training data errors propagate: missing required tokens/logprobs are checked by
+the training backend, and unsupported trajectory assembly raises an error rather
+than dropping the report. Failed sample assembly keeps its input records
+protected and does not mark the report successfully processed.
 
-**Computed feedback:** In ``ingest``, the correlation *is* the method. It uses
-the engine's ``catch_up`` / ``dispatch`` / ``track`` / ``retire`` verbs, as
-well as ``judge``, ``make_sample``, ``make_batch``, and ``expire`` for tracked
-records that time out.
+Computed feedback
+~~~~~~~~~~~~~~~~~
 
-Neither tier contains retention, lifecycle, or recovery code.
+A computed-feedback recipe implements correlation in ``ingest`` using the
+engine's ``catch_up``, ``dispatch``, ``track``, and ``retire`` operations.
+It supplies ``async judge``, ``make_sample``, ``make_batch``, and ``expire`` for
+tracked records that time out. This path derives a new signal and is unchanged
+by the reported-feedback contract.
+
+Task generation contract
+------------------------
+
+``TaskGenerationProcessor(DataProcessor, ABC)`` declares two asynchronous
+methods on the processor itself:
+
+- ``generate(request: TaskGenerationRequest) -> HarborTask`` produces one
+  task specification from source records, a description and optional asset
+  paths. The source records must have distinct ids and belong to one scenario;
+  the caller must also ensure it is the processor's scenario. Preserve their
+  ordered ids in the generated task's ``source_agent_record_ids``.
+- ``validate(task_path: Path) -> TaskValidationResult`` checks a materialized
+  candidate without modifying it. The implementation chooses the required
+  structural and execution checks. Empty ``errors`` means all checks passed;
+  non-empty errors reject the task. Infrastructure failures raise exceptions
+  rather than reporting that the task is invalid.
+
+Import the ABC from ``reef.train.processors`` and the request/result types
+from ``reef.train.processors.task_generation``. Asset paths name generator-accessible files or
+directories, such as repository snapshots or verifier fixtures; constructing
+a request does not read them. Method-specific prompts and settings belong to
+the processor configuration.
+
+This is a contract only. Implementing the two hooks does not start a worker
+or make batches ready: the inherited lifecycle remains the no-update default.
+Background scheduling, retry/recovery, candidate publication and conversion
+to ``TaskItem`` batches remain future implementation work. That lifecycle
+must execute both hooks outside the trainer lock, expose only complete,
+validated directories, preserve source records until acknowledgement, and keep
+reserved tasks accessible until consumption finishes. Existing feedback
+processors are unchanged.
 
 A record's path to a batch
 --------------------------
 
 .. code:: text
 
-   reported report ─ingest─► judge(context) ─TRAIN─► candidate ─[decide_group]─► make_batch ─► batch ─ack─► released
-                               │ WAIT  parked in the waiting index; re-judged when the last referenced inference lands
-                               └ NEVER terminal now; the report and the sources it owns become releasable
+   report -> validate existing references -> ingest -> make_sample
+       -> TrainDataItem -> optional group barrier -> make_batch -> batch -> acknowledge
 
-   computed record ─ingest─► track ──(a later record completes it)──► dispatch ─► judge (async, on the worker)
-                                                                                        │
-                               batch ◄─ make_batch ◄─ candidate ◄─ make_sample ◄────────┘
-                                                           └ None ─► retire: terminal, releasable
+   computed record -> ingest/track -> dispatch -> async judge
+       -> make_sample -> candidate -> make_batch -> batch -> acknowledge
 
 Where a processor lives
 -----------------------
 
-Every file under ``reef/train/processors/`` is framework: ``base``,
-``reported``, ``computed``, and ``common`` (shared report readers and sample
-builders). A method that owns its judgment writes
-``recipes/<name>/processor.py``, and that file should show its data flow from
-top to bottom. A method that delegates to an engine backend writes none: the
-backend owns its concrete processor (``reef/train/cordis_backend/processor.py``)
-and wires it in its ``build``, which is why ``recipes/skillclaw/`` ships no
-processor file. Machinery beyond that file's job sits beside it as
-modules named by concern (``recipes/openclawrl/``: ``sessions``, ``turns``,
-``prm``), never in the processor file and never in a ``utils`` grab-bag.
+Shared engines live under ``reef/train/processors/``. Concrete method processors
+live in ``recipes/<name>/processor.py``; the harness evolution implementation
+lives in ``reef/train/cordis_backend/processor.py``. Recipe-specific correlation
+and model clients belong beside the method processor.
 
-Each structure the engines keep answers one requirement of continual
-serving; delete one and a documented failure returns. The list for the
-reported engine, naming the attribute each requirement forces, is in the
-module docstring of ``reported.py``; the computed engine names its per-state
-structures on ``ComputedFeedbackProcessor`` itself.
+Compatibility
+-------------
 
-Cookbook processors
--------------------
+Reported-feedback subclasses must replace ``judge`` and ``ReportDecision`` with
+``make_sample`` returning ``TrainDataItem``. Remove ``WAIT``/``NEVER`` branches: invalid
+references fail admission, and training contract failures must raise. Existing
+stored records replay through the new contract; legacy reports with invalid
+references or eligibility flags fail explicitly and need correction before replay.
 
-+---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| File                                        | Tier     | What its ``judge`` accepts                                       | Batch                  |
-+=============================================+==========+==================================================================+========================+
-| ``recipes/sao/processor.py``                | reported | a trainable, finitely scored report whose assembled sample       | ``PolicyBatch``        |
-|                                             |          | passes the action-mask check; one referenced inference, or       |                        |
-|                                             |          | several assembled into one multi-turn sample when                |                        |
-|                                             |          | ``accept_multi_turn_policy_samples`` is set; one rollout,        |                        |
-|                                             |          | one unit                                                         |                        |
-+---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``recipes/tttd/processor.py``               | reported | a report parsing as ``TTTDGroupedRolloutReport`` on this         | ``GroupedPolicyBatch`` |
-|                                             |          | scenario's grid; the step is the group, ready only when every    |                        |
-|                                             |          | ``groups_per_step`` x ``rollouts_per_group`` slot is filled      |                        |
-+---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``reef/train/cordis_backend/processor.py``  | reported | a trainable, finitely scored report referencing at least one     | ``TraceBatch``         |
-|                                             |          | request, scored inside ``[min_score, max_score]``; one reference |                        |
-|                                             |          | is the sample unmodified, several are one trajectory sample      |                        |
-+---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``recipes/openclawrl/processor.py``         | computed | a main turn whose next state the PRM scores +/-1, or for which   | ``PolicyBatch``        |
-|                                             |          | the teacher scored an accepted hindsight hint                    |                        |
-+---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
+The harness recipe no longer supports ``max_score`` or filters successful
+reports. Remove that setting from configuration and Python construction.
+Identical report retries still return their original receipt, including after
+source compaction; changed content with the same id still conflicts.

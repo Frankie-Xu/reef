@@ -395,6 +395,27 @@ def test_run_agent_tags_records_with_the_installed_release(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
+    """An evolved tool that runs ``pi`` gets this harness's own binary, wherever
+    the install put it, even when no pi is on the person's PATH."""
+    compose = _make_compose(tmp_path, 1)
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "pi"
+    seen = tmp_path / "path.txt"
+    binary.write_text(f'#!/usr/bin/env python3\nimport os\nopen({str(seen)!r}, "w").write(os.environ["PATH"])\n')
+    binary.chmod(0o755)
+
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    with patch.dict(os.environ, env), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "review"])
+
+    entries = seen.read_text().split(os.pathsep)
+    assert entries[0] == str(bin_dir.resolve())
+    assert os.environ["PATH"].split(os.pathsep)[0] in entries[1:]
+
+
+@pytest.mark.unit
 def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
     """When a later per-receipt post fails, the restored claim holds only the
     receipts that never went out, so a retry cannot duplicate reports."""
@@ -1534,3 +1555,104 @@ def test_main_passes_release_to_setup_only_when_named(tmp_path) -> None:
         main()
     assert exited.value.code == 0
     assert called == [(("setup-scenario", "pi", str(tmp_path)), {"yes": False, "marks": (), "release": "v4"})]
+
+
+# -- reef-<adapter> doctor: one report of what the install needs ---------------------------------
+
+
+class _DoctorReef:
+    """A reef that serves only the harness routes, checks the bearer on them, and names one served head."""
+
+    def __init__(self, token: str, head: str, rows: list[dict] | None = None) -> None:
+        import http.server
+        import threading
+
+        catalog = rows if rows is not None else [{"release_id": head, "pending": False}]
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                # Only the harness routes, the ones the API platform exposes too; no service wide status.
+                if self.headers.get("Authorization") != f"Bearer {token}":
+                    code, payload = 401, {"error": "invalid service token"}
+                elif self.path == "/reef/harness/releases":
+                    code, payload = 200, {"releases": catalog}
+                else:
+                    code, payload = 404, {}
+                raw = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self.port = self._server.server_address[1]
+
+    def close(self) -> None:
+        self._server.shutdown()
+
+
+@pytest.mark.unit
+def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypatch) -> None:
+    """A pending release is served to nobody until a person promotes it; doctor says so
+    with the step page, and stops saying so once a promote row names it."""
+    from reef.harness.client.wrapper import doctor
+
+    held = [{"release_id": "rel-3", "pending": False}, {"release_id": "rel-4", "pending": True}]
+    reef = _DoctorReef(token="dummy", head="rel-3", rows=held)
+    compose, _ = _ask_tree(tmp_path, reef.port)
+    binary = tmp_path / "fake-pi"
+    binary.write_text("#!/bin/sh\necho 0.84.2\n")
+    binary.chmod(0o755)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    (review,) = [line for line in out if line.startswith("ok  review")]
+    assert f"rel-4 waits for your review: http://127.0.0.1:{reef.port}/reef/harness/releases/1/page" in review
+    reef.close()
+
+    promoted = [
+        *held,
+        {"release_id": "rel-5", "pending": False, "operation": "promote", "rollback_target_release_id": "rel-4"},
+    ]
+    reef = _DoctorReef(token="dummy", head="rel-3", rows=promoted)
+    (tmp_path / "promoted").mkdir()
+    compose, _ = _ask_tree(tmp_path / "promoted", reef.port)
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    assert not [line for line in capsys.readouterr().out.splitlines() if line.startswith("ok  review")]
+    reef.close()
+
+
+@pytest.mark.unit
+def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, capsys, monkeypatch) -> None:
+    from reef.harness.client.wrapper import doctor
+
+    reef = _DoctorReef(token="dummy", head="rel-3")
+    compose, _ = _ask_tree(tmp_path, reef.port)  # models.json binds the token dummy; release file names rel-3
+    binary = tmp_path / "fake-pi"
+    binary.write_text("#!/bin/sh\necho 0.84.2\n")
+    binary.chmod(0o755)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}" if command == "rg" else None)
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 1  # fd is missing
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("ok  interpreter") and "reef " in line for line in out)
+    assert any(line.startswith("ok  service") and "token accepted" in line for line in out)
+    assert any(line.startswith("ok  binary") and "0.84.2" in line for line in out)
+    assert any(line.startswith("ok  tool") and "rg at /usr/bin/rg" in line for line in out)
+    assert any(line.startswith("!!  tool") and "fd missing: install fd" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    # A wrong token in the shell wins over the binding's, and the service says so.
+    monkeypatch.setenv("REEF_TOKEN", "wrong")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 1
+    out = capsys.readouterr().out
+    assert "!!  service" in out and "401" in out
+    reef.close()

@@ -14,50 +14,31 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
-from reef.core.records_types import RequestType
+from reef.core.records_types import AgentRecord, RequestType
+from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
+from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
-from reef.records import AgentRecord
-from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
-from reef.runtime.inference import InferenceBackend, InferenceStream
+from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
-from reef.train.cordis_backend.requests import ancestor_requiring_nothing, required_by
-from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 logger = logging.getLogger(__name__)
-
-
-@runtime_checkable
-class StepRecords(Protocol):
-    """A backend that can read its scenario-scoped retained step files."""
-
-    def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class ProposalGate(Protocol):
-    """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
-
-    @property
-    def proposals(self) -> ProposalInbox | None: ...
-
-    def admit(
-        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
-    ) -> tuple[list[dict[str, Any]], str | None]: ...
 
 
 def _random_harness_scenario_name() -> str:
@@ -107,6 +88,7 @@ class PendingInference:
     lease: InferenceLease | None = None
     deferred_prepared: PreparedInference | None = None
     path: str | None = None
+    measurement: OperationMeasurement | None = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +97,7 @@ class PreparedInference:
 
     parsed: RequestHeaders
     artifact: Artifact
-    backend: InferenceBackend
+    handler: InferenceHandler
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
     #: must then carry the engine-confirmed runtime load ID.
@@ -146,7 +128,7 @@ class InferenceRetryPolicy:
 
 
 class InferenceRetryTimeout(ReefError):
-    """Inference attempts ending with a backend ``abort`` exhausted their retry deadline."""
+    """Inference attempts ending with a handler ``abort`` exhausted their retry deadline."""
 
 
 class RequestService:
@@ -157,10 +139,6 @@ class RequestService:
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
-
-    @staticmethod
-    def _require_inference(headers: Mapping[str, str]) -> RequestHeaders:
-        return parse_request_headers(headers, RequestType.INFERENCE)
 
     def accept(
         self,
@@ -180,9 +158,9 @@ class RequestService:
         headers: Mapping[str, str],
         payload: dict[str, Any],
         path: str,
-        backend: InferenceBackend,
+        handler: InferenceHandler,
     ) -> dict[str, Any]:
-        response, _ = await self.infer_with_data(headers, payload, path, backend)
+        response, _ = await self.infer_with_data(headers, payload, path, handler)
         return response
 
     async def infer_with_data(
@@ -190,133 +168,158 @@ class RequestService:
         headers: Mapping[str, str],
         payload: dict[str, Any],
         path: str,
-        backend: InferenceBackend | None = None,
+        handler: InferenceHandler | None = None,
     ) -> tuple[dict[str, Any], AgentRecord]:
-        original_payload = dict(payload)
-        retry_delay = self._retry_policy.initial_s
-        loop = asyncio.get_running_loop()
-        remaining_budget = self._retry_policy.timeout_s
-        timeout_error = f"inference retry deadline exceeded ({self._retry_policy.timeout_s:g}s)"
-        attempt = 0
-        while True:
-            attempt += 1
-            prepared, payload = await self._prepare_request(headers, original_payload, path, backend)
-            try:
-                if prepared.durable:
-                    payload = {**payload, "return_meta_info": True}
-                if remaining_budget <= 0:
-                    raise InferenceRetryTimeout(timeout_error)
-                started = loop.time()
+        operations = await self.inference_operations(headers)
+        measurement = operations.start("serve/request")
+        succeeded = False
+        try:
+            original_payload = dict(payload)
+            retry_delay = self._retry_policy.initial_s
+            loop = asyncio.get_running_loop()
+            remaining_budget = self._retry_policy.timeout_s
+            timeout_error = f"inference retry deadline exceeded ({self._retry_policy.timeout_s:g}s)"
+            attempt = 0
+            while True:
+                attempt += 1
+                if attempt > 1:
+                    operations.increment("serve/retries_total")
+                prepared, payload = await self._prepare_request(headers, original_payload, path, handler)
                 try:
-                    response = await asyncio.wait_for(
-                        prepared.backend.inference(prepared.artifact, path, payload),
-                        timeout=remaining_budget,
-                    )
-                except TimeoutError as exc:
-                    logger.warning(
-                        "inference for scenario %r timed out after %d attempt(s) at artifact %r",
+                    if prepared.durable:
+                        payload = {**payload, "return_meta_info": True}
+                    if remaining_budget <= 0:
+                        raise InferenceRetryTimeout(timeout_error)
+                    started = loop.time()
+                    try:
+                        response = await asyncio.wait_for(
+                            prepared.handler.inference(prepared.artifact, path, payload),
+                            timeout=remaining_budget,
+                        )
+                    except TimeoutError as exc:
+                        logger.warning(
+                            "inference for scenario %r timed out after %d attempt(s) at artifact %r",
+                            prepared.parsed.scenario,
+                            attempt,
+                            prepared.artifact.ref.release_id,
+                        )
+                        raise InferenceRetryTimeout(timeout_error) from exc
+                    finally:
+                        remaining_budget -= loop.time() - started
+                    interrupted = _inference_aborted(response)
+                    if not interrupted:
+                        # A completed response with invalid runtime-load-ID information is a
+                        # handler contract error, not a retryable inference abort.
+                        if prepared.surface.inference is not None:
+                            prepared.surface.inference.verify_response(prepared.artifact, path, response)
+                        self._stamp_durable_runtime_load_id(prepared, payload, response)
+                        item = await asyncio.to_thread(
+                            self._accept,
+                            prepared.parsed,
+                            {**payload, "response": response},
+                            artifact_ref=prepared.artifact.ref,
+                        )
+                        succeeded = True
+                        return client_inference_response(response), item
+                    # A handler ``abort`` finish reason makes the attempt unusable.
+                    # Restart the request against the latest artifact and never record it.
+                    logger.info(
+                        "retrying handler-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
+                        "engine reported runtime load ID %r",
                         prepared.parsed.scenario,
                         attempt,
                         prepared.artifact.ref.release_id,
+                        reported_runtime_load_id(response),
                     )
-                    raise InferenceRetryTimeout(timeout_error) from exc
                 finally:
-                    remaining_budget -= loop.time() - started
-                interrupted = _inference_aborted(response)
-                if not interrupted:
-                    # A completed response with invalid runtime-load-ID information is a
-                    # backend contract error, not a retryable inference abort.
-                    if prepared.surface.inference is not None:
-                        prepared.surface.inference.verify_response(prepared.artifact, path, response)
-                    self._stamp_durable_runtime_load_id(prepared, payload, response)
-                    item = await asyncio.to_thread(
-                        self._accept,
-                        prepared.parsed,
-                        {**payload, "response": response},
-                        artifact_ref=prepared.artifact.ref,
-                    )
-                    return client_inference_response(response), item
-                # A backend ``abort`` finish reason makes the attempt unusable.
-                # Restart the request against the latest artifact and never record it.
-                logger.info(
-                    "retrying backend-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
-                    "engine reported runtime load ID %r",
-                    prepared.parsed.scenario,
-                    attempt,
-                    prepared.artifact.ref.release_id,
-                    reported_runtime_load_id(response),
-                )
-            finally:
-                prepared.release()
-            if remaining_budget <= 0:
-                raise InferenceRetryTimeout(timeout_error)
-            sleep_for = min(retry_delay, remaining_budget)
-            await asyncio.sleep(sleep_for)
-            remaining_budget -= sleep_for
-            retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
+                    prepared.release()
+                if remaining_budget <= 0:
+                    raise InferenceRetryTimeout(timeout_error)
+                sleep_for = min(retry_delay, remaining_budget)
+                await asyncio.sleep(sleep_for)
+                remaining_budget -= sleep_for
+                retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
+        except RuntimeLoadMismatch:
+            operations.increment("serve/version_mismatch_total")
+            raise
+        except InferenceRetryTimeout:
+            operations.increment("serve/timeouts_total")
+            raise
+        finally:
+            measurement.finish(succeeded=succeeded)
 
     async def start_stream(
         self,
         headers: Mapping[str, str],
         payload: dict[str, Any],
         path: str,
-        backend: InferenceBackend | None = None,
+        handler: InferenceHandler | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
-        prepared, payload = await self._prepare_request(headers, payload, path, backend)
-        admission = prepared.admission
-        lease = prepared.lease
+        operations = await self.inference_operations(headers)
+        measurement = operations.start("serve/request")
         try:
-            stream = await prepared.backend.inference_stream(prepared.artifact, path, payload)
-            record_response = getattr(stream, "record_response", None)
-            record_response_pending = bool(getattr(stream, "record_response_pending", False))
-            if record_response is not None:
-                if prepared.surface.inference is not None:
-                    prepared.surface.inference.verify_response(prepared.artifact, path, record_response)
-                self._stamp_durable_runtime_load_id(prepared, payload, record_response)
-                # Buffered streaming backends have already finished model
-                # execution. Downstream client backpressure must not leave a
-                # stale admission handle across the colocated pause lifecycle.
-                if admission is not None:
-                    admission.release()
-                    admission = None
-                if lease is not None:
-                    lease.release()
-                    lease = None
-            elif prepared.durable and not record_response_pending:
-                raise RuntimeLoadMismatch(
-                    "durable streaming inference requires an atomic record_response with serving runtime load IDs"
-                )
-        except BaseException:
+            prepared, payload = await self._prepare_request(headers, payload, path, handler)
+            admission = prepared.admission
+            lease = prepared.lease
             try:
-                if "stream" in locals():
-                    await stream.close()
-            finally:
-                try:
-                    if lease is not None:
-                        lease.release()
-                finally:
+                stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
+                record_response = stream.record_response
+                record_response_pending = stream.record_response_pending
+                if record_response is not None:
+                    if prepared.surface.inference is not None:
+                        prepared.surface.inference.verify_response(prepared.artifact, path, record_response)
+                    self._stamp_durable_runtime_load_id(prepared, payload, record_response)
+                    # Buffered streaming backends have already finished model
+                    # execution. Downstream client backpressure must not leave a
+                    # stale admission handle across the colocated pause lifecycle.
                     if admission is not None:
                         admission.release()
+                        admission = None
+                    if lease is not None:
+                        lease.release()
+                        lease = None
+                elif prepared.durable and not record_response_pending:
+                    raise RuntimeLoadMismatch(
+                        "durable streaming inference requires an atomic record_response with serving runtime load IDs"
+                    )
+            except BaseException:
+                try:
+                    if "stream" in locals():
+                        await stream.close()
+                finally:
+                    try:
+                        if lease is not None:
+                            lease.release()
+                    finally:
+                        if admission is not None:
+                            admission.release()
+                raise
+            pending = PendingInference(
+                item=AgentRecord.create(
+                    scenario=prepared.parsed.scenario,
+                    request_type=RequestType.INFERENCE,
+                    payload=_with_tags(payload, prepared.parsed),
+                    artifact_ref=prepared.artifact.ref,
+                ),
+                release_id=prepared.parsed.release_id,
+                measurement=measurement,
+                admission=admission,
+                lease=lease,
+                deferred_prepared=prepared if record_response_pending else None,
+                path=path if record_response_pending else None,
+            )
+            return stream, pending
+        except BaseException as exc:
+            measurement.finish(succeeded=False)
+            if isinstance(exc, RuntimeLoadMismatch):
+                operations.increment("serve/version_mismatch_total")
             raise
-        pending = PendingInference(
-            item=AgentRecord.create(
-                scenario=prepared.parsed.scenario,
-                request_type=RequestType.INFERENCE,
-                payload=_with_tags(payload, prepared.parsed),
-                artifact_ref=prepared.artifact.ref,
-            ),
-            release_id=prepared.parsed.release_id,
-            admission=admission,
-            lease=lease,
-            deferred_prepared=prepared if record_response_pending else None,
-            path=path if record_response_pending else None,
-        )
-        return stream, pending
 
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
+        succeeded = False
         try:
             payload = dict(pending.item.payload)
-            # A token-native streaming backend fills record_response only when
+            # A token-native streaming handler fills record_response only when
             # the upstream generation finishes. Validate that final capture
             # here, after the route has drained the stream but before it can
             # become a training record. Incomplete/disconnected streams have
@@ -336,11 +339,18 @@ class RequestService:
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
-            return self._dispatcher.accept_record(
+            stored = self._dispatcher.accept_record(
                 item,
                 release_id=pending.release_id,
             )
-        except Exception:
+            delivery = response.get("stream_delivery", response)
+            succeeded = (
+                isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
+            )
+            return stored
+        except Exception as exc:
+            if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
+                pending.measurement.metrics.increment("serve/version_mismatch_total")
             logger.exception(
                 "dispatcher rejected the stream record for scenario %r (record %s)",
                 pending.item.scenario,
@@ -348,6 +358,8 @@ class RequestService:
             )
             raise
         finally:
+            if pending.measurement is not None:
+                pending.measurement.finish(succeeded=succeeded)
             try:
                 if pending.lease is not None:
                     pending.lease.release()
@@ -355,17 +367,29 @@ class RequestService:
                 if pending.admission is not None:
                     pending.admission.release()
 
+    async def inference_operations(self, headers: Mapping[str, str]) -> OperationMetrics:
+        """Resolve the scenario before measuring its inference request lifetime."""
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
+        scenario = await asyncio.to_thread(
+            self._dispatcher.get_or_create_scenario,
+            parsed.scenario,
+            release_id=parsed.release_id,
+        )
+        if scenario is None:
+            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        return scenario.operations
+
     async def _prepare_request(
         self,
         headers: Mapping[str, str],
         payload: Mapping[str, Any],
         path: str,
-        backend: InferenceBackend | None,
+        handler: InferenceHandler | None,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
-        (headers, scenario, artifact, backend, surface) and let the surface
+        (headers, scenario, artifact, handler, surface) and let the surface
         transform the request payload."""
-        parsed = self._require_inference(headers)
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(
             self._dispatcher.get_or_create_scenario,
             parsed.scenario,
@@ -373,12 +397,16 @@ class RequestService:
         )
         if initial is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        admission = await initial.runtime.acquire_inference() if initial.runtime is not None else None
+        if initial.runtime is not None:
+            with initial.operations.measure("serve/admission"):
+                admission = await initial.runtime.acquire_inference()
+        else:
+            admission = None
         try:
             # Re-resolve after admission: a queued request must freeze the head
             # committed by the weight update that released it, never the head it
             # observed before waiting.
-            prepared = await asyncio.to_thread(self._prepare_inference, parsed, backend, admission)
+            prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission)
             hooks = prepared.surface.inference
             transformed = (
                 dict(payload)
@@ -428,7 +456,7 @@ class RequestService:
     def _prepare_inference(
         self,
         parsed: RequestHeaders,
-        backend: InferenceBackend | None,
+        handler: InferenceHandler | None,
         admission: InferenceAdmissionHandle | None,
     ) -> PreparedInference:
         scenario = self._dispatcher.get_or_create_scenario(
@@ -437,16 +465,16 @@ class RequestService:
         )
         if scenario is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        selected_backend = backend if backend is not None else scenario.inference_backend
-        if selected_backend is None:
-            raise RecipeConfigError("the served recipe has no inference backend")
+        selected_handler = handler if handler is not None else scenario.inference_handler
+        if selected_handler is None:
+            raise RecipeConfigError("the served recipe has no inference handler")
         ref = scenario.current_artifact_ref()
         return PreparedInference(
             parsed=parsed,
             artifact=Artifact(ref, scenario.repository),
-            backend=selected_backend,
+            handler=selected_handler,
             surface=scenario.surface,
-            durable=isinstance(scenario.runtime, TrainingRuntime),
+            durable=scenario.training_runtime is not None,
             admission=admission,
         )
 
@@ -469,7 +497,7 @@ class RequestService:
         scenario: Scenario,
         release_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact, gate = scenario.artifact_snapshot(release_id)
+        artifact, gate = scenario.artifact_with_metrics(release_id)
         tree = scenario.surface.files
         if tree is None:
             raise ArtifactNotFound(
@@ -513,7 +541,7 @@ class RequestService:
         """
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         if not isinstance(backend, ProposalGate) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
@@ -567,7 +595,7 @@ class RequestService:
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = scenario.trainer.training_backend
+        backend = scenario.trainer.candidate_backend
         if not directory or not isinstance(backend, StepRecords):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
@@ -604,11 +632,11 @@ class RequestService:
             before_entries = logged or ()
             tree = scenario.surface.files
             try:
-                artifact, _ = scenario.artifact_snapshot(before)
+                artifact, _ = scenario.artifact_with_metrics(before)
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None
-        descriptor = getattr(scenario.trainer.training_backend, "descriptor", None)
+        descriptor = getattr(scenario.trainer.candidate_backend, "descriptor", None)
         return build_release_page(
             step,
             rows,
@@ -731,7 +759,7 @@ class RequestService:
                 raise ReefError("implicit harness scenario creation returned no scenario")
             return scenario
 
-        parsed = self._require_inference(headers)
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
         scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)

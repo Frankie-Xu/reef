@@ -4,6 +4,8 @@ Ported from benchmarks/skill_claw/evolver.py at commit 0519eefb; the one
 adaptation is the endpoint binding: ``chat_client`` wraps the ``ModelBinding``
 reef hands ``propose`` (the deployment's upstream), so the evolver is the
 model under test and this module never names an endpoint or holds a key.
+This module runs inside Reef with the recipe's method hooks; the standalone
+Harbor agent uses the separate client integration.
 
 summarize (temperature 0.2) condenses each session; judge (0.1) scores
 sessions whose grader failed; decide (0.4) picks improve_skill,
@@ -18,8 +20,10 @@ import json
 import random
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol
+from collections.abc import Callable
+from typing import Any
+
+from reef.harness.episodes.model_binding import ModelBinding
 
 from .prompts import CREATE_SYSTEM, EVOLVE_SYSTEM, JUDGE_SYSTEM, MERGE_SYSTEM, SUMMARIZE_SYSTEM
 
@@ -62,23 +66,11 @@ def _normalize_temperature(model: str, requested: float) -> float:
     return requested
 
 
-class ModelLike(Protocol):
-    """The slice of reef's ``ModelBinding`` the evolver uses."""
-
-    model: str
-
-    def chat(self, messages: Sequence[Mapping[str, Any]], *, timeout_s: float | None = None, **params: Any) -> str: ...
-
-
-class ModelsLike(Protocol):
-    served: ModelLike
-
-
 #: Their chat signature, which every stage below takes as ``llm``.
 ChatFn = Callable[[str, str, float, int], str]
 
 
-def chat_client(model: ModelLike) -> ChatFn:
+def chat_client(model: ModelBinding) -> ChatFn:
     """Their chat client's loop over ``model``: six attempts, exponential
     backoff capped at 30s, the temperature and stream-only fallbacks."""
 

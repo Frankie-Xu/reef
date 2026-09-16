@@ -10,8 +10,6 @@ from urllib.parse import quote, urlsplit
 
 import aiohttp
 
-BODY_LIMIT = 192 * 1024
-
 
 class HTTPFailure(RuntimeError):
     def __init__(self, status: int, message: str):

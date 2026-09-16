@@ -19,15 +19,16 @@ import pytest
 reef_service = pytest.importorskip("reef.service.app", reason="requires a reef checkout")
 
 from aiohttp.test_utils import TestClient, TestServer
-from recipes.coral.journal import CallJournal
-from recipes.coral.middleware import ReefGatewayMiddleware
-from recipes.coral.reporter import AttemptReport
 
+from recipes.beta.coral.journal import CallJournal
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.reporter import AttemptReport
 from reef.dispatcher import build_default_dispatcher
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import InferenceHandler
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class _EchoBackend(InferenceBackend):
+class _EchoBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del artifact, path, payload
         return {"choices": [{"message": {"content": "a proposed config"}}]}
@@ -92,7 +93,12 @@ async def _post_through(mw, scope, body: bytes):
 def test_full_loop_against_real_reef_service(tmp_path):
     async def run():
         reef_client = TestClient(
-            TestServer(reef_service.create_app(build_default_dispatcher(), inference_backend=_EchoBackend()))
+            TestServer(
+                reef_service.create_app(
+                    build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
+                    inference_handler=_EchoBackend(),
+                )
+            )
         )
         await reef_client.start_server()
         try:

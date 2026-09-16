@@ -28,15 +28,16 @@ from reef_service.test_reef_trainer_contracts import ExampleBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.harness.client.wrapper import harness
-from reef.records import RecordStore
+from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import _merged_requires
 from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
-from reef.train.types import TraceBatch
+from reef.train.types import TrainingBatch
 
 
 @pytest.mark.parametrize("has_receipts", [False, True])
@@ -83,7 +84,7 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
             assert f"training request {request['id']} accepted" in capsys.readouterr().out
             if pending is not None:
                 assert pending.read_bytes() == before
-            assert not (Path(scenario.trainer.training_backend.proposals.directory) / "requests").exists()
+            assert not (Path(scenario.trainer.candidate_backend.proposals.directory) / "requests").exists()
             response = await client.post("/reef/scenarios/ask-scenario/update", json={"training_mode": "auto"})
             assert response.status == 200
             assert scenario.trainer.training_mode == "auto"
@@ -403,9 +404,9 @@ def test_the_backend_caps_the_merged_list_and_writes_the_row_of_a_step_that_prop
     person = [{"name": f"P{index}", "kind": "env"} for index in range(6)]
     added = [{"name": "A0", "kind": "env"}, {"name": "A1", "kind": "service"}, {"name": "A2", "kind": "permission"}]
 
-    def batch_for(request_id: str) -> TraceBatch:
+    def batch_for(request_id: str) -> TrainingBatch:
         request = TrainingRequest("ask", "s", "rel-0", request_id, requires=person)
-        return TraceBatch(f"demo:instruction:{request_id}", (), request=request)
+        return TrainingBatch(f"demo:instruction:{request_id}", (), request=request)
 
     def extending(nodes, samples, models, *, requests=()):
         requests[0]["requires"].extend(added)
@@ -453,12 +454,12 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
     payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
     for written, expected in ((merged, merged), (None, REQUIRES)):
-        records = RecordStore()
+        records = SQLiteRecordStore()
         trainer = Trainer.build(
             "agents",
             records,
             processor_factory=lambda ctx: RecordDrivenTraceProcessor(ctx.with_config({"batch_size": 1})),
-            training_backend=_RequiresBackend(written),
+            candidate_backend=_RequiresBackend(written),
             training_mode="manual",
         )
         try:

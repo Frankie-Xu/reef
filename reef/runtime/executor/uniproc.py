@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from threading import Lock
 from time import monotonic
-from typing import Any, Literal, overload
+from typing import Any
 
-from reef.runtime.executor.base import Executor, ExecutorConfig, ExecutorFuture, resolve_class
+from reef.runtime.executor.base import (
+    ExecutorConfig,
+    ExecutorFuture,
+    SubmittingExecutor,
+    check_rank,
+    remaining_time,
+    resolve_class,
+)
 
 
 class ConcurrentExecutorFuture(ExecutorFuture):
+    """Rank-ordered results of ``concurrent.futures`` submissions, under one deadline."""
+
     def __init__(self, futures: Sequence[Future], *, single: bool = False, timeout: float | None = None) -> None:
         self._futures = tuple(futures)
         self._single = single
@@ -27,24 +36,40 @@ class ConcurrentExecutorFuture(ExecutorFuture):
             try:
                 # Wait without raising a worker's own exception, so only a
                 # transport timeout is normalized across Python 3.10/3.11+.
-                future.exception(timeout=None if deadline is None else max(0.0, deadline - monotonic()))
+                future.exception(timeout=remaining_time(deadline))
             except FutureTimeoutError as exc:
                 raise TimeoutError("executor RPC timed out; worker work may still be running") from exc
             results.append(future.result())
         return results[0] if self._single else results
 
 
-class UniProcExecutor(Executor):
+def shutdown_worker(worker: Any) -> None:
+    """Call a worker's optional ``shutdown`` hook."""
+    shutdown = getattr(worker, "shutdown", None)
+    if shutdown is not None:
+        shutdown()
+
+
+def _shutdown_error(worker: Any) -> Exception | None:
+    try:
+        shutdown_worker(worker)
+    except Exception as exc:
+        return exc
+    return None
+
+
+class UniProcExecutor(SubmittingExecutor):
+    """Run at most one worker in this process, each RPC on a dedicated thread."""
+
     def _init_executor(self) -> None:
         if len(self.config.workers) > 1:
             raise ValueError("UniProcExecutor accepts at most one worker; use mp for multiple workers")
-        self._workers: tuple[Any, ...] = ()
-        self._owned = True
-        self._closed = False
-        self._pools: dict[int, ThreadPoolExecutor] = {}
-        self._pool_lock = Lock()
         if self.config.options or any(spec.options for spec in self.config.workers):
             raise ValueError("UniProcExecutor does not accept worker resource or backend options")
+        self._workers: tuple[Any, ...] = ()
+        self._owned = True
+        self._pools: dict[int, ThreadPoolExecutor] = {}
+        self._pool_lock = Lock()
         workers: list[Any] = []
         try:
             workers.extend(
@@ -54,7 +79,7 @@ class UniProcExecutor(Executor):
         except BaseException:
             for worker in workers:
                 with suppress(Exception):
-                    self._shutdown_worker(worker)
+                    shutdown_worker(worker)
             raise
 
     @classmethod
@@ -70,11 +95,6 @@ class UniProcExecutor(Executor):
     def workers(self) -> tuple[Any, ...]:
         return self._workers
 
-    def _ensure_open(self) -> None:
-        self._failure_state.check()
-        if self._closed:
-            raise RuntimeError("executor is shut down")
-
     def _thread_pool(self, rank: int) -> ThreadPoolExecutor:
         with self._pool_lock:
             self._ensure_open()
@@ -82,87 +102,28 @@ class UniProcExecutor(Executor):
                 self._pools[rank] = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"reef-executor-{rank}")
             return self._pools[rank]
 
-    def _call(self, rank, method, args, kwargs):
+    def _call(self, rank: int, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         self._ensure_open()
-        return getattr(self._workers[rank], method)(*args, **dict(kwargs or {}))
+        return getattr(self._workers[rank], method)(*args, **kwargs)
 
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: Literal[False] = False,
-    ) -> list[Any]: ...
+    def _pending(self, rank: int, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Future:
+        return self._failure_state.track(self._thread_pool(rank).submit(self._call, rank, method, args, kwargs))
 
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: Literal[True],
-    ) -> ExecutorFuture: ...
+    def _submit(
+        self, rank: int, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
+        check_rank(rank, len(self._workers))
+        return ConcurrentExecutorFuture([self._pending(rank, method, args, kwargs)], single=True, timeout=timeout)
 
-    @overload
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool,
-    ) -> list[Any] | ExecutorFuture: ...
-
-    def collective_rpc(
-        self,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool = False,
-    ) -> list[Any] | ExecutorFuture:
-        self._ensure_open()
+    def _submit_all(
+        self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None
+    ) -> ExecutorFuture:
         # Match the remote worker RPC contract at this local transport boundary.
-        futures = [
-            self._failure_state.track(self._thread_pool(rank).submit(self._call, rank, method, args, kwargs))
-            for rank in range(len(self._workers))
-        ]
-        future = ConcurrentExecutorFuture(futures, timeout=timeout)
-        return future if non_block else future.result()
-
-    def rpc(
-        self,
-        rank: int,
-        method: str,
-        *,
-        args: tuple[Any, ...] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
-        non_block: bool = False,
-    ) -> Any:
-        self._ensure_open()
-        if not isinstance(rank, int) or isinstance(rank, bool) or rank < 0 or rank >= len(self._workers):
-            raise IndexError(f"worker rank {rank!r} is outside the executor group")
-        pending = self._failure_state.track(self._thread_pool(rank).submit(self._call, rank, method, args, kwargs))
-        future = ConcurrentExecutorFuture([pending], single=True, timeout=timeout)
-        return future if non_block else future.result()
+        pending = [self._pending(rank, method, args, kwargs) for rank in range(len(self._workers))]
+        return ConcurrentExecutorFuture(pending, timeout=timeout)
 
     def check_health(self, timeout: float | None = None) -> None:
         self._ensure_open()
-
-    @staticmethod
-    def _shutdown_worker(worker: Any) -> None:
-        # Plain CPU worker plugins may provide a shutdown hook; it is optional.
-        shutdown = getattr(worker, "shutdown", None)
-        if shutdown is not None:
-            shutdown()
 
     def shutdown(self) -> None:
         with self._pool_lock:
@@ -174,13 +135,6 @@ class UniProcExecutor(Executor):
             pool.shutdown(wait=True, cancel_futures=True)
         if not self._owned:
             return
-        errors = [error for worker in self._workers if (error := self._try_shutdown_worker(worker)) is not None]
+        errors = [error for worker in self._workers if (error := _shutdown_error(worker)) is not None]
         if errors:
             raise errors[0]
-
-    def _try_shutdown_worker(self, worker: Any) -> Exception | None:
-        try:
-            self._shutdown_worker(worker)
-        except Exception as exc:
-            return exc
-        return None

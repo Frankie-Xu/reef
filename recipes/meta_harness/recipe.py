@@ -33,17 +33,20 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.core.evaluation import CandidateEvaluationPlugin, CandidateEvaluator
 from reef.harness.adapters import get_adapter
+from reef.harness.tree.mutations import Mutation
 from reef.observability import ExperimentLogger
+from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
-from reef.records import RecordStore
-from reef.train.cordis_backend import CordisRecipe
-from reef.train.cordis_backend.strategies import Mutation, Proposer, resolve_proposer
+from reef.storage.records import RecordStore
+from reef.train.cordis_backend.strategies import Proposer, resolve_proposer
+from reef.train.evaluation.evaluators import CandidatePluginFactory
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
+from reef.train.types import TrajectoryItem
 
 from .backend import POPULATION_STATE_KEY, MetaHarnessBackend
-from .method import SEARCH_MODES, MetaHarnessProposer, MetaHarnessSelector
+from .method import SEARCH_MODES, MetaHarnessPlugin, MetaHarnessProposer
 from .population import PopulationStore
 
 
@@ -53,7 +56,7 @@ class _UnboundProposer(Proposer):
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: Any,
         *,
         manifest: Any = None,
@@ -62,9 +65,19 @@ class _UnboundProposer(Proposer):
         raise RecipeConfigError("the Meta-Harness proposer is bound by MetaHarnessRecipe.build")
 
 
-class _UnboundSelector:
-    def decide(self, candidate: Any, evaluation: Any) -> Any:
-        raise RecipeConfigError("the Meta-Harness selector is bound by MetaHarnessRecipe.build")
+class _UnboundPlugin(CandidatePluginFactory):
+    """A factory placeholder ``build`` binds to the population store."""
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        raise RecipeConfigError("the Meta-Harness plugin is bound by MetaHarnessRecipe.build")
+
+
+@dataclass(frozen=True)
+class _PopulationPluginFactory(CandidatePluginFactory):
+    store: PopulationStore
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        return MetaHarnessPlugin(candidate_backend, self.store)
 
 
 @dataclass(frozen=True)
@@ -109,7 +122,7 @@ class MetaHarnessRecipe(CordisRecipe):
             raise RecipeConfigError("Meta-Harness owns evolution.selection so population and serving commit together")
         supplied = dict(evolution)
         supplied.setdefault("propose", _UnboundProposer())
-        supplied["selection"] = _UnboundSelector()
+        supplied["selection"] = _UnboundPlugin()
         kwargs = super()._recipe_kwargs({**settings, "evolution": supplied}, values)
 
         block = evolution.get("meta_harness")
@@ -175,7 +188,11 @@ class MetaHarnessRecipe(CordisRecipe):
                     max_nodes=self.max_nodes,
                 )
             )
-        bound = dataclasses.replace(self, propose=propose, candidate_selector=MetaHarnessSelector(store))
+        bound = dataclasses.replace(
+            self,
+            propose=propose,
+            candidate_plugin=_PopulationPluginFactory(store),
+        )
         backend = MetaHarnessBackend(population_store=store, **bound._backend_kwargs())
         return bound._build_trainer(
             scenario,

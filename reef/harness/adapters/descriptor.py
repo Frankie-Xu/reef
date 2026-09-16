@@ -38,10 +38,11 @@ from __future__ import annotations
 
 import importlib
 import re
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any
 
 import yaml
 
@@ -49,9 +50,10 @@ from reef.core.errors import ReefError
 from reef.harness.episodes.executor import EpisodeExecutor
 
 
-class ExecutionValidator(Protocol):
+class ExecutionValidator(ABC):
     """Adapter-specific constraints checked by the shared episode lifecycle."""
 
+    @abstractmethod
     def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
 
 
@@ -145,6 +147,9 @@ class AdapterDescriptor:
     #: True when the adapter isolates episodes itself; nesting is refused
     #: unless validate_execution checks a compatible configuration.
     self_isolating: bool = False
+    #: True when the ``{prompt}`` argv slot names a task directory (a Harbor task) rather than text the
+    #: model reads, so a gate can hand the adapter task directories instead of prompts.
+    is_prompt_task_directory: bool = False
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -236,6 +241,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
         raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
+    is_prompt_task_directory = data.get("is_prompt_task_directory", False)
+    if not isinstance(is_prompt_task_directory, bool):
+        raise DescriptorError(f"{where} 'is_prompt_task_directory' must be a boolean")
     client_env = data.get("client_env", {})
     if not isinstance(client_env, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in client_env.items()
@@ -257,6 +265,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         finalize_render=finalize,
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
+        is_prompt_task_directory=is_prompt_task_directory,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
         tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,
@@ -406,8 +415,8 @@ def _load_quirks(
     if not all(isinstance(item, str) and item for item in whitelist):
         raise DescriptorError(f"{where} quirks cleanup_whitelist must contain non-empty strings")
     validate_execution = getattr(module, "validate_execution", None)
-    if validate_execution is not None and not callable(validate_execution):
-        raise DescriptorError(f"{where} quirks validate_execution must be callable")
+    if validate_execution is not None and not isinstance(validate_execution, ExecutionValidator):
+        raise DescriptorError(f"{where} quirks validate_execution must inherit ExecutionValidator")
     return finalize, whitelist, validate_execution
 
 

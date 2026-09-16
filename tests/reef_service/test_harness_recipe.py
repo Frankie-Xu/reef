@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from reef_service._trajectories import recorded_trajectory
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
@@ -23,26 +24,27 @@ from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.tree.mutations import admit_mutations
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
+from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.records import RecordStore
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import create_app
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import (
     CordisBackend,
-    CordisRecipe,
     FailureManifest,
     Mutation,
     MutationError,
     Promoter,
-    ScoreComparisonSelector,
+    ScoreComparisonPlugin,
 )
-from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, admit_mutations
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
 from reef.train.trainer import Trainer
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
+from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch, TrainStepResult
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the episode scorer can prefer compositions containing the marker.
@@ -95,8 +97,8 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
-def batch() -> TraceBatch:
-    return TraceBatch("demo:trace:1", (TraceSample("a1", {"messages": []}, 0.0),))
+def batch() -> TrainingBatch:
+    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 # The deployment's model binding: where episodes and proposals reach a model.
@@ -157,7 +159,7 @@ def backend(tmp_path: Path, propose, seed: tuple = ()) -> CordisBackend:
 
 def run_backend_step(
     backend: CordisBackend,
-    trace_batch: TraceBatch,
+    trace_batch: TrainingBatch,
     state,
 ) -> TrainStepResult:
     """Exercise the backend phases directly; production runs them in Trainer."""
@@ -167,7 +169,7 @@ def run_backend_step(
     candidate = prepared.candidate
     assert candidate is not None
     try:
-        evaluator = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+        evaluator = ScoreComparisonPlugin(backend)
         evaluation = evaluator.evaluate(candidate)
         decision = evaluator.decide(candidate, evaluation)
         return backend.settle_step(prepared, decision)
@@ -180,7 +182,7 @@ def run_backend_step(
 
 
 def test_recipe_resolves_by_dotted_reference() -> None:
-    assert recipe_class_for("reef.train.cordis_backend.recipe:CordisRecipe") is CordisRecipe
+    assert recipe_class_for("reef.recipe.cordis:CordisRecipe") is CordisRecipe
     assert recipe_class_for("harness_evolve") is None
 
 
@@ -214,7 +216,7 @@ def test_config_without_evolution_section_is_rejected() -> None:
 
 def test_build_returns_a_trainer_over_the_evolution_backend(tmp_path: Path) -> None:
     built = recipe(tmp_path, lambda nodes, samples, model: None)
-    trainer = built.build("demo", RecordStore())
+    trainer = built.build("demo", SQLiteRecordStore())
     assert isinstance(trainer, Trainer)
     assert trainer.report_type is ScoredRolloutReport
 
@@ -630,8 +632,8 @@ def test_seed_boots_the_composition_tree(tmp_path: Path) -> None:
         seen.append(nodes)
         return
 
-    trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", RecordStore())
-    b = trainer.training_backend
+    trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", SQLiteRecordStore())
+    b = trainer.candidate_backend
     assert isinstance(b, CordisBackend)
     state = b.initial_state()
     assert state == {"steps": 0, "entries": [SEED_MODELS, SEED_SETTINGS]}
@@ -781,6 +783,7 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "agent-record",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 
     try:
@@ -803,7 +806,7 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
 
 
 def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path) -> None:
-    """The decisive #476 run against the real commit protocol: a proposal
+    """The decisive #476 run against the real committer: a proposal
     smuggling an inline key lands as a rejected mutation, the stored commit
     record bytes carry no key material, and a process restart recovers the
     committed state and keeps stepping."""
@@ -819,7 +822,12 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476")
         assert scenario is not None
@@ -836,7 +844,12 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
-    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+    )
     try:
         recovered = restarted.get_or_create_scenario("leak-476")
         assert recovered is not None
@@ -890,7 +903,12 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476-disabled")
         assert scenario is not None
@@ -920,7 +938,12 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("pregate-476")
         assert scenario is not None
@@ -939,7 +962,12 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
-    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+    )
     try:
         recovered = restarted.get_or_create_scenario("pregate-476")
         assert recovered is not None
@@ -984,7 +1012,8 @@ def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, 
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\n"
         "def evaluate(task, result):\n    return 0.0\n\n"
-        "def accept(candidate, current):\n    return True\n"
+        "def accept(candidate, current):\n    return True\n\n"
+        "not_a_factory = 3\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1000,20 +1029,30 @@ def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, 
 
     with pytest.raises(RecipeConfigError, match=r"evolution\.acceptance was removed"):
         CordisRecipe.from_environment({}, config=config(acceptance="always"))
-    with pytest.raises(RecipeConfigError, match=r"must provide decide"):
-        CordisRecipe.from_environment({}, config=config(selection="demo_method:accept"))
+    # evolution.selection now names a plugin factory, so a reference to
+    # something that cannot be called at all is the misconfiguration.
+    with pytest.raises(RecipeConfigError, match=r"plugin factory"):
+        CordisRecipe.from_environment({}, config=config(selection="demo_method:not_a_factory"))
 
 
-def test_recipe_resolves_candidate_selector(tmp_path, monkeypatch) -> None:
+def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
     module = tmp_path / "demo_selection.py"
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\n"
         "def evaluate(task, result):\n    return 0.0\n\n"
-        "class Policy:\n"
+        "from reef.core.evaluation import CandidateEvaluationPlugin\n"
+        "from reef.train.evaluation.evaluators import CandidatePluginFactory\n\n"
+        "class DemoPlugin(CandidateEvaluationPlugin):\n"
+        "    def __init__(self, backend):\n"
+        "        self._backend = backend\n\n"
+        "    def evaluate(self, candidate):\n"
+        "        return self._backend.evaluate(candidate)\n\n"
         "    def decide(self, candidate, evaluation):\n"
         "        from reef.train.evaluation import SelectionDecision\n"
-        "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n\n"
-        "policy = Policy()\n"
+        "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n"
+        "\nclass DemoFactory(CandidatePluginFactory):\n"
+        "    def build(self, candidate_backend):\n"
+        "        return DemoPlugin(candidate_backend)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1028,16 +1067,17 @@ def test_recipe_resolves_candidate_selector(tmp_path, monkeypatch) -> None:
         }
 
     compared = CordisRecipe.from_environment({}, config=config())
-    assert compared.candidate_selector is not None
-    assert type(compared.candidate_selector).__name__ == "ScoreComparisonSelector"
+    assert compared.candidate_plugin is not None
+    assert type(compared.candidate_plugin.build(object())).__name__ == "ScoreComparisonPlugin"
 
     named = CordisRecipe.from_environment({}, config=config(selection="always"))
-    assert named.candidate_selector is not None
-    assert type(named.candidate_selector).__name__ == "AlwaysSelect"
+    assert named.candidate_plugin is not None
+    assert isinstance(named.candidate_plugin, AlwaysSelectPluginFactory)
 
-    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:policy"))
-    assert dotted.candidate_selector is not None
-    assert type(dotted.candidate_selector).__name__ == "Policy"
+    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoFactory"))
+    assert dotted.candidate_plugin is not None
+    assert type(dotted.candidate_plugin).__name__ == "DemoFactory"
+    assert type(dotted.candidate_plugin.build(object())).__name__ == "DemoPlugin"
 
     with pytest.raises(RecipeConfigError, match="acceptance was removed"):
         CordisRecipe.from_environment(
@@ -1101,7 +1141,7 @@ def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
         binary=str(make_binary(tmp_path)),
     )
     with pytest.raises(RecipeConfigError, match=r"reef\.upstream_url"):
-        built.build("demo", RecordStore())
+        built.build("demo", SQLiteRecordStore())
 
 
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path) -> None:
@@ -1273,14 +1313,14 @@ def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch)
         {}, config=config("records"), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
     )
     assert records.batch_policy == "records"
-    trainer = records.build("demo", RecordStore())
+    trainer = records.build("demo", SQLiteRecordStore())
     assert type(trainer.processor).__name__ == "RecordDrivenTraceProcessor"
 
     reported = CordisRecipe.from_environment(
         {}, config=config(None), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
     )
     assert reported.batch_policy == "reports"
-    trainer = reported.build("demo", RecordStore())
+    trainer = reported.build("demo", SQLiteRecordStore())
     assert type(trainer.processor).__name__ == "CordisProcessor"
 
     with pytest.raises(RecipeConfigError, match="batch_policy must be 'reports' or 'records'"):
@@ -1427,8 +1467,8 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
         executor=executor,
         runtime=runtime(),
     )
-    trainer = built.build("demo", RecordStore())
-    backend = trainer.training_backend
+    trainer = built.build("demo", SQLiteRecordStore())
+    backend = trainer.candidate_backend
     assert isinstance(backend, CordisBackend)
 
     run_backend_step(backend, batch(), backend.initial_state())
@@ -1437,11 +1477,12 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
     assert all(received is executor for received in seen)
 
 
-def _traced_batch(*prompts: str) -> TraceBatch:
+def _traced_batch(*prompts: str) -> TrainingBatch:
     samples = tuple(
-        TraceSample(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0) for i, p in enumerate(prompts)
+        recorded_trajectory(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0)
+        for i, p in enumerate(prompts)
     )
-    return TraceBatch("demo:trace:promote", samples)
+    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
@@ -1515,16 +1556,16 @@ def test_secret_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
     assert key not in json.dumps(result.state)
 
 
-def _tagged_batch(*pairs: tuple[str, str | None]) -> TraceBatch:
+def _tagged_batch(*pairs: tuple[str, str | None]) -> TrainingBatch:
     samples = tuple(
-        TraceSample(
+        recorded_trajectory(
             f"a{i}",
             {"messages": [{"role": "user", "content": p}], "metadata": {"tags": {"client": s}} if s else {}},
             0.0,
         )
         for i, (p, s) in enumerate(pairs)
     )
-    return TraceBatch("demo:trace:promote", samples)
+    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def _promoting_backend(tmp_path: Path, **kwargs):
@@ -1698,12 +1739,13 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
     a secret-shaped one, and applies the cap to what it returns."""
     key = "sk-476-POLICY-KEY-0123456789abcdef"
 
-    def keep_marked(samples):
-        return [
-            prompt
-            for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
-            if prompt and "keep" in prompt
-        ]
+    class KeepMarked(Promoter):
+        def __call__(self, samples, *, manifest=None):
+            return [
+                prompt
+                for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
+                if prompt and "keep" in prompt
+            ]
 
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -1715,7 +1757,7 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
         models=MODEL,
         binary=str(make_binary(tmp_path)),
         promote_failures=True,
-        promote=resolve_promoter(keep_marked),
+        promote=KeepMarked(),
         max_promoted_tasks=2,
     )
     first = run_backend_step(
@@ -1728,9 +1770,10 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
 def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path) -> None:
     seen: list[object] = []
 
-    def with_manifest(samples, *, manifest=None):
-        seen.append(manifest)
-        return []
+    class WithManifest(Promoter):
+        def __call__(self, samples, *, manifest=None):
+            seen.append(manifest)
+            return []
 
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -1742,7 +1785,7 @@ def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path)
         models=MODEL,
         binary=str(make_binary(tmp_path)),
         promote_failures=True,
-        promote=resolve_promoter(with_manifest),
+        promote=WithManifest(),
     )
     first = run_backend_step(b, _traced_batch("A"), b.initial_state())
     run_backend_step(b, _traced_batch("B"), first.state)
@@ -1754,7 +1797,8 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
     module = tmp_path / "demo_promote_policy.py"
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n\n"
-        "def promote(samples):\n    return []\n"
+        "from reef.train.cordis_backend.strategies import Promoter\n\n"
+        "class Promote(Promoter):\n    def __call__(self, samples, *, manifest=None):\n        return []\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1769,7 +1813,7 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
             }
         }
 
-    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:promote"))
+    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:Promote"))
     assert isinstance(on.promote, Promoter) and on.promote(()) == []
     assert CordisRecipe.from_environment({}, config=config()).promote is None
 
@@ -2057,14 +2101,14 @@ def test_min_win_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     candidate = prepared.candidate
     assert candidate is not None
-    evaluator = DefaultCandidateEvaluationPlugin(b, ScoreComparisonSelector(min_win_margin=1))
+    evaluator = ScoreComparisonPlugin(b, min_win_margin=1)
     decision = evaluator.decide(candidate, evaluator.evaluate(candidate))
     result = b.settle_step(prepared, decision)
     assert result.metrics["wins"] == 1 and result.metrics["losses"] == 0
     assert result.metrics["selected"] is False
     assert result.metrics["min_win_margin"] == 1
     with pytest.raises(ValueError, match="min_win_margin must be an integer of at least 0"):
-        ScoreComparisonSelector(min_win_margin=-1)
+        ScoreComparisonPlugin(b, min_win_margin=-1)
 
 
 def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path: Path) -> None:
@@ -2145,7 +2189,12 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
     initial = tmp_path / "initial"
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("review")
         assert scenario is not None
@@ -2155,7 +2204,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert result is not None and result.pending is True
         scenario.commit(result)
 
-        record = scenario.commit_log.records()[-1]
+        record = scenario.store.history()[-1]
         assert record.operation == "training" and record.pending is True and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
         row = scenario.releases()[0]
@@ -2165,15 +2214,15 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert tree is not None
         pending_files = tree.read_files(scenario.artifact_for_version(row["release_id"]))
         assert pending_files is not None and any("marker" in text for text in pending_files.values())
-        served_files = tree.read_files(scenario.artifact_snapshot()[0])
+        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
         assert not served_files or not any("marker" in text for text in served_files.values())
 
         promoted = dispatcher.promote("review", row["release_id"])
         assert promoted.release_id != row["release_id"]
         assert scenario.current_artifact_ref() == promoted
-        served_files = tree.read_files(scenario.artifact_snapshot()[0])
+        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
         assert served_files is not None and any("marker" in text for text in served_files.values())
-        last = scenario.commit_log.records()[-1]
+        last = scenario.store.history()[-1]
         assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
         assert scenario.releases()[0]["pending"] is False
     finally:
@@ -2246,7 +2295,12 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+    )
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("review-http")
@@ -2305,7 +2359,12 @@ def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) ->
     initial = tmp_path / "initial"
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("live-pending")
         assert scenario is not None
@@ -2400,9 +2459,9 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
         dataclasses.replace(default, proposals_dir=" ")
     # The backend gets the scenario's own directory; nothing is created until a proposal arrives.
     trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
-        "demo", RecordStore()
+        "demo", SQLiteRecordStore()
     )
-    inbox = trainer.training_backend.proposals
+    inbox = trainer.candidate_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
     assert not inbox.directory.exists()
 
@@ -2439,3 +2498,61 @@ def test_the_proposer_cannot_create_update_or_remove_a_reserved_entry(tmp_path: 
     assert (published / "extensions" / "reef-version-check.ts").read_text(encoding="utf-8") == notice["config"]["code"]
     assert (published / "AGENTS.md").read_text(encoding="utf-8") == "marker rules\n"
     assert not (published / "tree.json").exists()
+
+
+def test_yaml_config_takes_the_gate_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
+    from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
+
+    module = tmp_path / "demo_evolution.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    root = tmp_path / "tasks"
+    for name in ("held-1", "held-2", "train-1"):
+        write_harbor_task(
+            HarborTask(
+                name=name,
+                instruction=f"task {name}",
+                tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+                environment={"Dockerfile": "FROM python:3.12-slim\n"},
+            ),
+            root,
+        )
+    write_split_manifest(tmp_path / "split.json", TaskSplit(("train-1",), ("held-1", "held-2"), 0, 0.5))
+    evolution = {
+        "propose": "demo_evolution:propose",
+        "evaluate": "demo_evolution:evaluate",
+        "task_manifest": str(tmp_path / "split.json"),
+        "tasks_root": str(root),
+        "adapter": "terminus",
+    }
+    built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
+    assert built.tasks == (str(root / "held-1"), str(root / "held-2"))
+    assert get_adapter("terminus").is_prompt_task_directory and not get_adapter("pi").is_prompt_task_directory
+
+    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="promote_failures adds prompts"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "promote_failures": True}}, runtime=runtime()
+        )
+    with pytest.raises(RecipeConfigError, match=r"only read with evolution\.task_manifest"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "task_manifest": None, "tasks": ["x"]}}, runtime=runtime()
+        )
+
+    with pytest.raises(RecipeConfigError, match="cannot both be set"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "tasks": ["x"]}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="must both be non-empty paths"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {k: v for k, v in evolution.items() if k != "tasks_root"}}, runtime=runtime()
+        )
+    write_split_manifest(tmp_path / "empty.json", TaskSplit(("train-1",), (), 0, 0))
+    with pytest.raises(RecipeConfigError, match="names no eval tasks"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "task_manifest": str(tmp_path / "empty.json")}}, runtime=runtime()
+        )
+    (root / "held-2" / "instruction.md").write_text("changed")
+    with pytest.raises(RecipeConfigError, match=r"held-2.*does not match its digest"):
+        CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())

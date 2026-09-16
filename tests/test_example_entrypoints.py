@@ -23,9 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # record-only ``basic`` example has no method package.
 EXAMPLE_DIRS = {
     "basic": ROOT / "recipes" / "basic",
-    "sao": ROOT / "recipes" / "sao" / "examples" / "sao",
+    "sao": ROOT / "recipes" / "sao" / "examples" / "imo_answerbench",
     "tttd": ROOT / "recipes" / "tttd" / "examples" / "tttd",
     "guidance_ttt": ROOT / "recipes" / "tttd" / "examples" / "guidance_ttt",
+    "ceobench": ROOT / "recipes" / "sao" / "examples" / "ceobench",
 }
 REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),

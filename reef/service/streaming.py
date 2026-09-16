@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.inference import InferenceStream
+from reef.runtime.interfaces import InferenceStream
 
 
 class SSEFrameDecoder:
@@ -155,7 +155,7 @@ def stream_record(
     complete: bool,
     error: str | None = None,
 ) -> dict[str, Any]:
-    record_response = getattr(stream, "record_response", None)
+    record_response = stream.record_response
     if record_response is not None:
         captured_response = dict(record_response)
         captured_response["stream_delivery"] = {

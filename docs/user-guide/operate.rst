@@ -110,6 +110,17 @@ Tracking is optional and off by default; ``observability.wandb`` in `Configurati
 
 What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit log, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. Tracking failures are logged and never fail a training step or its commit.
 
+The same run also receives ``operations/*`` every 10 seconds, plotted against
+``operations/time_seconds``. Use these panels to inspect unread records,
+processor queues, waiting ages, active training and weight-sync durations,
+request counts and latency, admission waits, record acceptance/rejection,
+version-mismatch rejections, and stale training batches. Pure inference
+scenarios also upload these samples. These samples do not
+require status polling or a successful training commit. Read the `metric
+definitions <../reference/configuration.rst#operational-metrics>`__ before
+interpreting queue counts: a reserved batch may be executing, and manual-mode
+data may intentionally wait.
+
 Restart and recovery
 --------------------
 
@@ -144,3 +155,49 @@ publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
 The record store, commit logs, and repository live under ``.reef/`` by default (``agent_record_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: its record store, commit log, proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain.
+
+The bundled ``SQLiteScenarioStorage`` combines SQLite records with a
+``CommitLogScenarioStore`` for JSONL commits, preserving existing databases and
+log formats. Embedded
+deployments must supply a ``ScenarioStorage`` subclass through
+``Dispatcher(..., scenario_storage=...)``; the `Python storage contract
+<../reference/python-api.rst#scenario-stores>`__ describes the required commit,
+recovery, and lifecycle behavior. The storage service also performs archival
+and record retention. Direct Python construction uses ``SQLiteRecordStore``
+for SQLite records and requires ``store=...`` for a ``Scenario``; see the
+`record API <../reference/python-api.rst#record-storage-and-audit>`__ for migration.
+
+Choose the record backend in the deployment's ``storage`` section. SQLite remains
+the default and requires no new settings. To use PostgreSQL, install the driver
+with ``uv pip install 'reef-infra[postgres]'`` (or ``uv pip install -e '.[postgres]'``
+from a checkout), then configure:
+
+.. code-block:: yaml
+
+   schema-version: 2
+   storage:
+     record-backend: postgres
+     record-database-url: ${REEF_RECORD_DATABASE_URL}
+     record-database-schema: reef_records
+     agent-record-dir: .reef/agent-record
+
+Set ``REEF_RECORD_DATABASE_URL`` to a PostgreSQL connection URL, such as
+``postgresql://reef:password@db.example.com/reef?sslmode=require``. The database
+must already exist; Reef creates its tables in the selected dedicated schema.
+The database role needs permission to create that schema and its tables on
+first startup. Give independent deployments distinct schemas (default:
+``reef_records``). PostgreSQL 14 and newer are supported. Connection strings
+using ``postgresql+psycopg://`` are also accepted.
+
+``PostgresRecordStore`` uses the same SQL record operations as SQLite. A shared
+connection pool returns connections after each operation. Archived records stay
+in PostgreSQL under their old storage identifier; a recreated scenario gets a
+new identifier. The same retention settings apply across all active and archived
+stores in the configured schema, while preserving active records and retry hashes.
+
+``agent_record_dir`` still holds local JSONL commit logs and scenario settings;
+keep it on persistent storage alongside the artifact configuration. PostgreSQL
+record storage does not make scenario commits or artifacts remote, and each
+scenario still needs one Reef writer. Changing backends does not migrate existing
+records or commit history. Use a fresh deployment directory/schema for a new
+backend; moving an existing deployment requires a separate data migration.

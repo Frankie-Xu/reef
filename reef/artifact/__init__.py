@@ -1,7 +1,7 @@
 """Storage for the release chain: every publication as an immutable release.
 
 The package owns bytes and heads — persisted, staged, materialized on
-demand. *When* a head moves is the scenario commit protocol's decision, one
+demand. *When* a head moves is the scenario committer's decision, one
 level up. Boundaries this package holds:
 
 - Repository backends are scenario-agnostic. A backend stores one
@@ -41,6 +41,7 @@ from reef.artifact.artifact import (
     ArtifactPublicationError,
     ArtifactRef,
     ArtifactSourceError,
+    ArtifactValidator,
     LiveWeightArtifactRef,
 )
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
@@ -77,6 +78,7 @@ __all__ = [
     "ArtifactReleaseChain",
     "ArtifactSource",
     "ArtifactSourceError",
+    "ArtifactValidator",
     "CachedRepositoryBackendFactory",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",

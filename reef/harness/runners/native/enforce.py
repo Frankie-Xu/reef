@@ -7,9 +7,10 @@ import os
 import shutil
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 ENFORCE_ENV = "REEF_NATIVE_ENFORCE"
 #: What a profile can withhold; ``read`` is not here because every tool sees the workspace, read only at least.
@@ -68,23 +69,34 @@ class SandboxFailed(Exception):
     """The enforcer could not run the call at all, so the failure is the sandbox's and not the tool's."""
 
 
-class Tool(Protocol):
+class Tool(ABC):
     """What an enforcer needs of a tool module: its name, its declaration, its file, and its ``run``."""
 
-    name: str
-    capabilities: tuple[str, ...]
-    path: Path | None
+    @property
+    @abstractmethod
+    def name(self) -> str: ...
+    @property
+    @abstractmethod
+    def capabilities(self) -> tuple[str, ...]: ...
+    @property
+    @abstractmethod
+    def path(self) -> Path | None: ...
 
+    @abstractmethod
     def run(self, args: dict[str, Any], workdir: str, /) -> Any: ...
 
 
-class Enforcer(Protocol):
+class Enforcer(ABC):
     """One way to run a tool call: a mode name for the log, what it withholds per tool, and the run itself."""
 
-    mode: str
+    @property
+    @abstractmethod
+    def mode(self) -> str: ...
 
+    @abstractmethod
     def describe(self, tool: Tool | None) -> dict[str, Any]: ...
 
+    @abstractmethod
     def run(self, tool: Tool, arguments: dict[str, Any], workdir: Path) -> Any: ...
 
 
@@ -126,7 +138,7 @@ def bwrap_argv(
     return cmd
 
 
-class InProcessEnforcer:
+class InProcessEnforcer(Enforcer):
     """The default: ``run`` is a plain call in the loop's process and nothing is enforced."""
 
     mode = "none"
@@ -138,7 +150,7 @@ class InProcessEnforcer:
         return tool.run(arguments, str(workdir))
 
 
-class BwrapEnforcer:
+class BwrapEnforcer(Enforcer):
     """Each call imports the tool's module afresh in a child under the profile its declaration derives."""
 
     mode = "bwrap"

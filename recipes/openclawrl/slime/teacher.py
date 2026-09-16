@@ -145,23 +145,25 @@ def gather_teacher_rows(
     tp_world = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
     tp_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
 
-    lp_out: list[torch.Tensor] = []
-    native_out: list[torch.Tensor] = []
+    teacher_log_probs: list[torch.Tensor] = []
+    teacher_topk_token_ids: list[torch.Tensor] = []
     with torch.no_grad():
-        full = logits.squeeze(0).float()
+        scaled_local_logits = logits.squeeze(0).float()
         temperature = float(getattr(args, "rollout_temperature", 1.0) or 1.0)
-        if temperature != 1.0:
-            full = full / temperature
+        scaled_local_logits = scaled_local_logits / temperature if temperature != 1.0 else scaled_local_logits
         offset = 0
         for tokens, total_length, response_length in zip(
             unconcat_tokens, total_lengths, response_lengths, strict=True
         ):
-            rows = full[offset + total_length - response_length - 1 : offset + total_length - 1]
+            rows = scaled_local_logits[offset + total_length - response_length - 1 : offset + total_length - 1]
             sq = _SQ_BY_TOKENS[id(tokens)].to(device=rows.device, dtype=torch.long)
-            lp_out.append(_gather_lp_at_ids(rows, sq, tp_group, tp_world, tp_rank).cpu())
-            native_out.append(_native_topk_ids(rows, sq.size(-1), tp_group, tp_world, tp_rank).cpu())
+            teacher_log_probs.append(_gather_lp_at_ids(rows, sq, tp_group, tp_world, tp_rank).cpu())
+            teacher_topk_token_ids.append(_native_topk_ids(rows, sq.size(-1), tp_group, tp_world, tp_rank).cpu())
             offset += total_length
-    return torch.empty((0,), device=logits.device), {"lp_at_sq": lp_out, "native_topk": native_out}
+    return torch.empty((0,), device=logits.device), {
+        "lp_at_sq": teacher_log_probs,
+        "native_topk": teacher_topk_token_ids,
+    }
 
 
 def compute_openclaw_teacher_cands(actor: Any, rollout_data: dict[str, Any]) -> None:

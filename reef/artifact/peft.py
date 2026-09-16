@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact
+from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.errors import ReefError
 
 ADAPTER_CONFIG = "adapter_config.json"
@@ -97,7 +97,7 @@ def _comparable(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
-class PEFTValidator:
+class PEFTValidator(ArtifactValidator):
     """Validate a PEFT artifact, the base model it names, and its metadata.
 
     Set ``require_metadata`` when a scenario serves only adapters Reef

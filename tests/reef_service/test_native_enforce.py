@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
-from reef.harness.runners.native import LoadError, ToolModule, _invoke, _ModuleRun, load_tools
+from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
     ENFORCE_ENV,
@@ -26,6 +26,15 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.tree.render import render_native_module
+
+
+class _ConstantToolRun(ToolRunner):
+    def __init__(self, result: str = "") -> None:
+        self.result = result
+
+    def __call__(self, args, workdir):
+        return self.result
+
 
 PROBE = """\
 import errno
@@ -163,7 +172,7 @@ def test_the_environment_selects_the_enforcer(monkeypatch) -> None:
         select_enforcer({ENFORCE_ENV: "bwrap"})
     with pytest.raises(ValueError, match=r"seccomp.*names no enforcer"):
         select_enforcer({ENFORCE_ENV: "seccomp"})
-    tool = ToolModule("shout", "", {}, lambda args, workdir: "", ["read", "write"])
+    tool = ToolModule("shout", "", {}, _ConstantToolRun(), ["read", "write"])
     assert InProcessEnforcer().describe(tool) == {"mode": "none", "denied": []}
     assert BwrapEnforcer().describe(tool) == {"mode": "bwrap", "denied": ["exec", "network"]}
     assert BwrapEnforcer().describe(None) == {"mode": "bwrap", "denied": []}
@@ -181,7 +190,7 @@ def test_a_sandboxed_call_runs_the_child_protocol_and_keeps_the_error_codes(tmp_
     assert ok["arguments"] == {} and ok["meta"]["truncated"] is False
     failed = _invoke(tools, "probe", '{"raise": true}', work, enforcer=BwrapEnforcer())
     assert failed["error"] == {"code": "TOOL_FAILED", "message": "RuntimeError: kaboom"}
-    built = {"shout": ToolModule("shout", "", {}, lambda args, workdir: "", ["read"])}
+    built = {"shout": ToolModule("shout", "", {}, _ConstantToolRun(), ["read"])}
     assert _invoke(built, "shout", "{}", work, enforcer=BwrapEnforcer())["error"] == {
         "code": "SANDBOX_FAILED",
         "message": "tool 'shout' has no module file to run in a child process",
@@ -439,15 +448,42 @@ def test_concurrent_first_calls_import_once_and_a_raising_top_level_fails_every_
 
 
 def require_nested_jail() -> None:
-    """A live jail test runs where two bubblewrap jails nest; elsewhere it skips with the preflight's own reason."""
+    """Require nested jails in sandbox CI; allow local runs to skip unsupported hosts."""
     if shutil.which("bwrap") is None:
-        pytest.skip("bubblewrap (bwrap) is not on PATH")
-    try:
-        SandboxExecutor().preflight()
-    except SandboxUnavailable as exc:
-        pytest.skip(str(exc))
+        reason = "bubblewrap (bwrap) is not on PATH"
+    else:
+        try:
+            SandboxExecutor().preflight()
+            return
+        except SandboxUnavailable as exc:
+            reason = str(exc)
+    if os.environ.get("REEF_REQUIRE_SANDBOX") == "1":
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("availability", ["missing", "refused", "available"])
+def test_nested_jail_requirement_handles_host_availability(
+    monkeypatch: pytest.MonkeyPatch, required: bool, availability: str
+) -> None:
+    monkeypatch.setenv("REEF_REQUIRE_SANDBOX", "1" if required else "0")
+    monkeypatch.setattr(shutil, "which", lambda name: None if availability == "missing" else "/usr/bin/bwrap")
+
+    def _preflight(executor: SandboxExecutor) -> None:
+        if availability == "refused":
+            raise SandboxUnavailable("nested namespaces unavailable")
+
+    monkeypatch.setattr(SandboxExecutor, "preflight", _preflight)
+    if availability == "available":
+        require_nested_jail()
+        return
+    outcome = pytest.fail.Exception if required else pytest.skip.Exception
+    with pytest.raises(outcome, match=r"bubblewrap|nested namespaces unavailable"):
+        require_nested_jail()
+
+
+@pytest.mark.sandbox
 def test_bwrap_denies_what_the_declaration_withholds(tmp_path: Path) -> None:
     require_nested_jail()
     work = tmp_path / "work"

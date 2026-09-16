@@ -1,4 +1,4 @@
-"""Backend contract for producing and selecting training candidates."""
+"""Candidate lifecycle shared by weight training and harness evolution."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from reef.train.evaluation.contracts import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
@@ -96,13 +96,13 @@ class StepExecution:
             raise ValueError(f"a {self.outcome} execution cannot carry storage status")
 
 
-class TrainingBackend(CandidateEvaluator, ABC):
+class CandidateBackend(CandidateEvaluator, ABC):
     """Prepare and evaluate updates while Reef owns candidate selection.
 
     The backend owns method-specific candidate construction and settlement,
     and supplies the default evaluator. A recipe may inject a cohesive
     :class:`reef.train.evaluation.CandidateEvaluationPlugin`; otherwise the trainer
-    wraps this evaluator in :class:`reef.train.evaluation.DefaultCandidateEvaluationPlugin`.
+    wraps this evaluator in :class:`reef.train.evaluation.BackendAlwaysSelectPlugin`.
     Every backend therefore follows the same evaluate-then-decide lifecycle
     between preparation and settlement.
     """
@@ -156,6 +156,10 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Non-secret backend identity/config attached to experiment runs."""
         return {}
 
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        """Nonblocking process-local measurements, independent of successful commits."""
+        return {}
+
     def failed_step_metrics(self) -> Mapping[str, Any]:
         """Metadata to retain when the current instruction fails before producing a result."""
         return {}
@@ -183,4 +187,4 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["PreparedStep", "StepExecution", "TrainingBackend"]
+__all__ = ["CandidateBackend", "PreparedStep", "StepExecution"]

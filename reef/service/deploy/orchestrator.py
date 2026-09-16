@@ -3,7 +3,7 @@
 Starts independent services concurrently while honoring readiness dependencies,
 mirrors child output, watches for unexpected exits, and tears the stack down
 in reverse order on signal. Assembly of the Reef HTTP application itself
-lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
+lives in :mod:`reef.service.assembly`; CLI syntax lives in :mod:`reef.service.deploy.cli`.
 """
 
 from __future__ import annotations
@@ -16,30 +16,59 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import suppress
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
 import yaml
 
+from reef.recipe.base import WeightTrainingRecipe
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.registry import recipe_class_for
+from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
-from reef.service.deploy.config import (
+from reef.service.deploy.cli import (
+    InvalidOverrideError,
+    _apply_overrides,
+    _parse_overrides,
+    build_serve_parser,
+    native_override,
+    object_override_path,
+)
+from reef.service.deploy.config_utils import (
     PROJECT_ROOT,
+    DeployConfigError,
     config_value,
     interpolate_config,
     interpolate_environment,
     load_config,
     recipe_source_root,
-    resolve_model_paths,
-    validate_services,
 )
-from reef.service.deploy.execution import service_executor_config, service_executor_selection
-from reef.service.deploy.settings import build_parser
+from reef.service.deploy.deployment_config import (
+    component_config_arguments,
+    normalize_component_config,
+    normalize_component_layout,
+    reject_null_settings,
+    translate_layout,
+    translate_references,
+)
+from reef.service.deploy.diagnostics import startup_report
+from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
+from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
+from reef.service.deploy.service_config import (
+    normalize_service_config,
+    service_config_arguments,
+    service_config_from_mapping,
+    service_override,
+)
+from reef.service.deploy.training import assemble_training_services, local_model_required
+from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
@@ -49,74 +78,8 @@ def _log(msg: str) -> None:
     print(f"[reef] {msg}", file=sys.stderr)
 
 
-class InvalidOverrideError(ValueError):
-    """A leftover ``reef serve`` argument is not a valid ``--key`` override."""
-
-
-def _parse_overrides(extras: list[str]) -> dict[str, str]:
-    """Parse leftover ``--key value`` / ``--key=value`` pairs from ``parse_known_args``.
-
-    Anything that is not a well-formed ``--key`` override — an orphan
-    positional, an unknown short option, or a ``--`` with no name — is
-    rejected instead of silently discarded, so a typo fails fast at the CLI
-    rather than surfacing as an unrelated missing-config error downstream.
-    """
-    overrides: dict[str, str] = {}
-    i = 0
-    while i < len(extras):
-        token = extras[i]
-        if not token.startswith("--"):
-            raise InvalidOverrideError(f"unrecognized argument: {token!r}")
-        key = token[2:]
-        if "=" in key:
-            key, value = key.split("=", 1)
-            if not key:
-                raise InvalidOverrideError(f"override is missing a name: {token!r}")
-            overrides[key] = value
-            i += 1
-        elif i + 1 < len(extras) and not extras[i + 1].startswith("--"):
-            if not key:
-                raise InvalidOverrideError(f"override is missing a name: {token!r}")
-            overrides[key] = extras[i + 1]
-            i += 2
-        else:
-            if not key:
-                raise InvalidOverrideError(f"override is missing a name: {token!r}")
-            overrides[key] = "true"
-            i += 1
-    return overrides
-
-
-def _coerce_value(raw: str) -> Any:
-    """Parse a CLI string into a YAML-compatible Python value (int, bool, str, ...)."""
-    try:
-        return yaml.safe_load(raw)
-    except yaml.YAMLError:
-        return raw
-
-
-def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[str, Any]:
-    """Merge CLI overrides into a copy of the config dict.
-
-    Bare keys (no dot) target the ``reef`` section; dotted keys traverse
-    nested sections (e.g. ``training.checkpoint_dir``).
-    """
-    config = copy.deepcopy(config)
-    for key, raw_value in overrides.items():
-        if "." not in key:
-            key = f"reef.{key}"
-        parts = key.split(".")
-        node: dict[str, Any] = config
-        for index, part in enumerate(parts[:-1]):
-            if part not in node:
-                node[part] = {}
-            existing = node[part]
-            if not isinstance(existing, dict):
-                prefix = ".".join(parts[: index + 1])
-                raise InvalidOverrideError(f"override path {prefix!r} is not a section")
-            node = existing
-        node[parts[-1]] = _coerce_value(raw_value)
-    return config
+class DeployStartupError(RuntimeError):
+    """A deployment failed to start; includes its reason and local log location."""
 
 
 def _write_override_config(config: dict[str, Any]) -> Path:
@@ -174,8 +137,18 @@ class _Stack:
         while not self._stopping.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"service {service['name']!r} did not become ready")
-            ready = executor.rpc(0, "probe", args=(service["name"], min(5, remaining)), timeout=min(5, remaining) + 2)
+                timeout = service.get("ready_timeout", self.ready_timeout_default)
+                raise TimeoutError(f"service {service['name']!r} did not become ready within {timeout}s")
+            try:
+                ready = executor.rpc(
+                    0, "probe", args=(service["name"], min(5, remaining)), timeout=min(5, remaining) + 2
+                )
+            except Exception:
+                # A failed probe can be the first observation of a child's exit.
+                # Preserve its last output without replacing the startup error.
+                with suppress(Exception):
+                    self._drain_log(service["name"])
+                raise
             self._drain_log(service["name"])
             if ready:
                 return
@@ -291,6 +264,9 @@ class _Stack:
             self.shutdown()
             raise
         _log(f"stack up. logs: {self.run_dir}/*.log")
+        hint = install_hint(self.config)
+        if hint is not None:
+            _log(f"install the harness in another terminal: {hint}")
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -366,62 +342,329 @@ class _Stack:
         return int(self._unexpected_exit.is_set())
 
 
-def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None) -> int:
-    resolved_config_path = Path(config_path)
-    if not resolved_config_path.is_absolute():
-        resolved_config_path = PROJECT_ROOT / resolved_config_path
-    config = load_config(resolved_config_path, interpolate_env=False)
-    if overrides:
-        config = _apply_overrides(config, overrides)
-    config = interpolate_environment(config, resolved_config_path)
-    # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
-    services = validate_services(config, resolved_config_path)
-    # Resolved against the operator's config, before any override copy
-    # relocates the path the services read.
-    source_root = recipe_source_root(config, resolved_config_path)
+def install_hint(config: Mapping[str, Any]) -> str | None:
+    """The one line that installs a harness evolution deployment's harness, or None for a deployment without one.
+
+    Printed when the stack is up so nobody copies it from a README: the
+    address the service listens on (loopback when it binds every interface),
+    the adapter the deployment evolves, and the token the config holds."""
+    evolution = config.get("evolution")
+    adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
+    if not isinstance(adapter, str) or not adapter:
+        return None
+    host = str(config_value(config, "reef", "host", default="127.0.0.1"))
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    port = config_value(config, "reef", "port", default="8900")
+    token = config_value(config, "reef", "token", default=None)
+    if token is None:
+        tokens = config.get("reef", {}).get("tokens") if isinstance(config.get("reef"), Mapping) else None
+        if isinstance(tokens, list) and tokens:
+            token = str(tokens[0])
+    header = f"-H 'Authorization: Bearer {token}' " if token else ""
+    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
+
+
+def _component_selection(
+    config: dict[str, Any], overrides: dict[str, str], config_path: Path
+) -> tuple[dict[str, Any], Path | None]:
+    """Resolve only selection inputs before loading component definitions."""
+    selected = _apply_overrides(config, overrides)
+    reef = selected.get("reef", {})
+    if not isinstance(reef, Mapping):
+        raise DeployConfigError("reef must be an object")
+    selected_reference = interpolate_environment({"reef": {"recipe": reef.get("recipe")}}, config_path)
+    reference = selected_reference["reef"]["recipe"]
+    if reference is not None and not isinstance(reference, str):
+        raise DeployConfigError("reef.recipe must be a string")
+    selected.setdefault("reef", {})["recipe"] = interpolate_config(selected, reference) if reference else reference
+    if isinstance(selected.get("implementation"), str):
+        selected["implementation"] = interpolate_environment(
+            {"implementation": selected["implementation"]}, config_path
+        )["implementation"]
+    runtime = (
+        selected.get("runtime")
+        if selected.get("implementation") and ":" not in (reference or "")
+        else selected["reef"].get("runtime")
+    )
+    if isinstance(runtime, dict) and isinstance(runtime.get("type"), str):
+        runtime["type"] = interpolate_config(
+            selected, interpolate_environment({"type": runtime["type"]}, config_path)["type"]
+        )
+    source_root = recipe_source_root(selected, config_path)
+    if source_root is not None and str(source_root) not in sys.path:
+        sys.path.append(str(source_root))
+    return selected, source_root
+
+
+def resolve_deployment_config(
+    config: dict[str, Any], overrides: dict[str, str] | None, source: str | Path, *, standard: bool = False
+) -> tuple[dict[str, Any], Path | None]:
+    """Resolve the public layout and selected schemas without starting processes or downloading models."""
+    resolved_config_path = Path(source).resolve()
+    versioned = config.get("schema-version") == 2
+    config = translate_layout(config)
+    standard = standard or versioned
+    selected, source_root = _component_selection(config, overrides or {}, resolved_config_path)
     if source_root is not None:
         _log(f"recipe package resolves from {source_root}")
-        if str(source_root) not in sys.path:
-            sys.path.append(str(source_root))
-    paths_changed = resolve_model_paths(config)
-    temp_config_path: Path | None = None
-    if overrides or paths_changed:
-        temp_config_path = _write_override_config(config)
-        resolved_config_path = temp_config_path
-    run_dir = Path(config_value(config, "run_dir", default="/tmp/reef-stack") or "/tmp/reef-stack")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    ready_timeout_default = int(config_value(config, "ready_timeout", default="3600") or "3600")
-
-    stack = _Stack(
-        config,
-        services,
-        run_dir,
-        ready_timeout_default,
-        resolved_config_path,
-        source_root=source_root,
-    )
     try:
-        stack.start()
-        stack.block()
-    except KeyboardInterrupt:
-        # SIGINT during startup (before block() registers its handler) still
-        # triggers the default KeyboardInterrupt; shutdown ran via finally.
-        # Swallow it so the operator sees a clean exit, not a traceback.
-        stack._stopping.set()
+        arguments = component_config_arguments(selected)
+        recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
+        training = recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe)
+        if versioned:
+            config = normalize_component_layout(config, arguments)
+        if versioned or standard:
+            for key, value in (overrides or {}).items():
+                if (
+                    service_override(key, value) is None
+                    and native_override(key) is None
+                    and object_override_path(key, (*service_config_arguments(), *arguments)) is None
+                    and not any(f"--{key}" in (*argument.flags, *argument.negative_flags) for argument in arguments)
+                ):
+                    raise DeployConfigError(f"unknown configuration flag --{key}")
+        config = _apply_overrides(config, overrides or {}, arguments=arguments)
+        if versioned or standard:
+            config = translate_references(config, arguments)
+        config = interpolate_environment(config, resolved_config_path)
+        if versioned or standard:
+            reject_null_settings(config, arguments)
+        if standard:
+            if "services" in config.get("execution", {}):
+                raise DeployConfigError("execution.services belongs to legacy process stacks")
+            for name, flag in (("host", "reef.host"), ("model_path", "inference.model-path")):
+                value = config.get("reef", {}).get(name)
+                if isinstance(value, str) and not value.strip():
+                    raise DeployConfigError(f"--{flag} must be non-empty")
+        normalized_config = normalize_component_config(normalize_service_config(config), arguments)
+        if standard:
+            if training:
+                assemble_training_services(normalized_config)
+            else:
+                assemble_provider_services(normalized_config)
+    except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
+        raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
+    return normalized_config, source_root
+
+
+def _config_source(config_path: Path | None, versioned: bool) -> str:
+    """Name the selected file, profile or command line and its layout for the startup log."""
+    if config_path is None:
+        return "config: command line"
+    layout = "schema-version 2" if versioned else "unversioned layout"
+    if config_path.parent == PROFILES_DIR.resolve():
+        return f"config: profile {config_path.stem} at {config_path} ({layout})"
+    return f"config: {config_path} ({layout})"
+
+
+def _run_orchestrator(
+    config_path: str | None, overrides: dict[str, str] | None = None, *, print_config: bool = False
+) -> int:
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
+    config = (
+        load_config(resolved_config_path, interpolate_env=False) if config_path else command_line_config(os.environ)
+    )
+    versioned = config.get("schema-version") == 2
+    source = _config_source(resolved_config_path if config_path else None, versioned)
+    _log(source)
+    normalized_config, source_root = resolve_deployment_config(
+        config, overrides, resolved_config_path, standard=config_path is None
+    )
+    report = startup_report(
+        config,
+        normalized_config,
+        overrides or {},
+        environ=os.environ,
+        from_file=config_path is not None,
+        include_defaults=print_config,
+    )
+    if print_config:
+        # Settings are final here; a model path is shown as written, since
+        # downloads and hardware checks happen only at a real start.
+        print("\n".join([source, *report]))
+        return 0
+    for line in report:
+        _log(line)
+    settings_changed = normalized_config != config
+    config = normalized_config
+    services = validate_services(config, resolved_config_path)
+    paths_changed = local_model_required(config) and resolve_model_paths(config)
+    temp_config_path: Path | None = None
+    try:
+        if versioned or config_path is None or overrides or paths_changed or settings_changed:
+            temp_config_path = _write_override_config(config)
+            resolved_config_path = temp_config_path
+        run_dir = Path(config_value(config, "run_dir", default="/tmp/reef-stack") or "/tmp/reef-stack")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ready_timeout_default = int(config_value(config, "ready_timeout", default="3600") or "3600")
+
+        stack = _Stack(
+            config,
+            services,
+            run_dir,
+            ready_timeout_default,
+            resolved_config_path,
+            source_root=source_root,
+        )
+
+        def interrupt_startup(signum: int, frame: FrameType | None) -> None:
+            _log("received signal during startup, shutting down")
+            raise KeyboardInterrupt
+
+        # block() installs the steady-state handler only after every service is
+        # ready. Until then, interruption must unwind start() and stop its peers.
+        previous_sigterm = signal.signal(signal.SIGTERM, interrupt_startup)
+        try:
+            try:
+                stack.start()
+            except Exception as exc:
+                raise DeployStartupError(
+                    f"deployment startup failed: {exc}\n  logs: {run_dir.resolve()}/*.log"
+                ) from exc
+            stack.block()
+        except KeyboardInterrupt:
+            # Startup signals unwind the launch tasks before final cleanup.
+            stack._stopping.set()
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+            stack.shutdown()
+        return stack.exit_code
     finally:
-        stack.shutdown()
         if temp_config_path is not None:
             temp_config_path.unlink(missing_ok=True)
-    return stack.exit_code
+
+
+#: ``--model <provider>/<model>``: the upstream URL and the key a provider prefix stands for. A key of None
+#: comes from ``REEF_UPSTREAM_API_KEY`` and is required; ollama ignores its key, so any word will do.
+_PROVIDERS: dict[str, tuple[str, str | None]] = {
+    "ollama": ("http://127.0.0.1:11434", "ollama"),
+    "openai": ("https://api.openai.com", None),
+}
+
+#: The tutorial method the harness-evolve profile points at; the profile runs from the checkout that holds it.
+_PROFILE_METHODS = {"harness-evolve": Path("tutorials/evolve-your-harness/harness/evolution.py")}
+
+
+def _model_overrides(
+    spec: str, environ: Mapping[str, str], overrides: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The ``reef.*`` overrides ``--model`` stands for.
+
+    A known provider prefix fills the URL and the key; any other spelling,
+    a prefix of another kind included (``Qwen/Qwen3-8B``), is the model id
+    alone and the URL comes from the config or the environment."""
+    provider, _, model = spec.partition("/")
+    if provider not in _PROVIDERS or not model:
+        return {"upstream_model": spec}
+    url, key = _PROVIDERS[provider]
+    if key is None:
+        key = environ.get("REEF_UPSTREAM_API_KEY", "").strip()
+        for name, value in (overrides or {}).items():
+            declared = service_override(name, value)
+            if declared is not None and declared[0].name == "upstream_api_key":
+                key = value.strip()
+        if not key:
+            raise DeployConfigError(
+                f"--model {spec}: set REEF_UPSTREAM_API_KEY to the {provider} key or pass --inference.upstream-api-key"
+            )
+    return {"upstream_url": url, "upstream_model": model, "upstream_api_key": key}
+
+
+def _resolve_config(config: str | None, recipe: str | None) -> str | None:
+    """Select a file/profile, or return None for configuration-free provider startup."""
+    if config is not None and recipe is not None:
+        raise DeployConfigError("pass -c <file> or --recipe <name>, not both")
+    if config is not None:
+        if not config.strip():
+            raise DeployConfigError("--config must name a non-empty file path")
+        return config
+    if recipe is not None:
+        try:
+            return str(profile_path(recipe))
+        except UnknownProfileError as exc:
+            raise DeployConfigError(str(exc)) from exc
+    return None
+
+
+def _prepare_profile(
+    recipe: str,
+    model: str | None,
+    environ: MutableMapping[str, str],
+    overrides: Mapping[str, str] | None = None,
+) -> None:
+    """What a profile needs from the environment before it loads: its own directory, the checkout, a model."""
+    selected_model = model or environ.get("REEF_UPSTREAM_MODEL", "")
+    for key, value in (overrides or {}).items():
+        declared = service_override(key, value)
+        if declared is not None and declared[0].name == "upstream_model":
+            selected_model = value
+    if not selected_model.strip():
+        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --inference.upstream-model MODEL")
+    method = _PROFILE_METHODS.get(recipe)
+    if method is not None and not (PROJECT_ROOT / method).is_file():
+        raise DeployConfigError(
+            f"the {recipe} profile runs from a reef checkout: its proposer is {method}, not found under {PROJECT_ROOT}"
+        )
+    environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
+    environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
+    if method is not None:
+        python_paths = [str((PROJECT_ROOT / method).parents[1]), str(PROJECT_ROOT)]
+        if environ.get("PYTHONPATH"):
+            python_paths.append(environ["PYTHONPATH"])
+        environ["PYTHONPATH"] = os.pathsep.join(python_paths)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--help" in argv or "-h" in argv:
+        bootstrap = build_serve_parser(service_arguments=False)
+        selection, extras = bootstrap.parse_known_args([arg for arg in argv if arg not in ("--help", "-h")])
+        help_config = None
+        if (
+            selection.config
+            or selection.recipe
+            or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras)
+        ):
+            path = Path(selection.config or (profile_path(selection.recipe) if selection.recipe else "reef.yaml"))
+            config = (
+                translate_layout(load_config(path, interpolate_env=False))
+                if selection.config or selection.recipe
+                else {}
+            )
+            help_config, _ = _component_selection(config, _parse_overrides(extras), path.resolve())
+        build_serve_parser(config=help_config).parse_args(argv)
+    # Discover the file/profile without applying defaults or converting
+    # public values before YAML and environment references are available.
+    parser = build_serve_parser(service_arguments=False)
     args, extras = parser.parse_known_args(argv)
-    config_path = args.config or os.environ.get("REEF_CONFIG", "reef.yaml")
     try:
         overrides = _parse_overrides(extras)
-        exit_code = _run_orchestrator(config_path, overrides)
+        if args.model:
+            # An explicit --key beats what the provider prefix fills in.
+            model_defaults = _model_overrides(args.model, os.environ, overrides)
+            for key, value in overrides.items():
+                model_defaults.pop(key, None)
+                model_defaults[key] = value
+            overrides = model_defaults
+        config_path = _resolve_config(args.config, args.recipe)
+        if args.recipe:
+            _prepare_profile(args.recipe, args.model, os.environ, overrides)
+        exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
     sys.exit(exit_code)
+
+
+def run_service(config_path: str | Path | None = None) -> int:
+    """Run the internal Reef HTTP child from the orchestrator's config."""
+    selected_config = config_path or os.environ.get("REEF_CONFIG")
+    if selected_config is None:
+        raise SystemExit("[reef] ERROR: internal service requires REEF_CONFIG")
+    settings = service_config_from_mapping(load_config(selected_config))
+    from reef.service.assembly import build_app
+
+    app = build_app(settings)
+    from aiohttp import web
+
+    web.run_app(app, host=settings.host, port=settings.port)
+    return 0

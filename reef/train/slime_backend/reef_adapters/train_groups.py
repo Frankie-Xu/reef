@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.executor import Executor, ExecutorConfig, resolve
+from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.interfaces import RuntimeLoadId
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
 )
@@ -60,7 +63,7 @@ class SlimeTrainGroup:
         self._world_size = num_nodes * num_gpus_per_node
         backend = executor_backend if executor_backend is not None else getattr(args, "reef_executor_backend", "auto")
         # Resolve before reserving or launching any workers.
-        executor_class = slime_executor_class(backend, role="training")
+        executor_class = slime_executor_class(backend)
         self._executor_config = ExecutorConfig(
             backend=executor_class,
             options={
@@ -77,9 +80,12 @@ class SlimeTrainGroup:
             },
         )
         self._executor: Executor | None = None
+        self._failure_listener: ExecutorFailureListener | None = None
         self._rollout_manager: Any = None
+        self.train_parallel_config: dict[str, Any] = {}
         self._disk_weight_version = getattr(args, "update_weight_start_version", 0)
         self._released_runtime_load_id: str | None = None
+        self._prepared_disk_update: tuple[Path, int, str] | None = None
 
     @property
     def executor(self) -> Executor:
@@ -96,6 +102,8 @@ class SlimeTrainGroup:
         executor = Executor.create(self._executor_config)
         self._executor = executor
         try:
+            if self._failure_listener is not None:
+                executor.register_failure_listener(self._failure_listener)
             start_ids = executor.collective_rpc(
                 "init",
                 args=(self.args, self.role),
@@ -118,6 +126,12 @@ class SlimeTrainGroup:
         if executor is not None:
             executor.shutdown()
             self._executor = None
+
+    def register_failure_listener(self, listener: ExecutorFailureListener) -> None:
+        """Observe current and replacement workers from the operations owner."""
+        self._failure_listener = listener
+        if self._executor is not None:
+            self._executor.register_failure_listener(listener)
 
     def check_health(self) -> None:
         self.executor.check_health()
@@ -163,9 +177,13 @@ class SlimeTrainGroup:
 
     def set_rollout_manager(self, rollout_manager):
         self._rollout_manager = rollout_manager
-        return self.executor.collective_rpc(
+        layouts = self.executor.collective_rpc(
             "set_rollout_manager", args=(rollout_manager,), timeout=TRAIN_RPC_TIMEOUT_S
         )
+        if not layouts or not isinstance(layouts[0], dict) or any(layout != layouts[0] for layout in layouts):
+            raise RuntimeError(f"Slime workers disagree on training parallel config: {layouts!r}")
+        self.train_parallel_config = layouts[0]
+        return layouts
 
     def _release_train_enabled(self):
         return self.role == "actor" and getattr(self.args, "release_train", False)
@@ -177,9 +195,9 @@ class SlimeTrainGroup:
             and self.args.update_weight_transport == "disk"
         )
 
-    def restore_runtime_load_id_for_republication(self, runtime_load_id: str):
+    def set_runtime_load_id_for_update(self, runtime_load_id: str):
         return self.executor.collective_rpc(
-            "restore_runtime_load_id_for_republication", args=(runtime_load_id,), timeout=TRAIN_RPC_TIMEOUT_S
+            "set_runtime_load_id_for_update", args=(runtime_load_id,), timeout=TRAIN_RPC_TIMEOUT_S
         )
 
     def async_pop_rank0_metrics(self):
@@ -192,12 +210,10 @@ class SlimeTrainGroup:
             raise RuntimeError(f"actors disagree about prior state for scenario {scenario!r}: {existed!r}")
         return bool(existed[0])
 
-    def sync_serving_runtime_load_id(self) -> str:
-        """Stamp the group's current runtime-load-ID token on the engines."""
-        versions = self.executor.collective_rpc("sync_serving_runtime_load_id", timeout=TRAIN_RPC_TIMEOUT_S)
-        if len(set(versions)) != 1:
-            raise RuntimeError(f"Slime workers disagree on the runtime load ID: {versions!r}")
-        return str(versions[0])
+    def initialize_runtime_load_id(self, runtime_load_id: str) -> None:
+        self.executor.collective_rpc(
+            "initialize_runtime_load_id", args=(runtime_load_id,), timeout=TRAIN_RPC_TIMEOUT_S
+        )
 
     def publish_adapter(self, scenario: str, lora_name: str) -> None:
         """Re-register one scenario's adapter without a serving version bump."""
@@ -210,6 +226,51 @@ class SlimeTrainGroup:
             return self._released_runtime_load_id
         return self.executor.rpc(0, "get_runtime_load_id", non_block=True)
 
+    def prepare_weight_update(self, runtime_load_id: str, *, force_full: bool) -> None:
+        """Prepare sender state while Reef has released colocated inference.
+
+        Full-disk publication completes its export and releases trainer workers
+        here. A failed receive can reuse that immutable file without recreating
+        workers or repeating model export under an already-onloaded receiver.
+        """
+        prepared = self._prepared_disk_update
+        if prepared is not None and prepared[2] == runtime_load_id and prepared[0].is_dir():
+            return
+        if self._executor is None and self._release_train_enabled():
+            self.create()
+        self.set_runtime_load_id_for_update(runtime_load_id)
+        if not self._full_disk_weight_update_enabled():
+            return
+        self.executor.collective_rpc(
+            "update_weights",
+            kwargs={"manage_generation": False, "force_full": force_full},
+            timeout=TRAIN_RPC_TIMEOUT_S,
+        )
+        exported = str(resolve(self.async_get_rank0_runtime_load_id(), timeout=TRAIN_RPC_TIMEOUT_S))
+        if exported != runtime_load_id:
+            raise RuntimeError(f"disk sender exported {exported!r}; expected {runtime_load_id!r}")
+        sequence = RuntimeLoadId.parse(exported).sequence
+        directory = Path(self.args.update_weight_disk_dir) / f"weight_v{sequence:06d}"
+        if directory.is_symlink() or not directory.is_dir():
+            raise RuntimeError(f"prepared weight checkpoint is missing or unsafe: {directory}")
+        self._disk_weight_version = sequence
+        self._prepared_disk_update = (directory, sequence, exported)
+        if self._release_train_enabled():
+            self._released_runtime_load_id = exported
+            self.release()
+
+    def send_prepared_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
+        """Send the prepared target after Reef has restored receiver memory."""
+        if not self._full_disk_weight_update_enabled():
+            self.update_weights(manage_generation=False, force_full=force_full)
+            return
+        prepared = self._prepared_disk_update
+        if prepared is None or prepared[2] != runtime_load_id:
+            raise RuntimeError(f"weight checkpoint was not prepared for {runtime_load_id!r}")
+        directory, sequence, exported = prepared
+        self._reload_rollout_weights_from_disk(directory, sequence, exported, manage_generation=False)
+        self._prepared_disk_update = None
+
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         kwargs = (
             {}
@@ -219,11 +280,13 @@ class SlimeTrainGroup:
         if not self._full_disk_weight_update_enabled():
             return self.executor.collective_rpc("update_weights", kwargs=kwargs, timeout=TRAIN_RPC_TIMEOUT_S)
 
-        disk_sequence = self._disk_weight_version + 1
-        disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{disk_sequence:06d}"
         self.executor.collective_rpc("update_weights", kwargs=kwargs, timeout=TRAIN_RPC_TIMEOUT_S)
-        self._disk_weight_version = disk_sequence
         serving_runtime_load_id = str(resolve(self.async_get_rank0_runtime_load_id(), timeout=TRAIN_RPC_TIMEOUT_S))
+        # The native writer uses the Reef-assigned sequence. A cold restore or
+        # retry may reuse an existing target instead of this group's next count.
+        disk_sequence = RuntimeLoadId.parse(serving_runtime_load_id).sequence
+        disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{disk_sequence:06d}"
+        self._disk_weight_version = disk_sequence
         if self._release_train_enabled():
             self._released_runtime_load_id = serving_runtime_load_id
             self.release()
@@ -245,7 +308,9 @@ class SlimeTrainGroup:
         if self._rollout_manager is None:
             raise RuntimeError("disk weight update requires a rollout manager")
         manager = RayExecutor.from_workers([self._rollout_manager])
-        if self.args.offload_rollout:
+        if manage_generation and self.args.offload_rollout:
+            # Standalone native calls retain their lifecycle. Reef's sender
+            # path has already restored receiver memory through its scheduler.
             manager.rpc(0, "onload_weights", timeout=TRAIN_RPC_TIMEOUT_S)
         engines, *_ = manager.rpc(0, "get_updatable_engines_and_lock", timeout=TRAIN_RPC_TIMEOUT_S)
         if not engines:
@@ -256,7 +321,15 @@ class SlimeTrainGroup:
         serving = RayExecutor.from_workers(engines)
 
         if self.args.update_weight_local_checkpoint_dir:
-            serving.collective_rpc("pull_weights", args=(disk_sequence,), timeout=TRAIN_RPC_TIMEOUT_S)
+            serving.collective_rpc(
+                "pull_weights",
+                args=(disk_sequence,),
+                kwargs={
+                    "source_dir": self.args.update_weight_disk_dir,
+                    "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
+                },
+                timeout=TRAIN_RPC_TIMEOUT_S,
+            )
             model_path = self.args.update_weight_local_checkpoint_dir
         else:
             model_path = str(disk_weight_dir)
@@ -287,12 +360,12 @@ class SlimeTrainGroup:
             serving.collective_rpc("continue_generation", timeout=TRAIN_RPC_TIMEOUT_S)
 
 
-def prepare_critic_args(args: Any) -> Any:
+def prepare_critic_args(args: SlimeArguments) -> SlimeArguments:
     """Derive a critic namespace and apply Reef's role-specific policy."""
     if args.megatron_config_path is not None:
         from slime.utils.arguments import parse_megatron_role_args
 
-        critic_args = parse_megatron_role_args(args, args.megatron_config_path, role="critic")
+        critic_args = SlimeArguments(**vars(parse_megatron_role_args(args, args.megatron_config_path, role="critic")))
     else:
         critic_args = copy.deepcopy(args)
         critic_args.disable_param_buffers_cpu_backup = False
@@ -301,37 +374,51 @@ def prepare_critic_args(args: Any) -> Any:
     # The value model may train faster than the policy (SAO uses 5e-6 against
     # a 1e-6 policy lr); --critic-lr scopes that to the critic role without
     # the --megatron-config-path role surgery.
-    critic_lr = getattr(critic_args, "critic_lr", None)
+    critic_lr = critic_args.critic_lr
     if critic_lr is not None:
         critic_args.lr = float(critic_lr)
-    # LoRA is an actor-only serving adapter. Restore a user's provider for the
-    # critic instead of sending the critic through Reef's actor LoRA wrapper.
-    critic_args.megatron_lora_rank = 0
-    critic_args.megatron_lora_alpha = None
-    critic_args.megatron_lora_target_modules = None
-    critic_args.custom_model_provider_path = getattr(critic_args, "reef_chained_model_provider_path", None)
-    _apply_critic_checkpoint_roots(critic_args)
+    # A LoRA actor gets a LoRA critic: the value model keeps the same frozen
+    # base with its own adapters and a trainable value head (Slime swaps the
+    # head in after Reef's provider wraps the model), so a critic the size of
+    # the policy fits beside it. Without LoRA the critic trains every
+    # parameter through the user's own provider, as before.
+    if not critic_args.megatron_lora_rank:
+        critic_args.megatron_lora_alpha = None
+        critic_args.megatron_lora_target_modules = None
+        critic_args.custom_model_provider_path = critic_args.reef_chained_model_provider_path
+    apply_critic_checkpoint_roots(critic_args)
     return critic_args
 
 
-def _apply_critic_checkpoint_roots(critic_args: Any) -> None:
-    critic_save = getattr(critic_args, "critic_save", None)
+def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
+    critic_save = critic_args.critic_save
     if not critic_save:
         return
     critic_args.save = critic_save
-    tracker = Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt"
-    if tracker.is_file():
-        critic_args.load = critic_save
-        critic_args.no_load_optim = False
-        critic_args.no_load_rng = False
-        critic_args.finetune = False
-        critic_args.ckpt_step = None
-        logger.info("critic resumes from its own checkpoint root %s", critic_save)
+    critic_init = critic_args.critic_init
+    if (Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt").is_file():
+        load, reason = critic_save, "resumes from its own checkpoint root"
+    elif critic_init and (Path(critic_init).expanduser() / "latest_checkpointed_iteration.txt").is_file():
+        # A value model trained on earlier episodes: its weights and optimizer
+        # come from --critic-init once, and every later start resumes from
+        # what this run has saved since. The learning-rate schedule is this
+        # run's, not the checkpoint's: the earlier run may have used another
+        # batch size, and Megatron otherwise refuses a schedule whose total
+        # iteration count differs.
+        critic_args.override_opt_param_scheduler = True
+        load, reason = critic_init, "starts from the checkpoint in --critic-init"
     else:
         logger.info(
             "critic checkpoint root %s has no checkpoint yet; using the inherited load fallback",
             critic_save,
         )
+        return
+    critic_args.load = load
+    critic_args.no_load_optim = False
+    critic_args.no_load_rng = False
+    critic_args.finetune = False
+    critic_args.ckpt_step = None
+    logger.info("critic %s %s", reason, load)
 
 
 def create_train_groups(

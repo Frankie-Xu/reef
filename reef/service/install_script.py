@@ -33,9 +33,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
 
+from reef.core.requirements import parse_requires
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
 from reef.harness.episodes.vendor_install import DEFAULT_PREFIX_ROOT, PREFIX_ENV
-from reef.train.cordis_backend.requests import parse_requires
 
 #: The script's install-prefix root in shell spelling, the same root reef's
 #: own server-side vendor install uses, honouring the same environment
@@ -91,6 +91,18 @@ def _double_quoted(path: str) -> str:
     return path.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
+def _wrapper_quoted(text: str) -> str:
+    """Escape ``text`` for the wrapper body, which travels through an unquoted heredoc.
+
+    The wrapper body is emitted by ``cat <<REEF_WRAPPER_EOF`` in the install script, so it is
+    expanded once by the installing shell before it becomes the wrapper. Double the escaping
+    ``_double_quoted`` adds for the wrapper's own double-quoted context, so the heredoc pass
+    emits the quoted form and the wrapper receives the value byte exact.
+    """
+    quoted = _double_quoted(text)
+    return quoted.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
+
+
 def _single_quoted(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
@@ -111,20 +123,6 @@ def _write_file_block(target: str, content: str) -> str:
     if content.endswith("\n"):
         return f"cat > {redirect} {opener}\n{content}{delimiter}\n"
     return f"printf '%s' \"$(cat {opener}\n{content}\n{delimiter}\n)\" > {redirect}\n"
-
-
-def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
-    """The env var and compose subdirectory that point the binary at the composition.
-
-    The compose directory is the deepest directory above the primary config
-    target that an env entry relocates with a ``{root}/<dir>`` value: the
-    target's own parent for pi and opencode, the home two levels up for dsh,
-    whose config file sits inside a profile. That entry relocates the
-    binary's whole composition at the episode root, and it is the only env
-    entry the user-facing wrapper needs (session/state dirs use the binary's
-    own defaults outside episodes).
-    """
-    return descriptor.compose_relocation()
 
 
 def _wrapper_lines(
@@ -160,11 +158,11 @@ def _wrapper_lines(
         f'# Usage: {wrapper_name} -p "fix the bug"     # run the agent (receipts captured)',
         f'#        {wrapper_name} report --score 0 --feedback "..."  # report last run\'s receipts',
         f'#        {wrapper_name} harness "what the harness should do"  # ask reef for a change',
-        f"#        {wrapper_name} setup  # check off what the newest release requires of you",
+        f"#        {wrapper_name} doctor  # check the install: interpreter, service, binary, tools, release",
         "# Runs the python3 the install resolved; rerun the install from another shell to change it.",
         'export REEF_HARNESS_BINARY="$BINARY_ABS"',
         'export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"',
-        f'export REEF_HARNESS_SCENARIO="{_double_quoted(scenario)}"',
+        f'export REEF_HARNESS_SCENARIO="{_wrapper_quoted(scenario)}"',
         f'export REEF_HARNESS_ADAPTER="{_double_quoted(descriptor.name)}"',
         f'export REEF_HARNESS_ENV_VAR="{_double_quoted(env_var)}"',
         'exec "$PYTHON"${SAFE_PATH:+ $SAFE_PATH} -m reef.harness.client.wrapper "\\$@"',
@@ -173,24 +171,44 @@ def _wrapper_lines(
         f'if [ ! -x {wrapper} ] || [ "$(wrapper_text)" != "$(cat {wrapper})" ]; then',
         f"    wrapper_text > {wrapper}",
         f"    chmod +x {wrapper}",
-        f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH. The link target",
-        "    # must be absolute: DEST defaults to the relative ./reef-harness, and a",
-        "    # relative target resolves against the link's own directory, so the link",
-        f"    # dangles and {wrapper_name} is not runnable from anywhere.",
-        '    DEST_ABS="$(cd "$DEST" && pwd)"',
-        '    mkdir -p "$HOME/.local/bin"',
-        f'    ln -sf "$DEST_ABS/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
-        '    case ":$PATH:" in',
-        '        *":$HOME/.local/bin:"*) ;;',
-        f"        *) echo \"reef: add '$HOME/.local/bin' to your PATH to run {wrapper_name} from anywhere\" >&2 ;;",
-        "    esac",
+        "fi",
+        f"# Symlink into ~/.local/bin so {wrapper_name} is on PATH, on every run: the link may have been",
+        "# pointed elsewhere since the wrapper was written (an install into another directory), and",
+        "# ln -sf costs nothing. The link target must be absolute: DEST defaults to the relative",
+        "# ./reef-harness, and a relative target resolves against the link's own directory, so the",
+        f"# link dangles and {wrapper_name} is not runnable from anywhere.",
+        'DEST_ABS="$(cd "$DEST" && pwd)"',
+        'mkdir -p "$HOME/.local/bin"',
+        f'ln -sf "$DEST_ABS/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
+        'case ":$PATH:" in',
+        '    *":$HOME/.local/bin:"*) ;;',
+        f"    *) echo \"reef: add '$HOME/.local/bin' to your PATH to run {wrapper_name} from anywhere\" >&2 ;;",
+        "esac",
+    ]
+
+
+def _import_check_lines(wrapper_name: str) -> list[str]:
+    """Refuse, before anything is installed or written, an interpreter that cannot import what the wrapper runs.
+
+    The check takes ``$SAFE_PATH`` so the working directory cannot stand in
+    for an installed package: run from a checkout, it would pass for an
+    interpreter that has no reef at all. Nothing is installed on the person's
+    behalf: the one line that would is printed for them to run. The
+    distribution is ``reef-infra``; the import package is ``reef``.
+    """
+    return [
+        f"# reef-client (the capture proxy) and reef (the wrapper) must import in $PYTHON, which {wrapper_name} runs.",
+        "if ! \"$PYTHON\" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null; then",
+        f'    echo "reef: reef-client and reef-infra are not importable by $PYTHON, which {wrapper_name} runs; install them there:" >&2',
+        '    echo "    \\"$PYTHON\\" -m pip install reef-client \\"reef-infra @ git+https://github.com/Human-Agent-Society/reef.git\\"" >&2',
+        '    echo "or rerun this script from a shell whose python3 has them" >&2',
+        "    exit 1",
         "fi",
     ]
 
 
 def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) -> list[str]:
     """The vendor-delegating install step: check the pin, else install through the vendor's channel."""
-    wrapper_name = f"reef-{descriptor.name}"
     prelude: list[str] = []
     # Extra condition the "already installed" gate ands onto the binary check.
     gate = ""
@@ -254,27 +272,6 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         "        ;;",
         "esac",
         "",
-        "# Ensure reef-client (capture proxy) and reef (harness wrapper) are importable by $PYTHON, the",
-        f"# interpreter {wrapper_name} runs.",
-        # The distribution is `reef-infra`; naming it `reef` here makes pip
-        # reject the requirement ("produced metadata for project name
-        # reef-infra") on every run. The install stays best effort - a managed
-        # interpreter (PEP 668) refuses it too - so the import is rechecked
-        # after and the wrapper's own failure is named here rather than
-        # surfacing later as a bare ModuleNotFoundError from the launcher.
-        # The check takes $SAFE_PATH so the working directory cannot stand in
-        # for an installed package: run from a checkout, it would pass for an
-        # interpreter that has no reef at all.
-        (
-            "\"$PYTHON\" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
-            'spin "installing reef-client and reef-infra for $PYTHON" '
-            '"$PYTHON" -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true'
-        ),
-        (
-            "\"$PYTHON\" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
-            f'echo "reef: warning: reef-client and reef-infra are not importable by $PYTHON, which {wrapper_name} runs; '
-            'install them there, or rerun this script from a shell whose python3 has them" >&2'
-        ),
         *(
             f'command -v {command} >/dev/null 2>&1 || echo "reef: warning: {descriptor.binary} wants {package} '
             f"({command}) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; "
@@ -494,7 +491,7 @@ def render_install_script(
     install = descriptor.install
     if install is None:
         raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
-    env_var, compose_dir = _compose_env_var(descriptor)
+    env_var, compose_dir = descriptor.compose_relocation()
     wrapper_name = f"reef-{descriptor.name}"
     bindings = dict(binding_files or {})
     for relative in (*files, *bindings):
@@ -550,6 +547,8 @@ def render_install_script(
         "fi",
         "",
         *_python_lines(),
+        "",
+        *_import_check_lines(wrapper_name),
         "",
         *_release_info_tool_lines(wrapper_name),
         "",

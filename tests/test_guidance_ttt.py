@@ -24,6 +24,7 @@ from recipes.tttd.examples.guidance_ttt.harness import (
     openrouter_glm_5_2_backend,
     prepare_library,
 )
+from recipes.tttd.examples.guidance_ttt.harness.execution import ExecutionClient
 from recipes.tttd.examples.guidance_ttt.harness.library import GuidanceLibrary
 from recipes.tttd.examples.guidance_ttt.harness.prompts import (
     build_execution_prompt,
@@ -37,13 +38,14 @@ from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
     GuidanceRunStateStore,
     GuidanceTrainingTimeoutError,
     RayTrainingBridge,
+    TrainingBridge,
     read_json,
     require_step_success,
     scenario_status,
     wait_for_training_step,
     write_json,
 )
-from recipes.tttd.examples.guidance_ttt.harness.scorer import JudgeResult, JudgeScorer, extract_solution_code
+from recipes.tttd.examples.guidance_ttt.harness.scorer import JudgeResult, JudgeScorer, Scorer, extract_solution_code
 from recipes.tttd.examples.guidance_ttt.harness.state import (
     LibraryEntry,
     LLMRequest,
@@ -62,10 +64,11 @@ def _contract() -> TaskContract:
     return TaskContract.load(CONTRACT_PATH, problem_prompt=INSTRUCTION)
 
 
-def _length_scorer(code: str) -> VerificationResult:
-    """Stand in for the external judge: a deterministic, non-constant score."""
-    score = float(len(code))
-    return VerificationResult(score, score, True, "valid", "accepted", {"code": code})
+class _LengthScorer(Scorer):
+    def __call__(self, code: str) -> VerificationResult:
+        """Stand in for the external judge: a deterministic, non-constant score."""
+        score = float(len(code))
+        return VerificationResult(score, score, True, "valid", "accepted", {"code": code})
 
 
 class _ReefClient:
@@ -94,7 +97,7 @@ class _ReefClient:
         return {}
 
 
-class _ExecutionClient:
+class _ExecutionClient(ExecutionClient):
     backend = ExecutionBackend(
         name="test",
         model="test-executor",
@@ -190,7 +193,7 @@ def test_one_step_links_only_guidance_receipts_and_skips_executor_on_bad_format(
         scenario="guidance-smoke",
         model="Qwen/Qwen3-8B",
         contract=_contract(),
-        scorer=_length_scorer,
+        scorer=_LengthScorer(),
         groups_per_step=2,
         rollouts_per_group=2,
         guidance_max_tokens=64,
@@ -704,7 +707,7 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
 
     scores = iter([1_000_000.0, 2_000_000.0])
 
-    class _Scorer:
+    class _Scorer(Scorer):
         def __init__(self, *args, **kwargs) -> None:
             self.args = (args, kwargs)
 
@@ -721,7 +724,7 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
     runtime_path.parent.mkdir(parents=True)
     runtime_path.write_text('reef: {ray_address: "10.0.0.1:12345", ray_namespace: test, ray_actor_name: test-bridge}')
 
-    class _Bridge:
+    class _Bridge(TrainingBridge):
         def __init__(self, *args, **kwargs) -> None:
             self.args = (args, kwargs)
             assert kwargs["ray_address"] == "10.0.0.1:12345"
