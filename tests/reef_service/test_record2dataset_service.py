@@ -16,12 +16,14 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestServer
+from reef_client.client import ReefClientError
 
 from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
 from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset import (
     Designer,
     DesignerAnswer,
+    DesignerError,
     DesignerRequest,
     DuplicateTask,
     GeneratorError,
@@ -67,8 +69,9 @@ def reply_for(port: int) -> str:
 
 
 class StandInDesigner(Designer):
-    def __init__(self, scripted: Sequence[str] = ()) -> None:
+    def __init__(self, scripted: Sequence[str] = (), *, report_failure: Exception | None = None) -> None:
         self.scripted = list(scripted)
+        self.report_failure = report_failure
         self.calls: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
 
@@ -78,6 +81,8 @@ class StandInDesigner(Designer):
         return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
 
     def report(self, record_id, *, scenario, score, metadata) -> str:
+        if self.report_failure is not None:
+            raise self.report_failure
         self.reports.append({"record_id": record_id, "scenario": scenario, "score": score, "metadata": dict(metadata)})
         return f"report-{len(self.reports)}"
 
@@ -442,6 +447,26 @@ def test_a_proposal_report_reaches_the_designer(tmp_path: Path) -> None:
     assert designer.reports == [
         {"record_id": "designer-9", "scenario": "spade", "score": 0.25, "metadata": {"regret": 0.25}}
     ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        DesignerError("the designer report was refused (404): no record designer-9"),
+        ReefClientError(404, "no record designer-9"),
+    ],
+    ids=["designer_error", "client_error"],
+)
+def test_a_refused_proposal_report_answers_with_the_reason(tmp_path: Path, failure: Exception) -> None:
+    built, designer, _, _ = service(tmp_path, designer=StandInDesigner(report_failure=failure))
+
+    async def body(generator: HttpGenerator) -> object:
+        with pytest.raises(GeneratorError, match=r"refused \(502\).*no record designer-9"):
+            await generator.report_proposal("designer-9", scenario="spade", score=0.0, metadata={})
+        return None
+
+    run_with(built, body)
+    assert designer.reports == []
 
 
 def test_bad_requests_and_unknown_jobs_are_refused_with_a_reason(tmp_path: Path) -> None:

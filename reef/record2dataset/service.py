@@ -39,6 +39,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from aiohttp import web
+from reef_client.client import ReefClientError
 
 from reef.core.tasks import (
     HarborTaskConflict,
@@ -51,6 +52,7 @@ from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskPlay, TaskPlayer
 from reef.record2dataset.designer import (
     Designer,
+    DesignerError,
     DesignerReplyError,
     DesignerRequest,
     designer_messages,
@@ -594,9 +596,12 @@ class GeneratorService:
             metadata = checked_object(body.get("metadata", {}), "metadata")
         except WireError as exc:
             return error_response(400, str(exc))
-        report_id = await asyncio.to_thread(
-            self.designer.report, record_id, scenario=scenario, score=float(score), metadata=metadata
-        )
+        try:
+            report_id = await asyncio.to_thread(
+                self.designer.report, record_id, scenario=scenario, score=float(score), metadata=metadata
+            )
+        except (DesignerError, ReefClientError, OSError) as exc:
+            return error_response(502, str(exc))
         return web.json_response({"agent_record_id": report_id})
 
     async def write_task(self, request: web.Request) -> web.Response:
