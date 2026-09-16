@@ -4,8 +4,9 @@ A processor that generates tasks runs inside the Reef service and must not block
 must not need Docker, the ``harbor`` command line or reef-eval in that process. So the steps that need
 them run here, in a process ``reef serve`` starts beside the HTTP service (see ``reef.service.deploy``):
 
-- ``POST /proposals``: ask the served model for one task (a job); the reply parsed and held to the task
-  contract, the designer's record id beside the task or the refusal.
+- ``POST /proposals``: ask the designer's model for one task (a job): the service's designer model when it
+  has one, else the model the request names; the reply parsed and held to the task contract, the
+  designer's record id beside the task or the refusal.
 - ``POST /proposals/{record_id}/report``: report a score against the designer's receipt.
 - ``POST /tasks``: write a task under the tasks root, refusing a duplicate (by content hash) or a
   different task under a taken name; ``DELETE /tasks/{name}`` removes one.
@@ -362,6 +363,7 @@ class GeneratorService:
         checks: TaskChecks,
         plays: TaskPlays,
         default_model: str | None = None,
+        designer_model: str | None = None,
         jobs: JobRunner | None = None,
     ) -> None:
         self.tasks_root = Path(tasks_root)
@@ -369,6 +371,8 @@ class GeneratorService:
         self.checks = checks
         self.plays = plays
         self.default_model = default_model
+        # The deployment's generator section owns the Designer's model; a proposal's own model is the fallback.
+        self.designer_model = designer_model
         self.jobs = jobs if jobs is not None else JobRunner()
 
     def app(self) -> web.Application:
@@ -458,7 +462,7 @@ class GeneratorService:
                 self.designer,
                 designer_request,
                 scenario=checked_string(body, "scenario", label="a proposal"),
-                model=self.model_for(body),
+                model=self.designer_model or self.model_for(body),
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),
                 tags=checked_tags(body.get("tags")),

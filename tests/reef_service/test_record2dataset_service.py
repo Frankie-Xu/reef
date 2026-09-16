@@ -128,6 +128,7 @@ def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInD
         checks=checks,  # type: ignore[arg-type]
         plays=plays,  # type: ignore[arg-type]
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
+        designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
     )
     return built, designer, checks, plays  # type: ignore[return-value]
 
@@ -186,6 +187,37 @@ def test_a_proposal_without_a_model_uses_the_services_default_and_none_is_refuse
     built, _, _, _ = service(tmp_path, default_model=None)
     with pytest.raises(GeneratorError, match=r"refused \(400\).*model must name the served model"):
         run_with(built, body)
+
+
+def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_body_says(tmp_path: Path) -> None:
+    built, designer, _, plays = service(tmp_path, designer_model="strong")
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={}, model="m")
+        await generator.propose(request(), scenario="spade", generation=1, index=1, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        await generator.play(
+            written.path,
+            scenario="spade",
+            arm="bare",
+            plays=1,
+            is_reporting=False,
+            extra_instruction_files=(),
+            tags={},
+        )
+        return None
+
+    run_with(built, body)
+    assert [call["model"] for call in designer.calls] == ["strong", "strong"]
+    assert plays.calls[0]["model"] == "served", "the designer model is the Designer's alone; plays keep the served one"
+    built, designer, _, _ = service(tmp_path / "without")
+
+    async def body_without(generator: HttpGenerator) -> object:
+        return await generator.propose(request(), scenario="spade", generation=1, index=0, tags={}, model="m")
+
+    run_with(built, body_without)
+    assert designer.calls[0]["model"] == "m"
 
 
 def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_path: Path) -> None:

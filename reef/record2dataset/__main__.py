@@ -44,6 +44,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         checks=HarborChecks(harbor=generator.harbor),
         plays=plays,
         default_model=settings.upstream_model or settings.model_path,
+        designer_model=generator.designer_model,
     )
 
 

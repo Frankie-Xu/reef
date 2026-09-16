@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from reef.record2dataset import __main__ as generator_main
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.execution import service_executor_selection, validate_services
-from reef.service.deploy.generator import attach_generator_service, generator_service
+from reef.service.deploy.generator import attach_generator_service, generator_service, generator_settings
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 
@@ -95,3 +96,21 @@ def test_a_versioned_deployment_with_a_generator_section_assembles_the_service(t
     settings = service_config_from_mapping(resolved)
     assert settings.generator_settings == {"tasks-root": str(tmp_path / "tasks"), "port": 8912}
     assert settings.upstream_model == "m"
+
+
+def test_the_service_carries_the_designer_model_when_the_section_names_one_not_otherwise(tmp_path: Path) -> None:
+    deployment = {
+        "schema-version": 2,
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {"tasks-root": str(tmp_path / "tasks"), "designer-model": "openai/gpt-5"},
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_model == "openai/gpt-5" and built.default_model == "m"
+    del deployment["generator"]["designer-model"]
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_model is None and built.default_model == "m"
