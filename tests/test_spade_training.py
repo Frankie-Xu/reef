@@ -1,4 +1,4 @@
-"""The SPADE processor: episodes grouped by task and batched, the Designer's generations run through a generator."""
+"""SPADE training data: the Reasoning Agent's episodes grouped by task, the Designer's reports by generation, and the generations run through a generator."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
-from recipes.beta.spade import SpadeObjective, SpadeProcessor, SpadeRecipe
+from recipes.beta.spade import SpadeDesignerProcessor, SpadeDesignerRecipe, SpadeObjective, SpadeProcessor, SpadeRecipe
+from recipes.beta.spade.designer_processor import generation_label, reported_generation
 from recipes.beta.spade.processor import REFUSAL_SCORE, GenerationJob, reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
@@ -243,6 +244,153 @@ def test_the_assembly_spans_an_episodes_turns_and_realigns_the_think_scaffold() 
     assembly = processor()._assembly
     assert assembly.accept_multi_turn and assembly.scaffold_tolerance == 8
     assert processor(scaffold_tolerance=2)._assembly.scaffold_tolerance == 2
+
+
+# ------------------------------------------------------------------------------------------- the Designer's half
+
+
+def designer_report(record_id: str, reference: str, score: float, **metadata: object) -> AgentRecord:
+    payload: dict[str, object] = {
+        "score": score,
+        "feedback": {"task": None, "round": {"generation": 0, "previous": None}},
+        "references": [reference],
+    }
+    if metadata:
+        payload["metadata"] = dict(metadata)
+    return AgentRecord.create(
+        scenario="spade", request_type=RequestType.REPORT, payload=payload, agent_record_id=record_id
+    )
+
+
+def designer_processor(**config: object) -> SpadeDesignerProcessor:
+    return SpadeDesignerProcessor(ProcessorContext("spade", dict(config)))
+
+
+def proposed(
+    processor: SpadeDesignerProcessor, generation: int, index: int, score: float, proposals: int, **extra: object
+) -> None:
+    processor.ingest(inference(f"designer-{generation}-{index}"))
+    processor.ingest(
+        designer_report(
+            f"regret-{generation}-{index}",
+            f"designer-{generation}-{index}",
+            score,
+            generation=generation,
+            proposals=proposals,
+            **extra,
+        )
+    )
+
+
+def test_reported_generation_reads_the_generations_report_metadata() -> None:
+    assert reported_generation(designer_report("r", "i", 0.5, generation=3, proposals=8)) == (3, 8)
+    assert generation_label(3) == "generation-00003" and generation_label(3, "repair") == "generation-00003-repair"
+
+
+def test_a_generations_proposals_form_a_group_and_a_refusal_is_a_member() -> None:
+    p = designer_processor()
+    proposed(p, 0, 0, 0.5, 3, designer_version={"kind": "runtime", "id": "load-7"}, opponent={"model": "m"})
+    proposed(p, 0, 1, REFUSAL_SCORE, 3, refusal="reply refused: no json block")
+    assert not p.ready(), "two of three proposals are not a generation"
+    assert p.status() == {"ready_groups": 0, "groups": {"0": 2}}
+    proposed(p, 0, 2, -0.25, 3)
+    assert p.ready() and p.status() == {"ready_groups": 1, "groups": {"0": 3}}
+    batch = p.build_batch()
+    assert batch.batch_id == "spade:spade-designer:1"
+    groups = trajectory_groups(batch)
+    assert [[sample.group_id for sample in group] for group in groups] == [["generation-00000"] * 3]
+    first = groups[0][0]
+    assert first.metadata["generation"] == 0 and first.metadata["proposals"] == 3
+    assert first.metadata["designer_version"] == {"kind": "runtime", "id": "load-7"}
+    assert first.metadata["opponent"] == {"model": "m"} and "refusal" not in first.metadata
+    assert first.metadata["feedback"] == {"task": None, "round": {"generation": 0, "previous": None}}
+    assert [sample.metadata["reward"] for sample in groups[0]] == [0.5, -1.0, -0.25]
+    assert first.metadata["references"] == ["designer-0-0"], "one chat call, one reference, no multi turn assembly"
+    p.acknowledge(batch.batch_id)
+    assert p.status() == {"ready_groups": 0, "groups": {}} and not p.ready()
+
+
+def test_designer_proposals_compare_within_one_generation_and_one_skill() -> None:
+    p = designer_processor()
+    proposed(p, 2, 0, 0.5, 3, skill="inspection")
+    proposed(p, 2, 1, 0.0, 3, skill="repair")
+    assert p.status() == {"ready_groups": 0, "groups": {"2": 2}}, "a generation is one unit, ready at proposals"
+    proposed(p, 2, 2, 1.0, 3, skill="repair")
+    batch = p.build_batch()
+    groups = trajectory_groups(batch)
+    assert [[sample.group_id for sample in group] for group in groups] == [
+        ["generation-00002-inspection"],
+        ["generation-00002-repair", "generation-00002-repair"],
+    ]
+    signal = resolve_objective("spade").prepare(batch, {})
+    assert signal.action == "train" and signal.advantages == (0.0, -1.0, 1.0)
+    assert signal.metrics["constant_groups"] == 1, "a skill with one proposal has no relative regret"
+
+
+def test_generations_per_step_batches_that_many_complete_generations() -> None:
+    p = designer_processor(generations_per_step=2)
+    for index, score in enumerate((1.0, 0.0)):
+        proposed(p, 4, index, score, 2)
+    assert not p.ready(), "one complete generation is not a batch of two"
+    proposed(p, 5, 0, 0.5, 2)
+    assert not p.ready()
+    proposed(p, 5, 1, 0.5, 2)
+    assert p.ready()
+    groups = trajectory_groups(p.build_batch())
+    assert [[sample.group_id for sample in group] for group in groups] == [
+        ["generation-00004"] * 2,
+        ["generation-00005"] * 2,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "key"),
+    [
+        ({"proposals": 2}, "generation"),
+        ({"generation": 1}, "proposals"),
+        ({"generation": 1, "proposals": 0}, "proposals"),
+        ({"generation": True, "proposals": 2}, "generation"),
+    ],
+)
+def test_a_designer_report_without_its_generation_or_size_is_refused(metadata: dict[str, object], key: str) -> None:
+    p = designer_processor()
+    p.ingest(inference("designer-x"))
+    with pytest.raises(ValueError, match=rf"requires metadata\.{key}"):
+        p.ingest(designer_report("regret-x", "designer-x", 0.5, **metadata))
+    p.ingest(inference("designer-y"))
+    with pytest.raises(ValueError, match=r"requires metadata\.generation and metadata\.proposals"):
+        p.ingest(designer_report("regret-y", "designer-y", 0.5))
+
+
+def test_a_generations_per_step_that_cannot_train_is_refused() -> None:
+    with pytest.raises(ValueError, match="generations_per_step must be positive"):
+        designer_processor(generations_per_step=0)
+
+
+def test_the_objective_centers_regret_within_one_generation() -> None:
+    p = designer_processor()
+    for index, score in enumerate((0.5, 0.5, -0.5, -0.5)):
+        proposed(p, 7, index, score, 4)
+    signal = resolve_objective("spade").prepare(p.build_batch(), {})
+    assert signal.action == "train" and signal.advantages == (1.0, 1.0, -1.0, -1.0)
+    assert signal.metrics["constant_groups"] == 0
+
+
+def test_the_designer_recipe_binds_its_processor_the_shared_objective_and_its_schedule() -> None:
+    spec = SpadeDesignerRecipe.training_spec()
+    assert spec.processor is SpadeDesignerProcessor and spec.objective == "spade"
+    assert spec.loss_family == "importance_sampling"
+    assert spec.scheduling.unit == "sample" and spec.scheduling.batch_size == "actual"
+    assert SpadeDesignerRecipe.report_type.fget(SpadeDesignerRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
+    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8001")
+    training_runtime = StubTrainingRuntime()
+    recipe = SpadeDesignerRecipe(training_runtime=training_runtime, runtime=runtime)
+    assert recipe.name == "spade_designer" and recipe.processor_config() == {"generations_per_step": 1}
+    assert SpadeDesignerRecipe(
+        training_runtime=training_runtime, runtime=runtime, generations_per_step=3
+    ).processor_config() == {"generations_per_step": 3}
+    with pytest.raises(ValueError, match="generations_per_step"):
+        SpadeDesignerRecipe(training_runtime=training_runtime, runtime=runtime, generations_per_step=0)
 
 
 # ----------------------------------------------------------------------------------------- the generation half

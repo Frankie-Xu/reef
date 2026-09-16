@@ -9,14 +9,16 @@ and the Reasoning Agent's group relative training on the plain arm's episodes.
   out of reach), a generation's records and its report file.
 - ``processor``: the reported feedback half (episodes grouped by task) and the task generation half (the
   Designer's generations, run on a worker through the generator service).
-- ``objective``: group relative advantages per task group on Tinker's importance sampling loss.
-- ``recipe``: the configuration that binds them.
-
-The Designer's own training follows.
+- ``designer_processor``: the Designer's reports grouped by generation, its regret as the reward; skills
+  compare through the group id.
+- ``objective``: group relative advantages per group on Tinker's importance sampling loss, shared by both roles.
+- ``recipe``: the two recipes, the Reasoning Agent's on its episodes and the Designer's on its regret.
 """
 
+from recipes.beta.spade.designer_processor import SpadeDesignerProcessor
 from recipes.beta.spade.generation import (
     GenerationRecord,
+    GenerationSummary,
     PlayRecord,
     ProposalRecord,
     TaskMeasure,
@@ -26,13 +28,16 @@ from recipes.beta.spade.generation import (
 )
 from recipes.beta.spade.objective import SpadeObjective
 from recipes.beta.spade.processor import ProposalRefused, SpadeProcessor
-from recipes.beta.spade.recipe import SpadeRecipe
+from recipes.beta.spade.recipe import SpadeDesignerRecipe, SpadeRecipe
 
 __all__ = [
     "GenerationRecord",
+    "GenerationSummary",
     "PlayRecord",
     "ProposalRecord",
     "ProposalRefused",
+    "SpadeDesignerProcessor",
+    "SpadeDesignerRecipe",
     "SpadeObjective",
     "SpadeProcessor",
     "SpadeRecipe",

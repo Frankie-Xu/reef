@@ -13,9 +13,11 @@
 beta/spade/
   generation.py   the experience section (results sorted by regret into the frontier, the mastered and the out of reach), a generation's records
   processor.py    the reported half: episodes grouped by task; the task generation half: the Designer's generations, run on a worker
-  objective.py    group relative advantages per task group, on Tinker's importance sampling loss
-  recipe.py       the configuration that binds them
-  examples/tinker/serve.yaml   a Tinker deployment with the generator service
+  designer_processor.py   the Designer's reports grouped by generation; skills compare through the group id
+  objective.py    group relative advantages per group, on Tinker's importance sampling loss; both roles use it
+  recipe.py       the two recipes: the Reasoning Agent's on its episodes, the Designer's on its regret
+  examples/tinker/serve.yaml            a Tinker deployment with the generator service
+  examples/designer-tinker/serve.yaml   a Tinker deployment of the Designer recipe, on its own port
 ```
 
 ## The processor
@@ -50,4 +52,25 @@ python -m reef.harness.client.tasks --reef-url http://127.0.0.1:8900 --scenario 
 
 Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold-tolerance` lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
 
-Known limits: a generation runs for hours while the weights reload every step, so one task group can hold episodes of two weight versions; `max-staleness` bounds that. The Designer's own training, its regret as the reward of its proposals, follows.
+Known limits: a generation runs for hours while the weights reload every step, so one task group can hold episodes of two weight versions; `max-staleness` bounds that.
+
+## Train the Designer on its regret
+
+```bash
+export REEF_TOKEN=reef-local REEF_SPADE_DESIGNER_STATE_DIR="$PWD/work/spade-designer"   # and TINKER_API_KEY
+reef serve -c recipes/beta/spade/examples/designer-tinker/serve.yaml
+```
+
+Two Reef services run. The agent stack (`examples/tinker/serve.yaml`, port 8900) runs the generator and trains the Reasoning Agent; the Designer's service (`examples/designer-tinker/serve.yaml`, port 8901) serves the Designer and trains it. The agent stack's `generator` section points the Designer's calls at the second service:
+
+```yaml
+generator:
+  designer-url: http://127.0.0.1:8901
+  designer-token: ${REEF_TOKEN}
+  designer-scenario: designer
+  designer-model: Qwen/Qwen3-8B
+```
+
+`designer-scenario` is the scenario the Designer's records and reports go to on that service, whatever scenario the agent stack trains under; the Designer's deployment sets `allow-implicit-scenario-creation: true`, so the generator's first call creates it. `designer-model` names the model that service serves. Every proposal is then an inference record on the Designer's service, and `SpadeProcessor` reports each one there with its regret as the score, the generation and its size (`proposals`) in the metadata.
+
+`SpadeDesignerRecipe` is the Designer's weight training recipe: each proposal is one chat call, so one sample, with the regret its task earned as the score. `SpadeDesignerProcessor` batches one generation as one unit (`metadata.proposals` reports arrived, refusals included at `REFUSAL_SCORE`), and a sample's group id names the generation and, when the report names one, the skill, so `SpadeObjective` centers the scores within a generation and a skill; a generation whose proposals all scored alike is skipped rather than trained on zero advantages. `generations-per-step` sets how many complete generations one step trains on. `GET /reef/status` on the Designer's service shows the groups still buffered and how many reports each holds. This trains a separate Designer LoRA: two Tinker deployments never share a parameter, so the Designer and the Reasoning Agent are two policies, not the paper's shared weight self play; one scenario training both roles is a later issue.

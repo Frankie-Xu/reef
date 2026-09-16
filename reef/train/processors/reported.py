@@ -333,6 +333,17 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         for report in members:
             self._terminate(report)
 
+    def ready_group_keys(self) -> tuple[Hashable, ...]:
+        """The keys of the groups whose decision is READY, for a processor that batches some of them alone."""
+        return tuple(self._ready_groups)
+
+    def group_status(self) -> dict[str, object]:
+        """The groups still buffered and how many reports each holds, for a caller that waits on a batch."""
+        return {
+            "ready_groups": len(self._ready_groups),
+            "groups": {str(key): len(slots) for key, slots in self._groups.items()},
+        }
+
     # ----------------------------------------------------------- batch cycle
     #
     # A unit is one accepted singleton report or one ready group; the
