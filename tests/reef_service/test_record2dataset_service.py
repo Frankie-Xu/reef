@@ -8,10 +8,8 @@ import logging
 import os
 import stat
 import sys
-import os
-import sys
-import time
 import threading
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
@@ -41,8 +39,7 @@ from reef.record2dataset import (
     TaskPlays,
     readiness_probes,
 )
-from reef.record2dataset.service import DockerProbe, HarborProbe, ModuleProbe
-from reef.record2dataset.service import CLOSE_GRACE_S
+from reef.record2dataset.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
 from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
 from reef.service.deploy.generator import generator_settings
 

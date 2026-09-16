@@ -155,6 +155,8 @@ def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]
         HarborProbe(harbor=harbor),
         DockerProbe(),
     )
+
+
 # reef serve kills the generator 30 s after its term; the harbor grace and the join must both fit in that window.
 CLOSE_GRACE_S = 10.0
 

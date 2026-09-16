@@ -14,8 +14,6 @@ import pytest
 
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.record2dataset import GeneratedHarborTask, HarborReply, OracleUnavailable, harbor_task, oracle_check
-from reef.record2dataset.harbor import content_hash, dockerfile_parse_errors, reply_errors
-from reef.record2dataset import GeneratedHarborTask, HarborReply, harbor_task, oracle_check
 from reef.record2dataset.harbor import (
     HarborRuns,
     content_hash,

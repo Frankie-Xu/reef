@@ -11,9 +11,8 @@ from pathlib import Path
 from aiohttp import web
 
 from reef.record2dataset.designer import ReefDesigner
-from reef.record2dataset.service import GeneratorService, HarborChecks, ReefTaskPlays, readiness_probes
 from reef.record2dataset.harbor import HarborRuns
-from reef.record2dataset.service import GeneratorService, HarborChecks, JobRunner, ReefTaskPlays
+from reef.record2dataset.service import GeneratorService, HarborChecks, JobRunner, ReefTaskPlays, readiness_probes
 from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.generator import GeneratorSettings, generator_settings
 from reef.service.deploy.inference import local_service_url
