@@ -18,6 +18,11 @@ beta/spade/
   recipe.py       the two recipes: the Reasoning Agent's on its episodes, the Designer's on its regret
   examples/tinker/serve.yaml            a Tinker deployment with the generator service
   examples/designer-tinker/serve.yaml   a Tinker deployment of the Designer recipe, on its own port
+  objective.py    group relative advantages per task group, on Tinker's importance sampling loss
+  recipe.py       the configuration that binds them
+  harness.py      the Designer's prompt as a harness tree, rewritten from the regret reports
+  examples/tinker/serve.yaml   a Tinker deployment with the generator service
+  examples/designer-harness/serve.yaml   the Designer's harness evolution service beside it
 ```
 
 ## The processor
@@ -74,3 +79,18 @@ generator:
 `designer-scenario` is the scenario the Designer's records and reports go to on that service, whatever scenario the agent stack trains under; the Designer's deployment sets `allow-implicit-scenario-creation: true`, so the generator's first call creates it. `designer-model` names the model that service serves. Every proposal is then an inference record on the Designer's service, and `SpadeProcessor` reports each one there with its regret as the score, the generation and its size (`proposals`) in the metadata.
 
 `SpadeDesignerRecipe` is the Designer's weight training recipe: each proposal is one chat call, so one sample, with the regret its task earned as the score. `SpadeDesignerProcessor` batches one generation as one unit (`metadata.proposals` reports arrived, refusals included at `REFUSAL_SCORE`), and a sample's group id names the generation and, when the report names one, the skill, so `SpadeObjective` centers the scores within a generation and a skill; a generation whose proposals all scored alike is skipped rather than trained on zero advantages. `generations-per-step` sets how many complete generations one step trains on. `GET /reef/status` on the Designer's service shows the groups still buffered and how many reports each holds. This trains a separate Designer LoRA: two Tinker deployments never share a parameter, so the Designer and the Reasoning Agent are two policies, not the paper's shared weight self play; one scenario training both roles is a later issue.
+## Evolve the Designer's prompt
+
+The Designer's prompt is two texts, the system turn and the rules block (`reef.record2dataset.designer.DesignerPrompt`), and `SpadeDesignerHarnessRecipe` evolves them as a harness tree of two skill entries, `designer-system` and `designer-rules`. Run it as a second deployment beside the training one:
+
+```bash
+export REEF_TOKEN=reef-local REEF_SPADE_DESIGNER_STATE_DIR="$PWD/work/designer"
+export REEF_UPSTREAM_URL=https://openrouter.ai/api REEF_UPSTREAM_MODEL=openai/gpt-5 REEF_UPSTREAM_API_KEY=...
+reef serve -c recipes/beta/spade/examples/designer-harness/serve.yaml
+```
+
+The training deployment's `generator` section points the Designer at it: `designer-url: http://127.0.0.1:8901`, `designer-token`, `designer-scenario` naming the scenario the Designer's calls create there, and `designer-prompt: harness`. Every Designer call is then an inference record on that service and every proposal's report lands there with its regret as the score. `batch-size` on the harness service equals the training recipe's `count`, so one evolve step reads one whole generation: `propose_prompt` shows the Designer model each proposal's regret, feedback and instruction excerpt (fenced as data) beside the current texts and asks for a rewrite of one or both as a JSON array of skill entries; only the texts that changed become `update` mutations. `ReportedRegretSelection` publishes every rewrite without a gate episode, and the generator pulls the release (`GET /reef/harness`, `native/tree.json`) once per generation before it asks the Designer, so the next generation is written with the new texts; a scenario that serves no tree yet leaves the fixed prompt in place.
+
+No gate holds a worse rewrite back: the regret the next generation earns is the rewrite's measure, and the trend of the mean regret across generations (`state-dir/generation-<generation>.json` on the training side, the step records under `evolution.step-record-dir` on this one) is what to watch. A rewrite that drops the `{turn_limit}` placeholder or a rule of the task contract shows up as refusals in the next generation, which the following rewrite sees.
+
+Known limits: a generation runs for hours while the weights reload every step, so one task group can hold episodes of two weight versions; `max-staleness` bounds that. The Designer's own weight training, its regret as the reward of its proposals, follows.
