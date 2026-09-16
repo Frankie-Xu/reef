@@ -117,3 +117,25 @@ def test_the_service_carries_the_designer_model_when_the_section_names_one_not_o
     settings = service_config_from_mapping(resolved)
     built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
     assert built.designer_model is None and built.default_model == "m"
+
+
+def test_the_service_carries_the_designer_scenario_when_the_section_names_one_not_otherwise(tmp_path: Path) -> None:
+    deployment = {
+        "schema-version": 2,
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {
+            "tasks-root": str(tmp_path / "tasks"),
+            "designer-url": "http://127.0.0.1:8901",
+            "designer-scenario": "designer",
+        },
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_scenario == "designer"
+    del deployment["generator"]["designer-scenario"]
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_scenario is None, "without the key the proposal's own scenario is the Designer's"

@@ -8,6 +8,8 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   has one, else the model the request names; the reply parsed and held to the task contract, the
   designer's record id beside the task or the refusal.
 - ``POST /proposals/{record_id}/report``: report a score against the designer's receipt.
+- Both go to the service's designer scenario when the deployment names one, else to the scenario the
+  request names, so a Designer on its own Reef service keeps its own scenario.
 - ``POST /tasks``: write a task under the tasks root, refusing a duplicate (by content hash) or a
   different task under a taken name; ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
@@ -457,6 +459,7 @@ class GeneratorService:
         plays: TaskPlays,
         default_model: str | None = None,
         designer_model: str | None = None,
+        designer_scenario: str | None = None,
         jobs: JobRunner | None = None,
         probes: Sequence[ReadinessProbe] | None = None,
     ) -> None:
@@ -465,8 +468,9 @@ class GeneratorService:
         self.checks = checks
         self.plays = plays
         self.default_model = default_model
-        # The deployment's generator section owns the Designer's model; a proposal's own model is the fallback.
+        # The deployment's generator section owns the Designer's model and scenario; the request's own are the fallback.
         self.designer_model = designer_model
+        self.designer_scenario = designer_scenario
         self.jobs = jobs if jobs is not None else JobRunner()
         self.probes = tuple(probes) if probes is not None else readiness_probes()
         self.reported_missing: tuple[str, ...] = ()
@@ -577,7 +581,7 @@ class GeneratorService:
             job = ProposalJob(
                 self.designer,
                 designer_request,
-                scenario=checked_string(body, "scenario", label="a proposal"),
+                scenario=self.designer_scenario or checked_string(body, "scenario", label="a proposal"),
                 model=self.designer_model or self.model_for(body),
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),
@@ -591,7 +595,7 @@ class GeneratorService:
         record_id = request.match_info["record_id"]
         try:
             body = await self.body_of(request)
-            scenario = checked_string(body, "scenario", label="a report")
+            scenario = self.designer_scenario or checked_string(body, "scenario", label="a report")
             score = body.get("score")
             if isinstance(score, bool) or not isinstance(score, (int, float)):
                 raise WireError("score must be a number")

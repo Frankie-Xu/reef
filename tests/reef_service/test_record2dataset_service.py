@@ -160,6 +160,7 @@ def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInD
         plays=plays,  # type: ignore[arg-type]
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
+        designer_scenario=parts.get("designer_scenario"),  # type: ignore[arg-type]
         probes=parts.get("probes"),  # type: ignore[arg-type]
         jobs=parts.get("jobs"),  # type: ignore[arg-type]
     )
@@ -251,6 +252,42 @@ def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_b
 
     run_with(built, body_without)
     assert designer.calls[0]["model"] == "m"
+
+
+def test_a_service_with_a_designer_scenario_sends_the_designers_calls_and_reports_there(tmp_path: Path) -> None:
+    built, designer, _, plays = service(tmp_path, designer_scenario="designer")
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        await generator.play(
+            written.path,
+            scenario="spade",
+            arm="plain",
+            plays=1,
+            is_reporting=True,
+            extra_instruction_files=(),
+            tags={},
+        )
+        await generator.report_proposal(proposed.record_id, scenario="spade", score=0.5, metadata={})
+        # The deployment owns the Designer's scenario, so a proposal needs none of its own.
+        await generator.job_result(await generator.call("POST", "/proposals", body={"request": {"target": "x"}}))
+        return None
+
+    run_with(built, body)
+    assert [call["scenario"] for call in designer.calls] == ["designer", "designer"]
+    assert designer.reports[0]["scenario"] == "designer"
+    assert plays.calls[0]["scenario"] == "spade", "the Designer's scenario is the Designer's alone"
+    built, designer, _, _ = service(tmp_path / "without")
+
+    async def body_without(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        await generator.report_proposal(proposed.record_id, scenario="spade", score=0.5, metadata={})
+        return None
+
+    run_with(built, body_without)
+    assert designer.calls[0]["scenario"] == "spade" and designer.reports[0]["scenario"] == "spade"
 
 
 def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_path: Path) -> None:
@@ -607,6 +644,7 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "agent": {"kwargs": {}}}, "Harbor agent name"),
         ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
         ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
+        ({"tasks-root": "/tmp/t", "designer-scenario": " "}, "designer-scenario must name a scenario"),
     ):
         with pytest.raises(ValueError, match=message):
             generator_settings(section)

@@ -59,6 +59,9 @@ class GeneratorSettings:
     designer_model: str | None = config_option(
         None, help="The served model the designer asks for; the deployment's by default."
     )
+    designer_scenario: str | None = config_option(
+        None, help="The scenario the designer's calls and reports go to; the proposal's own scenario by default."
+    )
     designer_timeout_s: float = config_option(
         DEFAULT_DESIGNER_TIMEOUT_S, help="Seconds one designer call may take; inference.timeout-s must allow it too."
     )
@@ -81,6 +84,8 @@ class GeneratorSettings:
             raise ValueError("generator.designer-timeout-s must be positive")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
+        if self.designer_scenario is not None and not self.designer_scenario.strip():
+            raise ValueError("generator.designer-scenario must name a scenario when set")
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):
             raise ValueError("generator.agent must carry a Harbor agent name or an import_path")
 

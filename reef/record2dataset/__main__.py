@@ -47,6 +47,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         plays=plays,
         default_model=settings.upstream_model or settings.model_path,
         designer_model=generator.designer_model,
+        designer_scenario=generator.designer_scenario,
         probes=readiness_probes(harbor=generator.harbor),
         jobs=JobRunner(runs),
     )

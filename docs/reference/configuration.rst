@@ -956,6 +956,7 @@ place it on the host that has Docker.
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``
    generator.designer-model | the served model the designer asks for; the deployment's by default
+   generator.designer-scenario | the scenario the designer's calls and reports go to; the proposal's own scenario by default
    generator.designer-timeout-s | 1800 | seconds one designer call may take; ``inference.timeout-s`` must allow it too
    generator.designer-options | extra fields of the designer's chat request, e.g. ``{"reasoning_effort": "none"}``
    generator.ready-timeout | 60 | seconds ``reef serve`` waits for the generator to answer
