@@ -151,7 +151,7 @@ class ProposalRecord:
 
 @dataclass(frozen=True)
 class TaskMeasure:
-    """A written task after both arms played: the rewards, the regret and the band."""
+    """A written task after both arms played: the rewards, the regret and the band; the plays themselves when held."""
 
     name: str
     skill: str | None
@@ -160,6 +160,8 @@ class TaskMeasure:
     plain_rewards: tuple[float, ...]
     hint_rewards: tuple[float, ...]
     record: PlayRecord
+    plain_plays: tuple[TaskPlay, ...] = ()
+    hint_plays: tuple[TaskPlay, ...] = ()
 
     @property
     def regret(self) -> float:
@@ -192,6 +194,8 @@ class GenerationRecord:
     measures: tuple[TaskMeasure, ...]
     manifest_path: Path | None
     error: str = ""
+    # How many held plays were reported once the generation landed; None when every play reported as it ended.
+    held_plays_reported: int | None = None
 
     @property
     def experience(self) -> tuple[PlayRecord, ...]:
@@ -205,6 +209,11 @@ class GenerationRecord:
             measured=len(self.measures),
             refused=sum(1 for proposal in self.proposals if proposal.refusal),
         )
+
+
+def generation_label(generation: int) -> str:
+    """The generation's name in file names, receipts and the round its held plays report under."""
+    return f"{REPORT_PREFIX}{generation:05d}"
 
 
 def skill_tag(skill: str | None) -> dict[str, str]:
@@ -230,7 +239,7 @@ def rewards_of(plays: Sequence[TaskPlay]) -> tuple[float, ...]:
 
 
 def report_path_for(state_dir: Path, generation: int) -> Path:
-    return Path(state_dir) / f"{REPORT_PREFIX}{generation:05d}.json"
+    return Path(state_dir) / f"{generation_label(generation)}.json"
 
 
 def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
@@ -241,6 +250,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
         "generation": record.generation,
         "manifest": str(record.manifest_path) if record.manifest_path is not None else None,
         "error": record.error,
+        "held_plays_reported": record.held_plays_reported,
         "proposals": [asdict(proposal) for proposal in record.proposals],
         "tasks": [
             {
@@ -250,6 +260,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
                 "digest": measure.digest,
                 "plain_rewards": list(measure.plain_rewards),
                 "hint_rewards": list(measure.hint_rewards),
+                "held_plays": {"plain": len(measure.plain_plays), "hint": len(measure.hint_plays)},
                 "regret": measure.regret,
                 "outcome": measure.outcome,
             }

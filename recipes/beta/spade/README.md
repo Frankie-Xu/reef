@@ -32,6 +32,8 @@ As a task generation processor (`reef.train.processors.TaskGenerationProcessor`)
 
 The first generation starts when the processor first looks for a batch; the next once `batches-per-generation` batches were acknowledged since the previous one started (its episodes train while it runs), so the Designer writes for the policy that trains now; a generation that measured no task is followed at once; `generations` caps them. `GET /reef/status` shows the generation in flight, the count completed and the last error.
 
+With `report-plays-after-generation` every play is held until the generation lands, and the generation then reports them all at once: the plain plays stamped with the generation as their round and with the round's size, the hint plays beside them. Nothing trains while the generation runs, so the Designer is measured against one Reasoning Agent version. The processor keeps a round as one unit and trains the generation as one batch, ordered by task, whatever `tasks-per-step` says; the batch counter counts one batch per generation, so `batches-per-generation: 1` puts one training step between generations. Off by default: each play reports as it ends and trains in the next batch of complete groups. The generation's report says how many held plays went out.
+
 ## Run it
 
 ```bash

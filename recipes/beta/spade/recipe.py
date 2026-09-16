@@ -53,6 +53,8 @@ class SpadeRecipe(WeightTrainingRecipe):
     eval_fraction: float = config_field(DEFAULT_EVAL_FRACTION)
     seed: int = config_field(0)
     designer_report: bool = config_field(True)
+    # Hold every play until the generation lands; the generation then reports them all and trains as one batch.
+    report_plays_after_generation: bool = config_field(False)
     served_model: str = config_field("")
 
     @property

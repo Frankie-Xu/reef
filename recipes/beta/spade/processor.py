@@ -21,12 +21,18 @@ which is what a restart reads to carry on with the next number and the last expe
 
 The Designer's own reports and the hint arm's reports share the scenario with the training data; the
 processor tells them apart (``metadata.role``, the episode's ``arm`` label) and releases them unassembled.
+
+With ``report_plays_after_generation`` every play is held until the generation landed, so the Designer is
+measured against one Reasoning Agent version. The plain plays then go out stamped with the round
+(``metadata.round``, the generation's label, and ``metadata.round_plays``, how many plain plays report under
+it); the processor keeps a round as one unit, ready at that many reports whatever ``tasks_per_step`` says,
+and orders its batch by task so the objective's contiguous groups hold. The hint plays go out beside them.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -40,6 +46,7 @@ from recipes.beta.spade.generation import (
     TaskMeasure,
     experience_for,
     experience_text,
+    generation_label,
     load_experience,
     load_generation_summary,
     mean_reward,
@@ -51,6 +58,7 @@ from recipes.beta.spade.generation import (
 )
 from reef.core import AgentRecord
 from reef.core.tasks import HarborTask
+from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset.client import (
     DuplicateTask,
     Generator,
@@ -81,6 +89,7 @@ TRAINING_ARM = "plain"
 HINT_ARM = "hint"
 # A refused proposal scores below any measured task: with group centering, 0 would outrank a task whose hint hurt.
 REFUSAL_SCORE = -1.0
+ROUND_KEY = "round:"
 
 
 def reported_task_name(report: AgentRecord) -> str | None:
@@ -89,6 +98,27 @@ def reported_task_name(report: AgentRecord) -> str | None:
     task = metadata.get("task") if isinstance(metadata, Mapping) else None
     name = task.get("name") if isinstance(task, Mapping) else None
     return name if isinstance(name, str) and name else None
+
+
+def reported_round(report: AgentRecord) -> tuple[str, int] | None:
+    """The round a held play reports under and how many plain plays report with it, when the generation stamped them."""
+    metadata = report.payload.get("metadata")
+    if not isinstance(metadata, Mapping) or "round" not in metadata:
+        return None
+    label, plays = metadata.get("round"), metadata.get("round_plays")
+    if not isinstance(label, str) or not label:
+        raise ValueError("SPADE training requires metadata.round to be a label, text that is not empty")
+    if isinstance(plays, bool) or not isinstance(plays, int) or plays < 1:
+        raise ValueError("SPADE training requires metadata.round_plays, the round's plain plays, a positive integer")
+    return label, plays
+
+
+def held_plays(measures: Sequence[TaskMeasure]) -> tuple[tuple[str, tuple[TaskPlay, ...]], ...]:
+    """A generation's held plays by arm, the plain arm first."""
+    return (
+        (TRAINING_ARM, tuple(play for measure in measures for play in measure.plain_plays)),
+        (HINT_ARM, tuple(play for measure in measures for play in measure.hint_plays)),
+    )
 
 
 def reported_role(report: AgentRecord) -> str | None:
@@ -171,6 +201,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         self.difficulty = str(config.get("difficulty", "medium"))
         self.turn_limit = int(config.get("turn_limit", DesignerRequest.turn_limit))
         self.is_reporting_designer = bool(config.get("designer_report", True))
+        self.report_plays_after_generation = bool(config.get("report_plays_after_generation", False))
         served_model = config.get("served_model")
         self.served_model = str(served_model) if served_model else None
         grounding_path = str(config.get("grounding_path", "") or "")
@@ -233,21 +264,36 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         if task_name is None:
             raise ValueError("SPADE training requires metadata.task.name on the report, as the task player sends it")
         sample = self._assembly.build(context, context.require_score())
+        stamped = reported_round(context.report)
+        if stamped is not None:
+            sample = sample.with_metadata(round=stamped[0], round_plays=stamped[1])
         return replace(sample, group_id=task_name)
 
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        # A round's plays are one unit, so one step trains on all of them before the weights move.
+        stamped = reported_round(context.report)
+        if stamped is not None:
+            return f"{ROUND_KEY}{stamped[0]}", None
         return reported_task_name(context.report), None
 
     def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
+        if isinstance(key, str) and key.startswith(ROUND_KEY):
+            sizes = [int(item.metadata["round_plays"]) for item in items if isinstance(item, TrajectoryItem)]
+            return GroupDecision.READY if sizes and len(items) >= sizes[0] else GroupDecision.INCOMPLETE
         return GroupDecision.READY if len(items) >= self.rollouts_per_task else GroupDecision.INCOMPLETE
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:spade:{batch_number}", items)
+        # The objective reads contiguous task groups, so a round's interleaved plays are ordered by task.
+        ordered = tuple(sorted(items, key=lambda item: str(item.group_id)))
+        return TrainingBatch(f"{self.scenario}:spade:{batch_number}", ordered)
 
     # ----------------------------------------------------- the generation half
 
     def ready(self) -> bool:
         self.catch_up()
+        # A complete round is a batch on its own, whatever tasks_per_step says.
+        if any(isinstance(key, str) and key.startswith(ROUND_KEY) for key in self.ready_group_keys()):
+            return True
         return super().ready()
 
     def dropped(self, batch_id: str) -> None:
@@ -320,7 +366,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         )
         if not is_due:
             return
-        job = GenerationJob(receipt=f"generation-{self._next_generation:05d}", generation=self._next_generation)
+        job = GenerationJob(receipt=generation_label(self._next_generation), generation=self._next_generation)
         if self._worker.submit(job):
             self._in_flight = self._next_generation
             self._next_generation += 1
@@ -402,7 +448,19 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             # What ran is kept: the tasks are written and their episodes reported; the report says where it stopped.
             error = str(exc)
             logger.error("SPADE generation %d stopped: %s", job.generation, exc)
-        record = GenerationRecord(job.generation, tuple(proposals), tuple(measures), manifest_path, error)
+        held_plays_reported = None
+        if self.report_plays_after_generation:
+            # The held plays go out once the loop is over, so what it measured trains even when it stopped early.
+            held_plays_reported = 0
+            try:
+                for arm, plays in held_plays(measures):
+                    held_plays_reported += await self.report_held_plays(job.generation, arm, plays)
+            except GeneratorError as exc:
+                error = error or f"the held plays were not all reported: {exc}"
+                logger.error("SPADE generation %d could not report its held plays: %s", job.generation, exc)
+        record = GenerationRecord(
+            job.generation, tuple(proposals), tuple(measures), manifest_path, error, held_plays_reported
+        )
         return GenerationOutcome(
             receipt=job.receipt, record=record, report_path=write_generation_report(self.state_dir, record)
         )
@@ -441,17 +499,19 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         """Both arms played: the plain arm is the training data, the hint arm measures how much the hint helps.
 
         A task the Reasoning Agent could not play at all (every plain episode ended before the agent ran) is no
-        measure of the Reasoning Agent; it comes back as None with the first episode's error.
+        measure of the Reasoning Agent; it comes back as None with the first episode's error. A held play (the
+        generation reports after it landed) stays on the measure.
         """
         if self.generator is None:
             raise GeneratorError("this processor has no generator service to ask")
         tags = {"generation": str(generation), **skill_tag(skill)}
+        is_held = self.report_plays_after_generation
         plain = await self.generator.play(
             task_path,
             scenario=self.scenario,
             arm=TRAINING_ARM,
             plays=self.rollouts_per_task,
-            is_reporting=True,
+            is_reporting=not is_held,
             extra_instruction_files=(),
             tags=tags,
             model=self.served_model,
@@ -465,7 +525,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
                 scenario=self.scenario,
                 arm=HINT_ARM,
                 plays=hint_plays,
-                is_reporting=True,
+                is_reporting=not is_held,
                 extra_instruction_files=(HINT_FILE,),
                 tags=tags,
                 model=self.served_model,
@@ -488,8 +548,27 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             plain_rewards=rewards_of(plain),
             hint_rewards=rewards_of(hint),
             record=record,
+            plain_plays=tuple(plain) if is_held else (),
+            hint_plays=tuple(hint) if is_held else (),
         )
         return measure, ""
+
+    async def report_held_plays(self, generation: int, arm: str, plays: Sequence[TaskPlay]) -> int:
+        """One arm's held plays reported with their rewards, the plain arm stamped as the round; how many were reported."""
+        if self.generator is None:
+            raise GeneratorError("this processor has no generator service to ask")
+        score_of = {play.episode_id: play.reward for play in plays if play.reward is not None and play.receipts}
+        if not score_of:
+            return 0
+        metadata: dict[str, object] = {"arm": arm, "generation": generation}
+        if arm == TRAINING_ARM:
+            # The processor trains the round as one batch once this many plain reports arrived.
+            metadata["round"] = generation_label(generation)
+            metadata["round_plays"] = len(score_of)
+        reported = await self.generator.report_plays(
+            plays, scenario=self.scenario, score_of=score_of, metadata=metadata, model=self.served_model
+        )
+        return sum(1 for play in reported if play.is_reported)
 
     async def reported(
         self, proposal: ProposalRecord, measure: TaskMeasure | None

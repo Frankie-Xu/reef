@@ -305,6 +305,10 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     # ---------------------------------------------------------------- groups
 
+    def ready_group_keys(self) -> tuple[Hashable, ...]:
+        """The keys of the groups decided ready, for a recipe whose readiness rule reads them."""
+        return tuple(self._ready_groups)
+
     def _group_reports(self, key: Hashable) -> tuple[_PendingReport, ...]:
         return tuple(sorted(self._groups[key].values(), key=lambda pending: pending.order))
 
