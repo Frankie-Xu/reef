@@ -107,7 +107,7 @@ evolution:
 
 Combine this with the tasks, scorer, model, and proposer settings above. Export
 `REEF_TERMINUS_ENVIRONMENT=e2b` and `E2B_API_KEY` in the deployment. Install
-`reef-infra[terminus]` and `harbor[e2b]` on Linux with Python 3.12+ and bubblewrap;
+`harbor[e2b]` on Linux with Python 3.12+ and bubblewrap;
 place the runtime and any local task directories under `/usr` or `/opt`, which
 the existing sandbox mounts read-only. Registry task ids also work.
 

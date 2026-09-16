@@ -477,6 +477,7 @@ class Trainer:
             if self._pending is None:
                 return
             batch_id = self._pending.batch_id
+            self._processor.dropped(batch_id)
             self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)

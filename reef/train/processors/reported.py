@@ -157,6 +157,18 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         valid report produces a sample; this hook does not accept/reject reports.
         """
 
+    def is_training_report(self, report: AgentRecord) -> bool:
+        """Whether a valid report is this method's training data.
+
+        A report that is not, such as another role's signal sharing the
+        scenario, is released and never assembled; nothing about it can fail
+        ingestion. Its sources are released with it only under ``exclusive_sources``
+        or when it references more than one inference; a single referenced
+        inference stays retained for a report that trains on it. The default
+        takes every report.
+        """
+        return True
+
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         """Return the batching group and retry slot; defaults to an independent report.
 
@@ -192,7 +204,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         validate_report_payload(item.payload)
         if not item.references or len(set(item.references)) != len(item.references):
             raise ReportValidationError("report references must be non-empty and unique")
-        if any(ref in self._trained_sources for ref in item.references):
+        if any(ref in self._trained_sources for ref in item.references) or not self.is_training_report(item):
             self._seen_reports.add(item.agent_record_id)
             self._terminate(item)
             return
@@ -417,6 +429,23 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 # --------------------------------------------------------- shared helpers
 
 
+def reported_task(metadata: object) -> dict[str, Any] | None:
+    """The task a report names, so a recipe can group samples by task; None when the report names none.
+
+    ``metadata.task`` is a mapping with at least a ``name`` (the task player also sends ``path`` and
+    ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    task = metadata.get("task")
+    if isinstance(task, Mapping) and isinstance(task.get("name"), str) and task["name"]:
+        return dict(task)
+    harbor = metadata.get("harbor")
+    if isinstance(harbor, Mapping) and isinstance(harbor.get("task_name"), str) and harbor["task_name"]:
+        return {"name": harbor["task_name"]}
+    return None
+
+
 @dataclass(frozen=True)
 class SampleAssembly:
     """Shape a resolved report into a policy sample, without recipe policy.
@@ -465,8 +494,12 @@ class SampleAssembly:
             raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
         if (sample.training.get("turn_count", 1) > 1) and not self.accept_multi_turn:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
-        return sample.with_metadata(
-            feedback=context.report.payload.get("feedback"),
-            report_agent_record_id=context.report.agent_record_id,
-            references=list(context.references),
-        )
+        fields: dict[str, Any] = {
+            "feedback": context.report.payload.get("feedback"),
+            "report_agent_record_id": context.report.agent_record_id,
+            "references": list(context.references),
+        }
+        task = reported_task(context.report.payload.get("metadata"))
+        if task is not None:
+            fields["task"] = task
+        return sample.with_metadata(**fields)

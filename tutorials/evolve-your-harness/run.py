@@ -101,7 +101,7 @@ def main():
     while manifest is None and time.monotonic() < deadline:
         try:
             manifest = client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
-        except ReefClientError as exc:  # noqa: PERF203 - publish poll
+        except ReefClientError as exc:
             if exc.status != 404:  # 404 only means nothing has published yet
                 raise
             if error := client.get("/reef/status").get("error"):

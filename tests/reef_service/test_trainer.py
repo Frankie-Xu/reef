@@ -17,6 +17,7 @@ from reef.recipe import WeightTrainingRecipe
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
+from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.evaluation import (
     BackendEvaluateMixin,
@@ -29,7 +30,7 @@ from reef.train.processors import DataProcessor
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectory_groups
 
-from ._grouped_pg import GROUPED_PG_PREPARER as _GROUPED_PG_PREPARER
+from ._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
 from ._grouped_pg import GroupedPolicyProcessor
 from ._threshold_processor import ThresholdProcessor
 
@@ -48,10 +49,10 @@ def policy_plugin(backend: object, policy: type) -> CandidateEvaluationPlugin:
 
 
 class _PreparingBackend(CandidateBackend):
-    """Dispatched test backend that commits only the preparer's state transition."""
+    """Dispatched test backend that commits only the objective's state transition."""
 
-    def __init__(self, preparer: str = "sft") -> None:
-        self._preparer = preparer
+    def __init__(self, objective: str = "sft") -> None:
+        self._objective = objective
 
     @property
     def dispatched(self) -> bool:
@@ -62,7 +63,7 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, self._preparer, state)
+        prepared = prepare_slime_step(batch, self._objective, state, StepScheduling())
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -85,7 +86,7 @@ def test_training_backend_names_both_sides_of_the_durable_commit_handshake() -> 
 
     runtime = StubTrainingRuntime()
     runtime.inference = Receiver(runtime, base_url="http://inference")
-    backend = candidate_backend(runtime, "sft")
+    backend = candidate_backend(runtime, "sft", StepScheduling())
 
     assert not hasattr(CandidateBackend, "reconcile")
     assert hasattr(CandidateBackend, "recover_pending_step")
@@ -396,14 +397,14 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1}))
     sft_processor.ingest(inference("i1"))
     sft_processor.ingest(report("r1", "i1", 1.0))
-    sft_result = prepare_slime_step(sft_processor.build_batch(), "sft", {})
+    sft_result = prepare_slime_step(sft_processor.build_batch(), "sft", {}, StepScheduling())
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = GroupedPolicyProcessor(ProcessorContext("math", {"batch_size": 1}))
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
         grpo_processor.ingest(inference(rid))
         grpo_processor.ingest(report("r" + rid, rid, score, comparison_set="x"))
-    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_PREPARER, {})
+    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_OBJECTIVE, {}, StepScheduling())
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
 
@@ -434,6 +435,34 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     trainer.commit(prepared)
     trainer.apply_compaction(prepared.compacted_ids)
     assert trainer.state == {"steps": 1}
+
+
+@pytest.mark.unit
+def test_trainer_tells_the_processor_a_dropped_batch_before_acknowledging_it() -> None:
+    events: list[str] = []
+
+    class NotingProcessor(ThresholdProcessor):
+        def dropped(self, batch_id: str) -> None:
+            events.append(f"dropped {batch_id}")
+
+        def acknowledge(self, batch_id: str) -> frozenset[str]:
+            events.append(f"acknowledged {batch_id}")
+            return super().acknowledge(batch_id)
+
+    records = SQLiteRecordStore()
+    records.append(inference("i1"))
+    records.append(report("r1", "i1", 1.0))
+    trainer = Trainer.build(
+        "math",
+        records,
+        processor_factory=lambda context: NotingProcessor(context.with_config({"batch_size": 1})),
+        candidate_backend=_PreparingBackend(),
+    )
+    batch = trainer.reserve_training_batch()
+    assert batch is not None
+    trainer.reject_pending({"reason": "stale"})
+    assert events == [f"dropped {batch.batch_id}", f"acknowledged {batch.batch_id}"]
+    assert trainer.reserve_training_batch() is None, "the dropped batch is consumed"
 
 
 @pytest.mark.unit
@@ -772,11 +801,11 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             return None
 
         def prepare_training_step(
-            self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+            self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
         ):
-            prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
+            prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
             assert prepared.payload is not None
-            self.calls.append(("prepare", batch, step_preparer))
+            self.calls.append(("prepare", batch, objective))
             return PreparedTrainingStep(
                 action="train",
                 payload={**prepared.payload, "rollout_id": scenario_step},
@@ -807,7 +836,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     # The minimal grouped pg recipe — the cookbook grouped-method shape the
     # define-a-recipe guide describes, kept local to this suite.
     class GroupedPgRecipe(WeightTrainingRecipe):
-        step_preparer = _GROUPED_PG_PREPARER
+        objective = _GROUPED_PG_OBJECTIVE
         loss_family = "pg"
 
         def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
@@ -815,7 +844,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
                 scenario,
                 records,
                 processor_factory=lambda context: GroupedPolicyProcessor(context.with_config({"batch_size": 1})),
-                candidate_backend=candidate_backend(self.training_runtime, self.step_preparer),
+                candidate_backend=candidate_backend(self.training_runtime, self.objective, StepScheduling()),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
             )
@@ -841,7 +870,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     assert runtime.scenario_step == 1
     assert runtime.repository.current_artifact == runtime.repository.checkpoint_artifact
     prepare = training_runtime.calls[0]
-    assert prepare[2] == _GROUPED_PG_PREPARER
+    assert prepare[2] == _GROUPED_PG_OBJECTIVE
     assert trajectory_reward(trajectory_groups(prepare[1])[0][1]) == 0.8
     assert training_runtime.calls[1][1]["advantages"] == pytest.approx([-1.0, 1.0])
     assert [call[0] for call in training_runtime.calls] == ["prepare", "execute"]
@@ -888,7 +917,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     processor.ingest(report("r1", "i1", 1.0))
     batch = processor.build_batch()
     assert len(batch.items) == 1
-    prepared = prepare_slime_step(batch, "sao", {})
+    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)

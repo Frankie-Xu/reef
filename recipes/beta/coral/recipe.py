@@ -3,7 +3,7 @@
 Binds :class:`~recipes.beta.coral.processor.CoralProcessor` to the grouped
 relative-reward training machinery. CORAL sibling groups have the same shape
 as TTT-Discover steps — comparison sets of scored rollouts from one shared
-starting point — so the recipe reuses the ``tttd`` step preparer (grouped
+starting point — so the recipe reuses the ``tttd`` training objective (grouped
 adaptive-entropic leave-one-out advantages) and the ``tttd`` Slime loss
 family rather than duplicating either. The recipe's own configuration is the
 group barrier.
@@ -17,12 +17,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# The tttd step preparer and loss-family reference live in the repository
+# The tttd training objective and loss-family reference live in the repository
 # cookbook; importing them is what registers both names this recipe binds.
 import recipes.tttd  # noqa: F401  (registration side effect)
 from recipes.beta.coral.processor import CoralProcessor
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
+from reef.train.algos import StepScheduling
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -33,7 +34,12 @@ class CoralRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="tttd", loss_family="tttd", processor=CoralProcessor)
+        return WeightTrainingSpec(
+            objective="tttd",
+            processor=CoralProcessor,
+            # Sibling groups train as one optimizer step, as TTTD's grid does.
+            scheduling=StepScheduling(unit="sample", batch_size="actual"),
+        )
 
     def __post_init__(self) -> None:
         # Validate our own field first: the group barrier is checkable

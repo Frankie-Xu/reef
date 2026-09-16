@@ -321,7 +321,7 @@ class WandbExperimentTracker(ExperimentTracker):
         for run in runs:
             try:
                 run.finish()
-            except Exception as exc:  # noqa: PERF203
+            except Exception as exc:
                 logger.warning("W&B shutdown failed (%s)", type(exc).__name__)
 
     def _record_optimizer_steps(self, run: Any, event: TrainingExperimentEvent) -> None:

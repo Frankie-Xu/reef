@@ -1,4 +1,4 @@
-"""Slime-owned step preparation: resolve a preparer signal and build the payload.
+"""Slime-owned step preparation: resolve an objective signal and build the payload.
 
 Backend-agnostic step signals (which loss family, what advantages) live in
 ``reef.train.algos`` and are reusable by any training backend.
@@ -13,7 +13,7 @@ from typing import Any
 
 from reef.runtime.interfaces import PreparedTrainingStep
 from reef.train.algos import StepScheduling
-from reef.train.algos.registry import resolve_preparer
+from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, materialize_schedule, schedule_seed
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
@@ -21,19 +21,26 @@ from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 def prepare_slime_step(
     batch: TrainingBatch,
-    preparer_id: str,
+    objective_id: str,
     algorithm_state: Mapping[str, Any],
+    scheduling: StepScheduling,
 ) -> PreparedTrainingStep:
-    """Resolve a step preparer and produce its complete Slime training payload."""
-    signal = resolve_preparer(preparer_id)(batch, algorithm_state)
+    """Resolve a training objective and produce its complete Slime training payload.
+
+    ``scheduling`` is the recipe's step schedule; the objective rejects one its
+    loss cannot train before any payload is built.
+    """
+    objective = resolve_objective(objective_id)
+    objective.validate_scheduling(scheduling)
+    signal = objective.prepare(batch, algorithm_state)
     if signal.action == "skip":
         return PreparedTrainingStep(
             action="skip",
             next_algorithm_state=signal.next_algorithm_state,
             metrics=signal.metrics,
         )
-    schedule = _materialize(batch, signal.scheduling)
-    payload = _build_payload(batch, signal.loss_family, signal.advantages, signal.scheduling)
+    schedule = _materialize(batch, scheduling)
+    payload = _build_payload(batch, objective.loss_family, signal.advantages, scheduling)
     metrics = dict(signal.metrics)
     if schedule.epochs > 1:
         metrics.setdefault("epochs", schedule.epochs)

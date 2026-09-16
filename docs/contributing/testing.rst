@@ -55,15 +55,26 @@ Run it in the supported container environment. Many torch-dependent tests use
 collection. Without the training dependencies, pytest cannot collect the full
 suite.
 
-CI runs source and installed-wheel tests on Python 3.10, 3.11, and 3.12 on
+CI runs source and installed-wheel tests on Python 3.12 on
 Blacksmith. Source tests use eight workers on an 8-vCPU runner; installed-wheel
 tests use four workers on a 4-vCPU runner. The source suite excludes tests marked
 ``sandbox``; a parallel GitHub-hosted matrix runs those tests serially on the
-same three Python versions. Both matrices collect all of ``tests/`` and use
+same Python version. Both matrices collect all of ``tests/`` and use
 complementary marker selections, so each test belongs to exactly one group.
 The sandbox jobs set ``REEF_REQUIRE_SANDBOX=1``: a missing bubblewrap binary or
 failed nested-jail preflight fails CI instead of silently skipping isolation
 checks. Local runs still skip these tests on unsupported hosts.
+
+Ready pull requests automatically run these suites after lint passes,
+including installed-wheel tests and combined coverage. Drafts run only
+lint, type checks, and static Dockerfile checks. Documentation builds and
+harness smoke tests run automatically when relevant files change.
+
+New pushes cancel older runs and return to routine coverage. Matrix selection
+rejects closed, draft, and superseded PR revisions. Main pushes and manual
+workflow dispatches run the full matrix; use a PR workflow rerun to satisfy
+that PR's required checks. See the
+`maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
 
 Tests in the same file stay in one worker, preserving
 module fixture reuse. In an activated development environment, install the same
@@ -86,9 +97,9 @@ The source and sandbox suites can restore older download caches for the same
 OS, architecture, and Python version after workflow or dependency edits; uv
 still resolves and installs the requested versions.
 
-The existing ``test (3.10)``, ``test (3.11)``, and ``test (3.12)`` checks now
-gate completion of both matrices. A failed, cancelled, or skipped matrix
-cannot pass those checks. The 3.12 gate also combines and validates coverage.
+The ``test (3.12)`` check gates completion of both matrices. A failed,
+cancelled, or skipped matrix cannot pass it. The same gate combines and
+validates coverage.
 
 Run one area
 ------------

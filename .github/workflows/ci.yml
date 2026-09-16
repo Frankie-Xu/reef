@@ -4,10 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   COVERAGE_VERSION: "7.16.1"
@@ -76,7 +78,35 @@ jobs:
       - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
+  select-tests:
+    needs: [lint]
+    if: '!github.event.pull_request.draft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      python-versions: ${{ steps.select.outputs.python-versions }}
+    steps:
+      - name: Select routine or full validation
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          versions='["3.12"]'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '[.state, .draft, .head.sha] | @tsv')
+            expected=$(printf 'open\tfalse\t%s' "$EXPECTED_HEAD_SHA")
+            if [ "$current" != "$expected" ]; then
+              echo "::error::This PR is closed, draft, or has newer commits. Use its latest ready run."
+              exit 1
+            fi
+          fi
+          echo "python-versions=$versions" >> "$GITHUB_OUTPUT"
+
   test-suites:
+    needs: [select-tests]
     name: ${{ matrix.suite }} tests (${{ matrix.python-version }})
     # Real nested network namespaces are only proven on the GitHub runner.
     runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-latest' || 'blacksmith-8vcpu-ubuntu-2404' }}
@@ -101,7 +131,7 @@ jobs:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
         suite: [source, sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -169,31 +199,12 @@ jobs:
       # is enough. It is the only gate that pins SAO's hard-mask semantics,
       # which share the pg_clipfrac key with PPO's clamp counter.
       # Keep Git-LFS tests independent of host-level Git configuration.
-      # Coverage is measured on 3.12 only. Measuring it installs a
-      # process-wide trace function (threading.settrace), so every
-      # Thread._bootstrap_inner calls sys.settrace before running its target.
-      # CPython <= 3.11 guards sys.settrace with a `static int reentrant`
-      # (Python/ceval.c) that is process-global rather than per-thread: if that
-      # window is open on one thread when another thread bootstraps, the
-      # bootstrapping thread dies with "Cannot install a trace function while
-      # another trace function is being installed" -- before its target runs at
-      # all. That silently killed worker threads in the threaded suites on
-      # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
-      # coverage.xml is uploaded, so the other legs were paying the risk for a
-      # report nothing reads.
+      # Coverage is measured on every leg: Reef requires Python 3.12, whose
+      # sys.settrace no longer has the process-global reentrancy guard that
+      # killed bootstrapping worker threads under coverage on 3.10 and 3.11.
       # Source tests share eight workers and keep each file together. The two
       # sandbox tests run serially, avoiding unnecessary worker startup.
-      - name: Run tests
-        if: matrix.python-version != '3.12'
-        run: >
-          python -m pytest tests
-          -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
-          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist loadfile
-        env:
-          GIT_CONFIG_GLOBAL: /dev/null
-          GIT_CONFIG_SYSTEM: /dev/null
       - name: Run tests with coverage
-        if: matrix.python-version == '3.12'
         run: >
           python -m pytest tests
           -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
@@ -210,17 +221,16 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
-  # Preserve the existing required check names. A failed, skipped, or cancelled
-  # suite must not turn these gates green; 3.12 also checks combined coverage.
+  # The one required check per suite; Reef supports Python 3.12 only.
   test:
-    needs: [test-suites]
-    if: always()
+    needs: [select-tests, test-suites]
+    if: always() && !github.event.pull_request.draft
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
     steps:
       - name: Require every source and sandbox suite to pass
         env:
@@ -261,13 +271,14 @@ jobs:
           if-no-files-found: error
 
   package:
+    needs: [select-tests]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -305,7 +316,6 @@ jobs:
           python - <<'PY'
           import importlib.util
           import os
-          import sys
           from importlib.metadata import distribution
           from pathlib import Path
 
@@ -328,9 +338,10 @@ jobs:
               for requirement in requirements
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          expected_core = {"aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "sqlalchemy", "tomli-w"}
-          if sys.version_info < (3, 11):
-              expected_core.add("tomli")  # the tomllib backport the harness wrapper reads a TOML binding with
+          # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
+          expected_core = {
+              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+          }
           assert core == expected_core, core
           slime = {
               canonicalize_name(requirement.name)

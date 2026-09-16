@@ -11,7 +11,7 @@ Choose a destination
 at ``reef/train/cordis_backend/``. The built-in Reefine recipe lives under
 ``reef/recipe/reefine/``. Paper-backed methods live in separate
 packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``skillclaw``)
-with that method's recipe, processor, step preparer, and, for weight methods,
+with that method's recipe, processor, training objective, and, for weight methods,
 the ``slime/`` subpackage only the training plane imports. Nothing under
 ``reef/`` imports a method package.
 
@@ -98,7 +98,7 @@ import a concrete integration.
 | ``reef/harness/``    | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
 |                      | episodes, trajectories                                   |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``recipes/``         | one method per package: recipe, processor, preparer,     | shared machinery, or another method        |
+| ``recipes/``         | one method per package: recipe, processor, objective,    | shared machinery, or another method        |
 |                      | and its runnable examples                                |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``tests/``           | repository-level tests grouped by responsibility         | tests hidden inside an integration subtree |
@@ -232,6 +232,12 @@ The extension points those packages expose are in `Python API
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state;
   ``ScenarioStorage`` owns archival and retention.
+- Does it turn a designer's replies into Harbor tasks, check them with Harbor
+  or play them with an agent? Put it in ``reef/record2dataset/``, the
+  generator service ``reef serve`` starts beside the HTTP service from a
+  ``generator`` section; ``reef/service/deploy/generator.py`` assembles that
+  child. What a method asks the designer for, and what it does with the
+  episodes, stays in the method's processor under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
   schema, connections, transactions, and file maintenance. ``postgres.py`` supplies

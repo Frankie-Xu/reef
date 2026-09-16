@@ -1,4 +1,4 @@
-"""TTT-Discover step preparer: grouped adaptive-entropic advantages."""
+"""TTT-Discover training objective: grouped adaptive-entropic advantages."""
 
 from __future__ import annotations
 
@@ -7,15 +7,17 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.trajectories import trajectory_reward
-from reef.train.algos.base import StepPreparer, register_step_preparer
+from reef.train.algos import TrainingObjective
 from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import StepScheduling, StepSignal
+from reef.train.algos.registry import register_objective
+from reef.train.algos.signals import StepSignal
 from reef.train.types import TrainingBatch, trajectory_groups
 
 
-@register_step_preparer
-class TttdPreparer(StepPreparer):
+@register_objective
+class TttdObjective(TrainingObjective):
     name = "tttd"
+    loss_family = "tttd"
 
     @staticmethod
     def adaptive_entropic_advantages(rewards: list[float]) -> tuple[tuple[float, ...], float]:
@@ -86,7 +88,7 @@ class TttdPreparer(StepPreparer):
         advantages = tuple(e / (n + epsilon) - 1.0 for e, n in zip(exponentials, normalizers, strict=True))
         return advantages, beta
 
-    def __call__(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
         comparison_sets = trajectory_groups(batch)
         advantages: list[float] = []
         betas: list[float] = []
@@ -103,7 +105,6 @@ class TttdPreparer(StepPreparer):
         constant_groups = all(len({trajectory_reward(sample) for sample in group}) == 1 for group in comparison_sets)
         return StepSignal(
             "train",
-            self.name,
             {"steps": steps},
             {
                 "advantages": normalized,
@@ -112,5 +113,4 @@ class TttdPreparer(StepPreparer):
                 "steps": steps,
             },
             normalized,
-            StepScheduling(unit="sample", batch_size="actual"),
         )

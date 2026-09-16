@@ -35,6 +35,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, RetentionDecision, Trainer, TrainStepResult
+from reef.train.algos import StepScheduling
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
@@ -349,9 +350,9 @@ class RecordingRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
     ):
-        del step_preparer
+        del objective
         payload = {
             "rollout_id": scenario_step,
             "sources": [source_record_id(sample) for sample in batch.items],
@@ -618,7 +619,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             processor_factory=lambda context: ProtectAllProcessor(
                 context.with_config({"batch_size": self.batch_size, "min_score": self.min_score})
             ),
-            candidate_backend=candidate_backend(self.training_runtime, "sft"),
+            candidate_backend=candidate_backend(self.training_runtime, "sft", StepScheduling()),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )

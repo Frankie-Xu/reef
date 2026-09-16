@@ -28,6 +28,7 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
+from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -44,7 +45,7 @@ class _StateOnlySaoBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, "sao", state)
+        prepared = prepare_slime_step(batch, "sao", state, StepScheduling(unit="sample"))
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -245,7 +246,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, "sao", {})
+    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
@@ -258,7 +259,7 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, "sao", {})
+    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
@@ -280,7 +281,7 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     processor.ingest(_sao_inference("i1", loss_mask=(0, 0, 0)))
     processor.ingest(_sao_report("r1", "i1", 1.0))
     batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, "sao", {})
+    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
@@ -325,7 +326,7 @@ def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    result = prepare_slime_step(batch, "sao", {})
+    result = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
 
     assert result.payload is not None and result.payload["loss"] == "sao"
     assert "advantages" not in result.payload
@@ -339,8 +340,8 @@ def test_backend_preparation_advances_step_state() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    first = prepare_slime_step(batch, "sao", {})
-    second = prepare_slime_step(batch, "sao", first.next_algorithm_state)
+    first = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    second = prepare_slime_step(batch, "sao", first.next_algorithm_state, StepScheduling(unit="sample"))
 
     assert first.next_algorithm_state == {"steps": 1}
     assert second.next_algorithm_state == {"steps": 2}
@@ -379,11 +380,11 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         return self._served_version
 
     def prepare_training_step(
-        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
     ):
         assert isinstance(batch, TrainingBatch)
         sample = batch.items[0]
-        prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
+        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
         assert prepared.payload is not None
         payload = {
             **prepared.payload,

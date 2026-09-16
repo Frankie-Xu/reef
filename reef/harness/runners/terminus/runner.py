@@ -30,6 +30,7 @@ from types import ModuleType
 from typing import Any
 
 from reef.harness.episodes.executor import ISOLATION_ENV
+from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.runners.terminus.tree import (
     ENVIRONMENT_ENV,
     TerminusTreeError,
@@ -146,7 +147,7 @@ def trial_record(task: str, rewards: Any, trials_dir: Path, error: str = "") -> 
     return {
         "task": task,
         "rewards": scores,
-        "reward": next(iter(scores.values()), None),
+        "reward": primary_reward(scores),
         "failed": not scores,
         "error": error,
         "steps": atif_steps(trials_dir),
@@ -175,7 +176,7 @@ def run(task: str) -> int:
         from reef_eval import Lab
     except ImportError as exc:
         raise TerminusTreeError(
-            "the terminus runner needs reef-eval: pip install 'reef-infra[terminus]' on Python 3.12 or newer"
+            "the terminus runner needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
         ) from exc
 
     trial_slug(task)  # refuse a task that cannot name its own trial file
