@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestServer
 from reef_client.client import ReefClientError
+from reef_service.test_record2dataset_designer import StandInHarness, served_tree
 
 from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
 from reef.harness.client.tasks import TaskPlay
@@ -23,12 +24,15 @@ from reef.record2dataset import (
     Designer,
     DesignerAnswer,
     DesignerError,
+    DesignerPrompt,
     DesignerRequest,
     DuplicateTask,
+    FixedPrompt,
     GeneratorError,
     GeneratorService,
     HarborChecks,
     HarborRuns,
+    HarnessPrompt,
     HttpGenerator,
     JobRunner,
     OracleResult,
@@ -39,6 +43,7 @@ from reef.record2dataset import (
     TaskPlays,
     readiness_probes,
 )
+from reef.record2dataset.designer import TREE_PATH
 from reef.record2dataset.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
 from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
 from reef.service.deploy.generator import generator_settings
@@ -169,6 +174,7 @@ def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInD
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
         designer_scenario=parts.get("designer_scenario"),  # type: ignore[arg-type]
+        prompts=parts.get("prompts"),  # type: ignore[arg-type]
         probes=parts.get("probes"),  # type: ignore[arg-type]
         jobs=parts.get("jobs"),  # type: ignore[arg-type]
     )
@@ -296,6 +302,36 @@ def test_a_service_with_a_designer_scenario_sends_the_designers_calls_and_report
 
     run_with(built, body_without)
     assert designer.calls[0]["scenario"] == "spade" and designer.reports[0]["scenario"] == "spade"
+def test_the_service_asks_the_designer_with_the_prompt_its_generation_gets(tmp_path: Path) -> None:
+    evolved = DesignerPrompt(system="Evolved system.", rules="RULES:\n- {turn_limit} commands, keep {state}.")
+    client = StandInHarness(served_tree(evolved.entries()))
+    built, designer, _, _ = service(tmp_path, prompts=HarnessPrompt(client, "designer"))
+
+    async def body(generator: HttpGenerator) -> object:
+        for index in range(2):
+            await generator.propose(request(), scenario="spade", generation=4, index=index, tags={})
+        return None
+
+    run_with(built, body)
+    assert [call["messages"][0]["content"] for call in designer.calls] == ["Evolved system."] * 2
+    assert "- 12 commands, keep {state}." in designer.calls[0]["messages"][1]["content"]
+    assert client.pulls == [{"path": "/reef/harness", "x-reef-scenario": "designer"}], "one pull per generation"
+    assert isinstance(service(tmp_path / "fixed")[0].prompts, FixedPrompt), "the fixed prompt unless a source is given"
+
+
+def test_a_served_tree_the_prompt_cannot_read_fails_the_proposal_naming_it(tmp_path: Path) -> None:
+    client = StandInHarness({"release_id": "r1", "files": {TREE_PATH: "{not json"}})
+    built, designer, _, _ = service(tmp_path, prompts=HarnessPrompt(client, "designer"))
+
+    async def body(generator: HttpGenerator) -> object:
+        with pytest.raises(
+            GeneratorError, match=r"DesignerError: native/tree\.json of scenario 'designer' is not JSON"
+        ):
+            await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+        return None
+
+    run_with(built, body)
+    assert designer.calls == [], "no call with a prompt nobody chose"
 
 
 def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from reef.record2dataset.designer import ReefDesigner
+from reef.record2dataset.designer import FixedPrompt, HarnessPrompt, PromptSource, ReefDesigner
 from reef.record2dataset.harbor import HarborRuns
 from reef.record2dataset.service import GeneratorService, HarborChecks, JobRunner, ReefTaskPlays, readiness_probes
 from reef.service.deploy.config_utils import DeployConfigError, load_config
@@ -31,6 +31,12 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         request_options=generator.designer_options,
         timeout_s=generator.designer_timeout_s,
     )
+    prompts: PromptSource
+    if generator.designer_prompt == "harness" and generator.designer_scenario is not None:
+        # The Designer's calls and its prompt pulls go to one service: the release the calls are reported against.
+        prompts = HarnessPrompt(designer.client, generator.designer_scenario)
+    else:
+        prompts = FixedPrompt()
     plays = ReefTaskPlays(
         reef_url=reef_url,
         work_dir=work_dir,
@@ -48,6 +54,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         default_model=settings.upstream_model or settings.model_path,
         designer_model=generator.designer_model,
         designer_scenario=generator.designer_scenario,
+        prompts=prompts,
         probes=readiness_probes(harbor=generator.harbor),
         jobs=JobRunner(runs),
     )

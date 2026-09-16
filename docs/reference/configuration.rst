@@ -959,6 +959,8 @@ place it on the host that has Docker.
    generator.designer-scenario | the scenario the designer's calls and reports go to; the proposal's own scenario by default
    generator.designer-timeout-s | 1800 | seconds one designer call may take; ``inference.timeout-s`` must allow it too
    generator.designer-options | extra fields of the designer's chat request, e.g. ``{"reasoning_effort": "none"}``
+   generator.designer-scenario | the scenario on ``designer-url`` whose harness release is the Designer's prompt; required with ``designer-prompt: harness``
+   generator.designer-prompt | fixed | where the Designer's prompt comes from: ``fixed``, or ``harness`` for the tree ``designer-url`` serves under ``designer-scenario``, pulled once per generation (a scenario without files keeps the fixed prompt)
    generator.ready-timeout | 60 | seconds ``reef serve`` waits for the generator to answer
 
 .. code:: yaml

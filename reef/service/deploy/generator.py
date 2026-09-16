@@ -26,6 +26,7 @@ DEFAULT_PORT = 8910
 DEFAULT_CONCURRENCY = 2
 DEFAULT_DESIGNER_TIMEOUT_S = 1800.0
 DEFAULT_READY_TIMEOUT = 60
+DESIGNER_PROMPT_SOURCES = ("fixed", "harness")
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,10 @@ class GeneratorSettings:
         default=None,
         metadata=config_metadata('Extra fields of the designer\'s chat request, e.g. {"reasoning_effort": "none"}.'),
     )
+    designer_prompt: str = config_option(
+        "fixed",
+        help="Where the Designer's prompt comes from: fixed, or harness for the tree designer-url serves under designer-scenario.",
+    )
     ready_timeout: int = config_option(
         DEFAULT_READY_TIMEOUT, help="Seconds reef serve waits for the generator to answer."
     )
@@ -86,6 +91,13 @@ class GeneratorSettings:
             raise ValueError("generator.ready-timeout must be positive")
         if self.designer_scenario is not None and not self.designer_scenario.strip():
             raise ValueError("generator.designer-scenario must name a scenario when set")
+        if self.designer_prompt not in DESIGNER_PROMPT_SOURCES:
+            raise ValueError(f"generator.designer-prompt must be one of {DESIGNER_PROMPT_SOURCES}")
+        if self.designer_prompt == "harness" and not (self.designer_scenario or "").strip():
+            raise ValueError(
+                "generator.designer-prompt: harness needs generator.designer-scenario, the scenario whose harness "
+                "release is the Designer's prompt"
+            )
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):
             raise ValueError("generator.agent must carry a Harbor agent name or an import_path")
 

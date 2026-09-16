@@ -58,6 +58,8 @@ from reef.record2dataset.designer import (
     DesignerError,
     DesignerReplyError,
     DesignerRequest,
+    FixedPrompt,
+    PromptSource,
     designer_messages,
     parse_harbor_reply,
 )
@@ -274,7 +276,7 @@ class Job(ABC):
 
 
 class ProposalJob(Job):
-    """One designer call: the reply parsed and held to the task contract; the record id beside the task or the refusal."""
+    """One designer call with the prompt its generation gets; the reply parsed and held to the task contract."""
 
     kind = "proposal"
 
@@ -283,6 +285,7 @@ class ProposalJob(Job):
         designer: Designer,
         request: DesignerRequest,
         *,
+        prompts: PromptSource,
         scenario: str,
         model: str,
         generation: int,
@@ -292,6 +295,7 @@ class ProposalJob(Job):
         super().__init__()
         self.designer = designer
         self.request = request
+        self.prompts = prompts
         self.scenario = scenario
         self.model = model
         self.generation = generation
@@ -299,8 +303,10 @@ class ProposalJob(Job):
         self.tags = dict(tags)
 
     def run(self) -> dict[str, object]:
+        # On the job thread: a harness source pulls the release over HTTP, which the event loop must not wait on.
+        prompt = self.prompts.prompt(self.generation)
         answer = self.designer.answer(
-            designer_messages(self.request), scenario=self.scenario, model=self.model, tags=self.tags
+            designer_messages(self.request, prompt), scenario=self.scenario, model=self.model, tags=self.tags
         )
         try:
             reply = parse_harbor_reply(answer.text)
@@ -461,6 +467,7 @@ class GeneratorService:
         default_model: str | None = None,
         designer_model: str | None = None,
         designer_scenario: str | None = None,
+        prompts: PromptSource | None = None,
         jobs: JobRunner | None = None,
         probes: Sequence[ReadinessProbe] | None = None,
     ) -> None:
@@ -472,6 +479,7 @@ class GeneratorService:
         # The deployment's generator section owns the Designer's model and scenario; the request's own are the fallback.
         self.designer_model = designer_model
         self.designer_scenario = designer_scenario
+        self.prompts = prompts if prompts is not None else FixedPrompt()
         self.jobs = jobs if jobs is not None else JobRunner()
         self.probes = tuple(probes) if probes is not None else readiness_probes()
         self.reported_missing: tuple[str, ...] = ()
@@ -582,6 +590,7 @@ class GeneratorService:
             job = ProposalJob(
                 self.designer,
                 designer_request,
+                prompts=self.prompts,
                 scenario=self.designer_scenario or checked_string(body, "scenario", label="a proposal"),
                 model=self.designer_model or self.model_for(body),
                 generation=checked_count(body.get("generation", 0), "generation"),

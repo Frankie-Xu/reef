@@ -7,26 +7,41 @@ method wants the designer to know about earlier tasks (``DesignerRequest.experie
 earlier text enter the prompt fenced as data, never as instructions. The reply's ``json`` block is read
 into the instruction, the three file mappings and an optional hint. The call goes through Reef, so every
 proposal is an inference record with a receipt the method can report against.
+
+The two texts of the prompt that are the Designer's own, the system turn and the rules block, are a value
+(``DesignerPrompt``) the generator takes from a ``PromptSource``: the fixed texts here, or the tree a
+harness evolution release serves, pulled once per generation, so a method can evolve the Designer's prompt
+as a harness while the generator keeps asking the same way.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from reef_client.client import ReefClient, ReefClientError
 
 from reef.core.tasks.harbor import HarborTaskError, checked_files
 from reef.train.cordis_backend.strategies import untrusted_text
 
+logger = logging.getLogger(__name__)
+
 DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12
 GROUNDING_CHARS = 6000
 DESIGNER_TIMEOUT_S = 1800.0
 CHAT_PATH = "/v1/chat/completions"
+HARNESS_PATH = "/reef/harness"
+#: The harness tree entries a Designer prompt is made of, by entry id: the text each one carries.
+DESIGNER_SYSTEM_ENTRY = "designer-system"
+DESIGNER_RULES_ENTRY = "designer-rules"
+PROMPT_ENTRY_FIELDS = {DESIGNER_SYSTEM_ENTRY: "system", DESIGNER_RULES_ENTRY: "rules"}
+# Where the native adapter's descriptor puts the entries list in every served tree.
+TREE_PATH = "native/tree.json"
 SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 JSON_BLOCK = re.compile(r"^[ \t]*```[^\n{]*(?:\r?\n)?[ \t]*(\{.*?\})[ \t]*(?:\r?\n)?[ \t]*```", re.S | re.M)
 HARBOR_FILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(/[A-Za-z0-9][A-Za-z0-9._-]{0,99}){0,3}$")
@@ -82,13 +97,18 @@ class HarborReply:
     hint: str = ""
 
 
-def designer_messages(request: DesignerRequest) -> list[dict[str, str]]:
-    """The chat messages for one designer call."""
-    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": designer_prompt(request)}]
+def designer_messages(request: DesignerRequest, prompt: DesignerPrompt | None = None) -> list[dict[str, str]]:
+    """The chat messages for one designer call, with the fixed prompt texts unless a source gave others."""
+    prompt = prompt if prompt is not None else DesignerPrompt()
+    return [
+        {"role": "system", "content": prompt.system},
+        {"role": "user", "content": designer_prompt(request, prompt)},
+    ]
 
 
-def designer_prompt(request: DesignerRequest) -> str:
+def designer_prompt(request: DesignerRequest, prompt: DesignerPrompt | None = None) -> str:
     """The user turn of a designer call: the target, the method's experience text, the grounding, the rules, the output."""
+    prompt = prompt if prompt is not None else DesignerPrompt()
     target = request.target.strip()
     if request.skill is not None:
         target = f"{request.skill} ({target})"
@@ -107,7 +127,8 @@ def designer_prompt(request: DesignerRequest) -> str:
             "document. Never mention the document in the environment's text.\n"
             + untrusted_text(request.grounding.strip()[:GROUNDING_CHARS], "reference document")
         )
-    parts.extend([HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit), HARBOR_OUTPUT_TEXT])
+    # A replace, not str.format: an evolved rules text may carry braces of its own.
+    parts.extend([prompt.rules.replace("{turn_limit}", str(request.turn_limit)), HARBOR_OUTPUT_TEXT])
     return "\n\n".join(parts)
 
 
@@ -133,6 +154,42 @@ HARBOR_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, w
   "hint": "<one to three sentences for the agent: the key strategy, without the answer itself>"
 }
 ```"""
+
+
+@dataclass(frozen=True)
+class DesignerPrompt:
+    """The Designer's own texts, the system turn and the rules block: what a harness release may evolve."""
+
+    system: str = SYSTEM_PROMPT
+    rules: str = HARBOR_RULES_TEXT
+
+    def __post_init__(self) -> None:
+        for label, value in (("system", self.system), ("rules", self.rules)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label} must be non-empty text")
+
+    def entries(self) -> tuple[dict[str, object], ...]:
+        """The prompt as harness tree entries: one skill per text, its config name the entry id."""
+        return tuple(
+            {"id": entry_id, "name": "skill", "config": {"name": entry_id, "text": text}}
+            for entry_id, text in ((DESIGNER_SYSTEM_ENTRY, self.system), (DESIGNER_RULES_ENTRY, self.rules))
+        )
+
+    def with_entries(self, entries: Sequence[Mapping[str, object]]) -> DesignerPrompt:
+        """The prompt with the texts a served tree carries under the two entry ids; other entries are ignored."""
+        texts = {"system": self.system, "rules": self.rules}
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise ValueError("a harness entry must be an object with an id and a config")
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str) or entry_id not in PROMPT_ENTRY_FIELDS:
+                continue
+            config = entry.get("config")
+            text = config.get("text") if isinstance(config, Mapping) else None
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"harness entry {entry_id} must carry non-empty text")
+            texts[PROMPT_ENTRY_FIELDS[entry_id]] = text
+        return replace(self, system=texts["system"], rules=texts["rules"])
 
 
 def parse_harbor_reply(text: str) -> HarborReply:
@@ -283,3 +340,84 @@ class ReefDesigner(Designer):
         except OSError as exc:
             raise DesignerError(f"the designer report did not reach Reef: {exc}") from exc
         return str(answer.get("agent_record_id", ""))
+
+
+class PromptSource(ABC):
+    """Where the Designer's prompt for a generation comes from: the fixed texts, or a harness release."""
+
+    @abstractmethod
+    def prompt(self, generation: int) -> DesignerPrompt: ...
+
+
+class FixedPrompt(PromptSource):
+    """One prompt for every generation."""
+
+    def __init__(self, fixed: DesignerPrompt | None = None) -> None:
+        self.fixed = fixed if fixed is not None else DesignerPrompt()
+
+    def prompt(self, generation: int) -> DesignerPrompt:
+        return self.fixed
+
+
+class HarnessPrompt(PromptSource):
+    """The prompt a harness release serves: ``GET /reef/harness`` pulled once per generation, its tree over the fixed texts.
+
+    A scenario that serves no files yet (404) leaves the fixed prompt in place with a warning; a served tree
+    the prompt cannot read is a ``DesignerError``, so the generation stops naming it instead of writing tasks
+    with a prompt nobody chose.
+    """
+
+    def __init__(self, client: ReefClient, scenario: str, fallback: DesignerPrompt | None = None) -> None:
+        if not isinstance(scenario, str) or not scenario:
+            raise DesignerError("a harness prompt needs the scenario whose tree it pulls")
+        self.client = client
+        self.scenario = scenario
+        self.fallback = fallback if fallback is not None else DesignerPrompt()
+        self.generation: int | None = None
+        self.cached: DesignerPrompt | None = None
+
+    def prompt(self, generation: int) -> DesignerPrompt:
+        if self.cached is not None and self.generation == generation:
+            return self.cached
+        self.cached = self.pull(generation)
+        self.generation = generation
+        return self.cached
+
+    def pull(self, generation: int) -> DesignerPrompt:
+        """The served tree's texts over the fixed ones, or the fixed ones when the scenario serves no files."""
+        try:
+            manifest = self.client.get(HARNESS_PATH, extra_headers={"x-reef-scenario": self.scenario})
+        except ReefClientError as exc:
+            if exc.status != 404:
+                raise DesignerError(
+                    f"the harness pull for scenario {self.scenario!r} was refused ({exc.status}): {exc.body[:300]}"
+                ) from exc
+            logger.warning(
+                "scenario %r serves no harness tree yet; generation %d asks the Designer with the fixed prompt",
+                self.scenario,
+                generation,
+            )
+            return self.fallback
+        except OSError as exc:
+            raise DesignerError(f"the harness pull for scenario {self.scenario!r} did not reach Reef: {exc}") from exc
+        files = manifest.get("files")
+        text = files.get(TREE_PATH) if isinstance(files, Mapping) else None
+        if not isinstance(text, str):
+            raise DesignerError(f"the harness release of scenario {self.scenario!r} carries no {TREE_PATH}")
+        try:
+            entries = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise DesignerError(f"{TREE_PATH} of scenario {self.scenario!r} is not JSON: {exc}") from exc
+        if not isinstance(entries, list):
+            raise DesignerError(f"{TREE_PATH} of scenario {self.scenario!r} must hold a list of entries")
+        try:
+            prompt = self.fallback.with_entries(entries)
+        except ValueError as exc:
+            raise DesignerError(f"{TREE_PATH} of scenario {self.scenario!r}: {exc}") from exc
+        logger.info(
+            "generation %d asks the Designer with harness release %s of scenario %r",
+            generation,
+            manifest.get("release_id"),
+            self.scenario,
+        )
+        return prompt
