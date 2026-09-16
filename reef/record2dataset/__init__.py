@@ -6,7 +6,8 @@ bound steps therefore run in the generator service, a process ``reef serve`` sta
 service when a deployment carries a ``generator`` section, and the processor drives it over HTTP:
 
 - ``designer``: the task contract as a prompt, the served model asked for one task through Reef (every
-  proposal an inference record with a receipt), the reply parsed into the instruction, the files and a hint.
+  proposal an inference record with a receipt), the reply parsed into the instruction, the files and a hint;
+  a generation's turn at a Designer whose deployment evolves between generations.
 - ``harbor``: the reply held to the authoring rules, the task written with ``reef.core.tasks``, tasks
   deduplicated by content, Harbor's oracle and nop agents run through the ``harbor`` command line, a split
   per generation.
@@ -34,6 +35,7 @@ from reef.record2dataset.designer import (
     DesignerPrompt,
     DesignerReplyError,
     DesignerRequest,
+    DesignerTurn,
     FixedPrompt,
     HarborReply,
     HarnessPrompt,
@@ -72,6 +74,7 @@ __all__ = [
     "DesignerPrompt",
     "DesignerReplyError",
     "DesignerRequest",
+    "DesignerTurn",
     "DuplicateTask",
     "FixedPrompt",
     "GeneratedHarborTask",

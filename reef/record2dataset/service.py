@@ -6,7 +6,8 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 
 - ``POST /proposals``: ask the designer's model for one task (a job): the service's designer model when it
   has one, else the model the request names; the reply parsed and held to the task contract, the
-  designer's record id beside the task or the refusal.
+  designer's record id beside the task or the refusal. A generation's first proposal waits for the
+  Designer's deployment to take the last generation's reports in (``DesignerTurn``) before the prompt pull.
 - ``POST /proposals/{record_id}/report``: report a score against the designer's receipt, with the method's
   metadata and feedback (text or an object) passed through to the report.
 - Both go to the service's designer scenario when the deployment names one, else to the scenario the
@@ -61,6 +62,7 @@ from reef.record2dataset.designer import (
     DesignerError,
     DesignerReplyError,
     DesignerRequest,
+    DesignerTurn,
     FixedPrompt,
     PromptSource,
     designer_messages,
@@ -355,6 +357,7 @@ class ProposalJob(Job):
         generation: int,
         index: int,
         tags: Mapping[str, str],
+        turn: DesignerTurn | None = None,
     ) -> None:
         super().__init__()
         self.designer = designer
@@ -365,13 +368,18 @@ class ProposalJob(Job):
         self.generation = generation
         self.index = index
         self.tags = dict(tags)
+        self.turn = turn
 
     def run(self) -> dict[str, object]:
-        # On the job thread: a harness source pulls the release over HTTP, which the event loop must not wait on.
+        # On the job thread: the turn's wait and a harness source's pull go over HTTP, which the event loop must not wait on.
+        if self.turn is not None:
+            self.turn.begin(self.generation, self.scenario)
         prompt = self.prompts.prompt(self.generation)
         answer = self.designer.answer(
             designer_messages(self.request, prompt), scenario=self.scenario, model=self.model, tags=self.tags
         )
+        if self.turn is not None:
+            self.turn.proposed(self.generation, answer.record_id)
         try:
             reply = parse_harbor_reply(answer.text)
             task = harbor_task(
@@ -541,6 +549,7 @@ class GeneratorService:
         designer_model: str | None = None,
         designer_scenario: str | None = None,
         prompts: PromptSource | None = None,
+        turn: DesignerTurn | None = None,
         jobs: JobRunner | None = None,
         probes: Sequence[ReadinessProbe] | None = None,
     ) -> None:
@@ -553,6 +562,7 @@ class GeneratorService:
         self.designer_model = designer_model
         self.designer_scenario = designer_scenario
         self.prompts = prompts if prompts is not None else FixedPrompt()
+        self.turn = turn
         self.jobs = jobs if jobs is not None else JobRunner()
         self.probes = tuple(probes) if probes is not None else readiness_probes()
         self.reported_missing: tuple[str, ...] = ()
@@ -670,6 +680,7 @@ class GeneratorService:
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),
                 tags=checked_tags(body.get("tags")),
+                turn=self.turn,
             )
         except (WireError, ValueError) as exc:
             return error_response(400, str(exc))
@@ -700,6 +711,8 @@ class GeneratorService:
             )
         except (DesignerError, ReefClientError, OSError) as exc:
             return error_response(502, str(exc))
+        if self.turn is not None:
+            self.turn.reported(record_id)
         return web.json_response({"agent_record_id": report_id})
 
     async def write_task(self, request: web.Request) -> web.Response:

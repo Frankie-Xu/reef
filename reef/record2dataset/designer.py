@@ -12,6 +12,17 @@ The two texts of the prompt that are the Designer's own, the system turn and the
 (``DesignerPrompt``) the generator takes from a ``PromptSource``: the fixed texts here, or the tree a
 harness evolution release serves, pulled once per generation, so a method can evolve the Designer's prompt
 as a harness while the generator keeps asking the same way.
+
+The Designer's deployment evolves between generations: a harness evolution deployment publishes a rewrite
+as a new release once it has consumed a generation's reports, a weight training deployment commits a step
+and serves a new runtime load id. Either takes time after the last report lands, and a generation that asks
+the Designer before then uses the version the previous generation used, so the rewrite or the step its
+reports produced is never used. ``DesignerTurn`` closes that gap: it remembers the version a generation
+used (the served release id under a harness prompt, else ``current_runtime_load_id`` of the Designer's
+scenario in ``GET /reef/status``) and, when that generation sent at least one report, holds the next
+generation's first proposal until the version changed, polling every ``poll_s`` seconds up to ``wait_s``.
+A deployment with neither a release nor a runtime load id is fixed and never waited on; a wait that runs
+out logs a warning and the generation proceeds, so no generation blocks forever or fails on the wait.
 """
 
 from __future__ import annotations
@@ -19,6 +30,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -36,6 +49,9 @@ GROUNDING_CHARS = 6000
 DESIGNER_TIMEOUT_S = 1800.0
 CHAT_PATH = "/v1/chat/completions"
 HARNESS_PATH = "/reef/harness"
+STATUS_PATH = "/reef/status"
+DESIGNER_POLL_S = 5.0
+DESIGNER_WAIT_S = 1800.0
 #: The harness tree entries a Designer prompt is made of, by entry id: the text each one carries.
 DESIGNER_SYSTEM_ENTRY = "designer-system"
 DESIGNER_RULES_ENTRY = "designer-rules"
@@ -421,3 +437,116 @@ class HarnessPrompt(PromptSource):
             self.scenario,
         )
         return prompt
+
+
+class DesignerTurn:
+    """A generation's turn at the Designer: its first proposal waits until the deployment took the last generation in."""
+
+    def __init__(
+        self,
+        client: ReefClient,
+        *,
+        is_harness_prompt: bool = False,
+        poll_s: float = DESIGNER_POLL_S,
+        wait_s: float = DESIGNER_WAIT_S,
+    ) -> None:
+        for label, value in (("poll_s", poll_s), ("wait_s", wait_s)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise DesignerError(f"{label} must be a positive number of seconds")
+        self.client = client
+        self.is_harness_prompt = is_harness_prompt
+        self.poll_s = float(poll_s)
+        self.wait_s = float(wait_s)
+        self.generation: int | None = None
+        self.version: str | None = None
+        self.generation_of: dict[str, int] = {}
+        self.report_counts: dict[int, int] = {}
+        # Proposals register on the job thread while reports arrive on the event loop thread.
+        self.lock = threading.Lock()
+
+    def proposed(self, generation: int, record_id: str) -> None:
+        """Remember the generation a Designer record belongs to, so its report counts for that generation."""
+        with self.lock:
+            self.generation_of[record_id] = generation
+
+    def reported(self, record_id: str) -> None:
+        """Count a report sent for a record one of this service's proposals left."""
+        with self.lock:
+            generation = self.generation_of.get(record_id)
+            if generation is not None:
+                self.report_counts[generation] = self.report_counts.get(generation, 0) + 1
+
+    def begin(self, generation: int, scenario: str) -> None:
+        """Before a proposal: a generation's first waits for the Designer's version to move past the last generation's."""
+        if generation == self.generation:
+            return
+        with self.lock:
+            reported = self.report_counts.get(self.generation, 0) if self.generation is not None else 0
+        if self.version is not None and reported > 0:
+            version = self.wait_past(scenario, generation=generation, reported=reported)
+        else:
+            try:
+                version = self.version_of(scenario)
+            except DesignerError as exc:
+                logger.warning("%s; generation %d proceeds without one", exc, generation)
+                version = None
+            logger.info(
+                "generation %d asks the Designer at version %s",
+                generation,
+                version if version is not None else "none, a fixed deployment",
+            )
+        self.generation = generation
+        self.version = version
+
+    def version_of(self, scenario: str) -> str | None:
+        """The Designer's version now: the served release id, else the scenario's runtime load id; None when fixed."""
+        try:
+            if self.is_harness_prompt:
+                manifest = self.client.get(HARNESS_PATH, extra_headers={"x-reef-scenario": scenario})
+                value = manifest.get("release_id")
+            else:
+                scenarios = self.client.get(STATUS_PATH).get("scenarios")
+                block = scenarios.get(scenario) if isinstance(scenarios, Mapping) else None
+                value = block.get("current_runtime_load_id") if isinstance(block, Mapping) else None
+        except ReefClientError as exc:
+            # A scenario that serves no files is a fixed Designer, not a failed read.
+            if self.is_harness_prompt and exc.status == 404:
+                return None
+            raise DesignerError(f"the Designer's version could not be read ({exc.status}): {exc.body[:300]}") from exc
+        except OSError as exc:
+            raise DesignerError(f"the Designer's version could not be read: {exc}") from exc
+        return value if isinstance(value, str) and value else None
+
+    def wait_past(self, scenario: str, *, generation: int, reported: int) -> str | None:
+        """Poll until the Designer serves a version other than the last generation's or ``wait_s`` runs out; the version then."""
+        previous = self.version
+        logger.info(
+            "generation %d waits at Designer version %s for the deployment to take generation %s in (%d reported)",
+            generation,
+            previous,
+            self.generation,
+            reported,
+        )
+        started = time.monotonic()
+        failure = ""
+        while True:
+            try:
+                version = self.version_of(scenario)
+            except DesignerError as exc:
+                version = None
+                if str(exc) != failure:
+                    failure = str(exc)
+                    logger.warning("%s; the wait goes on", failure)
+            elapsed = time.monotonic() - started
+            if version is not None and version != previous:
+                logger.info("generation %d asks the Designer at version %s after %.0f s", generation, version, elapsed)
+                return version
+            if elapsed >= self.wait_s:
+                logger.warning(
+                    "the Designer's deployment did not move past version %s within %.0f s; generation %d proceeds",
+                    previous,
+                    elapsed,
+                    generation,
+                )
+                return version
+            time.sleep(min(self.poll_s, self.wait_s - elapsed))

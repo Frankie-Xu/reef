@@ -25,6 +25,8 @@ GENERATOR_SERVICE = "generator"
 DEFAULT_PORT = 8910
 DEFAULT_CONCURRENCY = 2
 DEFAULT_DESIGNER_TIMEOUT_S = 1800.0
+DEFAULT_DESIGNER_POLL_S = 5.0
+DEFAULT_DESIGNER_WAIT_S = 1800.0
 DEFAULT_READY_TIMEOUT = 60
 DESIGNER_PROMPT_SOURCES = ("fixed", "harness")
 
@@ -74,6 +76,17 @@ class GeneratorSettings:
         "fixed",
         help="Where the Designer's prompt comes from: fixed, or harness for the tree designer-url serves under designer-scenario.",
     )
+    designer_poll_s: float = config_option(
+        DEFAULT_DESIGNER_POLL_S,
+        help="Seconds between two looks at the Designer's version while a generation waits for it to change.",
+    )
+    designer_wait_s: float = config_option(
+        DEFAULT_DESIGNER_WAIT_S,
+        help=(
+            "Seconds a generation's first proposal waits for the Designer's deployment to serve a new release or "
+            "runtime load id after the previous generation's reports; on timeout it proceeds with a warning."
+        ),
+    )
     ready_timeout: int = config_option(
         DEFAULT_READY_TIMEOUT, help="Seconds reef serve waits for the generator to answer."
     )
@@ -87,6 +100,10 @@ class GeneratorSettings:
             raise ValueError("generator.concurrency must be at least 1")
         if self.designer_timeout_s <= 0:
             raise ValueError("generator.designer-timeout-s must be positive")
+        if self.designer_poll_s <= 0:
+            raise ValueError("generator.designer-poll-s must be positive")
+        if self.designer_wait_s <= 0:
+            raise ValueError("generator.designer-wait-s must be positive")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
         if self.designer_scenario is not None and not self.designer_scenario.strip():
