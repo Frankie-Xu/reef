@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # Inline the README logo so installed wheels need no docs checkout or external asset request.
@@ -145,7 +145,7 @@ def status_span(state: str) -> str:
 
 def stamp(seconds: float) -> str:
     """A commit time as a person reads it, UTC, inside a ``<time>`` element carrying the machine form."""
-    moment = datetime.fromtimestamp(seconds, timezone.utc)
+    moment = datetime.fromtimestamp(seconds, UTC)
     return f'<time datetime="{moment.isoformat()}">{moment.strftime("%d %b %Y, %H:%M:%S UTC")}</time>'
 
 
