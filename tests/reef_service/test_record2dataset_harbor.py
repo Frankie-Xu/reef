@@ -382,10 +382,9 @@ def test_terminate_all_ends_the_harbor_run_in_flight_and_refuses_a_new_one(tmp_p
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     assert runs.pids() == ()
-    result = oracle_check(
-        tmp_path / "tasks" / "harbor-00003-001-inspection", harbor=str(tmp_path / "harbor"), runs=runs
-    )
-    assert not result.is_solvable and result.reason == "the generator is stopping; no new harbor run"
+    # A check the stopping generator refuses to start could not run: an error, never a refused task.
+    with pytest.raises(OracleUnavailable, match="the generator is stopping; no new harbor run"):
+        oracle_check(tmp_path / "tasks" / "harbor-00003-001-inspection", harbor=str(tmp_path / "harbor"), runs=runs)
 
 
 def test_a_harbor_run_that_ignores_the_term_is_killed_after_the_grace(tmp_path: Path) -> None:

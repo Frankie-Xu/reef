@@ -377,8 +377,9 @@ def test_closing_the_service_stops_the_harbor_run_of_the_job_in_flight(tmp_path:
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     job = built.jobs.get(job_id)
-    assert job is not None and job.state == "done" and job.result is not None
-    assert job.result["reason"] == "harbor run -a oracle was stopped with the generator"
+    # A check the generator stopped could not run: the job fails with the reason, never a refused task.
+    assert job is not None and job.state == "failed" and job.result is None
+    assert job.error == "OracleUnavailable: harbor run -a oracle was stopped with the generator"
     assert runs.is_closed and runs.pids() == ()
 
 
