@@ -64,12 +64,21 @@ config through ``from_config`` and returns the messages and tools the
 teacher sees.
 
 The ``sdft`` loss family runs on Slime as a ``custom_loss``. Before each
-step, a pre-train hook runs one forward pass of the current actor over every
-sample's teacher sequence and keeps the teacher's next-token distribution at
-each response position. The loss then puts the student's distribution at the
-same positions, from the training forward over the plain request, against
-it. There is no second copy of the weights: with LoRA the teacher is the same
-frozen base plus the same adapter, and only the prompt differs.
+step, a pre-train hook runs one forward pass over every sample's teacher
+sequence and keeps the teacher's next-token distribution at each response
+position. The loss then puts the student's distribution at the same
+positions, from the training forward over the plain request, against it.
+
+The teacher's weights follow the reference implementation: a copy of the
+initial weights, kept on the host beside the actor's own backup, that moves
+toward the policy by ``--sdft-teacher-update-rate`` after every step (the
+reference's ``ref_model_mixup_alpha``, 0.01 in its runs). The paper's
+description, the model as its own teacher, is the rate of 1: no copy, the
+pass runs on the actor's weights, and only the prompt differs. In practice
+that setting collapses within a few steps on Science Q&A (responses grow to
+the window and the KL falls to zero on degenerate text), because the teacher
+drifts with the student and the demonstration stops changing its
+distribution; the slow-moving copy is what keeps the signal.
 
 Per token, the loss is the KL over the full vocabulary. Forward KL
 (teacher toward student, GKD-style) is the default, since the authors report
@@ -115,11 +124,14 @@ plus the family's own flags:
    --sdft-kl-direction | forward | ``forward`` is KL(teacher || student), ``reverse`` is KL(student || teacher).
    --sdft-importance-sampling-cap | 2.0 | cap of the truncated importance-sampling weight; 0 disables the correction.
    --sdft-skip-response-tokens | 0 | response tokens at the start of every sample left out of the loss; the paper's runs used 3.
+   --sdft-teacher-update-rate | 0.01 | fraction of the current policy mixed into the teacher's weights after every step; 1 makes the current policy the teacher, 0 freezes the initial weights.
 
 The teacher pass keeps one ``[response tokens, vocabulary / tensor parallel]``
 float16 block per sample on the host between the pass and the step, about
 2 GB for a 16k-token response of a 248k-vocabulary model at tensor parallel
 4, so long-context deployments size ``max_teacher_tokens`` with that in mind.
+A teacher copy costs the actor's weights once more on the host per rank,
+in bfloat16 plus a float32 accumulator.
 
 Related guides
 --------------

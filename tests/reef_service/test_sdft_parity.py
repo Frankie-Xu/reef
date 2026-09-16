@@ -14,7 +14,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from recipes.sdft.slime.objective import chunked_token_kl, global_log_sum_exp, sequence_importance_weight, token_kl
+from recipes.sdft.slime.objective import (
+    chunked_token_kl,
+    global_log_sum_exp,
+    mix_teacher_weights,
+    sequence_importance_weight,
+    token_kl,
+)
 
 from .reference_algorithms import sdft
 
@@ -135,3 +141,20 @@ def test_sequence_importance_weight_matches_reference(cap: float) -> None:
 def test_sequence_importance_weight_of_an_untrained_sample_is_zero() -> None:
     zeros = torch.zeros(3, dtype=torch.float64)
     assert sequence_importance_weight(zeros, zeros, torch.zeros(3, dtype=torch.int64), 2.0).item() == 0.0
+
+
+@pytest.mark.unit
+def test_teacher_weights_move_toward_the_actor_in_float32() -> None:
+    # The reference's ref = 0.99 * ref + 0.01 * policy, accumulated where a
+    # 1% step of a small change survives (bfloat16 would round it away).
+    teacher = {"w": torch.full((4,), 1.0, dtype=torch.float32), "steps": torch.tensor([3])}
+    actor = {"w": torch.full((4,), 1.0 + 1e-3, dtype=torch.bfloat16), "steps": torch.tensor([9])}
+
+    mix_teacher_weights(teacher, actor, 0.01)
+
+    expected = 0.99 * 1.0 + 0.01 * torch.full((4,), 1.0 + 1e-3, dtype=torch.bfloat16).float()
+    assert torch.allclose(teacher["w"], expected)
+    assert teacher["w"].dtype == torch.float32
+    assert teacher["steps"].tolist() == [3]
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        mix_teacher_weights(teacher, actor, 1.5)

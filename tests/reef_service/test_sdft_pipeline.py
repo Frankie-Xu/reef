@@ -420,10 +420,18 @@ def test_slime_payload_rejects_a_teacher_sequence_that_does_not_end_with_the_res
 def test_sdft_driver_options_travel_from_argv_onto_args() -> None:
     family = resolve_loss_family("sdft")
     settings, remaining = family.parse_driver_options(
-        ["--sdft-kl-direction=reverse", "--sdft-importance-sampling-cap=0", "--sdft-skip-response-tokens=3", "--lr=1"]
+        [
+            "--sdft-kl-direction=reverse",
+            "--sdft-importance-sampling-cap=0",
+            "--sdft-skip-response-tokens=3",
+            "--sdft-teacher-update-rate=1",
+            "--lr=1",
+        ]
     )
 
-    assert settings == SdftSettings(kl_direction="reverse", importance_sampling_cap=0.0, skip_response_tokens=3)
+    assert settings == SdftSettings(
+        kl_direction="reverse", importance_sampling_cap=0.0, skip_response_tokens=3, teacher_update_rate=1.0
+    )
     assert remaining == ["--lr=1"]
     args = SimpleNamespace()
     family.apply_driver_options(args, settings)
@@ -433,6 +441,7 @@ def test_sdft_driver_options_travel_from_argv_onto_args() -> None:
         0.0,
         3,
     )
+    assert args.sdft_teacher_update_rate == 1.0
 
     defaults = SimpleNamespace()
     family.apply_driver_options(defaults, None)
@@ -441,6 +450,8 @@ def test_sdft_driver_options_travel_from_argv_onto_args() -> None:
         2.0,
         0,
     )
+    # The reference's ref_model_mixup_alpha: the teacher copy moves toward the policy by 1% per step.
+    assert defaults.sdft_teacher_update_rate == 0.01
     assert family.bind(settings) is family
     with pytest.raises(TypeError, match="SdftSettings"):
         family.bind(SimpleNamespace())
@@ -454,6 +465,8 @@ def test_sdft_driver_options_travel_from_argv_onto_args() -> None:
         ("importance_sampling_cap", -1.0),
         ("importance_sampling_cap", float("nan")),
         ("skip_response_tokens", -1),
+        ("teacher_update_rate", 1.5),
+        ("teacher_update_rate", -0.1),
     ],
 )
 def test_sdft_settings_reject_invalid_values(name: str, value: Any) -> None:

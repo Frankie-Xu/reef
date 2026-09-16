@@ -68,11 +68,19 @@ from this directory. The student's samples are recorded and ignored, so
 `run.py` drives both arms unchanged: the same prompts in the same order, the
 same 32-prompt steps, the same optimizer in `serve-sft.yaml`.
 
+The teacher is the reference's `ref_model`: `main.py` runs the trainer with
+`sync_ref_model=True, ref_model_sync_steps=1, ref_model_mixup_alpha=0.01`, so
+the weights that read the demonstration are a copy of the base model that
+moves 1% toward the policy after every step, not the policy itself.
+`serve.yaml` sets the same with `--sdft-teacher-update-rate 0.01`. A first run
+with the policy as its own teacher (rate 1) collapsed within twenty steps:
+responses grew to the 1024-token window, the KL fell to zero on the
+degenerate text, and the test accuracy went to zero.
+
 What differs from the reference: sampling goes through SGLang instead of vLLM
 (the same settings: temperature 1, top-p 1, no top-k, no repetition penalty),
-the trainer is Megatron instead of TRL on one GPU, and the reference's
-`ref_model_mixup_alpha` (a slow-moving copy of the weights that TRL keeps for
-its KL-to-reference term, off at `beta = 0`) has no counterpart.
+the trainer is Megatron instead of TRL on one GPU, and the teacher copy's
+update is accumulated in float32 where the reference mixes bfloat16 weights.
 
 ## Setup (once)
 

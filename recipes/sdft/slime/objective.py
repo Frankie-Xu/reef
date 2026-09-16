@@ -22,7 +22,7 @@ against the pure-Python oracle in ``tests/reef_service/reference_algorithms/sdft
 from __future__ import annotations
 
 from argparse import Namespace
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
@@ -140,6 +140,23 @@ def chunked_token_kl(
         for start in range(0, rows, chunk_size)
     ]
     return torch.cat(pieces, dim=0)
+
+
+def mix_teacher_weights(
+    teacher: Mapping[str, torch.Tensor], actor: Mapping[str, torch.Tensor], update_rate: float
+) -> None:
+    """Move the teacher's floating-point tensors toward the actor's: ``teacher = (1 - rate) * teacher + rate * actor``.
+
+    The reference implementation's ``ref_model_mixup_alpha`` update, applied
+    in place. The teacher tensors are the higher-precision accumulator (the
+    actor's may be bfloat16); integer buffers are left as they are.
+    """
+    if not 0 <= update_rate <= 1:
+        raise ValueError(f"the teacher update rate must be in [0, 1], got {update_rate}")
+    for name, target in teacher.items():
+        if not target.is_floating_point():
+            continue
+        target.mul_(1.0 - update_rate).add_(actor[name].to(dtype=target.dtype), alpha=update_rate)
 
 
 def sequence_importance_weight(
@@ -274,9 +291,17 @@ def sdft_loss(
     return loss, metrics
 
 
+@objective("reef_actor_init_hook_path")
+def sdft_actor_init(actor: Any) -> None:
+    """Keep the initial weights as the teacher's starting point."""
+    from recipes.sdft.slime.teacher import initialize_teacher
+
+    initialize_teacher(actor)
+
+
 @objective("reef_actor_pre_train_hook_path")
 def sdft_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
-    """Score every sample's teacher sequence with the current policy before the step."""
+    """Move the teacher toward the policy, then score every sample's teacher sequence with it."""
     if not rollout_data.get("teacher_tokens"):
         raise ValueError("every sdft sample must carry teacher_tokens")
     from slime.utils.timer import timer

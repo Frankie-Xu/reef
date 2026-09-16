@@ -1,12 +1,20 @@
-"""The self-teacher forward pass: the current policy reads the teacher prompt and scores the student's response.
+"""The self-teacher forward pass: the teacher reads the demonstration prompt and scores the student's response.
 
-Modeled on the frozen-base teacher in ``recipes/openclawrl/slime/teacher.py``,
-with two differences. The teacher IS the current policy (with LoRA, the same
-frozen base plus the same adapter), so no weight backup is swapped in: the
-pass is slime's own ``forward_only`` over the actor's model on the teacher
-sequences the processor built (teacher prompt ids plus the student's response
-ids verbatim). And the loss needs the teacher's whole next-token distribution
-at every response position rather than a top-K gather, so each sample's rows
+Modeled on the frozen-base teacher in ``recipes/openclawrl/slime/teacher.py``.
+The teacher's weights are the reference implementation's ``ref_model``: a
+copy of the initial weights that moves toward the policy by
+``--sdft-teacher-update-rate`` after every step. The copy lives in the
+actor's weight backups on the host (Slime's ``TensorBackuper``, bfloat16
+and pinned) with a float32 accumulator beside it, so the small updates the
+reference applies do not vanish in bfloat16 rounding; the pass swaps it in
+through ``_switch_model`` and swaps the actor back. At a rate of 1 no copy
+exists and the pass runs on the actor's own weights (with LoRA, the same
+frozen base plus the same adapter as the student).
+
+The pass is slime's own ``forward_only`` over the teacher sequences the
+processor built (teacher prompt ids plus the student's response ids
+verbatim). The loss needs the teacher's whole next-token distribution at
+every response position rather than a top-K gather, so each sample's rows
 ``[R, V_local]`` (this rank's vocab shard, normalized over the full
 vocabulary) are kept in float16 on the CPU until the loss moves the
 micro-batch's rows back to the device.
@@ -22,11 +30,35 @@ from megatron.core import mpu
 from slime.backends.megatron_utils.data import DataIterator
 from slime.backends.megatron_utils.model import forward_only
 
-from recipes.sdft.slime.objective import global_log_sum_exp
+from recipes.sdft.slime.objective import global_log_sum_exp, mix_teacher_weights
 
 #: Log-probs are stored in float16; the floor keeps every stored value inside
 #: its range while ``exp`` of it is still exactly zero in float32.
 TEACHER_LOG_PROB_FLOOR = -1.0e4
+#: The actor's backup tags: Slime's own copy of the training weights, and the teacher's.
+ACTOR_TAG = "actor"
+TEACHER_TAG = "sdft_teacher"
+#: The float32 accumulator of the teacher's weights, per rank; the bfloat16
+#: backup under ``TEACHER_TAG`` is rewritten from it before every pass.
+_teacher_accumulator: dict[str, torch.Tensor] = {}
+
+
+def initialize_teacher(actor: Any) -> None:
+    """Seed the teacher from the actor's weights at init.
+
+    On a fresh start these are the base model's weights, the reference's
+    starting teacher. A restart from a Megatron checkpoint seeds the teacher
+    from the resumed weights instead: the copy the interrupted run had moved
+    is not checkpointed.
+    """
+    update_rate = float(actor.args.sdft_teacher_update_rate)
+    if update_rate >= 1.0:
+        return
+    actor.weights_backuper.backup(TEACHER_TAG)
+    _teacher_accumulator.clear()
+    if update_rate > 0.0:
+        for name, tensor in actor.weights_backuper.get(TEACHER_TAG).items():
+            _teacher_accumulator[name] = tensor.float() if tensor.is_floating_point() else tensor.clone()
 
 
 def pack_forward_schedule(lengths: list[int], budget: int) -> list[list[int]]:
@@ -102,11 +134,13 @@ def gather_teacher_log_probs(
 
 
 def compute_sdft_teacher_log_probs(actor: Any, rollout_data: dict[str, Any]) -> None:
-    """Fill ``rollout_data["sdft_teacher_log_probs"]`` from a forward pass of the current actor.
+    """Fill ``rollout_data["sdft_teacher_log_probs"]`` from a forward pass of the teacher.
 
     One forward-only pass over the batch's teacher sequences, packed under
-    the token budget; the actor's weights are the ones training is about to
-    use, so nothing is backed up or restored.
+    the token budget. With a teacher copy, the actor's backup is refreshed
+    first (so the restore afterwards returns the weights training is about
+    to use), the copy moves toward the actor by the update rate, and the
+    pass runs on the copy.
     """
     teacher_tokens: list[torch.Tensor] = rollout_data["teacher_tokens"]
     response_lengths = [int(value) for value in rollout_data["response_lengths"]]
@@ -134,16 +168,33 @@ def compute_sdft_teacher_log_probs(actor: Any, rollout_data: dict[str, Any]) -> 
         "response_lengths": response_lengths,
         "micro_batch_indices": schedule,
     }
-    result = forward_only(
-        gather_teacher_log_probs,
-        args,
-        actor.model,
-        [DataIterator(view, schedule) for _ in range(vpp)],
-        [len(schedule)],
-    )
+    update_rate = float(args.sdft_teacher_update_rate)
+    teacher_is_a_copy = update_rate < 1.0
+    if teacher_is_a_copy:
+        backuper = actor.weights_backuper
+        if TEACHER_TAG not in backuper.backup_tags:
+            raise RuntimeError("the sdft teacher was never initialized; the actor init hook did not run")
+        backuper.backup(ACTOR_TAG)
+        if update_rate > 0.0:
+            mix_teacher_weights(_teacher_accumulator, backuper.get(ACTOR_TAG), update_rate)
+            teacher_backup = backuper.get(TEACHER_TAG)
+            for name, accumulated in _teacher_accumulator.items():
+                teacher_backup[name].copy_(accumulated)
+        actor._switch_model(TEACHER_TAG)
+    try:
+        result = forward_only(
+            gather_teacher_log_probs,
+            args,
+            actor.model,
+            [DataIterator(view, schedule) for _ in range(vpp)],
+            [len(schedule)],
+        )
+    finally:
+        if teacher_is_a_copy:
+            actor._switch_model(ACTOR_TAG)
     if not result:
         return  # not the last pipeline stage; the loss does not run here
     rollout_data["sdft_teacher_log_probs"] = result["teacher_log_probs"]
 
 
-__all__ = ["compute_sdft_teacher_log_probs", "gather_teacher_log_probs", "pack_forward_schedule"]
+__all__ = ["compute_sdft_teacher_log_probs", "gather_teacher_log_probs", "initialize_teacher", "pack_forward_schedule"]

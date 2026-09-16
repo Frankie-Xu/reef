@@ -18,6 +18,10 @@ KL_DIRECTIONS = ("forward", "reverse")
 DEFAULT_KL_DIRECTION = "forward"
 DEFAULT_IMPORTANCE_SAMPLING_CAP = 2.0
 DEFAULT_SKIP_RESPONSE_TOKENS = 0
+# The reference's ``ref_model_mixup_alpha`` as ``main.py`` runs it: the teacher
+# is a copy of the weights that moves toward the policy by this fraction after
+# every step (``sync_ref_model=True, ref_model_sync_steps=1``).
+DEFAULT_TEACHER_UPDATE_RATE = 0.01
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class SdftSettings:
     kl_direction: str = DEFAULT_KL_DIRECTION
     importance_sampling_cap: float = DEFAULT_IMPORTANCE_SAMPLING_CAP
     skip_response_tokens: int = DEFAULT_SKIP_RESPONSE_TOKENS
+    teacher_update_rate: float = DEFAULT_TEACHER_UPDATE_RATE
 
     def __post_init__(self) -> None:
         if self.kl_direction not in KL_DIRECTIONS:
@@ -37,18 +42,26 @@ class SdftSettings:
         skip = self.skip_response_tokens
         if not isinstance(skip, Integral) or isinstance(skip, bool) or skip < 0:
             raise ValueError("sdft skip_response_tokens must be a non-negative integer")
+        rate = self.teacher_update_rate
+        if not isinstance(rate, Real) or isinstance(rate, bool) or not math.isfinite(rate) or not 0 <= rate <= 1:
+            raise ValueError("sdft teacher_update_rate must be a number in [0, 1]")
 
 
 @register_loss_family
 class SdftAlgorithm(SlimeAlgorithm):
-    """The self-teacher loss family: a per-token KL to the demonstration-conditioned policy.
+    """The self-teacher loss family: a per-token KL to the demonstration-conditioned model.
 
-    Before each step the pre-train hook runs a forward pass of the current
-    actor over every sample's teacher sequence and keeps the teacher's
-    next-token distribution at each response position. The loss then puts the
-    student's distribution at the same positions, computed from the training
-    forward over the plain request, against it. There is no second copy of
-    the weights: the teacher differs from the student only by its prompt.
+    Before each step the pre-train hook runs a forward pass over every
+    sample's teacher sequence and keeps the teacher's next-token distribution
+    at each response position. The loss then puts the student's distribution
+    at the same positions, computed from the training forward over the plain
+    request, against it.
+
+    The teacher's weights follow the reference implementation: a copy that
+    moves toward the policy by ``--sdft-teacher-update-rate`` after every
+    step (``ref_model_mixup_alpha``), kept on the host beside the actor's
+    own backup and swapped in for the pass. A rate of 1 makes the current
+    policy the teacher with no copy at all; 0 freezes the initial weights.
     """
 
     loss_family = "sdft"
@@ -68,7 +81,11 @@ class SdftAlgorithm(SlimeAlgorithm):
     rollout_tensor_dtypes: Mapping[str, str] = {"teacher_tokens": "long"}
     external_batch_keys = ("rollout_log_probs", "sdft_teacher_log_probs")
     rollout_log_skip_keys = ("teacher_tokens", "sdft_teacher_log_probs")
-    required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
+    required_objective_hooks = (
+        "custom_loss_function_path",
+        "reef_actor_init_hook_path",
+        "reef_actor_pre_train_hook_path",
+    )
 
     # --- stage 1: configure ---
 
@@ -111,6 +128,16 @@ class SdftAlgorithm(SlimeAlgorithm):
                 f"The paper's runs used 3. Default {DEFAULT_SKIP_RESPONSE_TOKENS}."
             ),
         )
+        parser.add_argument(
+            "--sdft-teacher-update-rate",
+            dest="teacher_update_rate",
+            type=float,
+            help=(
+                "Fraction of the current policy mixed into the teacher's weights after every step, the reference's "
+                "ref_model_mixup_alpha. 1 makes the current policy the teacher, 0 freezes the initial weights. "
+                f"Default {DEFAULT_TEACHER_UPDATE_RATE}."
+            ),
+        )
         options, remaining = parser.parse_known_args(list(arguments))
         return SdftSettings(**vars(options)), remaining
 
@@ -120,6 +147,7 @@ class SdftAlgorithm(SlimeAlgorithm):
         args.sdft_kl_direction = settings.kl_direction
         args.sdft_importance_sampling_cap = settings.importance_sampling_cap
         args.sdft_skip_response_tokens = settings.skip_response_tokens
+        args.sdft_teacher_update_rate = settings.teacher_update_rate
 
     def bind(self, config=None, *, critic_steps_per_actor=None, critic_only_steps=0):
         # The settings travel on args; the bound instance stays stateless.
