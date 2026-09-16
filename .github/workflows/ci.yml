@@ -316,7 +316,6 @@ jobs:
           python - <<'PY'
           import importlib.util
           import os
-          import sys
           from importlib.metadata import distribution
           from pathlib import Path
 
@@ -339,9 +338,10 @@ jobs:
               for requirement in requirements
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          expected_core = {"aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "sqlalchemy", "tomli-w"}
-          if sys.version_info < (3, 11):
-              expected_core.add("tomli")  # the tomllib backport the harness wrapper reads a TOML binding with
+          # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
+          expected_core = {
+              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+          }
           assert core == expected_core, core
           slime = {
               canonicalize_name(requirement.name)
