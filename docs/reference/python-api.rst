@@ -647,7 +647,7 @@ Reported feedback
    * - ``decide_group(key, items) -> GroupDecision``
      - Required when grouping supplies a group key; return READY, INCOMPLETE, or DISCARD.
    * - ``is_training_report(report) -> bool``
-     - Optional; ``False`` for a valid report that is not this method's training data. The engine releases it with its sources and never assembles it.
+     - Optional; ``False`` for a valid report that is not this method's training data. The engine releases it and never assembles it; its sources go with it only under ``exclusive_sources`` or when it references more than one inference.
 
 ``ReportContext`` carries ``report``, ordered ``inferences``, optional ``score``,
 and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or

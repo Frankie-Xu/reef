@@ -147,8 +147,10 @@ A reported-feedback recipe implements:
 - ``is_training_report(report)`` when another role's reports share the
   scenario: return ``False`` for a valid report that is not this method's
   training data (SPADE's Designer reports its own score there). The engine
-  owns such a report and releases it with the sources it claims, and never
-  calls ``make_sample`` on it. The default takes every report.
+  releases such a report and never calls ``make_sample`` on it; its sources
+  go with it only under ``exclusive_sources`` or when it references more
+  than one inference, and a single referenced inference stays retained for
+  a report that trains on it. The default takes every report.
 - ``grouping(context)`` for grouped methods: return ``(group_key, slot)``.
   The default ``(None, None)`` makes an independent sample. A None slot uses
   the report id; repeated slots preserve the first accepted report.

@@ -161,8 +161,11 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         """Whether a valid report is this method's training data.
 
         A report that is not, such as another role's signal sharing the
-        scenario, is owned and released with the sources it claims and never
-        assembled; nothing about it can fail ingestion. The default takes every report.
+        scenario, is released and never assembled; nothing about it can fail
+        ingestion. Its sources are released with it only under ``exclusive_sources``
+        or when it references more than one inference; a single referenced
+        inference stays retained for a report that trains on it. The default
+        takes every report.
         """
         return True
 
