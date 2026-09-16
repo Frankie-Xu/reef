@@ -21,6 +21,7 @@ from reef.record2dataset import (
     GeneratorService,
     HttpGenerator,
     OracleResult,
+    OracleUnavailable,
     TaskChecks,
     TaskNameConflict,
     TaskPlays,
@@ -76,7 +77,7 @@ class StandInChecks(TaskChecks):
     def oracle(self, task_path: Path) -> OracleResult:
         self.calls.append(task_path)
         if self.raises:
-            raise RuntimeError("docker is not running")
+            raise OracleUnavailable("harbor run -a oracle exited 2: docker is not running")
         if not self.is_solvable:
             return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
         return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
@@ -266,18 +267,25 @@ def test_a_check_runs_the_oracle_on_a_task_under_the_root_only(tmp_path: Path) -
     assert checks.calls == [tmp_path / "tasks" / "harbor-00001-000-inspection"] * 2
 
 
-def test_a_check_whose_harness_fails_is_a_failed_job(tmp_path: Path) -> None:
-    built, _, _, _ = service(tmp_path, checks=StandInChecks(raises=True))
+def test_a_check_that_could_not_run_is_a_failed_job_the_client_raises(tmp_path: Path) -> None:
+    built, _, checks, _ = service(tmp_path, checks=StandInChecks(raises=True))
+    error = "OracleUnavailable: harbor run -a oracle exited 2: docker is not running"
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        with pytest.raises(GeneratorError, match="failed: RuntimeError: docker is not running"):
+        submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
+        with pytest.raises(GeneratorError, match=f"job {submitted['job']} failed: {error}"):
+            await generator.job_result(submitted)
+        job = await generator.call("GET", f"/jobs/{submitted['job']}")
+        assert job["state"] == "failed" and job["error"] == error and job["result"] is None
+        with pytest.raises(GeneratorError, match=f"failed: {error}"):
             await generator.check(written.path)
         return None
 
     run_with(built, body)
+    assert len(checks.calls) == 2, "the runner went on to the next job after the failed one"
 
 
 def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:

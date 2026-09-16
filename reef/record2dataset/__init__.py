@@ -42,6 +42,7 @@ from reef.record2dataset.designer import (
 from reef.record2dataset.harbor import (
     GeneratedHarborTask,
     OracleResult,
+    OracleUnavailable,
     content_hash,
     harbor_task,
     oracle_check,
@@ -65,6 +66,7 @@ __all__ = [
     "HarborReply",
     "HttpGenerator",
     "OracleResult",
+    "OracleUnavailable",
     "ProposedTask",
     "ReefDesigner",
     "ReefTaskPlays",

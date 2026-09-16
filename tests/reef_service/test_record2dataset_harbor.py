@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from reef.core.tasks import read_harbor_task, write_harbor_task
-from reef.record2dataset import GeneratedHarborTask, HarborReply, harbor_task, oracle_check
+from reef.record2dataset import GeneratedHarborTask, HarborReply, OracleUnavailable, harbor_task, oracle_check
 from reef.record2dataset.harbor import content_hash, dockerfile_parse_errors, reply_errors
 
 try:
@@ -61,6 +61,10 @@ arguments = sys.argv[1:]
 agent = arguments[arguments.index("-a") + 1]
 jobs = Path(arguments[arguments.index("-o") + 1])
 script = json.loads(Path(__file__).with_suffix(".json").read_text())
+exit_code = script.get("exits", {{}}).get(agent)
+if exit_code is not None:
+    sys.stderr.write("docker daemon is not running")
+    sys.exit(exit_code)
 if script.get("sleep_s"):
     import time
     time.sleep(script["sleep_s"])
@@ -325,25 +329,44 @@ def test_a_harbor_run_that_hangs_is_stopped_at_the_timeout(tmp_path: Path) -> No
 
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
     started = time.monotonic()
-    result = oracle_check(root, harbor=fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, sleep_s=30), timeout_s=1.0)
-    assert not result.is_solvable and result.reason == "harbor run -a oracle did not finish within 1 s"
+    harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, sleep_s=30)
+    with pytest.raises(OracleUnavailable, match="harbor run -a oracle did not finish within 1 s"):
+        oracle_check(root, harbor=harbor, timeout_s=1.0)
     assert time.monotonic() - started < 10.0
 
 
-def test_a_missing_harbor_command_line_is_reported_not_raised(tmp_path: Path, monkeypatch) -> None:
+def test_a_missing_harbor_command_line_raises_rather_than_refusing_the_task(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None)
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
-    result = oracle_check(root)
-    assert not result.is_solvable and "not installed" in result.reason
+    with pytest.raises(OracleUnavailable, match="the harbor command line is not installed") as raised:
+        oracle_check(root)
+    assert isinstance(raised.value, RuntimeError), "a caller that catches RuntimeError still sees it"
 
 
-def test_a_harbor_run_that_fails_is_reported_with_its_output(tmp_path: Path) -> None:
+def test_a_harbor_run_that_exits_nonzero_raises_with_its_output(tmp_path: Path) -> None:
     path = tmp_path / "harbor"
     path.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('docker is not running')\nsys.exit(2)\n")
     path.chmod(0o755)
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
-    result = oracle_check(root, harbor=str(path))
-    assert not result.is_solvable and "exited 2: docker is not running" in result.reason
+    with pytest.raises(OracleUnavailable, match="harbor run -a oracle exited 2: docker is not running") as raised:
+        oracle_check(root, harbor=str(path))
+    assert isinstance(raised.value.__cause__, RuntimeError), "the harbor run's own error is the cause"
+
+
+def test_a_nop_run_that_exits_nonzero_raises_after_a_good_oracle_run(tmp_path: Path) -> None:
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, exits={"nop": 3})
+    with pytest.raises(OracleUnavailable, match="harbor run -a nop exited 3: docker daemon is not running"):
+        oracle_check(root, harbor=harbor)
+    assert (root.parent / ".harbor-jobs" / root.name / "oracle").is_dir(), "the oracle run happened first"
+
+
+def test_a_reference_solution_that_scores_zero_is_a_refusal_not_an_error(tmp_path: Path) -> None:
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    result = oracle_check(root, harbor=fake_harbor(tmp_path, {"oracle": 0.0, "nop": 0.0}))
+    assert not result.is_solvable and result.reason == "the reference solution scored 0.0, not 1"
+    for_free = oracle_check(root, harbor=fake_harbor(tmp_path, {"oracle": 1.0, "nop": 1.0}))
+    assert not for_free.is_solvable and for_free.reason == "doing nothing scored 1.0, not below 1"
 
 
 def test_a_second_check_starts_from_a_clean_jobs_directory(tmp_path: Path) -> None:

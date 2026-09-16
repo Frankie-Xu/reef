@@ -8,9 +8,11 @@ the classic Docker parser reads it (a heredoc body is a parse error there), task
 content hash that ignores ``task.toml`` and the hint, and ``oracle_check`` runs the task twice through the
 ``harbor`` command line, once with Harbor's oracle agent (the reference solution) and once with its nop
 agent (nothing), and accepts the task only when the first scores 1 and the second scores below 1:
-solvable, and not for free. One gate is reef's own: the team requires a pytest file under ``tests/``, reef
-requires a file under ``tests/`` that names the reward file, since its verifiers are shell scripts that
-write it.
+solvable, and not for free. A check that could not run, because ``harbor`` is not installed or a run
+ended without a trial to read (an exit code, a timeout, no Docker daemon), raises ``OracleUnavailable``
+rather than refusing the task. One gate is reef's own: the team requires a pytest file under ``tests/``,
+reef requires a file under ``tests/`` that names the reward file, since its verifiers are shell scripts
+that write it.
 """
 
 from __future__ import annotations
@@ -123,6 +125,10 @@ class OracleResult:
     reason: str
     oracle_reward: float | None = None
     nop_reward: float | None = None
+
+
+class OracleUnavailable(RuntimeError):
+    """The check could not run: harbor is not installed, or a harbor run ended without a trial to read."""
 
 
 def dockerfile_parse_errors(text: str) -> list[str]:
@@ -310,14 +316,15 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
     """Solvable, and not for free: the reference solution scores 1 and doing nothing scores below 1 under Harbor."""
     executable = harbor if harbor is not None else shutil.which("harbor")
     if executable is None:
-        return OracleResult(is_solvable=False, reason="the harbor command line is not installed")
+        raise OracleUnavailable("the harbor command line is not installed")
     jobs_path = task_path.parent / JOBS_DIRECTORY / task_path.name
     if jobs_path.exists():
         shutil.rmtree(jobs_path)
+    # A run that left no trial to read says nothing about the task; only a trial's verdict can refuse it.
     try:
         oracle = run_harbor_agent(task_path, "oracle", jobs_path / "oracle", harbor=executable, timeout_s=timeout_s)
     except (RuntimeError, ValueError, OSError) as exc:
-        return OracleResult(is_solvable=False, reason=str(exc)[:500])
+        raise OracleUnavailable(str(exc)[:500]) from exc
     if oracle.reward is None or oracle.reward < 1.0:
         # A task the reference solution does not solve is refused here; the nop run would only cost a build.
         reason = f"the reference solution scored {oracle.reward}, not 1"
@@ -329,7 +336,7 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
     try:
         nop = run_harbor_agent(task_path, "nop", jobs_path / "nop", harbor=executable, timeout_s=timeout_s)
     except (RuntimeError, ValueError, OSError) as exc:
-        return OracleResult(is_solvable=False, reason=str(exc)[:500], oracle_reward=oracle.reward)
+        raise OracleUnavailable(str(exc)[:500]) from exc
     if nop.reward is None or nop.reward >= 1.0:
         reason = f"doing nothing scored {nop.reward}, not below 1"
         if nop.exception is not None:

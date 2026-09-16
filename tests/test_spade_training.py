@@ -286,6 +286,7 @@ class StandInGenerator(Generator):
         play_error: str = "",
         fail_after: int | None = None,
         taken: Sequence[str] = (),
+        check_fail_after: int | None = None,
     ) -> None:
         self.root = root
         self.refusals = dict(refusals or {})
@@ -296,6 +297,7 @@ class StandInGenerator(Generator):
         self.rewards = {"plain": plain, "hint": hint}
         self.play_error = play_error
         self.fail_after = fail_after
+        self.check_fail_after = check_fail_after
         self.proposals: list[dict[str, object]] = []
         self.checks: list[Path] = []
         self.plays: list[dict[str, object]] = []
@@ -356,6 +358,8 @@ class StandInGenerator(Generator):
 
     async def check(self, task_path: Path) -> OracleResult:
         self.checks.append(task_path)
+        if self.check_fail_after is not None and len(self.checks) > self.check_fail_after:
+            raise GeneratorError("job 7 failed: OracleUnavailable: the harbor command line is not installed")
         if self.is_solvable:
             return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
         return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
@@ -718,6 +722,24 @@ def test_a_generator_that_goes_away_ends_the_generation_with_what_ran(tmp_path: 
         "error"
     ] == "the generator went away"
     assert generator.manifests == [], "the manifest is written after the last proposal"
+
+
+def test_a_check_that_could_not_run_ends_the_generation_with_the_error_and_no_score_for_that_proposal(
+    tmp_path: Path,
+) -> None:
+    generator = StandInGenerator(tmp_path / "tasks", check_fail_after=1)
+    p, _ = generating(tmp_path, generator, skills=())
+    assert not looked(p)
+    error = "job 7 failed: OracleUnavailable: the harbor command line is not installed"
+    status = p.status()["generation"]
+    assert status["completed"] == 1 and status["last_error"] == error
+    assert len(generator.proposals) == 2 and len(generator.checks) == 2, "the loop stops at the check that failed"
+    assert [(r["record_id"], r["score"]) for r in generator.reports] == [("designer-1", 0.5)]
+    assert [call["task"] for call in generator.plays] == ["harbor-00000-000"] * 2, "the unchecked task is not played"
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert document["error"] == error and [task["name"] for task in document["tasks"]] == ["harbor-00000-000"]
+    assert [proposal["refusal"] for proposal in document["proposals"]] == [""], "an unchecked task is no refusal"
+    assert generator.manifests == []
 
 
 def test_a_generation_that_never_finishes_is_named_in_the_status(tmp_path: Path) -> None:
