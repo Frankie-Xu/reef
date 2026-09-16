@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from reef.record2dataset.wire import (
 
 DEFAULT_POLL_S = 2.0
 DEFAULT_TIMEOUT_S = 60.0
+# The longest a play or check may take: several episodes of a large model on one task run for hours, not minutes.
+DEFAULT_JOB_TIMEOUT_S = 4 * 3600.0
 
 
 class GeneratorError(RuntimeError):
@@ -108,13 +111,25 @@ class Generator(ABC):
 
 
 class HttpGenerator(Generator):
-    """The generator service over HTTP; a job is polled every ``poll_s`` seconds until it is done or failed."""
+    """The generator service over HTTP; a job is polled every ``poll_s`` seconds until it is done or failed.
 
-    def __init__(self, url: str, *, poll_s: float = DEFAULT_POLL_S, timeout_s: float = DEFAULT_TIMEOUT_S) -> None:
+    ``timeout_s`` bounds one HTTP exchange; ``job_timeout_s`` bounds a whole job, the longest a play or check
+    may take, after which the job is given up and reported as an error.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        poll_s: float = DEFAULT_POLL_S,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        job_timeout_s: float = DEFAULT_JOB_TIMEOUT_S,
+    ) -> None:
         if not isinstance(url, str) or not url.strip():
             raise GeneratorError("the generator url must be a non-empty string")
         self.url = url.rstrip("/")
         self.poll_s = poll_s
+        self.job_timeout_s = job_timeout_s
         self.timeout = aiohttp.ClientTimeout(total=timeout_s)
 
     async def request(
@@ -147,6 +162,7 @@ class HttpGenerator(Generator):
 
     async def job_result(self, submitted: Mapping[str, object]) -> dict[str, object]:
         job_id = checked_string(submitted, "job", label="a submitted job")
+        started = time.monotonic()
         while True:
             job = await self.call("GET", f"/jobs/{job_id}")
             state = job.get("state")
@@ -154,6 +170,12 @@ class HttpGenerator(Generator):
                 return checked_object(job.get("result"), "a job result")
             if state == "failed":
                 raise GeneratorError(f"job {job_id} failed: {job.get('error')}")
+            elapsed = time.monotonic() - started
+            if elapsed >= self.job_timeout_s:
+                raise GeneratorError(
+                    f"{job.get('kind', '')} job {job_id} is still {state} after {elapsed:.1f} s "
+                    f"(job_timeout_s is {self.job_timeout_s:g})"
+                )
             await asyncio.sleep(self.poll_s)
 
     async def propose(

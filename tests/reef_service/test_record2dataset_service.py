@@ -11,6 +11,7 @@ import sys
 import os
 import sys
 import time
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
@@ -88,13 +89,16 @@ class StandInDesigner(Designer):
 
 
 class StandInChecks(TaskChecks):
-    def __init__(self, *, is_solvable: bool = True, raises: bool = False) -> None:
+    def __init__(self, *, is_solvable: bool = True, raises: bool = False, gate: threading.Event | None = None) -> None:
         self.is_solvable = is_solvable
         self.raises = raises
+        self.gate = gate
         self.calls: list[Path] = []
 
     def oracle(self, task_path: Path) -> OracleResult:
         self.calls.append(task_path)
+        if self.gate is not None:
+            self.gate.wait()
         if self.raises:
             raise OracleUnavailable("harbor run -a oracle exited 2: docker is not running")
         if not self.is_solvable:
@@ -379,6 +383,26 @@ def test_closing_the_service_stops_the_harbor_run_of_the_job_in_flight(tmp_path:
     assert job is not None and job.state == "done" and job.result is not None
     assert job.result["reason"] == "harbor run -a oracle was stopped with the generator"
     assert runs.is_closed and runs.pids() == ()
+
+
+def test_a_job_that_never_finishes_is_given_up_after_the_job_timeout(tmp_path: Path) -> None:
+    gate = threading.Event()
+    built, _, checks, _ = service(tmp_path, checks=StandInChecks(gate=gate))
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        impatient = HttpGenerator(generator.url, poll_s=0.01, job_timeout_s=0.05)
+        try:
+            with pytest.raises(GeneratorError, match=r"check job \w+ is still running after [\d.]+ s"):
+                await impatient.check(written.path)
+        finally:
+            gate.set()
+        return None
+
+    run_with(built, body)
+    assert len(checks.calls) == 1
 
 
 def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
