@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
+import stat
+import sys
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
@@ -22,10 +26,13 @@ from reef.record2dataset import (
     HttpGenerator,
     OracleResult,
     OracleUnavailable,
+    ReadinessProbe,
     TaskChecks,
     TaskNameConflict,
     TaskPlays,
+    readiness_probes,
 )
+from reef.record2dataset.service import DockerProbe, HarborProbe, ModuleProbe
 from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
 from reef.service.deploy.generator import generator_settings
 
@@ -118,6 +125,17 @@ class StandInPlays(TaskPlays):
         )
 
 
+class StandInProbe(ReadinessProbe):
+    def __init__(self, name: str, reason: str = "") -> None:
+        self.name = name
+        self.reason = reason
+        self.calls = 0
+
+    def missing(self) -> str:
+        self.calls += 1
+        return self.reason
+
+
 def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInDesigner, StandInChecks, StandInPlays]:
     designer = parts.get("designer") or StandInDesigner()
     checks = parts.get("checks") or StandInChecks()
@@ -129,6 +147,7 @@ def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInD
         plays=plays,  # type: ignore[arg-type]
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
+        probes=parts.get("probes"),  # type: ignore[arg-type]
     )
     return built, designer, checks, plays  # type: ignore[return-value]
 
@@ -405,6 +424,71 @@ def test_bad_requests_and_unknown_jobs_are_refused_with_a_reason(tmp_path: Path)
     run_with(built, body)
     with pytest.raises(GeneratorError, match="did not reach the generator"):
         asyncio.run(HttpGenerator("http://127.0.0.1:9", timeout_s=1.0).delete_task("x"))
+
+
+def test_healthz_is_503_naming_what_is_missing_and_200_once_every_probe_passes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    harbor = StandInProbe("harbor", "the harbor command line is not on PATH")
+    docker = StandInProbe("docker", "docker version exited 1: the daemon is down")
+    probes = [StandInProbe("reef_eval"), harbor, docker]
+    built, _, _, _ = service(tmp_path, probes=probes)
+
+    async def body(generator: HttpGenerator) -> object:
+        return [await generator.request("GET", "/healthz") for _ in range(2)]
+
+    with caplog.at_level(logging.WARNING, logger="reef.record2dataset.service"):
+        first, second = run_with(built, body)
+    assert (
+        first
+        == second
+        == (
+            503,
+            {
+                "ok": False,
+                "missing": ["harbor", "docker"],
+                "reasons": {"harbor": harbor.reason, "docker": docker.reason},
+                "tasks_root": str(tmp_path / "tasks"),
+            },
+        )
+    )
+    assert [probe.calls for probe in probes] == [2, 2, 2], "every probe runs on every call, so a fix is seen"
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == [f"the generator is not ready: harbor: {harbor.reason}; docker: {docker.reason}"]
+    harbor.reason = docker.reason = ""
+    assert run_with(built, body) == [(200, {"ok": True, "tasks_root": str(tmp_path / "tasks")})] * 2
+    assert not caplog.records[len(warnings) :], "a ready generator adds nothing to the log"
+
+
+def test_the_stack_probes_look_for_reef_eval_harbor_and_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert [probe.name for probe in readiness_probes(harbor="/opt/harbor")] == ["reef_eval", "harbor", "docker"]
+    assert ModuleProbe("json").missing() == ""
+    reason = ModuleProbe("no_such_module_anywhere", hint="install it").missing()
+    assert (
+        reason.startswith(f"no_such_module_anywhere does not import under {sys.executable}") and "install it" in reason
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert HarborProbe().missing() == "the harbor command line is not on PATH"
+    assert HarborProbe(harbor=str(tmp_path / "harbor")).missing() == f"{tmp_path / 'harbor'} is not an executable"
+    assert DockerProbe(docker="docker").missing() == "the docker command line is not on PATH"
+    reason = DockerProbe(docker=sys.executable).missing()
+    assert reason.startswith(f"{sys.executable} version exited 2:") and "version" in reason
+    if os.name != "posix":
+        return
+    harbor = tmp_path / "harbor"
+    harbor.write_text("#!/bin/sh\nexit 0\n")
+    harbor.chmod(harbor.stat().st_mode | stat.S_IXUSR)
+    assert HarborProbe(harbor=str(harbor)).missing() == ""
+    docker = tmp_path / "docker"
+    docker.write_text('#!/bin/sh\ntest "$1" = version || exit 3\nexit 0\n')
+    docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+    assert DockerProbe(docker=str(docker)).missing() == ""
+    docker.write_text("#!/bin/sh\necho 'Cannot connect to the Docker daemon' >&2\nexit 1\n")
+    assert (
+        DockerProbe(docker=str(docker)).missing() == f"{docker} version exited 1: Cannot connect to the Docker daemon"
+    )
 
 
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:

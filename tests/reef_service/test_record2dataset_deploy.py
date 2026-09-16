@@ -9,7 +9,7 @@ import pytest
 
 from reef.record2dataset import __main__ as generator_main
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings, select_executor
-from reef.service.deploy.config_utils import DeployConfigError
+from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
 from reef.service.deploy.execution import service_executor_selection, validate_services
 from reef.service.deploy.generator import attach_generator_service, generator_service, generator_settings
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -66,6 +66,29 @@ def test_the_generator_defaults_to_the_launching_interpreter_and_probes_its_bind
     attach_generator_service(stack)
     generator = stack["services"][0]
     assert generator["command"][0] == sys.executable and generator["ready"][-1] == "http://10.0.0.5:8910/healthz"
+
+
+def test_an_empty_generator_python_is_unset_and_the_interpreter_choice_is_printed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("REEF_GENERATOR_PYTHON", "")
+    monkeypatch.delenv("REEF_PYTHON", raising=False)
+    stack = interpolate_environment(config(python="${REEF_GENERATOR_PYTHON}"), "stack.yaml")
+    assert stack["generator"]["python"] == "", "the env pass turns an unset variable into an empty string"
+    attach_generator_service(stack)
+    assert stack["services"][0]["command"][0] == sys.executable
+    assert (
+        f"[reef] generator: runs under {sys.executable} (the launching interpreter; generator.python is unset)"
+        in capsys.readouterr().err
+    )
+    monkeypatch.setenv("REEF_PYTHON", "/opt/serve/bin/python")
+    assert generator_service(config(python=" "))["command"][0] == "/opt/serve/bin/python"
+    assert (
+        "[reef] generator: runs under /opt/serve/bin/python (REEF_PYTHON; generator.python is unset)"
+        in capsys.readouterr().err
+    )
+    assert generator_service(config(python="/opt/py312/bin/python"))["command"][0] == "/opt/py312/bin/python"
+    assert "[reef] generator: runs under /opt/py312/bin/python (generator.python)" in capsys.readouterr().err
 
 
 def test_the_generator_role_selects_its_own_executor() -> None:

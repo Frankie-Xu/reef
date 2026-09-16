@@ -13,7 +13,9 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
 - ``POST /plays``: an agent plays a written task through the task player, episodes reported to Reef (a job).
 - ``POST /manifests``: the split manifest of one generation's tasks under the tasks root.
-- ``GET /jobs/{id}``: a job's state and result; ``GET /healthz``.
+- ``GET /jobs/{id}``: a job's state and result.
+- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
+  then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check or play.
 
 Jobs run one after another on a private thread. Everything here is stateless beyond the tasks root: a
 restarted service serves the same root.
@@ -22,10 +24,13 @@ restarted service serves the same root.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import queue
 import shutil
+import subprocess
+import sys
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -71,6 +76,81 @@ from reef.record2dataset.wire import (
 logger = logging.getLogger(__name__)
 
 CLOSE_JOIN_S = 10.0
+DOCKER_PROBE_TIMEOUT_S = 5.0
+
+
+# ------------------------------------------------------------- the readiness
+
+
+class ReadinessProbe(ABC):
+    """One thing the generator needs before it can check and play tasks."""
+
+    name: str = ""
+
+    @abstractmethod
+    def missing(self) -> str:
+        """Why the need is not met, or an empty string when it is."""
+
+
+class ModuleProbe(ReadinessProbe):
+    """A module imports under this interpreter; ``find_spec`` looks without importing."""
+
+    def __init__(self, module: str, *, hint: str = "") -> None:
+        self.name = module
+        self.module = module
+        self.hint = hint
+
+    def missing(self) -> str:
+        if importlib.util.find_spec(self.module) is not None:
+            return ""
+        reason = f"{self.module} does not import under {sys.executable}"
+        return f"{reason}; {self.hint}" if self.hint else reason
+
+
+class HarborProbe(ReadinessProbe):
+    """The harbor command line resolves: the configured path, or ``harbor`` on PATH."""
+
+    name = "harbor"
+
+    def __init__(self, *, harbor: str | None = None) -> None:
+        self.harbor = harbor
+
+    def missing(self) -> str:
+        if self.harbor is None:
+            return "" if shutil.which("harbor") is not None else "the harbor command line is not on PATH"
+        return "" if shutil.which(self.harbor) is not None else f"{self.harbor} is not an executable"
+
+
+class DockerProbe(ReadinessProbe):
+    """The Docker daemon answers ``docker version``, so Harbor can build and run a task's container."""
+
+    name = "docker"
+
+    def __init__(self, *, docker: str = "docker", timeout_s: float = DOCKER_PROBE_TIMEOUT_S) -> None:
+        self.docker = docker
+        self.timeout_s = timeout_s
+
+    def missing(self) -> str:
+        if shutil.which(self.docker) is None:
+            return f"the {self.docker} command line is not on PATH"
+        try:
+            completed = subprocess.run(
+                [self.docker, "version"], capture_output=True, text=True, timeout=self.timeout_s, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"{self.docker} version did not answer: {exc}"
+        if completed.returncode != 0:
+            return f"{self.docker} version exited {completed.returncode}: {completed.stderr.strip()[:500]}"
+        return ""
+
+
+def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]:
+    """What playing and checking a task takes: reef-eval, the harbor command line and Docker."""
+    return (
+        ModuleProbe("reef_eval", hint="install reef-infra[terminus] on Python 3.12 or later"),
+        HarborProbe(harbor=harbor),
+        DockerProbe(),
+    )
 
 
 # ------------------------------------------------------------------ the work
@@ -365,6 +445,7 @@ class GeneratorService:
         default_model: str | None = None,
         designer_model: str | None = None,
         jobs: JobRunner | None = None,
+        probes: Sequence[ReadinessProbe] | None = None,
     ) -> None:
         self.tasks_root = Path(tasks_root)
         self.designer = designer
@@ -374,6 +455,8 @@ class GeneratorService:
         # The deployment's generator section owns the Designer's model; a proposal's own model is the fallback.
         self.designer_model = designer_model
         self.jobs = jobs if jobs is not None else JobRunner()
+        self.probes = tuple(probes) if probes is not None else readiness_probes()
+        self.reported_missing: tuple[str, ...] = ()
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -437,10 +520,30 @@ class GeneratorService:
         self.jobs.submit(job)
         return web.json_response({"job": job.id}, status=202)
 
+    def missing_needs(self) -> dict[str, str]:
+        """Every probe's reason for not being met, by name; empty when the generator can check and play."""
+        reasons: dict[str, str] = {}
+        for probe in self.probes:
+            reason = probe.missing()
+            if reason:
+                reasons[probe.name] = reason
+        return reasons
+
     # ------------------------------------------------------------ handlers
 
     async def healthz(self, request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "tasks_root": str(self.tasks_root)})
+        reasons = await asyncio.to_thread(self.missing_needs)
+        missing = tuple(reasons)
+        # The readiness wait probes several times a second; the reasons go to the log once per change.
+        if missing and missing != self.reported_missing:
+            logger.warning(
+                "the generator is not ready: %s", "; ".join(f"{name}: {reason}" for name, reason in reasons.items())
+            )
+        self.reported_missing = missing
+        document: dict[str, object] = {"ok": not missing, "tasks_root": str(self.tasks_root)}
+        if missing:
+            return web.json_response({**document, "missing": list(missing), "reasons": reasons}, status=503)
+        return web.json_response(document)
 
     async def propose(self, request: web.Request) -> web.Response:
         try:

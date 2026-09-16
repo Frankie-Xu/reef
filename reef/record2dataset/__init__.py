@@ -49,7 +49,15 @@ from reef.record2dataset.harbor import (
     reply_errors,
     split_generation,
 )
-from reef.record2dataset.service import GeneratorService, HarborChecks, ReefTaskPlays, TaskChecks, TaskPlays
+from reef.record2dataset.service import (
+    GeneratorService,
+    HarborChecks,
+    ReadinessProbe,
+    ReefTaskPlays,
+    TaskChecks,
+    TaskPlays,
+    readiness_probes,
+)
 
 __all__ = [
     "Designer",
@@ -68,6 +76,7 @@ __all__ = [
     "OracleResult",
     "OracleUnavailable",
     "ProposedTask",
+    "ReadinessProbe",
     "ReefDesigner",
     "ReefTaskPlays",
     "TaskChecks",
@@ -80,6 +89,7 @@ __all__ = [
     "harbor_task",
     "oracle_check",
     "parse_harbor_reply",
+    "readiness_probes",
     "reply_errors",
     "split_generation",
 ]

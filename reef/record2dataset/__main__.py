@@ -11,7 +11,7 @@ from pathlib import Path
 from aiohttp import web
 
 from reef.record2dataset.designer import ReefDesigner
-from reef.record2dataset.service import GeneratorService, HarborChecks, ReefTaskPlays
+from reef.record2dataset.service import GeneratorService, HarborChecks, ReefTaskPlays, readiness_probes
 from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.generator import GeneratorSettings, generator_settings
 from reef.service.deploy.inference import local_service_url
@@ -45,6 +45,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         plays=plays,
         default_model=settings.upstream_model or settings.model_path,
         designer_model=generator.designer_model,
+        probes=readiness_probes(harbor=generator.harbor),
     )
 
 
