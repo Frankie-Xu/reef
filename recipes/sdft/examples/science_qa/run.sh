@@ -14,6 +14,8 @@ MODEL_DIR="${MODEL_DIR:-$HOME/models}"
 RUN_DIR="${RUN_DIR:-$PWD/work}"
 export REEF_SERVICE_URL="${REEF_SERVICE_URL:-http://127.0.0.1:28901}"
 export REEF_SCENARIO="${REEF_SCENARIO:-sdft-science-qa}"
+# serve.yaml is the SDFT arm; serve-sft.yaml the SFT control on the same stack.
+export SERVE_CONFIG="${SERVE_CONFIG:-serve.yaml}"
 export SDFT_WORK_DIR="$RUN_DIR"
 # The reference checkout, for its dataset and the protocol the README cites.
 REFERENCE_DIR="$RUN_DIR/self-distillation"
@@ -42,7 +44,7 @@ fi
 # 2. Compose owns the stack's startup and readiness.
 echo "==> [2/3] the reef stack at $REEF_SERVICE_URL"
 (
-    export REEF_IMAGE MODEL_DIR RUN_DIR REEF_ROOT
+    export REEF_IMAGE MODEL_DIR RUN_DIR REEF_ROOT SERVE_CONFIG
     docker compose up -d --wait
 ) || { echo "run.sh: the stack never became healthy; docker compose logs" >&2; exit 1; }
 

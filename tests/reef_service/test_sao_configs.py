@@ -374,6 +374,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/science_qa/serve.yaml",
+        "recipes/sdft/examples/science_qa/serve-sft.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -397,6 +398,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/science_qa/serve.yaml",
+        "recipes/sdft/examples/science_qa/serve-sft.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

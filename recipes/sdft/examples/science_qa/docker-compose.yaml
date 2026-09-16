@@ -5,7 +5,7 @@ services:
   reef:
     image: ${REEF_IMAGE}
     container_name: reef-sdft-science-qa
-    command: reef serve -c /workspace/Reef/recipes/sdft/examples/science_qa/serve.yaml
+    command: reef serve -c /workspace/Reef/recipes/sdft/examples/science_qa/${SERVE_CONFIG:-serve.yaml}
     # Host networking: run.py reaches Reef on the loopback port serve.yaml
     # declares, and slime binds the training engines' router to the host.
     network_mode: host

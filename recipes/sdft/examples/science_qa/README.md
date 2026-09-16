@@ -19,7 +19,10 @@ protocol, its distance from the paper's, and the numbers.
 science.py            the reference dataset, the Reef calls, the scorer's answer rule, the training order
 run.py                the stream: 32 prompts, 32 samples, 32 reports, one step, wait for the release, repeat
 evaluate.py           the test split through the served model, greedy, exact match on the <answer> tag
+plot.py               the learning curve of a recorded run, in the repository's figure style
 serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config: full fine-tuning, the paper's optimizer
+serve-sft.yaml        the same stack with the SFT control's recipe
+baseline_sft.py       the SFT control: the demonstration as the assistant turn, Slime's stock sft_loss
 docker-compose.yaml   the stack in the reef image, five GPUs
 run.sh                checks out the reference at its pin, starts the stack, runs run.py
 results/              the recorded runs
@@ -52,6 +55,19 @@ weight decay, gradient clipping at 1; the `sdft` family's flags carry the
 forward KL, the cap of 2 and the three skipped tokens. The test split is scored
 before training and every 20 steps.
 
+## The SFT control
+
+Table 5 compares SDFT with supervised fine-tuning on the same demonstrations.
+`baseline_sft.py` is that arm on the same stack: a recipe that accepts the
+same reports, a processor that renders each demonstration as the assistant
+turn of the recorded request with the served model's chat template and
+trains those tokens (the content, the end-of-turn token and the template's
+turn separator) with Slime's stock `sft_loss`, and an objective that names
+the family by dotted reference so the Slime driver and its workers import it
+from this directory. The student's samples are recorded and ignored, so
+`run.py` drives both arms unchanged: the same prompts in the same order, the
+same 32-prompt steps, the same optimizer in `serve-sft.yaml`.
+
 What differs from the reference: sampling goes through SGLang instead of vLLM
 (the same settings: temperature 1, top-p 1, no top-k, no repetition penalty),
 the trainer is Megatron instead of TRL on one GPU, and the reference's
@@ -73,15 +89,20 @@ hf download Qwen/Qwen2.5-7B-Instruct --local-dir ~/models/Qwen2.5-7B-Instruct
 
 ```bash
 cd recipes/sdft/examples/science_qa
-./run.sh                                    # the stack, then the 167 steps
+./run.sh                                    # the SDFT arm: the stack, then the 167 steps
 SDFT_STEPS=2 ./run.sh                       # a smoke run: the baseline score and two steps
 uv run --no-project --python 3.12 --with reef-client --with datasets evaluate.py --label now
+uv run --no-project --python 3.12 --with matplotlib plot.py --run-dir work --out results/<run>
 docker compose down                         # stop the stack
+SERVE_CONFIG=serve-sft.yaml REEF_SCENARIO=sft-science-qa RUN_DIR=$PWD/work-sft ./run.sh   # the SFT control
 ```
 
 `run.sh` reads `REEF_IMAGE` (default `reef`), `MODEL_DIR` (default
 `~/models`), `RUN_DIR` (default `./work`: the reference checkout, the stack's
-state and checkpoints, `steps.jsonl` and `eval/*.json`), and `REEF_GPU_0..4`.
+state and checkpoints, `steps.jsonl` and `eval/*.json`), `SERVE_CONFIG`
+(default `serve.yaml`), and `REEF_GPU_0..4`. A trained stack is bound to its
+scenario and run directory, so each arm gets its own `RUN_DIR` and
+`REEF_SCENARIO`, and `docker compose down` separates them.
 `run.py` reads `SDFT_EPOCHS`, `SDFT_PROMPTS_PER_STEP` (must equal the recipe's
 batch size in `serve.yaml`), `SDFT_SEED`, `SDFT_MAX_TOKENS`, `SDFT_EVAL_EVERY`
 and `SDFT_STEPS`.
