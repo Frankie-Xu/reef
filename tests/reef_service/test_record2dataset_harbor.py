@@ -18,7 +18,9 @@ from reef.record2dataset import GeneratedHarborTask, HarborReply, OracleUnavaila
 from reef.record2dataset.harbor import (
     HarborRuns,
     content_hash,
+    dockerfile_logical_lines,
     dockerfile_parse_errors,
+    missing_copy_sources,
     reply_errors,
     run_harbor_agent,
 )
@@ -208,6 +210,32 @@ def test_a_substantive_reply_has_no_errors() -> None:
             },
             "untouched scaffold line in Dockerfile",
         ),
+        (
+            {
+                "environment": {
+                    "Dockerfile": "FROM python:3.12-slim\nRUN apt-get install -y tmux\nCOPY app.conf /etc/app.conf\n"
+                }
+            },
+            "COPY 'app.conf' names no file under environment/",
+        ),
+        (
+            {
+                "environment": {
+                    "Dockerfile": "FROM python:3.12-slim\nRUN apt-get install -y tmux\nCOPY environment/app.conf /etc/\n",
+                    "app.conf": "port=1\n",
+                }
+            },
+            "COPY 'environment/app.conf' names no file under environment/",
+        ),
+        (
+            {
+                "environment": {
+                    "Dockerfile": "FROM python:3.12-slim\nRUN apt-get install -y tmux\nADD --chown=1:1 logs/ /var/log/app\n",
+                    "app.conf": "port=1\n",
+                }
+            },
+            "COPY 'logs/' names no file",
+        ),
     ],
 )
 def test_a_reply_that_is_not_a_substantive_task_is_refused(changes: dict[str, object], message: str) -> None:
@@ -215,6 +243,29 @@ def test_a_reply_that_is_not_a_substantive_task_is_refused(changes: dict[str, ob
     assert any(message in error for error in errors), errors
     with pytest.raises(ValueError, match="not a substantive task"):
         harbor_task(generated(reply=reply_with(**changes)))
+
+
+def test_copy_sources_the_environment_holds_pass_the_gate() -> None:
+    dockerfile = (
+        "FROM python:3.12-slim\nRUN apt-get install -y tmux\n"
+        "COPY app.conf /etc/app.conf\nCOPY ./logs/ /var/log/app/\nCOPY --chown=1:1 *.conf scripts /opt/\n"
+        'COPY ["app.conf", "/etc/copy.conf"]\nCOPY . /src\nCOPY --from=builder /built /opt/built\n'
+        "ADD https://example.invalid/x.tar /opt/x\n"
+    )
+    environment = {
+        "Dockerfile": dockerfile,
+        "app.conf": "port=1\n",
+        "logs/app.log": "ok\n",
+        "scripts/run.sh": "true\n",
+    }
+    assert reply_errors(reply_with(environment=environment)) == []
+    assert missing_copy_sources(dockerfile, environment) == []
+    assert missing_copy_sources("COPY a.txt b.txt /dst\nCOPY --chmod=644 c/ /c\n", {"b.txt": ""}) == ["a.txt", "c/"]
+
+
+def test_the_classic_parser_view_joins_continuations_and_drops_comments() -> None:
+    text = "FROM python:3.12-slim\n# a note\nCOPY a \\\n  # between\n  /a\nRUN true \\\n\n"
+    assert dockerfile_logical_lines(text) == ["FROM python:3.12-slim", "COPY a /a", "RUN true"]
 
 
 def test_the_scaffold_sentences_are_looked_for_in_their_own_files_only() -> None:
