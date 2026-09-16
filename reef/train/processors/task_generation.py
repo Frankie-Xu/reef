@@ -17,7 +17,9 @@ class TaskGenerationRequest:
 
     Assets are files or directories accessible to the generator, such as a
     repository snapshot or verifier fixtures. Construction does not read them.
-    Method-specific settings belong to the processor's configuration.
+    Method-specific settings belong to the processor's configuration. A method
+    that writes tasks from the description alone, such as a designer prompted
+    with a target, passes no source records.
     """
 
     source_records: tuple[AgentRecord, ...]
@@ -25,11 +27,11 @@ class TaskGenerationRequest:
     assets: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source_records, tuple) or not self.source_records:
-            raise ValueError("source_records must be a non-empty tuple of AgentRecord values")
+        if not isinstance(self.source_records, tuple):
+            raise ValueError("source_records must be a tuple of AgentRecord values")
         if any(not isinstance(record, AgentRecord) for record in self.source_records):
             raise TypeError("source_records must contain AgentRecord values")
-        if len({record.scenario for record in self.source_records}) != 1:
+        if len({record.scenario for record in self.source_records}) > 1:
             raise ValueError("source_records must belong to one scenario")
         record_ids = [record.agent_record_id for record in self.source_records]
         if any(not record_id for record_id in record_ids) or len(set(record_ids)) != len(record_ids):

@@ -1,4 +1,4 @@
-"""The Reasoning Agent's step: group relative advantages over the episodes of one task, on Tinker's importance sampling loss."""
+"""The Reasoning Agent's objective: group relative advantages over the episodes of one task, on Tinker's importance sampling loss."""
 
 from __future__ import annotations
 
@@ -7,22 +7,22 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.trajectories import trajectory_reward
-from reef.train.algos.base import StepPreparer, register_step_preparer
+from reef.train.algos import TrainingObjective
 from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import StepScheduling, StepSignal
+from reef.train.algos.registry import register_objective
+from reef.train.algos.signals import StepSignal
 from reef.train.types import TrainingBatch, trajectory_groups
 
-# Tinker's built in loss: the advantage on every response token, the rollout log probs as the reference.
-LOSS_FAMILY = "importance_sampling"
 
-
-@register_step_preparer
-class SpadePreparer(StepPreparer):
+@register_objective
+class SpadeObjective(TrainingObjective):
     """Each episode's advantage is its reward centered and scaled within its task group; a constant group gets 0."""
 
     name = "spade"
+    # Tinker's built in loss: the advantage on every response token, the rollout log probs as the reference.
+    loss_family = "importance_sampling"
 
-    def __call__(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
         advantages: list[float] = []
         constant_groups = 0
         for group in trajectory_groups(batch):
@@ -36,9 +36,7 @@ class SpadePreparer(StepPreparer):
         normalized = tuple(advantages)
         return StepSignal(
             "train",
-            LOSS_FAMILY,
             {"steps": steps},
             {"advantages": normalized, "constant_groups": constant_groups, "steps": steps},
             normalized,
-            StepScheduling(unit="sample", batch_size="actual"),
         )

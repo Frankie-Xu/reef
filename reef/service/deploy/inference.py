@@ -223,8 +223,8 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         config["services"].insert(0, local_service)
 
 
-def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str, Any]:
-    """Build the standard local HTTP child and its readiness probe."""
+def local_service_url(settings: ServiceConfig) -> str:
+    """The Reef HTTP service's address on its own host: a wildcard bind is reached through loopback."""
     if settings.host == "0.0.0.0":
         host = "127.0.0.1"
     elif settings.host == "::":
@@ -232,7 +232,12 @@ def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str
     else:
         host = settings.host
     host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    endpoint = f"http://{host}:{settings.port}"
+    return f"http://{host}:{settings.port}"
+
+
+def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str, Any]:
+    """Build the standard local HTTP child and its readiness probe."""
+    endpoint = local_service_url(settings)
     python = os.environ.get("REEF_PYTHON", sys.executable)
     return {
         "name": "reef",

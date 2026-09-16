@@ -157,6 +157,15 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         valid report produces a sample; this hook does not accept/reject reports.
         """
 
+    def is_training_report(self, report: AgentRecord) -> bool:
+        """Whether a valid report is this method's training data.
+
+        A report that is not, such as another role's signal sharing the
+        scenario, is owned and released with the sources it claims and never
+        assembled; nothing about it can fail ingestion. The default takes every report.
+        """
+        return True
+
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         """Return the batching group and retry slot; defaults to an independent report.
 
@@ -192,7 +201,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         validate_report_payload(item.payload)
         if not item.references or len(set(item.references)) != len(item.references):
             raise ReportValidationError("report references must be non-empty and unique")
-        if any(ref in self._trained_sources for ref in item.references):
+        if any(ref in self._trained_sources for ref in item.references) or not self.is_training_report(item):
             self._seen_reports.add(item.agent_record_id)
             self._terminate(item)
             return

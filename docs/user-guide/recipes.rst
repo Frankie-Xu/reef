@@ -159,8 +159,10 @@ synthetic executable environments, `arXiv:2608.19197
 executable environments and a Reasoning Agent that learns in them. Reef knows
 one task format, Harbor, and the Designer writes it directly: an instruction,
 a container, a verifier and a reference solution, a task any Harbor agent can
-play. The package holds the Designer call with its reply parser, the team's
-structural gate and Harbor's oracle check on what it writes, and one
-generation end to end, from the Designer's proposals to the split manifest the
-two consumers read, with the Designer's regret reported back. The training
-side follows.
+play. Writing, checking and playing those tasks is Reef's
+(``reef.record2dataset``, the generator service ``reef serve`` starts beside
+the HTTP service); the package holds the method: the Designer's adversarial
+experience section, the two arms each task is played with, the hint based
+regret reported against the Designer's receipt, and the Reasoning Agent's
+group relative training on the plain arm's episodes, all driven from its
+processor. The Designer's own training follows.

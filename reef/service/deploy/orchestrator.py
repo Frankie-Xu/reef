@@ -60,6 +60,7 @@ from reef.service.deploy.deployment_config import (
 )
 from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
+from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
 from reef.service.deploy.service_config import (
     normalize_service_config,
@@ -442,6 +443,7 @@ def resolve_deployment_config(
                 assemble_training_services(normalized_config)
             else:
                 assemble_provider_services(normalized_config)
+            attach_generator_service(normalized_config)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root

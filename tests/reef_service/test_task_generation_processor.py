@@ -83,15 +83,16 @@ def test_validation_distinguishes_accepted_and_rejected_tasks(errors: tuple[str,
     assert result.errors == errors
 
 
-def test_request_rejects_missing_duplicate_and_cross_scenario_sources(source_record: AgentRecord) -> None:
+def test_request_rejects_duplicate_and_cross_scenario_sources_and_takes_none(source_record: AgentRecord) -> None:
     other = AgentRecord.create(scenario="other", request_type=RequestType.INFERENCE, payload={})
     for records, message in (
-        ((), "non-empty tuple"),
         ((source_record, source_record), "distinct"),
         ((source_record, other), "one scenario"),
     ):
         with pytest.raises(ValueError, match=message):
             TaskGenerationRequest(records, "Generate a task.")
+    # A designer prompted with a target alone generates from the description; the request carries no sources.
+    assert TaskGenerationRequest((), "Generate a task.").source_records == ()
 
 
 def test_request_and_rejection_require_explanations(source_record: AgentRecord) -> None:

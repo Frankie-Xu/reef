@@ -311,7 +311,12 @@ class TaskPlayer:
         reward = episode_reward(row.rewards)
         report_ids: tuple[str, ...] = ()
         if self.is_reporting and reward is not None and receipts:
-            report_ids = self.report(task_path, episode_id, reward, row, receipts)
+            try:
+                report_ids = self.report(task_path, episode_id, reward, row, receipts)
+            except TaskPlayError as exc:
+                # A refused report is this episode's failure, not the caller's: the play comes back unreported
+                # with the reason, and the other episodes in flight go on.
+                error = str(exc)
         return TaskPlay(
             task_path=task_path,
             name=task_path.name,

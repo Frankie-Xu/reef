@@ -1,0 +1,383 @@
+"""The generator service and its client: proposals, written tasks, checks, plays and manifests over HTTP."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
+
+import pytest
+from aiohttp.test_utils import TestServer
+
+from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
+from reef.harness.client.tasks import TaskPlay
+from reef.record2dataset import (
+    Designer,
+    DesignerAnswer,
+    DesignerRequest,
+    DuplicateTask,
+    GeneratorError,
+    GeneratorService,
+    HttpGenerator,
+    OracleResult,
+    TaskChecks,
+    TaskPlays,
+)
+from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
+from reef.service.deploy.generator import generator_settings
+
+pytestmark = pytest.mark.unit
+
+DOCUMENT = {
+    "instruction": (
+        "A service on this machine writes the port it listens on under /var/run. Find that file and write the "
+        "port number, and nothing else, to /workspace/port.txt."
+    ),
+    "environment": {
+        "Dockerfile": "FROM python:3.12-slim\nRUN apt-get update && apt-get install -y tmux && echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"
+    },
+    "tests": {
+        "test.sh": '#!/bin/sh\nmkdir -p /logs/verifier\ntest "$(cat /workspace/port.txt)" = 8471 && echo 1 > /logs/verifier/reward.txt || echo 0 > /logs/verifier/reward.txt\n'
+    },
+    "solution": {"solve.sh": "#!/bin/sh\ncat /var/run/app.port > /workspace/port.txt\n"},
+    "hint": "Look under /var/run for what the service left behind.",
+}
+
+
+def reply_for(port: int) -> str:
+    document = json.loads(json.dumps(DOCUMENT).replace("8471", str(port)))
+    return "```json\n" + json.dumps(document) + "\n```\n"
+
+
+class StandInDesigner(Designer):
+    def __init__(self, scripted: Sequence[str] = ()) -> None:
+        self.scripted = list(scripted)
+        self.calls: list[dict[str, object]] = []
+        self.reports: list[dict[str, object]] = []
+
+    def answer(self, messages, *, scenario, model, tags) -> DesignerAnswer:
+        self.calls.append({"messages": list(messages), "scenario": scenario, "model": model, "tags": dict(tags)})
+        text = self.scripted.pop(0) if self.scripted else reply_for(8471 + len(self.calls))
+        return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
+
+    def report(self, record_id, *, scenario, score, metadata) -> str:
+        self.reports.append({"record_id": record_id, "scenario": scenario, "score": score, "metadata": dict(metadata)})
+        return f"report-{len(self.reports)}"
+
+
+class StandInChecks(TaskChecks):
+    def __init__(self, *, is_solvable: bool = True, raises: bool = False) -> None:
+        self.is_solvable = is_solvable
+        self.raises = raises
+        self.calls: list[Path] = []
+
+    def oracle(self, task_path: Path) -> OracleResult:
+        self.calls.append(task_path)
+        if self.raises:
+            raise RuntimeError("docker is not running")
+        if not self.is_solvable:
+            return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
+        return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
+
+
+class StandInPlays(TaskPlays):
+    def __init__(self, reward: float = 0.5) -> None:
+        self.reward = reward
+        self.calls: list[dict[str, object]] = []
+
+    def play(self, task_path, *, scenario, model, arm, plays, is_reporting, extra_instruction_paths, tags):
+        self.calls.append(
+            {
+                "task": task_path.name,
+                "scenario": scenario,
+                "model": model,
+                "arm": arm,
+                "plays": plays,
+                "is_reporting": is_reporting,
+                "extra": [Path(path) for path in extra_instruction_paths],
+                "tags": dict(tags),
+            }
+        )
+        return tuple(
+            TaskPlay(
+                task_path,
+                task_path.name,
+                f"e{n}",
+                self.reward,
+                {"reward": self.reward},
+                "",
+                ("rec",),
+                0,
+                ("rep",),
+                None,
+            )
+            for n in range(plays)
+        )
+
+
+def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInDesigner, StandInChecks, StandInPlays]:
+    designer = parts.get("designer") or StandInDesigner()
+    checks = parts.get("checks") or StandInChecks()
+    plays = parts.get("plays") or StandInPlays()
+    built = GeneratorService(
+        tasks_root=tmp_path / "tasks",
+        designer=designer,  # type: ignore[arg-type]
+        checks=checks,  # type: ignore[arg-type]
+        plays=plays,  # type: ignore[arg-type]
+        default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
+    )
+    return built, designer, checks, plays  # type: ignore[return-value]
+
+
+def run_with(built: GeneratorService, body: Callable[[HttpGenerator], Awaitable[object]]) -> object:
+    async def run() -> object:
+        async with TestServer(built.app()) as server:
+            return await body(HttpGenerator(str(server.make_url("")), poll_s=0.01))
+
+    return asyncio.run(run())
+
+
+def request() -> DesignerRequest:
+    return DesignerRequest(target="shell tasks with hidden state", skill="inspection", experience_text="LAST TIME: ok")
+
+
+def test_a_proposal_comes_back_as_a_task_with_the_designers_record_id(tmp_path: Path) -> None:
+    built, designer, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        return await generator.propose(
+            request(), scenario="spade", generation=3, index=1, tags={"role": "designer"}, model="m"
+        )
+
+    proposed = run_with(built, body)
+    assert proposed.task is not None and proposed.refusal == "" and proposed.record_id == "designer-1"
+    assert proposed.task.name == "harbor-00003-001-inspection"
+    assert (
+        proposed.task.source_agent_record_ids == ("designer-1",) and proposed.task.metadata["difficulty"] == "medium"
+    )
+    assert proposed.task.solution["hint.txt"] == DOCUMENT["hint"] + "\n"
+    call = designer.calls[0]
+    assert call["scenario"] == "spade" and call["model"] == "m" and call["tags"] == {"role": "designer"}
+    assert "LAST TIME: ok" in call["messages"][1]["content"] and "inspection" in call["messages"][1]["content"]
+
+
+def test_a_reply_that_is_no_task_is_a_refusal_with_the_record_id(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path, designer=StandInDesigner(scripted=["no json here"]))
+
+    async def body(generator: HttpGenerator) -> object:
+        return await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+
+    proposed = run_with(built, body)
+    assert proposed.task is None and proposed.record_id == "designer-1"
+    assert proposed.refusal.startswith("reply refused: the reply holds no ```json block")
+
+
+def test_a_proposal_without_a_model_uses_the_services_default_and_none_is_refused(tmp_path: Path) -> None:
+    built, designer, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        return await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+
+    run_with(built, body)
+    assert designer.calls[0]["model"] == "served"
+    built, _, _, _ = service(tmp_path, default_model=None)
+    with pytest.raises(GeneratorError, match=r"refused \(400\).*model must name the served model"):
+        run_with(built, body)
+
+
+def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        assert written.path == tmp_path / "tasks" / proposed.task.name and written.digest == proposed.task.digest
+        assert read_harbor_task(written.path) == proposed.task
+        with pytest.raises(DuplicateTask, match="duplicate"):
+            await generator.write_task(
+                HarborTask(
+                    name="other-name",
+                    instruction=proposed.task.instruction,
+                    tests=proposed.task.tests,
+                    environment=proposed.task.environment,
+                    solution=proposed.task.solution,
+                )
+            )
+        with pytest.raises(GeneratorError, match="a different task holds the name"):
+            await generator.write_task(
+                HarborTask(
+                    name=proposed.task.name,
+                    instruction=proposed.task.instruction + "Hurry.\n",
+                    tests=proposed.task.tests,
+                    environment=proposed.task.environment,
+                )
+            )
+        await generator.delete_task(proposed.task.name)
+        assert not written.path.exists()
+        with pytest.raises(GeneratorError, match=r"refused \(404\)"):
+            await generator.delete_task(proposed.task.name)
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*not a task name"):
+            await generator.delete_task("bad name")
+        return None
+
+    run_with(built, body)
+
+
+def test_a_check_runs_the_oracle_on_a_task_under_the_root_only(tmp_path: Path) -> None:
+    built, _, checks, _ = service(tmp_path, checks=StandInChecks(is_solvable=False))
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        result = await generator.check(written.path)
+        assert not result.is_solvable and result.reason == "the oracle scored 0" and result.oracle_reward == 0.0
+        assert result == await generator.check(Path(proposed.task.name)), "a name under the root is the same task"
+        with pytest.raises(GeneratorError, match="not a task directory under"):
+            await generator.check(tmp_path)
+        return None
+
+    run_with(built, body)
+    assert checks.calls == [tmp_path / "tasks" / "harbor-00001-000-inspection"] * 2
+
+
+def test_a_check_whose_harness_fails_is_a_failed_job(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path, checks=StandInChecks(raises=True))
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        with pytest.raises(GeneratorError, match="failed: RuntimeError: docker is not running"):
+            await generator.check(written.path)
+        return None
+
+    run_with(built, body)
+
+
+def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
+    built, _, _, plays = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        played = await generator.play(
+            written.path,
+            scenario="spade",
+            arm="hint",
+            plays=2,
+            is_reporting=True,
+            extra_instruction_files=("solution/hint.txt",),
+            tags={"generation": "1"},
+        )
+        assert [play.reward for play in played] == [0.5, 0.5] and played[0].report_agent_record_ids == ("rep",)
+        with pytest.raises(GeneratorError, match="extra instruction files do not exist"):
+            await generator.play(
+                written.path,
+                scenario="spade",
+                arm="hint",
+                plays=1,
+                is_reporting=False,
+                extra_instruction_files=("solution/missing.txt",),
+                tags={},
+            )
+        return None
+
+    run_with(built, body)
+    call = plays.calls[0]
+    assert call["task"] == "harbor-00001-000-inspection" and call["arm"] == "hint" and call["plays"] == 2
+    assert call["model"] == "served" and call["scenario"] == "spade" and call["tags"] == {"generation": "1"}
+    assert call["extra"] == [tmp_path / "tasks" / "harbor-00001-000-inspection" / "solution" / "hint.txt"]
+
+
+def test_a_manifest_splits_the_named_tasks_under_the_root(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        names = []
+        for index in range(3):
+            proposed = await generator.propose(request(), scenario="spade", generation=2, index=index, tags={})
+            assert proposed.task is not None
+            names.append((await generator.write_task(proposed.task)).name)
+        path = await generator.write_manifest(generation=2, names=names, eval_fraction=0.3, seed=1)
+        assert path == tmp_path / "tasks" / "manifest-00002.json"
+        manifest = read_split_manifest(path)
+        assert sorted([*manifest.train, *manifest.eval]) == sorted(names) and len(manifest.eval) == 1
+        with pytest.raises(GeneratorError, match="not a task directory"):
+            await generator.write_manifest(generation=2, names=["missing"], eval_fraction=0.0, seed=1)
+        return None
+
+    run_with(built, body)
+
+
+def test_a_proposal_report_reaches_the_designer(tmp_path: Path) -> None:
+    built, designer, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        return await generator.report_proposal("designer-9", scenario="spade", score=0.25, metadata={"regret": 0.25})
+
+    assert run_with(built, body) == "report-1"
+    assert designer.reports == [
+        {"record_id": "designer-9", "scenario": "spade", "score": 0.25, "metadata": {"regret": 0.25}}
+    ]
+
+
+def test_bad_requests_and_unknown_jobs_are_refused_with_a_reason(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*target"):
+            await generator.call("POST", "/proposals", body={"scenario": "s", "request": {}})
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*scenario"):
+            await generator.call("POST", "/proposals", body={"request": {"target": "x"}})
+        with pytest.raises(GeneratorError, match=r"refused \(404\).*no such job"):
+            await generator.job_result({"job": "nope"})
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*not JSON"):
+            await generator.call("POST", "/tasks", body=None)
+        return None
+
+    run_with(built, body)
+    with pytest.raises(GeneratorError, match="did not reach the generator"):
+        asyncio.run(HttpGenerator("http://127.0.0.1:9", timeout_s=1.0).delete_task("x"))
+
+
+def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
+    task = HarborTask(
+        name="t",
+        instruction="Do the thing described here in enough words to pass.",
+        tests={"test.sh": "echo 1 > /logs/verifier/reward.txt"},
+        environment={"Dockerfile": "FROM x\nRUN true\n"},
+        config={"agent": {"timeout_sec": 30}},
+        metadata={"generation": 1},
+        source_agent_record_ids=("d1",),
+    )
+    assert task_from_document(task_document(task)) == task
+    with pytest.raises(ValueError, match="not a Harbor task"):
+        task_from_document({**task_document(task), "tests": {}})
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        task_from_document("task")
+    play = TaskPlay(tmp_path / "t", "t", "e1", None, {}, "the trial raised", (), 2, (), None)
+    assert play_from_document(play_document(play)) == play
+    with pytest.raises(ValueError, match="failed_calls"):
+        play_from_document({**play_document(play), "failed_calls": "2"})
+
+
+def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
+    settings = generator_settings({"tasks-root": "/tmp/t", "designer-timeout-s": 60, "agent": {"name": "terminus-2"}})
+    assert settings.tasks_root == "/tmp/t" and settings.designer_timeout_s == 60.0 and settings.port == 8910
+    assert generator_settings({"tasks_root": "/tmp/t"}).tasks_root == "/tmp/t"
+    for section, message in (
+        ({}, "tasks_root is required"),
+        ({"tasks-root": "/tmp/t", "bogus": 1}, "unknown config fields: bogus"),
+        ({"tasks-root": "/tmp/t", "concurrency": 0}, "concurrency must be at least 1"),
+        ({"tasks-root": "/tmp/t", "agent": {"kwargs": {}}}, "Harbor agent name"),
+        ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
+        ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            generator_settings(section)
+    with pytest.raises(ValueError, match="must be an object"):
+        generator_settings("tasks")  # type: ignore[arg-type]

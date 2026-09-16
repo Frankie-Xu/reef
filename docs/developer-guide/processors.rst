@@ -142,6 +142,11 @@ A reported-feedback recipe implements:
 - ``make_batch(items, batch_number)``: assemble the flat tuple of selected
   training items into a batch. Consumption remains the engine's responsibility,
   including selected items that the recipe removes from training.
+- ``is_training_report(report)`` when another role's reports share the
+  scenario: return ``False`` for a valid report that is not this method's
+  training data (SPADE's Designer reports its own score there). The engine
+  owns such a report and releases it with the sources it claims, and never
+  calls ``make_sample`` on it. The default takes every report.
 - ``grouping(context)`` for grouped methods: return ``(group_key, slot)``.
   The default ``(None, None)`` makes an independent sample. A None slot uses
   the report id; repeated slots preserve the first accepted report.
@@ -177,9 +182,11 @@ methods on the processor itself:
 
 - ``generate(request: TaskGenerationRequest) -> HarborTask`` produces one
   task specification from source records, a description and optional asset
-  paths. The source records must have distinct ids and belong to one scenario;
-  the caller must also ensure it is the processor's scenario. Preserve their
-  ordered ids in the generated task's ``source_agent_record_ids``.
+  paths. The source records, when there are any, must have distinct ids and
+  belong to one scenario, the processor's; a method whose designer writes
+  from the description alone passes none. Preserve their ordered ids, or the
+  designer's own inference record id, in the generated task's
+  ``source_agent_record_ids``.
 - ``validate(task_path: Path) -> TaskValidationResult`` checks a materialized
   candidate without modifying it. The implementation chooses the required
   structural and execution checks. Empty ``errors`` means all checks passed;
@@ -192,14 +199,26 @@ directories, such as repository snapshots or verifier fixtures; constructing
 a request does not read them. Method-specific prompts and settings belong to
 the processor configuration.
 
-This is a contract only. Implementing the two hooks does not start a worker
-or make batches ready: the inherited lifecycle remains the no-update default.
-Background scheduling, retry/recovery, candidate publication and conversion
-to ``TaskItem`` batches remain future implementation work. That lifecycle
-must execute both hooks outside the trainer lock, expose only complete,
-validated directories, preserve source records until acknowledgement, and keep
-reserved tasks accessible until consumption finishes. Existing feedback
-processors are unchanged.
+The ABC supplies no lifecycle: implementing the two hooks does not start a
+worker or make batches ready, and the inherited lifecycle is the no-update
+default. A method supplies its own, keeping the two rules every lifecycle
+must keep: both hooks run outside the trainer lock, and ``ingest``,
+``ready`` and ``build_batch`` never wait for them.
+
+The first implementation is SPADE (``recipes/beta/spade/processor.py``),
+which pairs the ABC with the reported-feedback engine. A private worker (the
+computed engine's ``JudgingWorker``) runs one generation at a time:
+``generate`` asks the designer for a task, the task is written, ``validate``
+runs Harbor's oracle check on it, the task is played, and the episodes come
+back as reports the reported half groups and batches; the next generation
+starts after a configured number of batches was acknowledged, and a restart
+carries on from the generation reports on disk. None of the container-bound
+steps run in the Reef service process: ``reef.record2dataset`` is the
+generator service ``reef serve`` starts beside the HTTP service from the
+deployment's ``generator`` section (see `the generator section
+<../reference/configuration.rst#the-generator-section>`__), and the processor
+drives it over HTTP. Conversion of generated tasks into ``TaskItem`` batches
+for a rollout-capable backend remains future work.
 
 A record's path to a batch
 --------------------------

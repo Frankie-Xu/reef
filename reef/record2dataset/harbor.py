@@ -1,16 +1,16 @@
-"""A generated environment: a Harbor task written directly, and the checks that Harbor can solve it.
+"""A generated task: the designer's reply as a Harbor task, and the checks that Harbor can solve it.
 
-The Designer writes a Harbor task directly: the instruction the agent reads, the
-files of the container image, the verifier under ``tests/`` and a reference solution under ``solution/``.
-Any Harbor agent plays it; Harbor scores it. The checks follow the team's terminal task designer
-(spare, ``scripts/terminal-rsi``): a structural gate refuses an untouched scaffold, the Dockerfile is
-read the way the classic Docker parser reads it (a heredoc body is a parse error there), tasks are
-deduplicated by a content hash that ignores ``task.toml`` and the hint, and ``oracle_check`` runs the
-task twice through the ``harbor`` command line, once with Harbor's oracle agent (the reference solution)
-and once with its nop agent (nothing), and accepts the task only when the first scores 1 and the second
-scores below 1: solvable, and not for free. One gate is reef's own: the team requires a pytest file under
-``tests/``, reef requires a file under ``tests/`` that names the reward file, since its verifiers are shell
-scripts that write it.
+The designer writes a Harbor task directly: the instruction the agent reads, the files of the container
+image, the verifier under ``tests/`` and a reference solution under ``solution/``. Any Harbor agent plays
+it; Harbor scores it. The checks follow the terminal task designer of Terminal-Bench's team (spare,
+``scripts/terminal-rsi``): a structural gate refuses an untouched scaffold, the Dockerfile is read the way
+the classic Docker parser reads it (a heredoc body is a parse error there), tasks are deduplicated by a
+content hash that ignores ``task.toml`` and the hint, and ``oracle_check`` runs the task twice through the
+``harbor`` command line, once with Harbor's oracle agent (the reference solution) and once with its nop
+agent (nothing), and accepts the task only when the first scores 1 and the second scores below 1:
+solvable, and not for free. One gate is reef's own: the team requires a pytest file under ``tests/``, reef
+requires a file under ``tests/`` that names the reward file, since its verifiers are shell scripts that
+write it.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from recipes.beta.spade.designer import SKILL_PATTERN, HarborReply
 from reef.core.tasks import HarborTask, TaskSplit, split_by_source
+from reef.record2dataset.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
 CATEGORIES = (
@@ -80,7 +80,7 @@ JOBS_DIRECTORY = ".harbor-jobs"
 
 @dataclass(frozen=True)
 class GeneratedHarborTask:
-    """One harbor environment as the Designer emitted it, with where it came from."""
+    """One task as the designer emitted it, with where it came from."""
 
     reply: HarborReply
     generation: int
@@ -103,7 +103,7 @@ class GeneratedHarborTask:
             if isinstance(number, bool) or not isinstance(number, int) or number < 0:
                 raise ValueError(f"{label} must be a non-negative integer")
         if not isinstance(self.source_record_id, str) or not self.source_record_id:
-            raise ValueError("source_record_id must name the Designer's generation record")
+            raise ValueError("source_record_id must name the designer's inference record")
         for label, text in (("difficulty", self.difficulty), ("document_id", self.document_id)):
             if text is not None and (not isinstance(text, str) or not text):
                 raise ValueError(f"{label} must be a non-empty string when set")
@@ -215,6 +215,8 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
         metadata["category"] = task.category
         metadata["tags"] = [tag for tag in (task.category, task.skill) if tag is not None]
     reply = task.reply
+    # The hint sits beside the reference solution, which Harbor never mounts for the agent.
+    solution = {**reply.solution, "hint.txt": reply.hint + "\n"} if reply.hint else dict(reply.solution)
     return HarborTask(
         name=task.name,
         instruction=reply.instruction,
@@ -227,7 +229,7 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
             "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 2048, "gpus": 0, "network_mode": "no-network"},
         },
         metadata=metadata,
-        solution={**reply.solution, "hint.txt": reply.hint + "\n"},
+        solution=solution,
         source_agent_record_ids=(task.source_record_id,),
     )
 
@@ -337,7 +339,7 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
 
 
 def split_generation(tasks: Sequence[HarborTask], *, eval_fraction: float, seed: int) -> TaskSplit:
-    """Split one generation's tasks so that every task of one Designer call lands in one split."""
+    """Split one generation's tasks so that every task of one designer call lands in one split."""
     names = [task.name for task in tasks]
     repeated = sorted({name for name in names if names.count(name) > 1})
     if repeated:

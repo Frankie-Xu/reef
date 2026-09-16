@@ -255,14 +255,15 @@ def test_per_receipt_sends_one_report_per_model_call(reef: StandInReef, tmp_path
     assert {report["body"]["score"] for report in reef.reports} == {0.25}
 
 
-def test_a_refused_report_is_an_error_that_names_the_task(tmp_path: Path) -> None:
+def test_a_refused_report_is_the_episodes_error_and_the_play_comes_back_unreported(tmp_path: Path) -> None:
     reef = StandInReef(refuse_reports=True)
     try:
         task_path = written_task(tmp_path / "tasks", "t1")
-        with pytest.raises(TaskPlayError, match=r"the report for t1 was refused \(400\)"):
-            player(reef, tmp_path, StandInLab({"reward": 1.0})).play(task_path)
+        played = player(reef, tmp_path, StandInLab({"reward": 1.0})).play(task_path)
     finally:
         reef.close()
+    assert played.reward == 1.0 and not played.is_reported
+    assert "the report for t1 was refused (400)" in played.error
 
 
 def test_the_agents_own_authorization_passes_through_without_a_token(reef: StandInReef, tmp_path: Path) -> None:
@@ -368,7 +369,7 @@ def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: Stan
     assert lab.calls[0]["agent"]["kwargs"]["api_base"].startswith("http://localhost:")
 
 
-def test_a_report_that_does_not_reach_reef_is_an_error_that_names_the_task(
+def test_a_report_that_does_not_reach_reef_is_the_episodes_error(
     reef: StandInReef, tmp_path: Path, monkeypatch
 ) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
@@ -378,8 +379,8 @@ def test_a_report_that_does_not_reach_reef_is_an_error_that_names_the_task(
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(playing.client, "report", refused)
-    with pytest.raises(TaskPlayError, match="the report for t1 did not reach"):
-        playing.play(task_path)
+    played = playing.play(task_path)
+    assert not played.is_reported and "the report for t1 did not reach" in played.error
 
 
 # ------------------------------------------------------------------------------------------------ the command

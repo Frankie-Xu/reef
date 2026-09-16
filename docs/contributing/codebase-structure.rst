@@ -232,6 +232,12 @@ The extension points those packages expose are in `Python API
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state;
   ``ScenarioStorage`` owns archival and retention.
+- Does it turn a designer's replies into Harbor tasks, check them with Harbor
+  or play them with an agent? Put it in ``reef/record2dataset/``, the
+  generator service ``reef serve`` starts beside the HTTP service from a
+  ``generator`` section; ``reef/service/deploy/generator.py`` assembles that
+  child. What a method asks the designer for, and what it does with the
+  episodes, stays in the method's processor under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
   schema, connections, transactions, and file maintenance. ``postgres.py`` supplies

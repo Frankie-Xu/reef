@@ -1,4 +1,4 @@
-"""A generated harbor environment as a Harbor task, and the oracle check through the harbor command line."""
+"""A designer reply as a Harbor task, the authoring gate, and the oracle check through the harbor command line."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from recipes.beta.spade import GeneratedHarborTask, HarborReply, harbor_task, oracle_check
-from recipes.beta.spade.harbor import content_hash, dockerfile_parse_errors, reply_errors
 from reef.core.tasks import read_harbor_task, write_harbor_task
+from reef.record2dataset import GeneratedHarborTask, HarborReply, harbor_task, oracle_check
+from reef.record2dataset.harbor import content_hash, dockerfile_parse_errors, reply_errors
 
 try:
     import tomllib
@@ -130,6 +130,11 @@ def test_the_task_carries_the_files_the_hint_beside_the_solution_and_the_metadat
 def test_a_bad_harbor_task_is_refused(overrides: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         harbor_task(generated(**overrides))
+
+
+def test_a_reply_without_a_hint_writes_no_hint_file() -> None:
+    task = harbor_task(generated(reply=reply_with(hint="")))
+    assert "hint.txt" not in task.solution and task.solution["solve.sh"] == REPLY.solution["solve.sh"]
 
 
 def test_a_bad_agent_timeout_is_refused() -> None:

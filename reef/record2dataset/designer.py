@@ -1,31 +1,32 @@
-"""The Environment Designer: what it is asked and how its reply becomes a Harbor task.
+"""The task designer: what a model is asked for a Harbor task, and how its reply becomes one.
 
-The Designer is the served model in a second role (SPADE Sec. 4.1). One call asks for one environment
-at the edge of what the agent can do today: the request carries what the agent did on the last
-generation's environments, sorted by the hint based regret of Sec. 4.2 into the frontier (the hint
-turns losses into wins), the mastered (won without it) and the out of reach (lost even with it), so the
-next environment lands where the agent fails without a hint and passes with one. The environment is a
-Harbor task written directly, an instruction, a container, a verifier and a reference solution, and Harbor
-running the reference solution validates it.
+One call asks the served model for one Harbor task: an instruction, a container, a verifier and a
+reference solution. The prompt carries the task contract (the rules every task must meet so any Harbor
+agent can play it and Harbor can score it), the target the task should test, and whatever text the
+method wants the designer to know about earlier tasks (``DesignerRequest.experience_text``). Grounding and
+earlier text enter the prompt fenced as data, never as instructions. The reply's ``json`` block is read
+into the instruction, the three file mappings and an optional hint. The call goes through Reef, so every
+proposal is an inference record with a receipt the method can report against.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
-from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, checked_files
+from reef_client.client import ReefClient, ReefClientError
+
+from reef.core.tasks.harbor import HarborTaskError, checked_files
 from reef.train.cordis_backend.strategies import untrusted_text
 
 DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12
-MAX_EXPERIENCE_RECORDS = 12
-INSTRUCTION_EXCERPT_CHARS = 1200
 GROUNDING_CHARS = 6000
-MASTERED_RETURN = 0.9
-TOO_HARD_RETURN = 0.1
+DESIGNER_TIMEOUT_S = 1800.0
+CHAT_PATH = "/v1/chat/completions"
 SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 JSON_BLOCK = re.compile(r"^[ \t]*```[^\n{]*(?:\r?\n)?[ \t]*(\{.*?\})[ \t]*(?:\r?\n)?[ \t]*```", re.S | re.M)
 HARBOR_FILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(/[A-Za-z0-9][A-Za-z0-9._-]{0,99}){0,3}$")
@@ -37,95 +38,58 @@ SYSTEM_PROMPT = (
 
 
 class DesignerReplyError(ValueError):
-    """The Designer's reply holds no usable environment."""
+    """The designer's reply holds no usable task."""
 
 
-@dataclass(frozen=True)
-class PlayRecord:
-    """What the agent did on one earlier environment: its mean return over the rollouts without and with the hint."""
-
-    name: str
-    return_without_hint: float
-    return_with_hint: float
-    skill: str | None = None
-    instruction_excerpt: str = ""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not TASK_NAME_PATTERN.fullmatch(self.name):
-            raise ValueError(f"a play record's name must be a task name matching {TASK_NAME_PATTERN.pattern}")
-        if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
-            raise ValueError(f"a play record's skill must match {SKILL_PATTERN.pattern}")
-        for label, value in (
-            ("return_without_hint", self.return_without_hint),
-            ("return_with_hint", self.return_with_hint),
-        ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not -1.0 <= value <= 1.0:
-                raise ValueError(f"{label} must be a number in [-1, 1]")
-        if not isinstance(self.instruction_excerpt, str):
-            raise ValueError("instruction_excerpt must be text")
-
-    @property
-    def regret(self) -> float:
-        """How much the hint helped: the with hint return minus the without hint return (Sec. 4.2)."""
-        return float(self.return_with_hint) - float(self.return_without_hint)
-
-    @property
-    def outcome(self) -> str:
-        """The reference memory's bands on the no hint return: ``mastered`` above 0.9, ``out_of_reach`` below 0.1, else ``frontier``."""
-        if self.return_without_hint > MASTERED_RETURN:
-            return "mastered"
-        if self.return_without_hint < TOO_HARD_RETURN:
-            return "out_of_reach"
-        return "frontier"
+class DesignerError(RuntimeError):
+    """A designer call or report did not go through."""
 
 
 @dataclass(frozen=True)
 class DesignerRequest:
-    """One Designer call: what to test (a description, an optional skill), how hard, what the agent did last time, a grounding text."""
+    """One designer call: what to test (a target, an optional skill), how hard, a grounding text, earlier results as text."""
 
-    skill_description: str
+    target: str
     skill: str | None = None
     difficulty: str = "medium"
     turn_limit: int = DEFAULT_TURN_LIMIT
     grounding: str | None = None
-    experience: tuple[PlayRecord, ...] = field(default_factory=tuple)
+    experience_text: str = ""
 
     def __post_init__(self) -> None:
         if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
             raise ValueError(f"skill {self.skill!r} must match {SKILL_PATTERN.pattern}")
-        if not isinstance(self.skill_description, str) or not self.skill_description.strip():
-            raise ValueError("skill_description must be non-empty text")
+        if not isinstance(self.target, str) or not self.target.strip():
+            raise ValueError("target must be non-empty text")
         if self.difficulty not in DIFFICULTIES:
             raise ValueError(f"difficulty must be one of {DIFFICULTIES}")
         if isinstance(self.turn_limit, bool) or not isinstance(self.turn_limit, int) or self.turn_limit < 2:
             raise ValueError("turn_limit must be an integer of at least 2")
         if self.grounding is not None and (not isinstance(self.grounding, str) or not self.grounding.strip()):
             raise ValueError("grounding must be non-empty text when set")
-        if not isinstance(self.experience, tuple) or not all(isinstance(r, PlayRecord) for r in self.experience):
-            raise ValueError("experience must be a tuple of PlayRecord")
-        if len(self.experience) > MAX_EXPERIENCE_RECORDS:
-            raise ValueError(f"experience holds at most {MAX_EXPERIENCE_RECORDS} records; pick the most recent")
+        if not isinstance(self.experience_text, str):
+            raise ValueError("experience_text must be text")
 
 
 @dataclass(frozen=True)
 class HarborReply:
-    """A usable reply: the task's files by directory, and the hint for the agent."""
+    """A usable reply: the task's files by directory, and a hint for the agent when the designer gave one."""
 
     instruction: str
     environment: dict[str, str]
     tests: dict[str, str]
     solution: dict[str, str]
-    hint: str
+    hint: str = ""
 
 
 def designer_messages(request: DesignerRequest) -> list[dict[str, str]]:
-    """The chat messages for one Designer call, in the shape ``ModelBinding.chat`` takes."""
+    """The chat messages for one designer call."""
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": designer_prompt(request)}]
 
 
 def designer_prompt(request: DesignerRequest) -> str:
-    """The user turn of a Designer call: target, what the agent did last time, grounding, the rules, output."""
-    target = request.skill_description.strip()
+    """The user turn of a designer call: the target, the method's experience text, the grounding, the rules, the output."""
+    target = request.target.strip()
     if request.skill is not None:
         target = f"{request.skill} ({target})"
     parts = [
@@ -134,8 +98,9 @@ def designer_prompt(request: DesignerRequest) -> str:
             f"DIFFICULTY: {request.difficulty}. The agent has at most {request.turn_limit} turns; a careful agent "
             "finishes in fewer, a careless one fails."
         ),
-        experience_text(request.experience),
     ]
+    if request.experience_text.strip():
+        parts.append(request.experience_text.strip())
     if request.grounding is not None:
         parts.append(
             "GROUNDING: the environment must make the agent execute a technique or operate a system from this "
@@ -144,54 +109,6 @@ def designer_prompt(request: DesignerRequest) -> str:
         )
     parts.extend([HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit), HARBOR_OUTPUT_TEXT])
     return "\n\n".join(parts)
-
-
-def experience_text(experience: Sequence[PlayRecord]) -> str:
-    """The agent's results on the last environments, sorted into what to write more of and what to avoid."""
-    if not experience:
-        return (
-            "WHAT THE AGENT DID LAST TIME: nothing recorded yet. Aim for an environment a careful agent completes "
-            "and a hasty one fails."
-        )
-    frontier = sorted((r for r in experience if r.outcome == "frontier"), key=lambda r: r.regret, reverse=True)
-    mastered = [r for r in experience if r.outcome == "mastered"]
-    out_of_reach = [r for r in experience if r.outcome == "out_of_reach"]
-    lines = [
-        (
-            "WHAT THE AGENT DID LAST TIME (mean episode returns in [-1, 1] over its attempts; a hint is a few "
-            "sentences of strategy the agent was given on a second set of attempts):"
-        )
-    ]
-    if frontier:
-        lines.append(
-            "- Within reach but not mastered, the ones the hint helped most first. Write environments like these, "
-            "varied, not copies:"
-        )
-        lines.extend(record_lines(frontier, is_instruction_shown=True))
-    if mastered:
-        lines.append("- Mastered without any hint. Too easy; do not write environments like these:")
-        lines.extend(record_lines(mastered, is_instruction_shown=False))
-    if out_of_reach:
-        lines.append(
-            "- Won fewer than one attempt in ten without the hint. Out of reach or broken; do not write environments "
-            "like these, and make sure the instruction gives the agent enough to act on:"
-        )
-        lines.extend(record_lines(out_of_reach, is_instruction_shown=False))
-    return "\n".join(lines)
-
-
-def record_lines(records: Sequence[PlayRecord], *, is_instruction_shown: bool) -> list[str]:
-    lines = []
-    for record in records:
-        label = record.name if record.skill is None else f"{record.name} ({record.skill})"
-        lines.append(
-            f"  {label}: without hint {record.return_without_hint:+.2f}, with hint {record.return_with_hint:+.2f}"
-        )
-        if is_instruction_shown and record.instruction_excerpt.strip():
-            lines.append(
-                untrusted_text(record.instruction_excerpt.strip()[:INSTRUCTION_EXCERPT_CHARS], "earlier instruction")
-            )
-    return lines
 
 
 HARBOR_RULES_TEXT = """RULES:
@@ -219,7 +136,7 @@ HARBOR_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, w
 
 
 def parse_harbor_reply(text: str) -> HarborReply:
-    """The ``json`` block of a reply: instruction, the three file mappings and the hint, all checked."""
+    """The ``json`` block of a reply: the instruction, the three file mappings and the hint, all checked."""
     if not isinstance(text, str) or not text.strip():
         raise DesignerReplyError("the reply is empty")
     match = JSON_BLOCK.search(text)
@@ -236,7 +153,7 @@ def parse_harbor_reply(text: str) -> HarborReply:
     if unknown:
         raise DesignerReplyError(f"the reply carries keys the task has no place for: {', '.join(unknown)}")
     instruction = checked_text(document.get("instruction"), "instruction")
-    hint = checked_text(document.get("hint"), "hint")
+    hint = checked_text(document["hint"], "hint") if document.get("hint") is not None else ""
     files = {label: checked_harbor_files(document.get(label), label) for label in ("environment", "tests", "solution")}
     for label, required in (("environment", "Dockerfile"), ("tests", "test.sh"), ("solution", "solve.sh")):
         if not files[label].get(required, "").strip():
@@ -277,3 +194,76 @@ def checked_harbor_files(value: object, label: str) -> dict[str, str]:
     except HarborTaskError as exc:
         raise DesignerReplyError(f"the reply's {label}: {exc}") from exc
     return files
+
+
+@dataclass(frozen=True)
+class DesignerAnswer:
+    """What the designer said and the record its call left on Reef."""
+
+    text: str
+    record_id: str
+
+
+class Designer(ABC):
+    """Who answers a designer prompt and takes a report about the proposal: the served model through Reef."""
+
+    @abstractmethod
+    def answer(
+        self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
+    ) -> DesignerAnswer: ...
+
+    @abstractmethod
+    def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str: ...
+
+
+class ReefDesigner(Designer):
+    """The served model behind a Reef service; each proposal is an inference record, each outcome a report."""
+
+    def __init__(
+        self,
+        *,
+        reef_url: str,
+        token: str | None = None,
+        request_options: Mapping[str, object] | None = None,
+        timeout_s: float = DESIGNER_TIMEOUT_S,
+    ) -> None:
+        # Extra fields of the chat request, e.g. {"reasoning_effort": "none"} for a model that would think for
+        # thousands of tokens before writing an environment and run past the service's inference deadline.
+        self.request_options = dict(request_options or {})
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
+            raise DesignerError("timeout_s must be a positive number of seconds")
+        # A large local model writes an environment in minutes; the service's own inference deadline must allow it too.
+        self.client = ReefClient(reef_url, token=token, timeout_s=float(timeout_s))
+
+    def answer(
+        self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
+    ) -> DesignerAnswer:
+        headers = {f"x-reef-tag-{name}": value for name, value in tags.items()}
+        payload = {**self.request_options, "model": model, "messages": [dict(message) for message in messages]}
+        try:
+            body, record_id = self.client.inference_with_record(scenario, CHAT_PATH, payload, extra_headers=headers)
+        except ReefClientError as exc:
+            raise DesignerError(f"the designer call was refused ({exc.status}): {exc.body[:300]}") from exc
+        except OSError as exc:
+            raise DesignerError(
+                f"the designer call did not complete within {self.client.timeout_s:g} s: {exc}"
+            ) from exc
+        choices = body.get("choices")
+        message = choices[0].get("message") if isinstance(choices, list) and choices else None
+        text = message.get("content") if isinstance(message, Mapping) else None
+        return DesignerAnswer(text=text if isinstance(text, str) else "", record_id=record_id)
+
+    def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str:
+        payload = {
+            "score": score,
+            "feedback": "task designer score",
+            # The report shares the scenario with the agent's episodes; the role tells a processor them apart.
+            "metadata": {**dict(metadata), "role": "designer"},
+        }
+        try:
+            answer = self.client.report(scenario, payload, references=[record_id])
+        except ReefClientError as exc:
+            raise DesignerError(f"the designer report was refused ({exc.status}): {exc.body[:300]}") from exc
+        except OSError as exc:
+            raise DesignerError(f"the designer report did not reach Reef: {exc}") from exc
+        return str(answer.get("agent_record_id", ""))
