@@ -13,7 +13,7 @@ import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.beta.spade import SpadeObjective, SpadeProcessor, SpadeRecipe
-from recipes.beta.spade.processor import GenerationJob, reported_task_name
+from recipes.beta.spade.processor import REFUSAL_SCORE, GenerationJob, reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import (
@@ -339,8 +339,16 @@ class StandInGenerator(Generator):
         port = 8471 if self.same_port else 8471 + len(self.proposals)
         return ProposedTask(record_id=record_id, task=task_for(name, record_id, port, skill=request.skill), refusal="")
 
-    async def report_proposal(self, record_id, *, scenario, score, metadata) -> str:
-        self.reports.append({"record_id": record_id, "scenario": scenario, "score": score, "metadata": dict(metadata)})
+    async def report_proposal(self, record_id, *, scenario, score, metadata, feedback=None) -> str:
+        self.reports.append(
+            {
+                "record_id": record_id,
+                "scenario": scenario,
+                "score": score,
+                "metadata": dict(metadata),
+                "feedback": feedback,
+            }
+        )
         return f"report-{len(self.reports)}"
 
     async def write_task(self, task: HarborTask) -> WrittenTask:
@@ -555,7 +563,16 @@ def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Pa
     assert [r["score"] for r in generator.reports] == [0.5, 0.5, 0.5]
     metadata = generator.reports[0]["metadata"]
     assert metadata["task"]["name"] == names[0] and metadata["outcome"] == "frontier" and metadata["regret"] == 0.5
-    assert metadata["skill"] == "inspection" and metadata["generation"] == 0
+    assert metadata["skill"] == "inspection" and metadata["generation"] == 0 and metadata["proposals"] == 3
+    assert generator.reports[0]["feedback"] == {
+        "task": names[0],
+        "refusal": "",
+        "outcome": "frontier",
+        "regret": 0.5,
+        "return_without_hint": 0.25,
+        "return_with_hint": 0.75,
+        "round": {"generation": 0, "previous": None},
+    }
 
     assert generator.manifests == [{"generation": 0, "names": names, "eval_fraction": 0.3, "seed": 7}]
     manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00000.json")
@@ -591,6 +608,10 @@ def test_the_next_generation_waits_for_batches_per_generation_and_carries_the_ex
     text = generator.proposals[3]["request"].experience_text
     assert "harbor-00000-000: without hint +0.25, with hint +0.75" in text and "Within reach" in text
     assert generator.proposals[3]["tags"] == {"role": "designer", "generation": "1"}
+    assert generator.reports[3]["feedback"]["round"] == {
+        "generation": 1,
+        "previous": {"generation": 0, "mean_regret": 0.5, "measured": 3, "refused": 0},
+    }
     assert sorted(entry.name for entry in (tmp_path / "state").iterdir()) == [
         "generation-00000.json",
         "generation-00001.json",
@@ -628,20 +649,46 @@ def test_a_restarted_processor_carries_on_from_the_reports_on_disk(tmp_path: Pat
     assert not looked(again)
     assert generator.proposals[0]["generation"] == 1
     assert "harbor-00000-000-inspection" in generator.proposals[0]["request"].experience_text
+    assert generator.reports[0]["feedback"]["round"]["previous"] == {
+        "generation": 0,
+        "mean_regret": 0.5,
+        "measured": 3,
+        "refused": 0,
+    }, "the last generation's summary is read back from its report on disk"
     assert again.status()["generation"]["completed"] == 2
     assert not looked(again), "the cap is reached"
     assert len(generator.proposals) == 3
 
 
-def test_refused_proposals_are_reported_as_zero_and_never_stay_under_the_root(tmp_path: Path) -> None:
+def test_refused_proposals_are_reported_at_the_refusal_floor_and_never_stay_under_the_root(tmp_path: Path) -> None:
     generator = StandInGenerator(tmp_path / "tasks", refusals={0: "reply refused: no json"}, same_port=True)
-    p, _ = generating(tmp_path, generator, skills=(), count=3)
+    p, _ = generating(tmp_path, generator, skills=(), count=3, tasks_per_step=1)
     assert not looked(p)
     document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
     refusals = [proposal["refusal"] for proposal in document["proposals"]]
     assert refusals == ["reply refused: no json", "", "refused: duplicate of a task already under the root"]
-    assert [r["score"] for r in generator.reports] == [0.0, 0.5, 0.0]
+    assert [r["score"] for r in generator.reports] == [REFUSAL_SCORE, 0.5, REFUSAL_SCORE] and REFUSAL_SCORE == -1.0
     assert generator.reports[0]["metadata"]["refusal"] == "reply refused: no json"
+    assert generator.reports[0]["metadata"]["proposals"] == 3 and "task" not in generator.reports[0]["metadata"]
+    assert generator.reports[0]["feedback"] == {
+        "task": None,
+        "refusal": "reply refused: no json",
+        "outcome": None,
+        "regret": None,
+        "return_without_hint": None,
+        "return_with_hint": None,
+        "round": {"generation": 0, "previous": None},
+    }
+    played(p, "harbor-00000-001", 0, 1.0)
+    played(p, "harbor-00000-001", 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    assert not looked(p), "a batch trained, so generation 1 runs and its reports carry generation 0's summary"
+    assert generator.reports[3]["feedback"]["round"]["previous"] == {
+        "generation": 0,
+        "mean_regret": 0.5,
+        "measured": 1,
+        "refused": 2,
+    }
     assert [task["name"] for task in document["tasks"]] == ["harbor-00000-001"]
     assert sorted(e.name for e in (tmp_path / "tasks").iterdir() if e.name != ".staging") == [
         "harbor-00000-001",
@@ -668,7 +715,7 @@ def test_a_rerun_generation_replaces_the_tasks_its_earlier_attempt_wrote(tmp_pat
     document = json.loads((tmp_path / "again" / "state" / "generation-00000.json").read_text())
     assert document["proposals"][0]["refusal"].startswith("refused: a different task holds the name harbor-00000-000")
     assert [task["name"] for task in document["tasks"]] == ["harbor-00000-001", "harbor-00000-002"]
-    assert [r["score"] for r in generator.reports] == [0.0, 0.5, 0.5] and document["error"] == ""
+    assert [r["score"] for r in generator.reports] == [REFUSAL_SCORE, 0.5, 0.5] and document["error"] == ""
 
 
 def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path: Path) -> None:
@@ -676,7 +723,7 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     p, generator = generating(tmp_path, refusing, count=1, generations=1)
     assert not looked(p)
     assert generator.deleted == ["harbor-00000-000-inspection"] and generator.plays == []
-    assert generator.reports[0]["score"] == 0.0
+    assert generator.reports[0]["score"] == REFUSAL_SCORE
     assert generator.reports[0]["metadata"]["refusal"] == "oracle check refused: the oracle scored 0"
     assert generator.manifests == []
 
@@ -688,6 +735,18 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     ], "the hint arm is not played for a task that cannot run"
     assert unplayable.deleted == ["harbor-00000-000-inspection"]
     assert unplayable.reports[0]["metadata"]["refusal"].startswith("the Reasoning Agent could not play the task")
+
+
+def test_a_task_whose_hint_hurt_is_reported_with_its_negative_regret_above_a_refusal(tmp_path: Path) -> None:
+    hurting = StandInGenerator(tmp_path / "tasks", plain=0.75, hint=0.25)
+    p, generator = generating(tmp_path, hurting, count=1, generations=1, skills=())
+    assert not looked(p)
+    report = generator.reports[0]
+    assert report["score"] == -0.5 and report["metadata"]["regret"] == -0.5, "the regret is reported as measured"
+    assert report["feedback"]["regret"] == -0.5 and report["feedback"]["outcome"] == "frontier"
+    assert report["score"] > REFUSAL_SCORE, "a refusal stays below a task whose hint hurt"
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert document["tasks"][0]["regret"] == -0.5
 
 
 def test_a_dropped_batch_does_not_count_toward_the_next_generation(tmp_path: Path) -> None:

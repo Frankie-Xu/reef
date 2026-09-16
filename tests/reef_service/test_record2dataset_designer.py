@@ -175,6 +175,13 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
             designer_messages(request()), scenario="spade", model="m", tags={"role": "designer", "generation": "2"}
         )
         report_id = designer.report(answer.record_id, scenario="spade", score=0.5, metadata={"generation": 2})
+        designer.report(
+            answer.record_id,
+            scenario="spade",
+            score=-0.5,
+            metadata={"generation": 2},
+            feedback={"task": "harbor-00002-000", "round": {"generation": 2, "previous": None}},
+        )
     finally:
         reef.close()
     assert answer.text == "ls" and answer.record_id == "rec-1"
@@ -186,6 +193,11 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
     report = reef.reports[0]["body"]
     assert report_id == "rep-1" and report["references"] == ["rec-1"] and report["score"] == 0.5
     assert report["metadata"] == {"generation": 2, "role": "designer"}, "the role tells a processor the report apart"
+    assert report["feedback"] == "task designer score"
+    assert reef.reports[1]["body"]["feedback"] == {
+        "task": "harbor-00002-000",
+        "round": {"generation": 2, "previous": None},
+    }
 
 
 def test_a_refused_designer_call_is_a_designer_error() -> None:

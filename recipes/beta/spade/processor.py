@@ -12,7 +12,8 @@ One generation is one job on a private worker, off the trainer's thread: ``count
 written (a duplicate refused; a name an earlier attempt of the generation took before a reload cancelled
 it is replaced), validated, played ``rollouts_per_task`` times as it is (the training data) and
 ``hint_plays`` times with the hint appended (measured only), and reported against the Designer's receipt
-with its regret as the score. The first generation starts when the processor first looks for a
+with its raw regret as the score (the refusal floor for a refused one), the generation's size in the
+metadata and the last generation's summary in the feedback. The first generation starts when the processor first looks for a
 batch; the next once ``batches_per_generation`` batches were acknowledged since the previous one started
 (its episodes train while it runs), so the Designer always writes for the policy that trains now; a
 generation that measured no task is followed at once. Every generation's report goes under ``state_dir``,
@@ -33,12 +34,14 @@ from typing import Any
 from recipes.beta.spade.generation import (
     RECORDED_EXCERPT_CHARS,
     GenerationRecord,
+    GenerationSummary,
     PlayRecord,
     ProposalRecord,
     TaskMeasure,
     experience_for,
     experience_text,
     load_experience,
+    load_generation_summary,
     mean_reward,
     recorded_generations,
     report_path_for,
@@ -76,6 +79,8 @@ HINT_FILE = "solution/hint.txt"
 HINT_NAME = "hint.txt"
 TRAINING_ARM = "plain"
 HINT_ARM = "hint"
+# A refused proposal scores below any measured task: with group centering, 0 would outrank a task whose hint hurt.
+REFUSAL_SCORE = -1.0
 
 
 def reported_task_name(report: AgentRecord) -> str | None:
@@ -192,12 +197,14 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         self._worker = worker
         if self._worker is None and self.generator is not None and self.generations > 0:
             self._worker = JudgingWorker(self.run_generation, concurrency=1)
-        # What the last generation measured, for the next prompt; read back from the state directory.
+        # What the last generation measured, for the next prompt and the next reports; read back from the state directory.
         recorded = recorded_generations(self.state_dir) if self.state_dir is not None else ()
-        self._experience: tuple[PlayRecord, ...] = (
-            load_experience(report_path_for(self.state_dir, recorded[-1]))
-            if recorded and self.state_dir is not None
-            else ()
+        last_report = (
+            report_path_for(self.state_dir, recorded[-1]) if recorded and self.state_dir is not None else None
+        )
+        self._experience: tuple[PlayRecord, ...] = load_experience(last_report) if last_report is not None else ()
+        self.previous_summary: GenerationSummary | None = (
+            load_generation_summary(last_report) if last_report is not None else None
         )
         self._next_generation = recorded[-1] + 1 if recorded else 0
         self._completed = len(recorded)
@@ -295,6 +302,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
                 raise TypeError("the generation worker must hand back a GenerationOutcome")
             self._completed += 1
             self._experience = outcome.record.experience
+            self.previous_summary = outcome.record.summary
             self._last_error = outcome.record.error
             self._landed_empty = not outcome.record.measures
             logger.info(
@@ -486,21 +494,45 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
     async def reported(
         self, proposal: ProposalRecord, measure: TaskMeasure | None
     ) -> tuple[ProposalRecord, TaskMeasure | None]:
-        """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
+        """The Designer's report for one proposal: its raw regret as the score, the refusal floor for a refused one.
+
+        The metadata names the generation and its size, so a Designer processor groups a generation's reports;
+        the feedback carries the task's measure and the generation beside the last one's summary.
+        """
         if not self.is_reporting_designer or self.generator is None:
             return proposal, measure
-        metadata: dict[str, object] = {"generation": self._generation, **skill_tag(proposal.skill)}
+        measured: dict[str, object] = (
+            {"outcome": None, "regret": None, "return_without_hint": None, "return_with_hint": None}
+            if measure is None
+            else {
+                "outcome": measure.outcome,
+                "regret": measure.regret,
+                "return_without_hint": measure.record.return_without_hint,
+                "return_with_hint": measure.record.return_with_hint,
+            }
+        )
+        metadata: dict[str, object] = {
+            "generation": self._generation,
+            "proposals": self.count,
+            **skill_tag(proposal.skill),
+        }
         if measure is None:
-            score = 0.0
+            score = REFUSAL_SCORE
             metadata["refusal"] = proposal.refusal
         else:
-            score = max(measure.regret, 0.0)
+            score = measure.regret
             metadata["task"] = {"name": measure.name, "path": str(measure.task_path), "digest": measure.digest}
-            metadata["outcome"] = measure.outcome
-            metadata["regret"] = measure.regret
-            metadata["return_without_hint"] = measure.record.return_without_hint
-            metadata["return_with_hint"] = measure.record.return_with_hint
+            metadata.update(measured)
+        feedback: dict[str, object] = {
+            "task": None if measure is None else measure.name,
+            "refusal": proposal.refusal,
+            **measured,
+            "round": {
+                "generation": self._generation,
+                "previous": None if self.previous_summary is None else self.previous_summary.document(),
+            },
+        }
         report_id = await self.generator.report_proposal(
-            proposal.designer_record_id, scenario=self.scenario, score=score, metadata=metadata
+            proposal.designer_record_id, scenario=self.scenario, score=score, metadata=metadata, feedback=feedback
         )
         return replace(proposal, designer_report_id=report_id), measure

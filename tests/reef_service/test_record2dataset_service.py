@@ -78,10 +78,18 @@ class StandInDesigner(Designer):
         text = self.scripted.pop(0) if self.scripted else reply_for(8471 + len(self.calls))
         return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
 
-    def report(self, record_id, *, scenario, score, metadata) -> str:
+    def report(self, record_id, *, scenario, score, metadata, feedback=None) -> str:
         if self.report_failure is not None:
             raise self.report_failure
-        self.reports.append({"record_id": record_id, "scenario": scenario, "score": score, "metadata": dict(metadata)})
+        self.reports.append(
+            {
+                "record_id": record_id,
+                "scenario": scenario,
+                "score": score,
+                "metadata": dict(metadata),
+                "feedback": feedback,
+            }
+        )
         return f"report-{len(self.reports)}"
 
 
@@ -500,11 +508,36 @@ def test_a_proposal_report_reaches_the_designer(tmp_path: Path) -> None:
     built, designer, _, _ = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> object:
-        return await generator.report_proposal("designer-9", scenario="spade", score=0.25, metadata={"regret": 0.25})
+        first = await generator.report_proposal("designer-9", scenario="spade", score=0.25, metadata={"regret": 0.25})
+        await generator.report_proposal(
+            "designer-9",
+            scenario="spade",
+            score=-1.0,
+            metadata={"refusal": "no json"},
+            feedback={"task": None, "round": {"generation": 2, "previous": None}},
+        )
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*feedback must be a string or an object"):
+            await generator.call(
+                "POST", "/proposals/designer-9/report", body={"scenario": "spade", "score": 0.0, "feedback": 3}
+            )
+        return first
 
     assert run_with(built, body) == "report-1"
     assert designer.reports == [
-        {"record_id": "designer-9", "scenario": "spade", "score": 0.25, "metadata": {"regret": 0.25}}
+        {
+            "record_id": "designer-9",
+            "scenario": "spade",
+            "score": 0.25,
+            "metadata": {"regret": 0.25},
+            "feedback": None,
+        },
+        {
+            "record_id": "designer-9",
+            "scenario": "spade",
+            "score": -1.0,
+            "metadata": {"refusal": "no json"},
+            "feedback": {"task": None, "round": {"generation": 2, "previous": None}},
+        },
     ]
 
 

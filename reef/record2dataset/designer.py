@@ -213,7 +213,15 @@ class Designer(ABC):
     ) -> DesignerAnswer: ...
 
     @abstractmethod
-    def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str: ...
+    def report(
+        self,
+        record_id: str,
+        *,
+        scenario: str,
+        score: float,
+        metadata: Mapping[str, object],
+        feedback: str | Mapping[str, object] | None = None,
+    ) -> str: ...
 
 
 class ReefDesigner(Designer):
@@ -253,10 +261,18 @@ class ReefDesigner(Designer):
         text = message.get("content") if isinstance(message, Mapping) else None
         return DesignerAnswer(text=text if isinstance(text, str) else "", record_id=record_id)
 
-    def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str:
+    def report(
+        self,
+        record_id: str,
+        *,
+        scenario: str,
+        score: float,
+        metadata: Mapping[str, object],
+        feedback: str | Mapping[str, object] | None = None,
+    ) -> str:
         payload = {
             "score": score,
-            "feedback": "task designer score",
+            "feedback": "task designer score" if feedback is None else feedback,
             # The report shares the scenario with the agent's episodes; the role tells a processor them apart.
             "metadata": {**dict(metadata), "role": "designer"},
         }

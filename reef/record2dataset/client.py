@@ -78,7 +78,13 @@ class Generator(ABC):
 
     @abstractmethod
     async def report_proposal(
-        self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]
+        self,
+        record_id: str,
+        *,
+        scenario: str,
+        score: float,
+        metadata: Mapping[str, object],
+        feedback: str | Mapping[str, object] | None = None,
     ) -> str: ...
 
     @abstractmethod
@@ -209,13 +215,18 @@ class HttpGenerator(Generator):
         )
 
     async def report_proposal(
-        self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]
+        self,
+        record_id: str,
+        *,
+        scenario: str,
+        score: float,
+        metadata: Mapping[str, object],
+        feedback: str | Mapping[str, object] | None = None,
     ) -> str:
-        answer = await self.call(
-            "POST",
-            f"/proposals/{record_id}/report",
-            body={"scenario": scenario, "score": score, "metadata": dict(metadata)},
-        )
+        body: dict[str, object] = {"scenario": scenario, "score": score, "metadata": dict(metadata)}
+        if feedback is not None:
+            body["feedback"] = dict(feedback) if isinstance(feedback, Mapping) else feedback
+        answer = await self.call("POST", f"/proposals/{record_id}/report", body=body)
         return str(answer.get("agent_record_id", ""))
 
     async def write_task(self, task: HarborTask) -> WrittenTask:

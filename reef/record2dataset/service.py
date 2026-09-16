@@ -7,7 +7,8 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``POST /proposals``: ask the designer's model for one task (a job): the service's designer model when it
   has one, else the model the request names; the reply parsed and held to the task contract, the
   designer's record id beside the task or the refusal.
-- ``POST /proposals/{record_id}/report``: report a score against the designer's receipt.
+- ``POST /proposals/{record_id}/report``: report a score against the designer's receipt, with the method's
+  metadata and feedback (text or an object) passed through to the report.
 - Both go to the service's designer scenario when the deployment names one, else to the scenario the
   request names, so a Designer on its own Reef service keeps its own scenario.
 - ``POST /tasks``: write a task under the tasks root, refusing a duplicate (by content hash) or a
@@ -600,11 +601,19 @@ class GeneratorService:
             if isinstance(score, bool) or not isinstance(score, (int, float)):
                 raise WireError("score must be a number")
             metadata = checked_object(body.get("metadata", {}), "metadata")
+            feedback = body.get("feedback")
+            if feedback is not None and not isinstance(feedback, (str, Mapping)):
+                raise WireError("feedback must be a string or an object")
         except WireError as exc:
             return error_response(400, str(exc))
         try:
             report_id = await asyncio.to_thread(
-                self.designer.report, record_id, scenario=scenario, score=float(score), metadata=metadata
+                self.designer.report,
+                record_id,
+                scenario=scenario,
+                score=float(score),
+                metadata=metadata,
+                feedback=dict(feedback) if isinstance(feedback, Mapping) else feedback,
             )
         except (DesignerError, ReefClientError, OSError) as exc:
             return error_response(502, str(exc))
