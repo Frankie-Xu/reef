@@ -13,7 +13,7 @@ Reproduction of [Self-Distillation Fine-Tuning](https://arxiv.org/abs/2601.19897
 sdft/
   recipe.py          SDFTRecipe: training spec, loss family "sdft", the report contract
   report.py          TeacherContextReport: a rollout's receipt and the text its teacher sees
-  teacher_prompt.py  the teacher prompt: the recorded request plus the context, in the chat template
+  teacher_prompt.py  TeacherPromptBuilder: the teacher's request from the recorded one and the context, in the chat template
   processor.py       reported feedback, singleton: one rollout with its demonstration is one unit
   objective.py       selects the sdft loss; the recipe binds the per-sample step schedule
   slime/             the training-plane objective: the self-teacher forward pass and the token KL

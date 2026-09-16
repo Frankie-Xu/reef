@@ -17,7 +17,13 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sdft import SdftObjective, SDFTProcessor, SDFTRecipe, TeacherContextReport
 from recipes.sdft.slime import SdftSettings
-from recipes.sdft.teacher_prompt import DEFAULT_CONTEXT_TEMPLATE, TeacherPromptTokenizer, teacher_messages
+from recipes.sdft.teacher_prompt import (
+    DEFAULT_CONTEXT_TEMPLATE,
+    AppendContextBuilder,
+    TeacherPromptBuilder,
+    TeacherPromptTokenizer,
+    TeacherRequest,
+)
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
@@ -48,6 +54,22 @@ class CountingTokenizer(TeacherPromptTokenizer):
         self.calls.append((list(messages), tools))
         text = "".join(str(message.get("content") or "") for message in messages)
         return [100 + index for index in range(len(messages) + len(text) // 10)]
+
+
+class PrefixBuilder(TeacherPromptBuilder):
+    """A deployment's own composition: the context as a system message, and no tools for the teacher."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> PrefixBuilder:
+        return cls(str(config.get("context_template", "demo")))
+
+    def build(
+        self, request_messages: Sequence[Mapping[str, Any]], tools: Sequence[Any] | None, context: str
+    ) -> TeacherRequest:
+        return TeacherRequest([{"role": "system", "content": f"{self.label}: {context}"}, *request_messages], None)
 
 
 def _inference(agent_record_id: str, *, messages: list[dict[str, Any]] | None = None) -> AgentRecord:
@@ -108,45 +130,47 @@ def test_report_rejects_a_missing_or_empty_context(payload: dict[str, Any]) -> N
 
 
 @pytest.mark.unit
-def test_teacher_messages_add_the_demonstration_to_the_final_user_message() -> None:
+def test_default_builder_adds_the_demonstration_to_the_final_user_message() -> None:
     request = [
         {"role": "developer", "content": "Be brief."},
         {"role": "user", "content": [{"type": "text", "text": "Question?"}]},
     ]
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
 
-    messages = teacher_messages(request, "The answer.")
+    teacher = AppendContextBuilder().build(request, tools, "The answer.")
 
-    assert messages == [
+    assert teacher.messages == [
         {"role": "system", "content": "Be brief."},
         {"role": "user", "content": "Question?\n\n" + DEFAULT_CONTEXT_TEMPLATE.replace("{context}", "The answer.")},
     ]
+    assert teacher.tools == tools
     # The request is left as recorded.
     assert request[1]["content"] == [{"type": "text", "text": "Question?"}]
 
 
 @pytest.mark.unit
-def test_teacher_messages_append_a_user_message_after_a_tool_result() -> None:
+def test_default_builder_appends_a_user_message_after_a_tool_result() -> None:
     request = [
         {"role": "user", "content": "Run it."},
         {"role": "assistant", "tool_calls": [{"function": {"name": "bash", "arguments": '{"cmd": "ls"}'}}]},
         {"role": "tool", "content": "a.txt"},
     ]
 
-    messages = teacher_messages(request, "call bash with cat a.txt", "Demonstration: {context}")
+    teacher = AppendContextBuilder("Demonstration: {context}").build(request, None, "call bash with cat a.txt")
 
-    assert messages[-1] == {"role": "user", "content": "Demonstration: call bash with cat a.txt"}
-    assert messages[1]["tool_calls"] == [{"function": {"name": "bash", "arguments": {"cmd": "ls"}}}]
-    assert messages[:3] == [
+    assert teacher.messages[-1] == {"role": "user", "content": "Demonstration: call bash with cat a.txt"}
+    assert teacher.messages[:3] == [
         {"role": "user", "content": "Run it."},
         {"role": "assistant", "tool_calls": [{"function": {"name": "bash", "arguments": {"cmd": "ls"}}}]},
         {"role": "tool", "content": "a.txt"},
     ]
+    assert teacher.tools is None
 
 
 @pytest.mark.unit
-def test_teacher_messages_require_the_context_placeholder() -> None:
+def test_default_builder_requires_the_context_placeholder() -> None:
     with pytest.raises(ValueError, match=r"\{context\}"):
-        teacher_messages([{"role": "user", "content": "q"}], "demo", "no placeholder")
+        AppendContextBuilder("no placeholder")
 
 
 # --- processor --------------------------------------------------------------
@@ -183,7 +207,8 @@ def test_processor_skips_and_counts_a_teacher_sequence_over_the_window() -> None
     long_request = _inference("i1")
     short_request = _inference("i2", messages=[{"role": "user", "content": "q"}])
     # The window admits the short request's teacher sequence and not the long one's.
-    window = len(tokenizer.prompt_token_ids(teacher_messages(short_request.payload["messages"], "ok"), None)) + 3
+    short_teacher = AppendContextBuilder().build(short_request.payload["messages"], None, "ok")
+    window = len(tokenizer.prompt_token_ids(short_teacher.messages, None)) + 3
     processor = _processor(tokenizer, max_teacher_tokens=window)
     processor.ingest(long_request)
     processor.ingest(_report("r1", ("i1",)))
@@ -198,6 +223,43 @@ def test_processor_skips_and_counts_a_teacher_sequence_over_the_window() -> None
     processor.ingest(_report("r2", ("i2",), context="ok"))
     assert len(processor.build_batch().items) == 1
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
+
+
+@pytest.mark.unit
+def test_processor_uses_the_configured_teacher_prompt_builder() -> None:
+    tokenizer = CountingTokenizer()
+    processor = _processor(
+        tokenizer,
+        teacher_prompt_builder=f"{__name__}:PrefixBuilder",
+        context_template="Expert move",
+    )
+    processor.ingest(_inference("i1"))
+    processor.ingest(_report("r1", ("i1",)))
+
+    batch = processor.build_batch()
+
+    rendered, tools = tokenizer.calls[0]
+    assert rendered[0] == {"role": "system", "content": "Expert move: 100 degrees Celsius."}
+    assert rendered[1:] == _inference("i1").payload["messages"]
+    assert tools is None
+    prompt_ids = tokenizer.prompt_token_ids(rendered, tools)
+    assert list(batch.items[0].training["teacher_tokens"]) == [*prompt_ids, 1, 2, 3]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reference", "error", "message"),
+    [
+        ("no-colon", ValueError, "package.module:Builder"),
+        ("no.such.module:Builder", ValueError, "cannot import"),
+        (f"{__name__}:CountingTokenizer", TypeError, "TeacherPromptBuilder"),
+    ],
+)
+def test_processor_rejects_a_bad_teacher_prompt_builder_reference(
+    reference: str, error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        _processor(CountingTokenizer(), teacher_prompt_builder=reference)
 
 
 @pytest.mark.unit
@@ -267,7 +329,28 @@ def test_sdft_recipe_reads_reef_side_config_and_hands_it_to_the_processor() -> N
         "tokenizer_path": TOKENIZER_PATH,
         "max_teacher_tokens": 24000,
         "context_template": "Example: {context}",
+        "teacher_prompt_builder": "",
     }
+
+
+@pytest.mark.unit
+def test_sdft_recipe_validates_the_teacher_prompt_composition_at_construction() -> None:
+    bindings = runtime_bindings(StubTrainingRuntime())
+    recipe = SDFTRecipe.from_environment(
+        {},
+        config={"data": {"tokenizer_path": TOKENIZER_PATH, "teacher_prompt_builder": f"{__name__}:PrefixBuilder"}},
+        **bindings,
+    )
+    assert recipe.teacher_prompt_builder == f"{__name__}:PrefixBuilder"
+
+    with pytest.raises(RecipeConfigError, match="cannot import teacher_prompt_builder"):
+        SDFTRecipe.from_environment(
+            {}, config={"data": {"tokenizer_path": TOKENIZER_PATH, "teacher_prompt_builder": "no.such:B"}}, **bindings
+        )
+    with pytest.raises(RecipeConfigError, match=r"context_template must contain \{context\}"):
+        SDFTRecipe.from_environment(
+            {}, config={"data": {"tokenizer_path": TOKENIZER_PATH, "context_template": "bare"}}, **bindings
+        )
 
 
 @pytest.mark.unit

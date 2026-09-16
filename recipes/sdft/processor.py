@@ -7,12 +7,10 @@ from collections.abc import Hashable, Mapping
 
 from recipes.sdft.report import TeacherContextReport
 from recipes.sdft.teacher_prompt import (
-    CONTEXT_PLACEHOLDER,
-    DEFAULT_CONTEXT_TEMPLATE,
     ChatTemplateTokenizer,
     TeacherPromptTokenizer,
     recorded_request,
-    teacher_messages,
+    resolve_teacher_prompt_builder,
 )
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
@@ -28,10 +26,11 @@ class SDFTProcessor(ReportedFeedbackProcessor):
     A report references one recorded request and carries the demonstration
     as ``context``. The sample keeps the student's policy tensors as every
     weight recipe does and adds ``teacher_tokens``: the teacher prompt (the
-    request with the demonstration added) followed by the student's response
-    ids verbatim, so the trainer's teacher pass scores the student's own
-    tokens. With the recipe default ``batch_size=1`` a report trains as soon
-    as it arrives.
+    request and the demonstration composed by the configured
+    ``TeacherPromptBuilder``) followed by the student's response ids
+    verbatim, so the trainer's teacher pass scores the student's own tokens.
+    With the recipe default ``batch_size=1`` a report trains as soon as it
+    arrives.
 
     A teacher sequence longer than ``max_teacher_tokens`` cannot be scored by
     the trainer's window. Such a report is not training data: it is released
@@ -44,9 +43,7 @@ class SDFTProcessor(ReportedFeedbackProcessor):
     def __init__(self, context: ProcessorContext, tokenizer: TeacherPromptTokenizer | None = None) -> None:
         config = context.config
         self._assembly = SampleAssembly.from_config(context)
-        self._context_template = str(config.get("context_template", DEFAULT_CONTEXT_TEMPLATE))
-        if CONTEXT_PLACEHOLDER not in self._context_template:
-            raise ValueError(f"context_template must contain {CONTEXT_PLACEHOLDER}")
+        self._prompt_builder = resolve_teacher_prompt_builder(config)
         self._max_teacher_tokens = int(config.get("max_teacher_tokens", 0))
         if self._max_teacher_tokens < 0:
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
@@ -81,9 +78,8 @@ class SDFTProcessor(ReportedFeedbackProcessor):
         if not 0 < response_length < len(tokens):
             raise ValueError("SDFT requires the recorded prompt and response tokens of the inference")
         messages, tools = recorded_request(context.inferences[0].payload)
-        prompt_ids = self._tokenizer.prompt_token_ids(
-            teacher_messages(messages, parsed.context, self._context_template), tools
-        )
+        teacher = self._prompt_builder.build(messages, tools, parsed.context)
+        prompt_ids = self._tokenizer.prompt_token_ids(teacher.messages, teacher.tools)
         teacher_tokens = [*prompt_ids, *tokens[-response_length:]]
         if self._max_teacher_tokens and len(teacher_tokens) > self._max_teacher_tokens:
             self._overflow_reports.add(context.report.agent_record_id)

@@ -8,7 +8,7 @@ from typing import Any
 
 from recipes.sdft.processor import SDFTProcessor
 from recipes.sdft.report import TeacherContextReport
-from recipes.sdft.teacher_prompt import CONTEXT_PLACEHOLDER, DEFAULT_CONTEXT_TEMPLATE
+from recipes.sdft.teacher_prompt import DEFAULT_CONTEXT_TEMPLATE, resolve_teacher_prompt_builder
 from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
@@ -29,9 +29,11 @@ class SDFTRecipe(WeightTrainingRecipe):
     ``tokenizer_path`` is the served model's tokenizer directory, which renders
     the teacher prompt with the chat template the engine applied.
     ``max_teacher_tokens`` skips reports whose teacher sequence would not fit
-    the trainer's window (0 disables the check), and ``context_template`` is
-    the block that carries the demonstration, with ``{context}`` as its
-    placeholder.
+    the trainer's window (0 disables the check). The teacher prompt is
+    composed by a ``TeacherPromptBuilder``: by default the demonstration is
+    added to the request's final user message as ``context_template`` (with
+    ``{context}`` as its placeholder); ``teacher_prompt_builder`` names
+    another composition as ``package.module:Builder``.
 
     Objective settings such as the KL direction belong to the training
     backend; for Slime they are ``--sdft-*`` flags in ``training.options``.
@@ -44,6 +46,7 @@ class SDFTRecipe(WeightTrainingRecipe):
     tokenizer_path: str = config_field("")
     max_teacher_tokens: int = config_field(0)
     context_template: str = config_field(DEFAULT_CONTEXT_TEMPLATE)
+    teacher_prompt_builder: str = config_field("")
 
     @property
     def report_type(self) -> type[ReportBase]:
@@ -66,8 +69,8 @@ class SDFTRecipe(WeightTrainingRecipe):
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
         if self.max_teacher_tokens < 0:
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
-        if CONTEXT_PLACEHOLDER not in self.context_template:
-            raise ValueError(f"context_template must contain {CONTEXT_PLACEHOLDER}")
+        # A bad template or builder reference fails the deployment here, not the first scenario.
+        resolve_teacher_prompt_builder(self.processor_config())
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

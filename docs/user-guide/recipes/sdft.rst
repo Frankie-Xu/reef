@@ -50,11 +50,18 @@ How Reef implements it
 
 The processor turns every ``TeacherContextReport`` into one
 ``TrajectoryItem`` carrying the student's recorded tokens plus
-``teacher_tokens``: the request with the demonstration added to its final
-user message, rendered with the served model's chat template
-(``tokenizer_path``), followed by the student's response ids verbatim. The
-demonstration block is ``context_template``, whose default is the reference
-implementation's wording.
+``teacher_tokens``: the teacher's request rendered with the served model's
+chat template (``tokenizer_path``), followed by the student's response ids
+verbatim. A ``TeacherPromptBuilder`` composes that request from the
+student's request and the report's context. The default adds the
+demonstration block (``context_template``, whose default is the reference
+implementation's wording) to the request's final user message, or as a new
+user message when the request ends in a tool result. A harness whose
+demonstrations need another layout, such as a native tool-call turn or a
+block in the system prompt, ships its own builder and names it with
+``teacher_prompt_builder``; the builder reads its settings from the recipe
+config through ``from_config`` and returns the messages and tools the
+teacher sees.
 
 The ``sdft`` loss family runs on Slime as a ``custom_loss``. Before each
 step, a pre-train hook runs one forward pass of the current actor over every
@@ -95,7 +102,8 @@ Configuration
    batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
    tokenizer_path | required | the served model's tokenizer directory; it renders the teacher prompt with the chat template the engine applied.
    max_teacher_tokens | 0 | a report whose teacher sequence is longer is skipped and counted (``teacher_overflow_reports``); 0 disables the check. Set it to the trainer's window.
-   context_template | the reference's block | the text added to the final user message, with ``{context}`` as the demonstration's placeholder.
+   context_template | the reference's block | the text the default builder adds to the final user message, with ``{context}`` as the demonstration's placeholder.
+   teacher_prompt_builder | empty | ``package.module:Builder`` naming a ``TeacherPromptBuilder`` that composes the teacher's request instead of the default.
    max_staleness | 0 | accepted lag between the producing and serving version.
 
 The Slime driver takes ``--loss-type custom_loss``,
