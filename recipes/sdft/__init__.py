@@ -1,7 +1,8 @@
 """Self-Distillation Fine-Tuning (arXiv:2601.19897): one method, one package.
 
-- ``recipe`` — the SDFT recipe class and its ``WeightTrainingSpec``.
-- ``report`` — the report contract: a rollout's receipt and its teacher's ``context``.
+- ``recipe`` — the SDFT recipe class and its ``WeightTrainingSpec``. Its report
+  contract is the shared :class:`reef.core.reports.TeacherContextReport`: a
+  rollout's receipt and its teacher's ``context``.
 - ``teacher_prompt`` — the teacher prompt built from the recorded request and that context.
 - ``processor`` — one rollout with its demonstration, one batch unit.
 - ``objective`` — the backend-agnostic training objective.
@@ -13,9 +14,8 @@
 from recipes.sdft.objective import SdftObjective
 from recipes.sdft.processor import SDFTProcessor
 from recipes.sdft.recipe import SDFTRecipe
-from recipes.sdft.report import TeacherContextReport
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("sdft", "recipes.sdft.slime:SdftAlgorithm")
 
-__all__ = ["SDFTProcessor", "SDFTRecipe", "SdftObjective", "TeacherContextReport"]
+__all__ = ["SDFTProcessor", "SDFTRecipe", "SdftObjective"]

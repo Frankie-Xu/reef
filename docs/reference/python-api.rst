@@ -248,10 +248,13 @@ Report
 
 .. code:: python
 
-   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
+   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 
-Method-specific report contracts live in their method package; Reef does not
-import or re-export them.
+``ScoredRolloutReport`` is the shared score-only contract and
+``TeacherContextReport`` the shared contract of the self-distillation recipes
+(a rollout's receipt and the ``context`` its teacher sees). Method-specific
+report contracts live in their method package; Reef does not import or
+re-export them.
 
 A report type declares the feedback a method accepts, so malformed input fails
 at ingress with HTTP 400.

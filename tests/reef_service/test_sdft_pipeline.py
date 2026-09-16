@@ -1,4 +1,4 @@
-"""Reef-side SDFT pipeline: report contract, teacher prompt, processor, recipe and Slime wire payload.
+"""Reef-side SDFT pipeline: teacher prompt, processor, recipe and Slime wire payload.
 
 Everything here is torch/ray free so it runs in the minimal CI gate; the
 tensor kernels are pinned to the pure-Python reference in
@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
-from recipes.sdft import SdftObjective, SDFTProcessor, SDFTRecipe, TeacherContextReport
+from recipes.sdft import SdftObjective, SDFTProcessor, SDFTRecipe
 from recipes.sdft.slime import SdftSettings
 from recipes.sdft.teacher_prompt import (
     DEFAULT_CONTEXT_TEMPLATE,
@@ -26,7 +26,7 @@ from recipes.sdft.teacher_prompt import (
 )
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import ReportValidationError
+from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
@@ -104,26 +104,6 @@ def _report(agent_record_id: str, references: tuple[str, ...], context: str = "1
 
 def _processor(tokenizer: CountingTokenizer | None = None, **config: Any) -> SDFTProcessor:
     return SDFTProcessor(ProcessorContext("science", {"batch_size": 1, **config}, TeacherContextReport), tokenizer)
-
-
-# --- report contract --------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_report_carries_the_context_and_an_optional_score() -> None:
-    report = TeacherContextReport.from_dict({"metadata": {"context": "demo"}})
-    assert report == TeacherContextReport(context="demo")
-    assert report.to_dict(references=("i1",)) == {"metadata": {"context": "demo"}, "references": ["i1"]}
-
-    scored = TeacherContextReport.from_dict({"score": 0.5, "metadata": {"context": "demo"}})
-    assert scored.score == 0.5
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("payload", [{"metadata": {}}, {"metadata": {"context": "   "}}, {"metadata": {"context": 3}}])
-def test_report_rejects_a_missing_or_empty_context(payload: dict[str, Any]) -> None:
-    with pytest.raises(ReportValidationError, match="context"):
-        TeacherContextReport.from_dict(payload)
 
 
 # --- teacher prompt ---------------------------------------------------------

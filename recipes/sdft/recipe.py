@@ -7,9 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from recipes.sdft.processor import SDFTProcessor
-from recipes.sdft.report import TeacherContextReport
 from recipes.sdft.teacher_prompt import DEFAULT_CONTEXT_TEMPLATE, resolve_teacher_prompt_builder
-from reef.core.reports import ReportBase
+from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
