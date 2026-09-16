@@ -302,6 +302,8 @@ def test_a_service_with_a_designer_scenario_sends_the_designers_calls_and_report
 
     run_with(built, body_without)
     assert designer.calls[0]["scenario"] == "spade" and designer.reports[0]["scenario"] == "spade"
+
+
 def test_the_service_asks_the_designer_with_the_prompt_its_generation_gets(tmp_path: Path) -> None:
     evolved = DesignerPrompt(system="Evolved system.", rules="RULES:\n- {turn_limit} commands, keep {state}.")
     client = StandInHarness(served_tree(evolved.entries()))

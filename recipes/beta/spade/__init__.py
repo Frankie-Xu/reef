@@ -13,11 +13,7 @@ and the Reasoning Agent's group relative training on the plain arm's episodes.
   compare through the group id.
 - ``objective``: group relative advantages per group on Tinker's importance sampling loss, shared by both roles.
 - ``recipe``: the two recipes, the Reasoning Agent's on its episodes and the Designer's on its regret.
-- ``objective``: group relative advantages per task group on Tinker's importance sampling loss.
-- ``recipe``: the configuration that binds them.
 - ``harness``: the Designer's prompt as a harness tree the evolution loop rewrites from the regret reports.
-
-The Designer's own weight training follows.
 """
 
 from recipes.beta.spade.designer_processor import SpadeDesignerProcessor
@@ -49,10 +45,10 @@ __all__ = [
     "PlayRecord",
     "ProposalRecord",
     "ProposalRefused",
-    "SpadeDesignerProcessor",
-    "SpadeDesignerRecipe",
     "ReportedRegretSelection",
     "SpadeDesignerHarnessRecipe",
+    "SpadeDesignerProcessor",
+    "SpadeDesignerRecipe",
     "SpadeObjective",
     "SpadeProcessor",
     "SpadeRecipe",

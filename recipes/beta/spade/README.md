@@ -18,11 +18,8 @@ beta/spade/
   recipe.py       the two recipes: the Reasoning Agent's on its episodes, the Designer's on its regret
   examples/tinker/serve.yaml            a Tinker deployment with the generator service
   examples/designer-tinker/serve.yaml   a Tinker deployment of the Designer recipe, on its own port
-  objective.py    group relative advantages per task group, on Tinker's importance sampling loss
-  recipe.py       the configuration that binds them
   harness.py      the Designer's prompt as a harness tree, rewritten from the regret reports
-  examples/tinker/serve.yaml   a Tinker deployment with the generator service
-  examples/designer-harness/serve.yaml   the Designer's harness evolution service beside it
+  examples/designer-harness/serve.yaml   the Designer's harness evolution service, on its own port
 ```
 
 ## The processor
