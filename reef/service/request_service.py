@@ -31,14 +31,29 @@ from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
-from reef.service.release_page import before_release_id, build_release_page
+from reef.service.release_page import before_release_id, build_release_page, result_of
+from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
+from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 
 logger = logging.getLogger(__name__)
+
+
+def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
+    """The headers a page route reads, ``?scenario=`` standing in for ``x-reef-scenario`` when that header is absent.
+
+    A page is a link a person opens in a browser, which sends no ``x-reef-*``
+    header; the header wins when both are present. The token has the same
+    fallback in :mod:`reef.service.auth`, for the page routes alone.
+    """
+    merged = dict(headers.items())
+    scenario = query.get("scenario", "").strip()
+    if scenario and not any(key.lower() == SCENARIO_HEADER for key in merged):
+        merged[SCENARIO_HEADER] = scenario
+    return merged
 
 
 def _random_harness_scenario_name() -> str:
@@ -479,12 +494,12 @@ class RequestService:
         )
 
     def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
-        """The served tree plus its parent release and gate metrics.
+        """The served tree plus its parent release and evaluation metrics.
 
         ``release_id`` addresses one catalog release instead of the
         serving head, so a consumer can pin or roll back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
-        naming it. The gate field carries the metrics of the training step
+        naming it. The ``evaluation`` field carries the metrics of the training step
         that published the served release, so a consumer can audit what a
         pulled tree changed and why it was admitted before running it.
         Read-only: never creates a scenario.
@@ -497,7 +512,7 @@ class RequestService:
         scenario: Scenario,
         release_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact, gate = scenario.artifact_with_metrics(release_id)
+        artifact, evaluation_metrics = scenario.artifact_with_metrics(release_id)
         tree = scenario.surface.files
         if tree is None:
             raise ArtifactNotFound(
@@ -517,8 +532,9 @@ class RequestService:
             "parent_release_id": artifact.ref.parent_release_id,
             "content_id": artifact.ref.content_id,
             "files": dict(files),
-            "gate": gate,
-            # The union over the chain, not this gate's list: a release whose request named nothing still installs an earlier extension.
+            "evaluation": evaluation_metrics,
+            "gate": evaluation_metrics,  # Legacy clients read this manifest field.
+            # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
         }
 
@@ -542,7 +558,7 @@ class RequestService:
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
         backend = scenario.trainer.candidate_backend
-        if not isinstance(backend, ProposalGate) or backend.proposals is None:
+        if not isinstance(backend, ProposalValidator) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
                 "evolution recipe with a proposal inbox"
@@ -574,7 +590,7 @@ class RequestService:
         return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
 
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
-        """The scenario's release catalog with per-release gate metrics, newest last.
+        """The scenario's release catalog with per-release evaluation metrics, newest last.
 
         The list side of the update channel: every committed release stays
         addressable through the manifest read's ``release_id``, and each
@@ -605,7 +621,9 @@ class RequestService:
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
-    def harness_release_page(self, headers: Mapping[str, str], step: int) -> str:
+    def harness_release_page(
+        self, headers: Mapping[str, str], step: int, link_query: Mapping[str, str] | None = None
+    ) -> str:
         """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
 
         The rows are the ones ``harness_releases`` answers, so the step a
@@ -613,7 +631,9 @@ class RequestService:
         step ran on (the parent of a win, the head a rejected or skipped
         step ran on) comes through the artifact snapshot when it is
         restorable, so an extension update shows as a diff, else as its new
-        text. An unknown step raises ArtifactNotFound naming the range.
+        text. ``link_query`` is carried to the Chain's links, so a page
+        opened through query parameters links pages that open the same way.
+        An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.releases()))
@@ -643,7 +663,80 @@ class RequestService:
             before_entries=before_entries,
             before_files=before_files,
             node_paths=None if descriptor is None else descriptor.node_paths,
+            link_query=link_query,
         )
+
+    def harness_request_page(
+        self, headers: Mapping[str, str], record_id: str, link_query: Mapping[str, str] | None = None
+    ) -> str:
+        """One HTML page for the harness request stored as agent record ``record_id``, live until its step settles.
+
+        The record is the ``POST /reef/train`` instruction as stored; the
+        catalog row whose ``training_request.id`` names it settles the page.
+        Until then the page reads the running step's progress from the
+        scenario's candidate backend, when the backend reports one, and
+        whether the trainer holds the request in its reserved batch.
+        ``link_query`` is carried to the version page link, so a page opened
+        through query parameters links one that opens the same way. An
+        unknown id, or one that is not a training instruction, raises
+        ArtifactNotFound naming it.
+        """
+        scenario = self._file_scenario(headers)
+        record = self._dispatcher.read_record(scenario.name, record_id)
+        if record is None or record.get("request_type") != RequestType.TRAIN.value:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
+        rows = list(reversed(scenario.releases()))
+        backend = scenario.trainer.candidate_backend
+        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        reserved = scenario.trainer.pending_batch
+        consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
+        return build_request_page(record, rows, progress=progress, consumed=consumed, link_query=link_query)
+
+    def harness_request_progress(self, headers: Mapping[str, str], record_id: str) -> dict[str, Any]:
+        """Where a filed request stands, as JSON, for a client with no browser to open its page.
+
+        The same reading the page renders: the state
+        (``queued``, ``proposing``, ``evaluating``, ``running``, ``settling``,
+        else the settled row's result), what it means in the page's words,
+        and, once a row answers the request, the step it landed as. A client
+        polls this to show a phase; the page itself stays the readable view.
+        An unknown id, or one that is not a training instruction, raises
+        ArtifactNotFound naming it.
+        """
+        scenario = self._file_scenario(headers)
+        record = self._dispatcher.read_record(scenario.name, record_id)
+        if record is None or record.get("request_type") != RequestType.TRAIN.value:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
+        rows = list(reversed(scenario.releases()))
+        step = settled_step(rows, record_id)
+        if step is not None:
+            return {
+                "request_id": record_id,
+                "settled": True,
+                "step": step,
+                "state": result_of(rows[step], rows),
+                "meaning": None,
+                "started_at": None,
+                "episodes_total": None,
+                "step_record": None,
+            }
+        backend = scenario.trainer.candidate_backend
+        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        reserved = scenario.trainer.pending_batch
+        consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
+        state = request_state(record, progress, consumed)
+        mine = progress if progress is not None and progress.request_id == record_id else None
+        return {
+            "request_id": record_id,
+            "settled": False,
+            "step": None,
+            "state": state,
+            "meaning": STATE_WORDS.get(state),
+            # The step's own clock, so a client shows the time in the step and not the time since it asked.
+            "started_at": None if mine is None else mine.started_at,
+            "episodes_total": None if mine is None else mine.episodes_total,
+            "step_record": None if mine is None else mine.step_record,
+        }
 
     def harness_install_script(
         self,
@@ -698,7 +791,7 @@ class RequestService:
         an installed tree needs one written beside it: the release's own
         entries (the recipe's seed for the base release no step published)
         plus the descriptor's binding template, the base URL taken from the
-        request's Host, the model from the gate the release ran against (the
+        request's Host, the model from the evaluation the release ran against (the
         recipe's served model for the base release), and the token left as a
         placeholder the script fills from the client's environment. Empty
         when any of those is unknown, and the script then installs the
@@ -708,8 +801,12 @@ class RequestService:
         # A gateway in front of Reef names the address the client reached in the forwarded
         # headers; the binding goes there, so the installed harness calls back through it.
         host = normalized.get("x-forwarded-host") or normalized.get("host")
-        gate = manifest.get("gate") or {}
-        model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
+        evaluation_metrics = manifest.get("evaluation", manifest.get("gate")) or {}
+        model = (
+            (evaluation_metrics.get("evaluation_context", evaluation_metrics.get("gated_against")) or {}).get("model")
+            if isinstance(evaluation_metrics, Mapping)
+            else None
+        )
         info = scenario.surface.harness
         if not isinstance(model, str) or not model:
             model = None if info is None else info.served_model
@@ -844,4 +941,5 @@ __all__ = [
     "RequestService",
     "client_inference_response",
     "normalize_request_payload",
+    "page_headers",
 ]
