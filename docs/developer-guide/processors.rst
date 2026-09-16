@@ -36,7 +36,9 @@ and algorithm support.
 
 The processor also controls retention. The trainer reads
 ``retention_decision()`` (protected vs releasable ids) and reports deletions
-back through ``compaction_applied()``.
+back through ``compaction_applied()``. A batch the backend dropped as stale is
+announced through ``dropped()`` before its acknowledgement, for a processor
+that paces work on what actually trained.
 Nothing numeric lives here. Advantages and the loss family are the step
 objective's. The read-only ``status()`` hook is empty by default; a processor
 uses it only when a terminal outcome cannot become a batch and an external

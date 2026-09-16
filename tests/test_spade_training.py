@@ -637,6 +637,27 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     assert unplayable.reports[0]["metadata"]["refusal"].startswith("the Reasoning Agent could not play the task")
 
 
+def test_a_dropped_batch_does_not_count_toward_the_next_generation(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, _ = generating(tmp_path, worker=worker, skills=())
+    assert not p.ready() and [job.generation for job in worker.submitted] == [0]
+    for task in ("harbor-00000-000", "harbor-00000-001"):
+        played(p, task, 0, 1.0)
+        played(p, task, 1, 0.0)
+    batch_id = p.build_batch().batch_id
+    p.dropped(batch_id)
+    p.acknowledge(batch_id)
+    worker.finish()
+    assert not p.ready(), "generation 0 lands; the dropped batch trained nothing"
+    assert [job.generation for job in worker.submitted] == [0]
+    for task in ("harbor-00000-002", "harbor-00000-003"):
+        played(p, task, 0, 1.0)
+        played(p, task, 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    assert not p.ready(), "a trained batch counts"
+    assert [job.generation for job in worker.submitted] == [0, 1]
+
+
 def test_a_generation_that_measured_no_task_does_not_block_the_next_one(tmp_path: Path) -> None:
     worker = DeferredWorker()
     refusing = StandInGenerator(tmp_path / "tasks", is_solvable=False)

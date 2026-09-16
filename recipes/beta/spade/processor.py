@@ -200,6 +200,8 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         self._has_landed = False
         # A generation without a task makes no batch; waiting for one would stall the loop until a restart.
         self._landed_empty = False
+        # Batches the backend dropped as stale trained nothing, so they do not pace the Designer.
+        self._dropped: set[str] = set()
         self._last_error = ""
 
     # ------------------------------------------------------- the reported half
@@ -233,9 +235,15 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         self.catch_up()
         return super().ready()
 
+    def dropped(self, batch_id: str) -> None:
+        self._dropped.add(batch_id)
+
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         consumed = super().acknowledge(batch_id)
-        self._batches_since_generation += 1
+        if batch_id in self._dropped:
+            self._dropped.discard(batch_id)
+        else:
+            self._batches_since_generation += 1
         return consumed
 
     def derivation_pending(self) -> bool:

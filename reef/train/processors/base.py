@@ -246,6 +246,9 @@ class DataProcessor:
         self._pending = None
         return consumed
 
+    def dropped(self, batch_id: str) -> None:
+        """The trainer says the batch is acknowledged without training: the backend dropped it as stale."""
+
     def release_batch(self, batch_id: str) -> None:
         """Forget the handed out batch without consuming anything; the next ``build_batch`` selects again."""
         if self._pending is None or self._pending.batch_id != batch_id:
