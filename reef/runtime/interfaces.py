@@ -35,7 +35,7 @@ from threading import Condition
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.batches import TrainingBatch
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.errors import ReefError
 from reef.core.evaluation import SelectionDecision, UpdateCandidate
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
@@ -611,13 +611,19 @@ class TrainingRuntime(ABC):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
         scenario_step: int,
         *,
         serving_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
-        """Turn one reserved batch into backend work, or a state-only skip."""
+        """Turn one reserved batch into backend work, or a state-only skip.
+
+        ``objective`` names the recipe's training objective and ``scheduling``
+        is the recipe's step schedule; the backend resolves the objective in
+        its own process and cuts the batch into optimizer steps accordingly.
+        """
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         """Execute a backend-native durable job through checkpoint export."""
@@ -725,7 +731,11 @@ class TrainingBackend(ABC):
 
     @abstractmethod
     def prepare_training_step(
-        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self,
+        batch: TrainingBatch,
+        objective: str,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
     ) -> PreparedTrainingStep: ...
 
     @abstractmethod

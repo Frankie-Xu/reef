@@ -10,7 +10,7 @@ import pytest
 
 reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef checkout")
 
-from reef.train.algos import base as algos_base
+from reef.train.algos.registry import resolve_objective
 
 
 def _recipe_cls():
@@ -25,13 +25,13 @@ def test_training_spec_binds_processor_and_grouped_machinery():
     from recipes.beta.coral.processor import CoralProcessor
 
     assert spec.processor is CoralProcessor
-    assert spec.step_preparer == "tttd"
+    assert spec.objective == "tttd"
     assert spec.loss_family == "tttd"
 
 
-def test_importing_the_recipe_registers_the_reused_preparer():
+def test_importing_the_recipe_registers_the_reused_objective():
     _recipe_cls()
-    assert "tttd" in algos_base._decorated_preparers
+    assert resolve_objective("tttd").loss_family == "tttd"
 
 
 def test_group_size_floor():

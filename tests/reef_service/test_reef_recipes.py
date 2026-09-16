@@ -77,7 +77,7 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
 
 
 @pytest.mark.parametrize(
-    ("recipe", "name", "processor_type", "step_preparer", "report_type"),
+    ("recipe", "name", "processor_type", "objective", "report_type"),
     [
         (Recipe(), "recipe", DataProcessor, None, None),
         (
@@ -103,47 +103,43 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
         ),
     ],
 )
-def test_concrete_recipe_builds_its_processor_step_preparer_and_report_type(
-    recipe, name, processor_type, step_preparer, report_type
+def test_concrete_recipe_builds_its_processor_objective_and_report_type(
+    recipe, name, processor_type, objective, report_type
 ) -> None:
     trainer = recipe.build("math", SQLiteRecordStore())
 
     assert recipe.name == name
     assert recipe.report_type is report_type
     assert isinstance(trainer.processor, processor_type)
-    if step_preparer is None:
+    if objective is None:
         assert trainer.candidate_backend is None
     else:
         assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
-        assert trainer.candidate_backend.step_preparer == step_preparer
+        assert trainer.candidate_backend.objective == objective
     assert trainer.report_type is report_type
 
 
-def test_build_rejects_an_unknown_step_preparer_before_any_training_step() -> None:
-    # Regression: the preparer name used to be resolved only at the first
-    # training step — after GPUs were already up. A recipe naming a preparer
+def test_build_rejects_an_unknown_objective_before_any_training_step() -> None:
+    # Regression: the objective name used to be resolved only at the first
+    # training step — after GPUs were already up. A recipe naming an objective
     # that no longer exists (the deleted online_grpo arm, a typo) must fail at
-    # recipe build, with the registry's available-preparers message.
+    # recipe build, with the registry's available-objectives message.
     @dataclass(frozen=True)
-    class StalePreparerRecipe(WeightTrainingRecipe):
+    class StaleObjectiveRecipe(WeightTrainingRecipe):
         _: KW_ONLY
         name: str = "stale"
 
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(
-                step_preparer="online_grpo",
-                loss_family="pg",
-                processor=ThresholdProcessor,
-            )
+            return WeightTrainingSpec(objective="online_grpo", processor=ThresholdProcessor)
 
-    with pytest.raises(ValueError, match=r"unknown step preparer 'online_grpo'.*available preparers"):
-        StalePreparerRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
+    with pytest.raises(ValueError, match=r"unknown objective 'online_grpo'.*available objectives"):
+        StaleObjectiveRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
 
 
-def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process() -> None:
+def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process() -> None:
     # A service process never imports the Slime driver, so the cookbook
-    # package must register its preparer when the dotted recipe is imported for eager preparer
+    # package must register its objective when the dotted recipe is imported for eager objective
     # resolution to accept "tttd" in the process the recipe is served from.
     # In-process tests cannot pin this (a sibling test may have imported the
     # driver for the whole session), hence the subprocess.
@@ -158,7 +154,7 @@ def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process(
                 "from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings\n"
                 "trainer = TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), groups_per_step=1, rollouts_per_group=2)"
                 ".build('math', SQLiteRecordStore())\n"
-                "assert trainer.candidate_backend.step_preparer == 'tttd'\n"
+                "assert trainer.candidate_backend.objective == 'tttd'\n"
             ),
         ],
         check=True,
@@ -387,13 +383,11 @@ def test_named_recipe_configs_resolve_by_name(monkeypatch, tmp_path) -> None:
     assert runtime.api_key == "test-minimax-key"
 
 
-def test_cookbook_preparers_signal_their_recipes_loss_family() -> None:
-    # The recipe's loss_family and the preparer's StepSignal.loss_family are
-    # two strings; the bridge only compares them at the first training step.
-    # Pin them here so a drift fails before any GPU spins up.
+def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
+    # Both driver selection and batch preparation use the same method binding.
     from dataclasses import replace
 
-    from reef.train.algos.registry import resolve_preparer
+    from reef.train.algos.registry import resolve_objective
     from reef.train.slime_backend.loss_families import resolve_loss_family
     from reef.train.types import TrainingBatch
 
@@ -420,8 +414,10 @@ def test_cookbook_preparers_signal_their_recipes_loss_family() -> None:
                     second,
                 ),
             )
-        signal = resolve_preparer(spec.step_preparer)(batch, {})
-        assert signal.loss_family == spec.loss_family, recipe_type.__name__
-        assert resolve_loss_family(signal.loss_family).loss_family == spec.loss_family
+        objective = resolve_objective(spec.objective)
+        signal = objective.prepare(batch, {})
+        assert signal.action == "train"
+        assert objective.loss_family == spec.loss_family, recipe_type.__name__
+        assert resolve_loss_family(objective.loss_family).loss_family == spec.loss_family
         checked.add(recipe_type.__name__)
     assert checked == {"OpenClawRLRecipe", "SAORecipe", "TTTDRecipe"}

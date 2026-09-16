@@ -20,6 +20,7 @@ from recipes.openclawrl.prm import (
 from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.turns import TurnJob
 from reef.core.trajectories import source_record_id
+from reef.train.algos import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch, TrajectoryItem
 
@@ -250,7 +251,7 @@ class TestHintJudging:
         assert "[role: tool]" in messages[1]["content"]
 
 
-class TestTopkPreparer:
+class TestTopkTestObjective:
     def test_signals_ride_topk_channels(self):
         cand = {"hint": "h", "teacher_tokens": [7, 8, 12, 13, 14]}
         batch = TrainingBatch(
@@ -260,7 +261,7 @@ class TestTopkPreparer:
                 _sample(-1.0),
             ),
         )
-        step = prepare_slime_step(batch, "openclawrl", {})
+        step = prepare_slime_step(batch, "openclawrl", {}, StepScheduling(unit="sample"))
         assert step.payload["loss"] == "openclawrl"
         assert step.payload["advantages"] == [1.0, -1.0]
         # The family's wire row: policy 5-tuple + the three top-K channels.

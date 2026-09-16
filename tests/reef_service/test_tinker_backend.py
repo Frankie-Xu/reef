@@ -24,9 +24,9 @@ from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.weights import WeightLoader
-from reef.train.algos.base import StepPreparer
-from reef.train.algos.registry import register_preparer, unregister_preparer
-from reef.train.algos.signals import StepScheduling, StepSignal
+from reef.train.algos import StepScheduling, StepSignal
+from reef.train.algos.objective import TrainingObjective
+from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
@@ -82,30 +82,32 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.closed = True
 
 
-class Preparer(StepPreparer):
-    name = "tinker-test-preparer"
+class SampleObjective(TrainingObjective):
+    loss_family = "importance_sampling"
+    name = "tinker-test-objective"
 
     def __init__(self):
-        self.scheduling = StepScheduling(unit="sample", batch_size="actual")
-        self.loss = "importance_sampling"
+        self.loss_family = "importance_sampling"
         self.action = "train"
 
-    def __call__(self, batch, state):
+    def prepare(self, batch, state):
         return StepSignal(
             self.action,
-            self.loss,
             {"steps": state.get("steps", 0) + 1},
             advantages=tuple(float(i + 1) for i in range(len(batch.items))),
-            scheduling=self.scheduling,
         )
 
 
+# The schedule a recipe over this objective binds: one step over every sample.
+SCHEDULING = StepScheduling(unit="sample", batch_size="actual")
+
+
 @pytest.fixture
-def preparer():
-    value = Preparer()
-    register_preparer(value)
+def objective():
+    value = SampleObjective()
+    register_objective(value)
     yield value
-    unregister_preparer(value.name)
+    unregister_objective(value.name)
 
 
 class Deployment:
@@ -116,8 +118,8 @@ class Deployment:
         self.training = TinkerTrainingRuntime("Qwen/Qwen3-8B", config, client)
         self.inference = TinkerInferenceRuntime(client, base_model="Qwen/Qwen3-8B")
 
-    def backend(self, preparer):
-        return RuntimeCandidateBackend(self.training, preparer.name, inference_runtime=self.inference)
+    def backend(self, objective):
+        return RuntimeCandidateBackend(self.training, objective.name, SCHEDULING, inference_runtime=self.inference)
 
     def shutdown(self):
         self.training.shutdown()
@@ -153,9 +155,9 @@ def item(version, group="g"):
     )
 
 
-def prepared(runtime, preparer, *, step=0):
+def prepared(runtime, objective, *, step=0):
     batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
-    return runtime.training.prepare_training_step(batch, preparer.name, {}, step)
+    return runtime.training.prepare_training_step(batch, objective.name, {}, SCHEDULING, step)
 
 
 def decision(selected):
@@ -170,9 +172,9 @@ def empty_artifact(tmp_path):
     return Artifact.local(directory)
 
 
-def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, preparer, tmp_path):
+def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, objective, tmp_path):
     value, client = runtime
-    backend = value.backend(preparer)
+    backend = value.backend(objective)
     base = empty_artifact(tmp_path)
     original = value.inference.serving_runtime_load_id()
     batch = TrainingBatch("batch", (item(original),))
@@ -196,9 +198,9 @@ def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, pr
     assert len(client.calls) == 1
 
 
-def test_rejected_and_uncertain_candidates_leave_incumbent_optimizer_unchanged(runtime, preparer):
+def test_rejected_and_uncertain_candidates_leave_incumbent_optimizer_unchanged(runtime, objective):
     value, client = runtime
-    payload = prepared(value, preparer).payload
+    payload = prepared(value, objective).payload
     original = value.inference.current_runtime_load_id()
     candidate = value.training.train_candidate(payload)
     assert value.training.train_candidate(payload) == candidate
@@ -214,9 +216,9 @@ def test_rejected_and_uncertain_candidates_leave_incumbent_optimizer_unchanged(r
     assert value.inference.current_runtime_load_id() == original
 
 
-def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime, preparer, tmp_path):
+def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime, objective, tmp_path):
     value, client = runtime
-    candidate = value.training.train_candidate(prepared(value, preparer).payload)
+    candidate = value.training.train_candidate(prepared(value, objective).payload)
     value.inference.activate_candidate(candidate)
     assert value.inference.pending_training_job_id == candidate.training_job_id
     # Reloading a different head after a failed publication drops the pending candidate.
@@ -226,20 +228,20 @@ def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime,
     restored = Deployment(value.config, client)
     try:
         restored.inference.activate_checkpoint(Artifact.local(Path(candidate.checkpoint_path)))
-        restored.backend(preparer).acknowledge_commit(1, candidate.training_job_id)
+        restored.backend(objective).acknowledge_commit(1, candidate.training_job_id)
         assert restored.inference.current_runtime_load_id() != value.inference.serving_runtime_load_id()
-        restored.training.train_candidate(prepared(restored, preparer, step=1).payload)
+        restored.training.train_candidate(prepared(restored, objective, step=1).payload)
         assert client.calls[-1][0].state_path == "tinker://update-1/state"
         assert client.initializations == 1
     finally:
         restored.shutdown()
 
 
-def test_live_versions_and_rollback_bind_exact_snapshots(runtime, preparer, tmp_path):
+def test_live_versions_and_rollback_bind_exact_snapshots(runtime, objective, tmp_path):
     value, _ = runtime
-    candidate = value.training.train_candidate(prepared(value, preparer).payload)
+    candidate = value.training.train_candidate(prepared(value, objective).payload)
     activated = value.inference.activate_candidate(candidate)
-    value.backend(preparer).acknowledge_commit(1, candidate.training_job_id)
+    value.backend(objective).acknowledge_commit(1, candidate.training_job_id)
     live = Artifact(LiveWeightArtifactRef("live", "release", "parent", activated.runtime_load_id), None)
     assert value.inference.snapshot(live)[0] == "tinker://update-1/sampler"
     assert value.training.incumbent.state_path == "tinker://update-1/state"
@@ -325,31 +327,32 @@ def test_unsupported_chat_options_fail_explicitly(runtime, tmp_path, extra):
     assert not client.sampled
 
 
-def test_schedule_keeps_comparison_sets_and_handles_epochs(preparer):
-    preparer.scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
+def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
+    objective.supports_multiple_epochs = True
+    scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_step(batch, preparer.name, {}, runtime_load_id="v", batch_size=1)
+    step = prepare_tinker_step(batch, objective.name, {}, scheduling, runtime_load_id="v", batch_size=1)
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
 
 
-def test_stale_policy_is_dropped_through_generic_backend(runtime, preparer):
+def test_stale_policy_is_dropped_through_generic_backend(runtime, objective):
     value, client = runtime
-    backend = value.backend(preparer)
+    backend = value.backend(objective)
     result = backend.prepare_step(TrainingBatch("stale", (item("old:0"),)), {}, 0)
     assert result.outcome == "drop"
     assert not client.calls
 
 
-def test_skip_and_unsupported_loss_do_not_mutate_remote(runtime, preparer):
+def test_skip_and_unsupported_loss_do_not_mutate_remote(runtime, objective):
     value, client = runtime
-    preparer.action = "skip"
-    assert prepared(value, preparer).action == "skip"
-    preparer.action = "train"
-    preparer.loss = "sao"
+    objective.action = "skip"
+    assert prepared(value, objective).action == "skip"
+    objective.action = "train"
+    objective.loss_family = "sao"
     with pytest.raises(ValueError, match="unsupported Tinker loss"):
-        prepared(value, preparer)
+        prepared(value, objective)
     assert not client.calls
 
 
@@ -453,7 +456,7 @@ def test_bad_runtime_configuration_fails_without_api_key(tmp_path, options):
         runtime_factory.parse_config({"state_dir": str(tmp_path), **options}, {})
 
 
-def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, preparer):
+def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, objective):
     import time
     from dataclasses import dataclass
 
@@ -472,7 +475,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, pr
 
         @classmethod
         def training_spec(cls):
-            return WeightTrainingSpec(preparer.name, "importance_sampling", ThresholdProcessor)
+            return WeightTrainingSpec(objective.name, ThresholdProcessor)
 
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -595,12 +598,12 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         dispatcher.close()
 
 
-def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, preparer, tmp_path):
+def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, objective, tmp_path):
     value, _ = runtime
     inference = value.inference
     base = empty_artifact(tmp_path)
     first = inference.activate_checkpoint(base)
-    candidate = value.training.train_candidate(prepared(value, preparer).payload)
+    candidate = value.training.train_candidate(prepared(value, objective).payload)
     selected = inference.activate_candidate(candidate)
     published = Artifact.local(Path(candidate.checkpoint_path))
     inference.activate_checkpoint(published)
@@ -614,7 +617,9 @@ def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, pr
     assert inference.activate_checkpoint(rollback) == latest
 
 
-def test_configured_batch_size_respects_error_remainder(preparer):
-    preparer.scheduling = StepScheduling(batch_size="configured", remainder="error")
+def test_configured_batch_size_respects_error_remainder(objective):
+    scheduling = StepScheduling(batch_size="configured", remainder="error")
     with pytest.raises(ValueError, match="configured batch_size"):
-        prepare_tinker_step(TrainingBatch("batch", (item("v"),)), preparer.name, {}, runtime_load_id="v", batch_size=2)
+        prepare_tinker_step(
+            TrainingBatch("batch", (item("v"),)), objective.name, {}, scheduling, runtime_load_id="v", batch_size=2
+        )

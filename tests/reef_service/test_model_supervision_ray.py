@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 
 from reef.runtime.recovery import FileTrainingJobStore
+from reef.train.algos import StepScheduling
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
@@ -328,7 +329,7 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
 
     ray, namespace = deployment.ray, deployment.namespace
     training, runtime = connect_ray_runtime(actor_name="training", namespace=namespace, inference_timeout_s=30)
-    RuntimeCandidateBackend(training, "sft", inference_runtime=runtime)
+    RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=runtime)
     backend = runtime.inference_handler
 
     async def infer():
@@ -386,7 +387,7 @@ def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployme
     training, runtime = connect_ray_runtime(
         actor_name="training", namespace=deployment.namespace, inference_timeout_s=30
     )
-    coordinator = RuntimeCandidateBackend(training, "sft", inference_runtime=runtime)
+    coordinator = RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=runtime)
     path = deployment.directory / "job.json"
     marker = read_marker(path)
     (deployment.directory / "checkpoint.json").write_text(json.dumps({"version": "checkpoint:2"}))
@@ -496,7 +497,7 @@ class ScheduledTrainingBackend(TrainingBackend):
     def context(self):
         return self._context
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state):
+    def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
         raise AssertionError("unexpected prepare_training_step in this fixture")
 
     def prepare(self, payload, *, job_id, rollout_id, prior_marker):

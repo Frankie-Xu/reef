@@ -28,7 +28,7 @@ Start with Recipe and add only what the method actually needs.
 |                                             |                                                  | updates; subclass only for a |
 |                                             |                                                  | new shape                    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| turn a batch into a signal                  | `Step preparer <#step-preparer>`__               | weight-training methods      |
+| turn a batch into a signal                  | `Training objective <#training-objective>`__     | weight-training methods      |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -135,7 +135,7 @@ for every scenario in a deployment.
 .. code:: text
 
    Recipe                       record-only by default   reef.recipe
-   ├── WeightTrainingRecipe     step preparer, loss family, separate runtimes
+   ├── WeightTrainingRecipe     training objective, loss family, separate runtimes
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
@@ -197,8 +197,9 @@ Common members
 
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open). Weight-training recipes add
-``training_spec()``, which binds the processor, the registered or dotted step
-preparer, and the backend loss family; ``max_staleness``, the accepted
+``training_spec()``, which binds the processor, the registered or dotted training
+objective, which declares the backend loss family, and the ``StepScheduling`` the
+runtime cuts each batch with; ``max_staleness``, the accepted
 producing-to-serving version lag, which must match the runtime; and
 ``candidate_evaluation``, the optional plugin configured by the deployment's
 ``evaluation`` section.
@@ -217,8 +218,8 @@ producing-to-serving version lag, which must match the runtime; and
        def training_spec(cls) -> WeightTrainingSpec:
            return WeightTrainingSpec(
                processor=MyMethodProcessor,
-               step_preparer="my_method.prepare:prepare_step",
-               loss_family="my_method",
+               objective="my_method.objective:MyObjective",
+               scheduling=StepScheduling(unit="sample"),
            )
 
 ``frozen=True`` is required by the base. ``kw_only=True`` keeps later fields
@@ -821,60 +822,87 @@ Use ``group_id`` on each member for grouped batches. Read captured tensors from
 ``output_schema`` defaults to ``TrainingBatch``. Keep batches serializable, with
 no handles to services, files, threads or models.
 
-Step preparer
--------------
+Training objective
+------------------
+
+Each method defines a ``TrainingObjective`` in its own ``objective.py``. It
+owns full-batch signal preparation and declares the backend loss family.
+Recipes bind it with ``WeightTrainingSpec(objective="my_method.objective:MyObjective",
+processor=MyProcessor, scheduling=StepScheduling(...))``. The dotted reference names a class with a zero-argument
+constructor or an existing instance; its module must be importable in both the
+service and training processes.
 
 .. code:: python
 
-   from reef.train.algos import StepSignal
+   from reef.train.algos import TrainingObjective, StepSignal
+   from reef.train.algos.helpers import next_steps
+   from reef.train.types import TrainingBatch, trajectories
    from reef.core.trajectories import trajectory_reward
 
-A preparer turns a reserved batch into a pure, backend-neutral signal. Normally
-it is a plain function named by the recipe as ``package.module:callable``, and
-its module must be importable in both the service and the training process.
+   class MyObjective(TrainingObjective):
+       name = "my_method"
+       loss_family = "my_method"
 
-.. code:: python
+       def prepare(self, batch, state) -> StepSignal:
+           samples = trajectories(batch)
+           steps = next_steps(state)
+           return StepSignal(
+               action="train",
+               advantages=tuple(trajectory_reward(sample) for sample in samples),
+               next_algorithm_state={"steps": steps},
+               metrics={"steps": steps},
+           )
 
-   def prepare_step(batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-       samples = trajectories(batch)
-       steps = next_steps(state)
-       return StepSignal(
-           action="train",
-           loss_family="my_method",
-           advantages=tuple(trajectory_reward(sample) for sample in samples),
-           next_algorithm_state={"steps": steps},
-           metrics={"steps": steps},
-       )
+For a shared short name, decorate the class with ``@register_objective`` from
+``reef.train.algos.registry``; importing its package registers it. The same
+function accepts an explicit instance. Core never imports method packages.
+``WeightTrainingSpec.loss_family`` is derived from the objective, so neither
+the recipe nor the signal repeats that choice.
 
-+--------------------------+-------------------------------------------------+
-| Field                    | Contract                                        |
-+==========================+=================================================+
-| ``action``               | ``train`` runs a backend step; ``skip`` commits |
-|                          | a state-only transition                         |
-+--------------------------+-------------------------------------------------+
-| ``loss_family``          | the backend objective for this step             |
-+--------------------------+-------------------------------------------------+
-| ``advantages``           | optional per-sample values, in batch order      |
-+--------------------------+-------------------------------------------------+
-| ``next_algorithm_state`` | committed only after the step succeeds          |
-+--------------------------+-------------------------------------------------+
-| ``metrics``              | method telemetry carried to the commit record   |
-+--------------------------+-------------------------------------------------+
-| ``scheduling``           | how a runtime materializes a grouped batch:     |
-|                          | ``unit`` is ``comparison_set`` or ``sample``,   |
-|                          | ``batch_size`` is ``configured``, ``actual``,   |
-|                          | or a positive int                               |
-+--------------------------+-------------------------------------------------+
-
-A preparer owns method math and nothing else. It must not import a runtime, Ray,
-torch, or Slime; execute a training job; read deployment configuration; mutate
-the reserved batch; or commit state outside ``next_algorithm_state``. The
-recipe's loss family, the signal's loss family, the driver environment, and the
-backend flags must agree. Reef rejects a mismatch at startup or during step
+``WeightTrainingSpec.scheduling`` is the recipe's ``StepScheduling``
+(``reef.core.batches``): the rollout unit (``comparison_set`` or ``sample``),
+rollouts per optimizer step (``configured``, ``actual`` or an int), ``epochs``,
+``shuffle`` and ``remainder`` handling. It is deployment configuration rather
+than method math, so it lives on the recipe and the runtime carries it to the
+backend with the objective reference. An objective declares only what its loss
+tolerates: ``supports_multiple_epochs`` (default ``False``) says whether passes
+after the first, which train off-policy against log-probs computed once, are
+valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
+``epochs > 1`` otherwise, at recipe build and again in each backend before
 preparation.
 
-Use a ``StepPreparer`` subclass with ``@register_step_preparer`` only when
-several recipes need a stable shared name.
+``StepSignal`` carries:
+
+- ``action``: ``train`` runs backend training; ``skip`` commits a state-only
+  transition.
+- ``advantages``: optional per-trajectory values, in batch order.
+- ``next_algorithm_state``: proposed state committed through the trainer's
+  existing step lifecycle.
+- ``metrics``: method telemetry carried to the commit record.
+
+``prepare`` runs on the complete reserved batch before optimizer or worker
+partitioning. Compute group-relative statistics here. Keep this entry point
+free of torch, Ray, Slime and Tinker imports. It must not mutate the batch,
+execute training, or commit state. Model-dependent terms (critic-based GAE,
+reference-model KL) stay in the backend implementation after the required
+forward passes. Both Slime and Tinker use the same objective preparation;
+the selected backend resolves its own loss implementation lazily.
+
+Migration: move the former ``StepPreparer.__call__`` body to
+``TrainingObjective.prepare`` in the method's ``objective.py``, declare
+``loss_family`` on that class, and remove it from ``StepSignal``. Move the
+``StepScheduling`` the preparer returned to the recipe:
+``WeightTrainingSpec(step_preparer=..., loss_family=...)`` becomes
+``WeightTrainingSpec(objective=..., scheduling=...)``, and ``StepSignal`` no
+longer carries ``scheduling``. Declare ``supports_multiple_epochs = True`` on
+an objective whose loss is clipped for off-policy passes. Plain function
+references are replaced by objective class/instance references. Runtime
+preparation's string argument is now named ``objective`` and is followed by
+the recipe's ``scheduling`` in every ``prepare_training_step`` signature,
+including the coordinator RPC. Update custom runtimes and upgrade coordinators
+and workers together. Experiment backend metadata now uses ``objective`` and
+``scheduling`` instead of ``step_preparer``; committed algorithm state,
+training payloads, checkpoints and artifact formats are unchanged.
 
 Harness method
 --------------

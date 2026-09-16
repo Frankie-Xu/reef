@@ -1,16 +1,16 @@
-"""Shared test-only grouped-pg processor and step preparer.
+"""Shared test-only grouped-pg processor and training objective.
 
 Group-relative pg is the shape a cookbook grouped method would register: a
-processor that groups reports by ``metadata.comparison_set`` and a preparer
+processor that groups reports by ``metadata.comparison_set`` and an objective
 that turns the resulting ``TrainingBatch`` into group-relative
 advantages. Both live here rather than in ``reef`` because no bundled recipe
 uses them — the grouping machinery they exercise (group keys, slots, the
 ``decide_group`` barrier, ``TrainingBatch`` through the trainer and the
 runtime) IS production code, and these suites are what keep it pinned.
 
-``GROUPED_PG_PREPARER`` is the dotted ``module:callable`` spelling the
-resolver (``reef.train.algos.registry.resolve_preparer``) accepts, so tests exercise
-the same custom-preparer path a reader's package would.
+``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
+resolver (``reef.train.algos.registry.resolve_objective``) accepts, so tests exercise
+the same custom-objective path a reader's package would.
 """
 
 from __future__ import annotations
@@ -21,24 +21,28 @@ from typing import Any
 
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
-from reef.train.algos import StepSignal
+from reef.train.algos import StepSignal, TrainingObjective
 from reef.train.algos.helpers import next_steps
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectory_groups
 
-GROUPED_PG_PREPARER = "reef_service._grouped_pg:prepare_grouped_pg"
+GROUPED_PG_OBJECTIVE = "reef_service._grouped_pg:GroupedPolicyObjective"
 
 
-def prepare_grouped_pg(batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-    advantages: list[float] = []
-    for comparison_set in trajectory_groups(batch):
-        rewards = [trajectory_reward(sample) for sample in comparison_set]
-        mean = sum(rewards) / len(rewards)
-        std = (sum((reward - mean) ** 2 for reward in rewards) / len(rewards)) ** 0.5
-        advantages.extend((reward - mean) / std if std else 0.0 for reward in rewards)
-    steps = next_steps(state)
-    normalized = tuple(advantages)
-    return StepSignal("train", "pg", {"steps": steps}, {"advantages": normalized}, normalized)
+class GroupedPolicyObjective(TrainingObjective):
+    name = "test-grouped-pg"
+    loss_family = "pg"
+
+    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+        advantages: list[float] = []
+        for comparison_set in trajectory_groups(batch):
+            rewards = [trajectory_reward(sample) for sample in comparison_set]
+            mean = sum(rewards) / len(rewards)
+            std = (sum((reward - mean) ** 2 for reward in rewards) / len(rewards)) ** 0.5
+            advantages.extend((reward - mean) / std if std else 0.0 for reward in rewards)
+        steps = next_steps(state)
+        normalized = tuple(advantages)
+        return StepSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
 
 
 def _comparison_set_id(report: AgentRecord) -> str | None:

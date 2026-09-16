@@ -122,7 +122,7 @@ From a report to a gradient:
    fairly within one policy version. A malformed attempt raises an explicit training data error; discarded
    groups are visible in the processor's `status()` (`discarded_groups`).
 4. **The step.** A released group becomes one training unit. The recipe
-   reuses the `tttd` step preparer (grouped leave-one-out advantages) and
+   reuses the `tttd` training objective (grouped leave-one-out advantages) and
    the `tttd` Slime loss family, CORAL sibling groups have the same shape
    as TTT-Discover steps, so the recipe adds only the group barrier. A group
    where every sibling scored the same still trains as a well-defined

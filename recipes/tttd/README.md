@@ -12,7 +12,7 @@ Reproduction of [Learning to Discover at Test Time](https://arxiv.org/abs/2601.1
 tttd/
   recipe.py        TTTDRecipe: training spec, loss family "tttd", grid configuration
   processor.py     reported feedback, grouped: the step is the full grid of sibling attempts
-  preparer.py      builds the grouped policy batch for the driver
+  objective.py     shared grouped adaptive-entropic advantages and backend loss selection
   report.py        TTTDGroupedRolloutReport, the declared report schema
   tinker.py        remote importance-sampling loss and centered frozen-base KL
   slime/           the training-plane objective: the grouped entropic loss
@@ -24,4 +24,4 @@ tttd/
 
 [The tttd recipe page](../../docs/user-guide/recipes/tttd.rst) covers the runtime sequence, a reduced smoke, and recovery behavior, and the [example README](examples/tttd/README.md) records implementation details, paper fidelity, and the completed reproduction.
 
-The optional [Tinker backend](../../docs/user-guide/tinker.rst) reuses the same recipe, grouped preparer, and feedback protocol. Start with the [two-rollout smoke](../../tutorials/tinker/README.md); the benchmark results above were obtained with Slime and are not Tinker validation results.
+The optional [Tinker backend](../../docs/user-guide/tinker.rst) reuses the same recipe, grouped objective, and feedback protocol. Start with the [two-rollout smoke](../../tutorials/tinker/README.md); the benchmark results above were obtained with Slime and are not Tinker validation results.
