@@ -196,6 +196,17 @@ def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> No
     assert signal.metrics["constant_groups"] == 1
 
 
+def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_count() -> None:
+    p = processor()
+    for task in ("harbor-00000-000", "harbor-00000-001"):
+        for index in range(2):
+            played(p, task, index, 1.0)
+    signal = resolve_objective("spade").prepare(p.build_batch(), {"steps": 3})
+    assert signal.action == "skip" and signal.advantages is None
+    assert signal.next_algorithm_state == {"steps": 3}
+    assert signal.metrics == {"constant_groups": 2, "skipped": "every group is constant"}
+
+
 def test_the_recipe_binds_the_processor_the_objective_and_its_schedule() -> None:
     spec = SpadeRecipe.training_spec()
     assert spec.processor is SpadeProcessor and spec.objective == "spade"
