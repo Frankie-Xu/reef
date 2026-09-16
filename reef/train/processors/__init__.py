@@ -2,7 +2,9 @@
 
 Feedback either arrives as reports referencing inference records — where it is
 whatever the report carries, scores, text, or structured objects, not only
-numbers — or is mined from the traffic itself.
+numbers — or is mined from the traffic itself. ``TaskGenerationProcessor``
+declares asynchronous generation and validation hooks for task-producing
+processors; its execution lifecycle is not implemented yet.
 
 The design — the four-method contract, the two engines and the one question
 that picks between them, what a recipe writes on each tier, and a record's
@@ -16,10 +18,12 @@ retention, objectives own the training signal.
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.computed import ComputedFeedbackProcessor
 from reef.train.processors.reported import ReportedFeedbackProcessor
+from reef.train.processors.task_generation import TaskGenerationProcessor
 
 __all__ = [
     "ComputedFeedbackProcessor",
     "DataProcessor",
     "ReportedFeedbackProcessor",
     "RetentionDecision",
+    "TaskGenerationProcessor",
 ]
