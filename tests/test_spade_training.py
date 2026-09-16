@@ -619,7 +619,8 @@ def test_refused_proposals_are_reported_as_zero_and_never_stay_under_the_root(tm
 
 
 def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path: Path) -> None:
-    p, generator = generating(tmp_path, StandInGenerator(tmp_path / "tasks", is_solvable=False), count=1)
+    refusing = StandInGenerator(tmp_path / "tasks", is_solvable=False)
+    p, generator = generating(tmp_path, refusing, count=1, generations=1)
     assert not looked(p)
     assert generator.deleted == ["harbor-00000-000-inspection"] and generator.plays == []
     assert generator.reports[0]["score"] == 0.0
@@ -627,13 +628,25 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     assert generator.manifests == []
 
     unplayable = StandInGenerator(tmp_path / "tasks2", play_error="Failed to start tmux session. Error: None")
-    p, _ = generating(tmp_path / "second", unplayable, count=1)
+    p, _ = generating(tmp_path / "second", unplayable, count=1, generations=1)
     assert not looked(p)
     assert [call["arm"] for call in unplayable.plays] == [
         "plain"
     ], "the hint arm is not played for a task that cannot run"
     assert unplayable.deleted == ["harbor-00000-000-inspection"]
     assert unplayable.reports[0]["metadata"]["refusal"].startswith("the Reasoning Agent could not play the task")
+
+
+def test_a_generation_that_measured_no_task_does_not_block_the_next_one(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    refusing = StandInGenerator(tmp_path / "tasks", is_solvable=False)
+    p, generator = generating(tmp_path, refusing, worker=worker, count=1)
+    assert not p.ready() and [job.generation for job in worker.submitted] == [0]
+    worker.finish()
+    assert not p.ready(), "generation 0 lands without a task and generation 1 starts on the same look"
+    assert [job.generation for job in worker.submitted] == [0, 1], "no batch can come; none was acknowledged"
+    assert p.status()["generation"] == {"in_flight": 1, "next": 2, "completed": 1, "of": 3, "last_error": ""}
+    assert generator.deleted == ["harbor-00000-000-inspection"] and generator.manifests == []
 
 
 def test_a_generator_that_goes_away_ends_the_generation_with_what_ran(tmp_path: Path) -> None:

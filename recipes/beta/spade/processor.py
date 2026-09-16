@@ -13,9 +13,9 @@ written (a duplicate refused), validated, played ``rollouts_per_task`` times as 
 and ``hint_plays`` times with the hint appended (measured only), and reported against the Designer's
 receipt with its regret as the score. The first generation starts when the processor first looks for a
 batch; the next once ``batches_per_generation`` batches were acknowledged since the previous one started
-(its episodes train while it runs), so the Designer always writes for the policy that trains now. Every
-generation's report goes under ``state_dir``, which is what a restart reads to carry on with the next
-number and the last experience.
+(its episodes train while it runs), so the Designer always writes for the policy that trains now; a
+generation that measured no task is followed at once. Every generation's report goes under ``state_dir``,
+which is what a restart reads to carry on with the next number and the last experience.
 
 The Designer's own reports and the hint arm's reports share the scenario with the training data; the
 processor tells them apart (``metadata.role``, the episode's ``arm`` label) and releases them unassembled.
@@ -198,6 +198,8 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         # Batches acknowledged since the last generation started; the next one is due at batches_per_generation.
         self._batches_since_generation = 0
         self._has_landed = False
+        # A generation without a task makes no batch; waiting for one would stall the loop until a restart.
+        self._landed_empty = False
         self._last_error = ""
 
     # ------------------------------------------------------- the reported half
@@ -278,6 +280,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             self._completed += 1
             self._experience = outcome.record.experience
             self._last_error = outcome.record.error
+            self._landed_empty = not outcome.record.measures
             logger.info(
                 "SPADE generation %d on scenario %r: %d tasks of %d proposals under %s",
                 outcome.record.generation,
@@ -288,7 +291,9 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             )
         if self._in_flight is not None or self._next_generation >= self.generations:
             return
-        is_due = not self._has_landed or self._batches_since_generation >= self.batches_per_generation
+        is_due = (
+            not self._has_landed or self._landed_empty or self._batches_since_generation >= self.batches_per_generation
+        )
         if not is_due:
             return
         job = GenerationJob(receipt=f"generation-{self._next_generation:05d}", generation=self._next_generation)
@@ -297,6 +302,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             self._next_generation += 1
             # The batches this generation's episodes make count toward the next one.
             self._batches_since_generation = 0
+            self._landed_empty = False
         else:
             self._last_error = "the generation worker is closed or broken; no further generation runs"
 
