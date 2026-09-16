@@ -65,6 +65,21 @@ The sandbox jobs set ``REEF_REQUIRE_SANDBOX=1``: a missing bubblewrap binary or
 failed nested-jail preflight fails CI instead of silently skipping isolation
 checks. Local runs still skip these tests on unsupported hosts.
 
+On pull requests, these matrices run only after lint succeeds and a maintainer
+reruns the latest ready workflow with ``gh run rerun RUN_ID`` (or **Re-run all
+jobs** in Actions). The first ready run intentionally stops at ``Approve full
+CI`` awaiting that rerun. The approval job checks the rerun initiator's current
+repository role: ``maintain`` and ``admin`` are accepted; ``write`` is not.
+Drafts run only lint, type checks, and static Dockerfile checks. Documentation
+builds and applicable harness smoke workflows also require their own rerun.
+New pushes cancel old runs and require approval for the new revision; turning
+a PR back into a draft cancels its runs without starting heavy jobs. Approval
+rejects closed, draft, and superseded revisions. Heavy jobs require approval
+from the same attempt, so rerun the whole workflow rather than individual or
+failed jobs. Manual dispatches check the initiating user's role too. Pushes to
+``main`` remain automatic. See the
+`maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
+
 Tests in the same file stay in one worker, preserving
 module fixture reuse. In an activated development environment, install the same
 test runner plugin and reproduce the parallel run:

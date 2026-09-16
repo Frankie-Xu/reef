@@ -4,10 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   COVERAGE_VERSION: "7.16.1"
@@ -76,7 +78,17 @@ jobs:
       - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
+  approval:
+    needs: [lint]
+    if: github.event_name != 'push' && !github.event.pull_request.draft
+    uses: ./.github/workflows/ci-approval.yml
+
   test-suites:
+    needs: [lint, approval]
+    if: >-
+      !cancelled() && needs.lint.result == 'success' &&
+      (github.event_name == 'push' ||
+      (needs.approval.result == 'success' && needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)))
     name: ${{ matrix.suite }} tests (${{ matrix.python-version }})
     # Real nested network namespaces are only proven on the GitHub runner.
     runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-latest' || 'blacksmith-8vcpu-ubuntu-2404' }}
@@ -261,6 +273,11 @@ jobs:
           if-no-files-found: error
 
   package:
+    needs: [lint, approval]
+    if: >-
+      !cancelled() && needs.lint.result == 'success' &&
+      (github.event_name == 'push' ||
+      (needs.approval.result == 'success' && needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)))
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:

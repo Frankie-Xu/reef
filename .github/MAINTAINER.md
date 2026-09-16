@@ -197,6 +197,40 @@ comments and may respectfully challenge a request with technical reasoning.
 
 ### 5. Continuous integration
 
+Draft pull requests run only lint, type checks, and static Dockerfile checks.
+The first ready run stops at `Approve full CI` with an "Awaiting maintainer
+approval" message. After checking the author's local validation, any repository
+collaborator with `maintain` or `admin` permission can release a run:
+
+```bash
+gh run rerun RUN_ID --repo Human-Agent-Society/reef
+```
+
+The Actions UI equivalent is **Re-run all jobs**. Rerun the latest ready run for
+each relevant workflow: `ci`, `Docs Build`, and `harness-smoke`. The main test
+and package matrices wait for lint before checking approval. Use a full rerun
+so the approval job executes in the same attempt as the heavy jobs; partial
+reruns cannot reuse an earlier attempt's authorization.
+
+The shared approval workflow checks `github.triggering_actor`, rather than
+`github.actor`, which remains the original author during a rerun. It reads the
+collaborator's current `role_name` from GitHub and accepts only `maintain` or
+`admin`. Ordinary `write` permission is insufficient. This includes external
+collaborators and follows repository role changes without a separate reviewer
+list, organization invitation, or protected environment. A maintainer may
+release their own PR's CI; this compute decision does not replace code review.
+
+Approval covers the current revision and attempt. New commits and conversion
+to draft cancel previous runs. Before releasing heavy jobs, the approval job
+checks that the PR is still open, ready, and at the same head SHA. Authors must
+batch review fixes and request a rerun for the new revision. Manual dispatches
+also require `maintain` or `admin` permission; `main` push checks stay automatic.
+
+Retain the required `lint`, `test (3.10)`, `test (3.11)`, `test (3.12)`, and
+package checks in the `protect-main` ruleset. The test gates fail when their
+suites are skipped, and `docs-gate` fails unless the documentation build
+succeeds. Do not replace these gates with conditionally skipped required jobs.
+
 Required checks must pass on the reviewed revision. CI is a gate, not a
 substitute for review. The Merge Oncall may request focused or environment-
 specific validation when the standard checks do not cover the affected path.

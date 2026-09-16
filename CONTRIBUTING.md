@@ -329,6 +329,34 @@ Use a draft pull request when the design or implementation is not ready for
 acceptance. Do not mix a functional change with drive-by formatting, generated
 rewrites, or unrelated cleanup.
 
+Draft pull requests run lint, type checks, and static Dockerfile checks only;
+the test and package matrices, documentation build, and real-harness smoke
+tests wait until the pull request is ready and a maintainer approves full CI.
+Run the relevant checks locally and push a complete batch of changes before
+marking the pull request ready. Complete each round of review fixes locally
+before pushing again.
+
+The first run of a ready pull request stops at `Approve full CI` with an
+"Awaiting maintainer approval" message. Any collaborator with repository
+`maintain` or `admin` permission can release the current revision by rerunning
+the entire workflow:
+
+```bash
+gh run rerun RUN_ID --repo Human-Agent-Society/reef
+```
+
+The equivalent Actions UI command is **Re-run all jobs**. Each workflow needs
+its own rerun; use the latest ready run for `ci`, `Docs Build`, and applicable
+`harness-smoke` checks. The main `ci` workflow runs lint before checking approval.
+Use a full rerun, not a single-job or failed-jobs-only rerun: approval is bound
+to the attempt and must run again. Ordinary write access cannot authorize CI.
+
+A new push or conversion back to draft cancels the previous run, and a new
+ready revision needs approval again. Re-running an old run cannot authorize a
+newer revision. Missing approval or skipped tests do not satisfy the required
+test checks. Manual workflow dispatches also check the triggering user's
+`maintain` or `admin` permission; pushes to `main` run automatically.
+
 ## Review and acceptance
 
 Maintainers route reviews according to the affected areas. The

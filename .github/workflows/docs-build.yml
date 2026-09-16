@@ -5,6 +5,7 @@ on:
   # required check. The path filter remains on main pushes to avoid needless
   # post-merge builds.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches:
       - main
@@ -22,14 +23,24 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: docs-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  approval:
+    if: github.event_name != 'push' && !github.event.pull_request.draft
+    uses: ./.github/workflows/ci-approval.yml
+
   build:
-    name: docs-gate
+    name: Build documentation
+    needs: [approval]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+      (needs.approval.result == 'success' && needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)))
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     defaults:
@@ -62,3 +73,15 @@ jobs:
 
       - name: Build documentation site
         run: npm run build
+
+  gate:
+    name: docs-gate
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require the documentation build to pass
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success
