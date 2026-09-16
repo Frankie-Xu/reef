@@ -12,6 +12,8 @@ from aiohttp import web
 
 from reef.record2dataset.designer import ReefDesigner
 from reef.record2dataset.service import GeneratorService, HarborChecks, ReefTaskPlays, readiness_probes
+from reef.record2dataset.harbor import HarborRuns
+from reef.record2dataset.service import GeneratorService, HarborChecks, JobRunner, ReefTaskPlays
 from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.generator import GeneratorSettings, generator_settings
 from reef.service.deploy.inference import local_service_url
@@ -38,14 +40,16 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         agent_host=generator.agent_host,
         concurrency=generator.concurrency,
     )
+    runs = HarborRuns()
     return GeneratorService(
         tasks_root=tasks_root,
         designer=designer,
-        checks=HarborChecks(harbor=generator.harbor),
+        checks=HarborChecks(harbor=generator.harbor, runs=runs),
         plays=plays,
         default_model=settings.upstream_model or settings.model_path,
         designer_model=generator.designer_model,
         probes=readiness_probes(harbor=generator.harbor),
+        jobs=JobRunner(runs),
     )
 
 

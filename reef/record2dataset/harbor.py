@@ -17,6 +17,7 @@ that write it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -24,6 +25,8 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -290,29 +293,93 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     return TrialOutcome(reward=float(value), exception=exception_text, agent_note=agent_note)
 
 
-def run_harbor_agent(task_path: Path, agent: str, jobs_path: Path, *, harbor: str, timeout_s: float) -> TrialOutcome:
+def signal_process_group(process: subprocess.Popen[str], signum: int) -> None:
+    """Signal the whole group of a child that is still running; a group already gone is no error."""
+    if process.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signum)
+
+
+def wait_or_kill(process: subprocess.Popen[str], *, deadline: float) -> None:
+    """Wait for the child until the monotonic ``deadline``; a kill to its whole group when it is still there."""
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        signal_process_group(process, signal.SIGKILL)
+        process.wait()
+
+
+def stop_process_groups(processes: Sequence[subprocess.Popen[str]], *, grace_s: float) -> None:
+    """A term to every group, so Harbor's compose children can take their containers down; a kill after ``grace_s``."""
+    for process in processes:
+        signal_process_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + grace_s
+    for process in processes:
+        wait_or_kill(process, deadline=deadline)
+
+
+class HarborRuns:
+    """The harbor children in flight, each its own process group: started here so a closed registry refuses one."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.live: dict[int, subprocess.Popen[str]] = {}
+        self.is_closed = False
+
+    def start(self, command: Sequence[str]) -> subprocess.Popen[str]:
+        """Start ``command`` in its own session and keep it until ``release``; refused once the runs are closed."""
+        with self.lock:
+            if self.is_closed:
+                raise RuntimeError("the generator is stopping; no new harbor run")
+            process = subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True
+            )
+            self.live[process.pid] = process
+        return process
+
+    def release(self, process: subprocess.Popen[str]) -> None:
+        with self.lock:
+            self.live.pop(process.pid, None)
+
+    def pids(self) -> tuple[int, ...]:
+        with self.lock:
+            return tuple(self.live)
+
+    def terminate_all(self, *, grace_s: float = STOP_GRACE_S) -> tuple[int, ...]:
+        """Close the runs, then stop every live group: a term, and a kill for what is still alive after ``grace_s``."""
+        with self.lock:
+            self.is_closed = True
+            processes = list(self.live.values())
+        stop_process_groups(processes, grace_s=grace_s)
+        return tuple(process.pid for process in processes)
+
+
+def run_harbor_agent(
+    task_path: Path, agent: str, jobs_path: Path, *, harbor: str, timeout_s: float, runs: HarborRuns | None = None
+) -> TrialOutcome:
     """Run ``agent`` on the task through the harbor command line, in its own process group, and read the trial."""
     command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", "docker", "-o", str(jobs_path), "-n", "1"]
-    with subprocess.Popen(
-        command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True
-    ) as process:
-        try:
-            _, stderr = process.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            # Harbor's compose children are in the group too: a term first, so compose can take its containers down.
-            os.killpg(process.pid, signal.SIGTERM)
+    registry = runs if runs is not None else HarborRuns()
+    process = registry.start(command)
+    try:
+        with process:
             try:
-                process.wait(timeout=STOP_GRACE_S)
+                _, stderr = process.communicate(timeout=timeout_s)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s") from None
+                stop_process_groups([process], grace_s=STOP_GRACE_S)
+                raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s") from None
+    finally:
+        registry.release(process)
     if process.returncode != 0:
+        if registry.is_closed:
+            raise RuntimeError(f"harbor run -a {agent} was stopped with the generator")
         raise RuntimeError(f"harbor run -a {agent} exited {process.returncode}: {stderr.strip()[:500]}")
     return trial_outcome(jobs_path)
 
 
-def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float = ORACLE_TIMEOUT_S) -> OracleResult:
+def oracle_check(
+    task_path: Path, *, harbor: str | None = None, timeout_s: float = ORACLE_TIMEOUT_S, runs: HarborRuns | None = None
+) -> OracleResult:
     """Solvable, and not for free: the reference solution scores 1 and doing nothing scores below 1 under Harbor."""
     executable = harbor if harbor is not None else shutil.which("harbor")
     if executable is None:
@@ -322,7 +389,9 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
         shutil.rmtree(jobs_path)
     # A run that left no trial to read says nothing about the task; only a trial's verdict can refuse it.
     try:
-        oracle = run_harbor_agent(task_path, "oracle", jobs_path / "oracle", harbor=executable, timeout_s=timeout_s)
+        oracle = run_harbor_agent(
+            task_path, "oracle", jobs_path / "oracle", harbor=executable, timeout_s=timeout_s, runs=runs
+        )
     except (RuntimeError, ValueError, OSError) as exc:
         raise OracleUnavailable(str(exc)[:500]) from exc
     if oracle.reward is None or oracle.reward < 1.0:
@@ -334,7 +403,7 @@ def oracle_check(task_path: Path, *, harbor: str | None = None, timeout_s: float
             reason = f"{reason}; {oracle.agent_note}"
         return OracleResult(is_solvable=False, reason=reason, oracle_reward=oracle.reward)
     try:
-        nop = run_harbor_agent(task_path, "nop", jobs_path / "nop", harbor=executable, timeout_s=timeout_s)
+        nop = run_harbor_agent(task_path, "nop", jobs_path / "nop", harbor=executable, timeout_s=timeout_s, runs=runs)
     except (RuntimeError, ValueError, OSError) as exc:
         raise OracleUnavailable(str(exc)[:500]) from exc
     if nop.reward is None or nop.reward >= 1.0:

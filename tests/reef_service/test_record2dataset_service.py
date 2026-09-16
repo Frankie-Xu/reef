@@ -8,6 +8,9 @@ import logging
 import os
 import stat
 import sys
+import os
+import sys
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
@@ -23,7 +26,10 @@ from reef.record2dataset import (
     DuplicateTask,
     GeneratorError,
     GeneratorService,
+    HarborChecks,
+    HarborRuns,
     HttpGenerator,
+    JobRunner,
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
@@ -33,6 +39,7 @@ from reef.record2dataset import (
     readiness_probes,
 )
 from reef.record2dataset.service import DockerProbe, HarborProbe, ModuleProbe
+from reef.record2dataset.service import CLOSE_GRACE_S
 from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
 from reef.service.deploy.generator import generator_settings
 
@@ -148,6 +155,7 @@ def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInD
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
         probes=parts.get("probes"),  # type: ignore[arg-type]
+        jobs=parts.get("jobs"),  # type: ignore[arg-type]
     )
     return built, designer, checks, plays  # type: ignore[return-value]
 
@@ -337,6 +345,35 @@ def test_a_check_that_could_not_run_is_a_failed_job_the_client_raises(tmp_path: 
 
     run_with(built, body)
     assert len(checks.calls) == 2, "the runner went on to the next job after the failed one"
+
+
+def test_closing_the_service_stops_the_harbor_run_of_the_job_in_flight(tmp_path: Path) -> None:
+    harbor = tmp_path / "harbor"
+    harbor.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+    harbor.chmod(0o755)
+    runs = HarborRuns()
+    built, _, _, _ = service(tmp_path, checks=HarborChecks(harbor=str(harbor), runs=runs), jobs=JobRunner(runs))
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
+        deadline = time.monotonic() + 10.0
+        while not runs.pids() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        return submitted["job"], runs.pids()
+
+    started = time.monotonic()
+    job_id, pids = run_with(built, body)  # type: ignore[misc]
+    assert time.monotonic() - started < CLOSE_GRACE_S, "the child honours the term, so the close never waits it out"
+    (pid,) = pids
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    job = built.jobs.get(job_id)
+    assert job is not None and job.state == "done" and job.result is not None
+    assert job.result["reason"] == "harbor run -a oracle was stopped with the generator"
+    assert runs.is_closed and runs.pids() == ()
 
 
 def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:

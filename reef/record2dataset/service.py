@@ -17,8 +17,9 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
   then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check or play.
 
-Jobs run one after another on a private thread. Everything here is stateless beyond the tasks root: a
-restarted service serves the same root.
+Jobs run one after another on a private thread; closing the service stops the harbor runs a job has in
+flight, so ``reef serve`` leaves no container behind. Everything here is stateless beyond the tasks
+root: a restarted service serves the same root.
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ from reef.record2dataset.designer import (
 )
 from reef.record2dataset.harbor import (
     GeneratedHarborTask,
+    HarborRuns,
     OracleResult,
     content_hash,
     harbor_task,
@@ -151,6 +153,8 @@ def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]
         HarborProbe(harbor=harbor),
         DockerProbe(),
     )
+# reef serve kills the generator 30 s after its term; the harbor grace and the join must both fit in that window.
+CLOSE_GRACE_S = 10.0
 
 
 # ------------------------------------------------------------------ the work
@@ -164,11 +168,14 @@ class TaskChecks(ABC):
 
 
 class HarborChecks(TaskChecks):
-    def __init__(self, *, harbor: str | None = None) -> None:
+    """The checks through the harbor command line; ``runs`` shared with the job runner so closing it stops a check."""
+
+    def __init__(self, *, harbor: str | None = None, runs: HarborRuns | None = None) -> None:
         self.harbor = harbor
+        self.runs = runs
 
     def oracle(self, task_path: Path) -> OracleResult:
-        return oracle_check(task_path, harbor=self.harbor)
+        return oracle_check(task_path, harbor=self.harbor, runs=self.runs)
 
 
 class TaskPlays(ABC):
@@ -359,9 +366,10 @@ class PlayJob(Job):
 
 
 class JobRunner:
-    """Runs jobs one after another on a private thread; a job is read back by id until the runner closes."""
+    """Runs jobs one after another on a private thread; closing stops the harbor runs in flight, then the thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, runs: HarborRuns | None = None) -> None:
+        self.runs = runs if runs is not None else HarborRuns()
         self._queue: queue.SimpleQueue[Job | None] = queue.SimpleQueue()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
@@ -389,6 +397,7 @@ class JobRunner:
                 return
             self._closed = True
             thread = self._thread
+        self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
         if thread is None:
             return
         self._queue.put(None)

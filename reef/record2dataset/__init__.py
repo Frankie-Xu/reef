@@ -41,6 +41,7 @@ from reef.record2dataset.designer import (
 )
 from reef.record2dataset.harbor import (
     GeneratedHarborTask,
+    HarborRuns,
     OracleResult,
     OracleUnavailable,
     content_hash,
@@ -58,6 +59,7 @@ from reef.record2dataset.service import (
     TaskPlays,
     readiness_probes,
 )
+from reef.record2dataset.service import GeneratorService, HarborChecks, JobRunner, ReefTaskPlays, TaskChecks, TaskPlays
 
 __all__ = [
     "Designer",
@@ -72,7 +74,9 @@ __all__ = [
     "GeneratorService",
     "HarborChecks",
     "HarborReply",
+    "HarborRuns",
     "HttpGenerator",
+    "JobRunner",
     "OracleResult",
     "OracleUnavailable",
     "ProposedTask",
