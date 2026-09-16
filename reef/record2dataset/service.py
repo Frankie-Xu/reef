@@ -151,7 +151,7 @@ class DockerProbe(ReadinessProbe):
 def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]:
     """What playing and checking a task takes: reef-eval, the harbor command line and Docker."""
     return (
-        ModuleProbe("reef_eval", hint="install reef-infra[terminus] on Python 3.12 or later"),
+        ModuleProbe("reef_eval", hint="a dependency of reef-infra; reinstall reef-infra"),
         HarborProbe(harbor=harbor),
         DockerProbe(),
     )

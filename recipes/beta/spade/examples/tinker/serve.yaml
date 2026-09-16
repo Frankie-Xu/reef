@@ -1,6 +1,6 @@
 # SPADE on Tinker: the served model writes tasks as the Designer and trains on them as the Reasoning Agent.
 # Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
-# The generator service runs under the same interpreter as Reef, which needs reef-infra[terminus] for it.
+# The generator service runs under the same interpreter as Reef.
 schema-version: 2
 reef:
   host: 127.0.0.1

@@ -939,9 +939,8 @@ Absent by default. When present, ``reef serve`` starts the generator service
 it, and publishes its address as ``${endpoints.generator}`` for the recipe to
 consume. The generator writes, checks and plays Harbor tasks for a task
 generating processor such as SPADE, under the same interpreter as the Reef
-service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker, the
-``harbor`` command line and ``reef-infra[terminus]``; the Reef service itself
-does not. ``execution.generator`` selects its executor, so a deployment can
+service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
+``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
 place it on the host that has Docker.
 
 .. config::

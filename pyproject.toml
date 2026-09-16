@@ -27,6 +27,8 @@ dependencies = [
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    # Harbor and reef-eval: the terminus runner, the task player and the generator service play Harbor tasks.
+    "reef-eval[harbor]>=0.1.1",
     "sqlalchemy>=2.0,<3",
     "tomli-w",
 ]
@@ -41,9 +43,6 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
-terminus = [
-    "reef-eval[harbor]>=0.1.1",
-]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [

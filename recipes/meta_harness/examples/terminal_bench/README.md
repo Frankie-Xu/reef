@@ -62,7 +62,7 @@ read them. From the repository root:
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[terminus]'
+pip install -e .
 git lfs install
 
 git clone https://github.com/harbor-framework/terminal-bench-2.git /opt/terminal-bench-2

@@ -175,7 +175,7 @@ def run(task: str) -> int:
         from reef_eval import Lab
     except ImportError as exc:
         raise TerminusTreeError(
-            "the terminus runner needs reef-eval: pip install 'reef-infra[terminus]' on Python 3.12 or newer"
+            "the terminus runner needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
         ) from exc
 
     trial_slug(task)  # refuse a task that cannot name its own trial file

@@ -264,4 +264,4 @@ stay apart. The proxy the agent talks to listens on this host's loopback; an
 agent that runs inside the task container (``claude-code``, ``codex`` and the
 other installed agents) needs ``--agent-host host.docker.internal`` (on Linux,
 give the container that name with Docker's ``host-gateway``), and the proxy then
-listens on every interface. Needs ``reef-infra[terminus]`` and Docker.
+listens on every interface. Needs Docker.

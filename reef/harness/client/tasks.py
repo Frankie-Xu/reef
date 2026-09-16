@@ -27,6 +27,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from reef_client.client import ReefClient, ReefClientError
 
@@ -94,10 +95,12 @@ class ReefEvalLab(TaskLab):
             from reef_eval import Lab
         except ImportError as exc:
             raise TaskPlayError(
-                "playing tasks needs reef-eval: install reef-infra[terminus] on Python 3.12 or later"
+                "playing tasks needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
             ) from exc
         # A Lab binds its asyncio primitives to the loop of its first use, so every episode gets its own Lab.
-        row = await Lab(self.work_dir).run(str(task_path), dict(agent), tags=dict(tags), key=key, **dict(overrides))
+        # reef-eval types each override by name; the caller's mapping passes through as it is.
+        options: dict[str, Any] = dict(overrides)
+        row = await Lab(self.work_dir).run(str(task_path), dict(agent), tags=dict(tags), key=key, **options)
         row_tags = dict(row.tags)
         rewards = {str(name): float(value) for name, value in dict(row.rewards).items()}
         return EpisodeRow(rewards=rewards, error=str(row_tags.get("error") or ""), trial_uri=row.uri)

@@ -105,7 +105,7 @@ def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
         generator = generator_settings(section)
     except ValueError as exc:
         raise DeployConfigError(f"generator: {exc}") from exc
-    # The same interpreter as every child reef serve starts; reef-infra[terminus] is installed for it.
+    # The same interpreter as every child reef serve starts.
     python = os.environ.get("REEF_PYTHON", sys.executable)
     probe_host = "127.0.0.1" if generator.host in ("0.0.0.0", "") else generator.host
     probe_host = f"[{probe_host}]" if ":" in probe_host and not probe_host.startswith("[") else probe_host
