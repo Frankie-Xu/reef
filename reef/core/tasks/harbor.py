@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import stat
+import tomllib
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -37,11 +38,6 @@ from pathlib import Path, PurePosixPath
 import tomli_w
 
 from reef.core.errors import ReefError
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
 
 #: The ``version`` every task.toml under ``recipes/`` declares; Harbor reads it as ``schema_version``.
 TASK_CONFIG_VERSION = "1.0"

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -177,7 +176,7 @@ def test_run_turn_is_the_binding_the_module_body_leaves() -> None:
         "(run_turn := None)\n",
         "[(run_turn := f) for f in ()]\n",
         "def other(a=(run_turn := None)):\n    return\n",
-        *(["type run_turn = int\n"] if sys.version_info >= (3, 12) else []),
+        "type run_turn = int\n",
     ):
         with pytest.raises(ValueError, match="must define a top level run_turn"):
             validate_native_loop({**LOOP[1], "code": taking + rebinding})

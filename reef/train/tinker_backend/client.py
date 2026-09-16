@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import math
 import shutil
-import sys
 import tarfile
 import urllib.request
 import uuid
@@ -61,8 +60,6 @@ class TinkerSDKClient(TinkerClient):
     _base_sampler: Any
 
     def __init__(self, base_model: str, config: TinkerConfig, api_key: str) -> None:
-        if sys.version_info < (3, 11):
-            raise RuntimeError("Tinker requires Python 3.11 or newer; Reef's other backends still support 3.10")
         try:
             self._sdk = importlib.import_module("tinker")
         except ImportError as exc:

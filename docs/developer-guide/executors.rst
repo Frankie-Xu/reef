@@ -361,7 +361,9 @@ Whole-stack deployment configuration
 
 Version 2 has no public process list: Reef assembles native inference/training
 and HTTP processes using the same Executor factory as the model workers.
-Method services are deployed independently; recipes consume their endpoints. The explicit ``services`` and
+Method services such as a PRM are deployed independently and recipes consume
+their endpoints; the one auxiliary child Reef assembles is the generator
+service of a ``generator`` section, under the ``generator`` executor role. The explicit ``services`` and
 ``execution.services`` examples below apply only to unversioned legacy stacks. The orchestrator only handles dependencies, readiness, endpoint
 publication, log tailing, failure detection and reverse-order shutdown. It
 does not contain local process or Ray placement operations.

@@ -4,7 +4,8 @@ Feedback either arrives as reports referencing inference records — where it is
 whatever the report carries, scores, text, or structured objects, not only
 numbers — or is mined from the traffic itself. ``TaskGenerationProcessor``
 declares asynchronous generation and validation hooks for task-producing
-processors; its execution lifecycle is not implemented yet.
+processors; a method pairs them with an engine and a worker of its own, as
+SPADE does with the reported engine and the generator service.
 
 The design — the four-method contract, the two engines and the one question
 that picks between them, what a recipe writes on each tier, and a record's

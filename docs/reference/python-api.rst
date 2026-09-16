@@ -646,6 +646,8 @@ Reported feedback
      - Optional collection group and retry slot; defaults to an independent report.
    * - ``decide_group(key, items) -> GroupDecision``
      - Required when grouping supplies a group key; return READY, INCOMPLETE, or DISCARD.
+   * - ``is_training_report(report) -> bool``
+     - Optional; ``False`` for a valid report that is not this method's training data. The engine releases it and never assembles it; its sources go with it only under ``exclusive_sources`` or when it references more than one inference.
 
 ``ReportContext`` carries ``report``, ordered ``inferences``, optional ``score``,
 and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or
@@ -714,13 +716,16 @@ Task generation
 ``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
 ``async generate(request: TaskGenerationRequest) -> HarborTask`` and
 ``async validate(task_path: Path) -> TaskValidationResult``. Both must be
-implemented by subclasses. This ABC supplies no task execution lifecycle yet;
-implementing the hooks alone does not produce ready batches.
+implemented by subclasses. The ABC supplies no task execution lifecycle;
+a method pairs the hooks with an engine and a worker of its own, as SPADE
+pairs them with the reported-feedback engine and the generator service
+(``reef.record2dataset``).
 
 ``TaskGenerationRequest(source_records, description, assets=())`` carries a
-non-empty tuple of distinct ``AgentRecord`` values from one scenario, non-empty
-requirements text, and optional ``Path`` values for local generation assets.
-The generated task must preserve the source record ids in order.
+tuple of distinct ``AgentRecord`` values from one scenario (empty for a method
+that generates from the description alone), non-empty requirements text, and
+optional ``Path`` values for local generation assets. The generated task must
+preserve the source record ids in order.
 ``TaskValidationResult(errors=())`` exposes ``is_valid``; each error is a
 non-empty explanation of a task defect. Check execution failures raise instead.
 Generation and validation must run outside the synchronous trainer-lock path.

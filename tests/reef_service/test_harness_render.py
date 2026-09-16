@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
 import yaml
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
-    import tomli as tomllib
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError

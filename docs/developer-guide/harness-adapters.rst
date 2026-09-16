@@ -33,7 +33,7 @@ agent class rather than a CLI, driven by a runner Reef owns.
 |              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
-|              |                                                           | reef-eval via ``reef-infra[terminus]``    |
+|              |                                                           | reef-eval ships with reef-infra           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 
 The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
@@ -59,8 +59,7 @@ Extensions require ``evolution.executor: sandbox`` to isolate the Python
 runner. Harbor then runs the terminal
 task remotely. Network access must be enabled with ``sandbox.egress_hosts``;
 that setting currently enables networking without enforcing a hostname firewall.
-The runtime needs Linux, bubblewrap, Python 3.12+, ``reef-infra[terminus]``, and
-``harbor[e2b]``. The interpreter and local task directories must be visible in
+The runtime needs Linux, bubblewrap, Python 3.12+ and ``harbor[e2b]``. The interpreter and local task directories must be visible in
 the sandbox (for example under ``/opt``). Ordinary declarative trees can still
 use the local executor and Docker. Docker inside bubblewrap and extensions in
 an unisolated runner are rejected before process launch.

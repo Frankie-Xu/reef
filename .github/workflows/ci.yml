@@ -93,7 +93,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          versions='["3.10","3.11","3.12"]'
+          versions='["3.12"]'
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
               --jq '[.state, .draft, .head.sha] | @tsv')
@@ -101,11 +101,6 @@ jobs:
             if [ "$current" != "$expected" ]; then
               echo "::error::This PR is closed, draft, or has newer commits. Use its latest ready run."
               exit 1
-            fi
-            if [ "$GITHUB_RUN_ATTEMPT" -eq 1 ]; then
-              versions='["3.12"]'
-              echo "Routine PR checks use Python 3.12. Before merging, request the full matrix:" >> "$GITHUB_STEP_SUMMARY"
-              echo "gh run rerun $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           echo "python-versions=$versions" >> "$GITHUB_OUTPUT"
@@ -204,31 +199,12 @@ jobs:
       # is enough. It is the only gate that pins SAO's hard-mask semantics,
       # which share the pg_clipfrac key with PPO's clamp counter.
       # Keep Git-LFS tests independent of host-level Git configuration.
-      # Coverage is measured on 3.12 only. Measuring it installs a
-      # process-wide trace function (threading.settrace), so every
-      # Thread._bootstrap_inner calls sys.settrace before running its target.
-      # CPython <= 3.11 guards sys.settrace with a `static int reentrant`
-      # (Python/ceval.c) that is process-global rather than per-thread: if that
-      # window is open on one thread when another thread bootstraps, the
-      # bootstrapping thread dies with "Cannot install a trace function while
-      # another trace function is being installed" -- before its target runs at
-      # all. That silently killed worker threads in the threaded suites on
-      # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
-      # coverage.xml is uploaded, so the other legs were paying the risk for a
-      # report nothing reads.
+      # Coverage is measured on every leg: Reef requires Python 3.12, whose
+      # sys.settrace no longer has the process-global reentrancy guard that
+      # killed bootstrapping worker threads under coverage on 3.10 and 3.11.
       # Source tests share eight workers and keep each file together. The two
       # sandbox tests run serially, avoiding unnecessary worker startup.
-      - name: Run tests
-        if: matrix.python-version != '3.12'
-        run: >
-          python -m pytest tests
-          -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
-          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist loadfile
-        env:
-          GIT_CONFIG_GLOBAL: /dev/null
-          GIT_CONFIG_SYSTEM: /dev/null
       - name: Run tests with coverage
-        if: matrix.python-version == '3.12'
         run: >
           python -m pytest tests
           -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
@@ -245,8 +221,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
-  # Full reruns expand these existing required checks to every supported
-  # version. Routine runs leave the 3.10/3.11 checks pending before merge.
+  # The one required check per suite; Reef supports Python 3.12 only.
   test:
     needs: [select-tests, test-suites]
     if: always() && !github.event.pull_request.draft
@@ -341,7 +316,6 @@ jobs:
           python - <<'PY'
           import importlib.util
           import os
-          import sys
           from importlib.metadata import distribution
           from pathlib import Path
 
@@ -364,9 +338,10 @@ jobs:
               for requirement in requirements
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          expected_core = {"aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "sqlalchemy", "tomli-w"}
-          if sys.version_info < (3, 11):
-              expected_core.add("tomli")  # the tomllib backport the harness wrapper reads a TOML binding with
+          # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
+          expected_core = {
+              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+          }
           assert core == expected_core, core
           slime = {
               canonicalize_name(requirement.name)

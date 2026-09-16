@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,6 @@ from reef.core.tasks import (
     read_harbor_task,
     write_harbor_task,
 )
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
 
 VERIFIER = (
     "#!/bin/sh\nset -eu\n"

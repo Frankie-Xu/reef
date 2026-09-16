@@ -438,6 +438,34 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
 
 @pytest.mark.unit
+def test_trainer_tells_the_processor_a_dropped_batch_before_acknowledging_it() -> None:
+    events: list[str] = []
+
+    class NotingProcessor(ThresholdProcessor):
+        def dropped(self, batch_id: str) -> None:
+            events.append(f"dropped {batch_id}")
+
+        def acknowledge(self, batch_id: str) -> frozenset[str]:
+            events.append(f"acknowledged {batch_id}")
+            return super().acknowledge(batch_id)
+
+    records = SQLiteRecordStore()
+    records.append(inference("i1"))
+    records.append(report("r1", "i1", 1.0))
+    trainer = Trainer.build(
+        "math",
+        records,
+        processor_factory=lambda context: NotingProcessor(context.with_config({"batch_size": 1})),
+        candidate_backend=_PreparingBackend(),
+    )
+    batch = trainer.reserve_training_batch()
+    assert batch is not None
+    trainer.reject_pending({"reason": "stale"})
+    assert events == [f"dropped {batch.batch_id}", f"acknowledged {batch.batch_id}"]
+    assert trainer.reserve_training_batch() is None, "the dropped batch is consumed"
+
+
+@pytest.mark.unit
 def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -> None:
     calls = []
 

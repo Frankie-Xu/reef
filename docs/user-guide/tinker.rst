@@ -10,9 +10,7 @@ engine. The tested SDK interface is pinned to ``tinker==0.28.1``.
 Install and run
 ---------------
 
-Use Python 3.11 or newer on Linux or macOS. The base Reef distribution continues
-to support Python 3.10; installing the optional extra there does not install
-Tinker, and constructing its runtime raises a version error.
+Use Python 3.12 or newer on Linux or macOS, the version Reef itself requires.
 
 .. code:: bash
 
