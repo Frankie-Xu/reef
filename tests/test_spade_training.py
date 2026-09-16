@@ -7,6 +7,7 @@ import json
 import shutil
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -461,6 +462,7 @@ class StandInGenerator(Generator):
         self.checks: list[Path] = []
         self.plays: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
+        self.play_reports: list[dict[str, object]] = []
         self.deleted: list[str] = []
         self.manifests: list[dict[str, object]] = []
         self.episodes = 0
@@ -559,9 +561,29 @@ class StandInGenerator(Generator):
                     failed_calls=0,
                     report_agent_record_ids=(f"rep-{self.episodes}",) if is_reporting and not self.play_error else (),
                     trial_uri=None,
+                    labels={**tags, "arm": arm},
                 )
             )
         return tuple(rows)
+
+    async def report_plays(self, plays, *, scenario, score_of, metadata, model=None):
+        self.play_reports.append(
+            {
+                "plays": tuple(plays),
+                "scenario": scenario,
+                "scores": dict(score_of),
+                "metadata": dict(metadata),
+                "model": model,
+            }
+        )
+        return tuple(
+            (
+                replace(play, report_agent_record_ids=(f"rep-{play.episode_id}",))
+                if play.episode_id in score_of and play.receipts
+                else play
+            )
+            for play in plays
+        )
 
     async def write_manifest(self, *, generation, names: Sequence[str], eval_fraction, seed) -> Path:
         self.manifests.append(

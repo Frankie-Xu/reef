@@ -15,6 +15,8 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   different task under a taken name; ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
 - ``POST /plays``: an agent plays a written task through the task player, episodes reported to Reef (a job).
+- ``POST /plays/report``: held episodes reported after the fact, each against its receipts with the score
+  the caller names (a direct call, so it never waits behind a play in flight).
 - ``POST /manifests``: the split manifest of one generation's tasks under the tasks root.
 - ``GET /jobs/{id}``: a job's state and result.
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
@@ -39,6 +41,7 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from aiohttp import web
@@ -52,7 +55,7 @@ from reef.core.tasks import (
     write_split_manifest,
 )
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.harness.client.tasks import TaskPlay, TaskPlayer
+from reef.harness.client.tasks import TaskPlay, TaskPlayer, TaskPlayError
 from reef.record2dataset.designer import (
     Designer,
     DesignerError,
@@ -78,6 +81,7 @@ from reef.record2dataset.wire import (
     checked_string,
     oracle_document,
     play_document,
+    play_from_document,
     task_document,
     task_from_document,
 )
@@ -204,9 +208,21 @@ class TaskPlays(ABC):
         tags: Mapping[str, str],
     ) -> tuple[TaskPlay, ...]: ...
 
+    @abstractmethod
+    def report(
+        self,
+        plays: Sequence[TaskPlay],
+        *,
+        scenario: str,
+        model: str,
+        score_of: Mapping[str, float],
+        metadata: Mapping[str, object],
+    ) -> tuple[TaskPlay, ...]:
+        """Report held episodes after the fact, each with the score ``score_of`` names by episode id; the plays with their report ids."""
+
 
 class ReefTaskPlays(TaskPlays):
-    """A task player per call, its episodes tagged with the arm."""
+    """A task player per call, its episodes tagged with the arm; a held play is reported by a player with its labels."""
 
     def __init__(
         self,
@@ -239,7 +255,56 @@ class ReefTaskPlays(TaskPlays):
     ) -> tuple[TaskPlay, ...]:
         if plays < 1:
             return ()
-        player = TaskPlayer(
+        player = self.player(
+            scenario=scenario,
+            model=model,
+            labels={**tags, "arm": arm},
+            extra_instruction_paths=extra_instruction_paths,
+            is_reporting=is_reporting,
+        )
+        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
+
+    def report(
+        self,
+        plays: Sequence[TaskPlay],
+        *,
+        scenario: str,
+        model: str,
+        score_of: Mapping[str, float],
+        metadata: Mapping[str, object],
+    ) -> tuple[TaskPlay, ...]:
+        # One player per distinct label set: the labels a play carries are the ones its episode block names.
+        players: dict[tuple[tuple[str, str], ...], TaskPlayer] = {}
+        reported = []
+        for play in plays:
+            score = score_of.get(play.episode_id)
+            if score is None or not play.receipts:
+                reported.append(play)
+                continue
+            key = tuple(sorted(play.labels.items()))
+            if key not in players:
+                players[key] = self.player(
+                    scenario=scenario, model=model, labels=play.labels, extra_instruction_paths=(), is_reporting=True
+                )
+            try:
+                report_ids = players[key].report_play(play, score=score, metadata=metadata)
+            except TaskPlayError as exc:
+                # A refused report is this play's failure; the others still go out.
+                reported.append(replace(play, error=str(exc)))
+                continue
+            reported.append(replace(play, report_agent_record_ids=report_ids))
+        return tuple(reported)
+
+    def player(
+        self,
+        *,
+        scenario: str,
+        model: str,
+        labels: Mapping[str, str],
+        extra_instruction_paths: Sequence[Path],
+        is_reporting: bool,
+    ) -> TaskPlayer:
+        return TaskPlayer(
             reef_url=self.reef_url,
             scenario=scenario,
             model=model,
@@ -247,11 +312,10 @@ class ReefTaskPlays(TaskPlays):
             token=self.token,
             agent=self.agent,
             agent_host=self.agent_host,
-            labels={**tags, "arm": arm},
+            labels=labels,
             extra_instruction_paths=extra_instruction_paths,
             is_reporting=is_reporting,
         )
-        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
 
 
 # ------------------------------------------------------------------ the jobs
@@ -454,6 +518,15 @@ def checked_count(value: object, label: str, *, minimum: int = 0) -> int:
     return value
 
 
+def checked_scores(value: object) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for episode_id, score in checked_object(value if value is not None else {}, "scores").items():
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise WireError("scores must map episode ids to numbers")
+        scores[episode_id] = float(score)
+    return scores
+
+
 class GeneratorService:
     """Writes, checks and plays Harbor tasks under one tasks root, for whoever asks over HTTP."""
 
@@ -495,6 +568,7 @@ class GeneratorService:
                 web.delete("/tasks/{name}", self.delete_task),
                 web.post("/checks", self.check),
                 web.post("/plays", self.play),
+                web.post("/plays/report", self.report_plays),
                 web.post("/manifests", self.write_manifest),
                 web.get("/jobs/{job_id}", self.job),
             ]
@@ -688,6 +762,24 @@ class GeneratorService:
         except WireError as exc:
             return error_response(400, str(exc))
         return self.submitted(job)
+
+    async def report_plays(self, request: web.Request) -> web.Response:
+        try:
+            body = await self.body_of(request)
+            scenario = checked_string(body, "scenario", label="a play report")
+            model = self.model_for(body)
+            rows = body.get("plays")
+            if not isinstance(rows, list):
+                raise WireError("plays must be a list of played episodes")
+            plays = tuple(play_from_document(row) for row in rows)
+            score_of = checked_scores(body.get("scores"))
+            metadata = checked_object(body.get("metadata", {}), "metadata")
+        except WireError as exc:
+            return error_response(400, str(exc))
+        reported = await asyncio.to_thread(
+            self.plays.report, plays, scenario=scenario, model=model, score_of=score_of, metadata=metadata
+        )
+        return web.json_response({"plays": [play_document(play) for play in reported]})
 
     async def write_manifest(self, request: web.Request) -> web.Response:
         try:

@@ -10,7 +10,9 @@ import stat
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -18,8 +20,8 @@ from aiohttp.test_utils import TestServer
 from reef_client.client import ReefClientError
 from reef_service.test_record2dataset_designer import StandInHarness, served_tree
 
-from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
-from reef.harness.client.tasks import TaskPlay
+from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest, write_harbor_task
+from reef.harness.client.tasks import TaskPlay, TaskPlayer
 from reef.record2dataset import (
     Designer,
     DesignerAnswer,
@@ -38,6 +40,7 @@ from reef.record2dataset import (
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
+    ReefTaskPlays,
     TaskChecks,
     TaskNameConflict,
     TaskPlays,
@@ -120,6 +123,7 @@ class StandInPlays(TaskPlays):
     def __init__(self, reward: float = 0.5) -> None:
         self.reward = reward
         self.calls: list[dict[str, object]] = []
+        self.reports: list[dict[str, object]] = []
 
     def play(self, task_path, *, scenario, model, arm, plays, is_reporting, extra_instruction_paths, tags):
         self.calls.append(
@@ -144,10 +148,99 @@ class StandInPlays(TaskPlays):
                 "",
                 ("rec",),
                 0,
-                ("rep",),
+                ("rep",) if is_reporting else (),
                 None,
+                {**tags, "arm": arm},
             )
             for n in range(plays)
+        )
+
+    def report(self, plays, *, scenario, model, score_of, metadata):
+        self.reports.append(
+            {
+                "plays": tuple(plays),
+                "scenario": scenario,
+                "model": model,
+                "scores": dict(score_of),
+                "metadata": dict(metadata),
+            }
+        )
+        return tuple(
+            (
+                replace(play, report_agent_record_ids=(f"rep-{play.episode_id}",))
+                if play.episode_id in score_of and play.receipts
+                else play
+            )
+            for play in plays
+        )
+
+
+class StandInReef:
+    """A Reef service that keeps every report it gets; one that references ``rec-refused`` is refused."""
+
+    def __init__(self) -> None:
+        self.reports: list[dict[str, object]] = []
+        service = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                service.reports.append({"headers": headers, "body": body})
+                if self.path != "/reef/report":
+                    self.answer(404, {"error": self.path})
+                elif "rec-refused" in body.get("references", []):
+                    self.answer(400, {"error": "references must identify an existing inference"})
+                else:
+                    self.answer(200, {"agent_record_id": f"rep-{len(service.reports)}"})
+
+            def answer(self, status: int, document: dict[str, object]) -> None:
+                payload = json.dumps(document).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return None
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class CountingPlays(ReefTaskPlays):
+    """The real task plays, keeping the labels of every player it builds."""
+
+    def __init__(self, *, reef_url: str, work_dir: Path, token: str | None) -> None:
+        super().__init__(reef_url=reef_url, work_dir=work_dir, token=token)
+        self.built: list[dict[str, str]] = []
+
+    def player(
+        self,
+        *,
+        scenario: str,
+        model: str,
+        labels: Mapping[str, str],
+        extra_instruction_paths: Sequence[Path],
+        is_reporting: bool,
+    ) -> TaskPlayer:
+        self.built.append(dict(labels))
+        return super().player(
+            scenario=scenario,
+            model=model,
+            labels=labels,
+            extra_instruction_paths=extra_instruction_paths,
+            is_reporting=is_reporting,
         )
 
 
@@ -522,6 +615,127 @@ def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path:
     assert call["extra"] == [tmp_path / "tasks" / "harbor-00001-000-inspection" / "solution" / "hint.txt"]
 
 
+def test_held_plays_are_reported_through_the_service_with_their_scores(tmp_path: Path) -> None:
+    built, _, _, plays = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        held = await generator.play(
+            written.path,
+            scenario="spade",
+            arm="plain",
+            plays=2,
+            is_reporting=False,
+            extra_instruction_files=(),
+            tags={"generation": "1"},
+        )
+        assert [play.is_reported for play in held] == [False, False]
+        assert held[0].labels == {"generation": "1", "arm": "plain"}, "the labels travel back with the play"
+        reported = await generator.report_plays(
+            held,
+            scenario="spade",
+            score_of={held[0].episode_id: 1.0},
+            metadata={"round": "generation-00001", "round_plays": 1},
+            model="m",
+        )
+        assert [play.report_agent_record_ids for play in reported] == [("rep-e0",), ()]
+        assert reported[0].labels == held[0].labels and reported[0].receipts == ("rec",)
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*scores must map"):
+            await generator.call(
+                "POST", "/plays/report", body={"scenario": "spade", "plays": [], "scores": {"e": "1"}}
+            )
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*labels"):
+            await generator.call(
+                "POST",
+                "/plays/report",
+                body={"scenario": "spade", "plays": [{**play_document(held[0]), "labels": {"arm": 1}}]},
+            )
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*plays must be a list"):
+            await generator.call("POST", "/plays/report", body={"scenario": "spade", "plays": {}})
+        return None
+
+    run_with(built, body)
+    call = plays.reports[0]
+    assert call["scenario"] == "spade" and call["model"] == "m" and call["scores"] == {"e0": 1.0}
+    assert call["metadata"] == {"round": "generation-00001", "round_plays": 1}
+    assert [play.episode_id for play in call["plays"]] == ["e0", "e1"]
+    assert call["plays"][0].receipts == ("rec",) and call["plays"][0].labels == {"generation": "1", "arm": "plain"}
+
+
+def test_reef_task_plays_report_held_plays_with_one_player_per_label_set(tmp_path: Path) -> None:
+    task_path = write_harbor_task(
+        HarborTask(
+            name="t-held",
+            instruction="List the files in the working directory and write their count to /app/count.txt.",
+            tests={"test.sh": "#!/bin/sh\nmkdir -p /logs/verifier\necho 1 > /logs/verifier/reward.txt\n"},
+            environment={"Dockerfile": "FROM python:3.12-slim\nWORKDIR /app\n"},
+        ),
+        tmp_path / "tasks",
+    )
+
+    def held(episode_id: str, labels: dict[str, str], receipts: tuple[str, ...] = ("rec-1",)) -> TaskPlay:
+        return TaskPlay(task_path, "t-held", episode_id, 1.0, {"reward": 1.0}, "", receipts, 0, (), "trials/x", labels)
+
+    plain = {"arm": "plain", "generation": "1"}
+    hint = {"arm": "hint", "generation": "1"}
+    reef = StandInReef()
+    try:
+        plays = CountingPlays(reef_url=reef.url, work_dir=tmp_path / "play", token="tok")
+        built, _, _, _ = service(tmp_path, plays=plays)
+
+        async def body(generator: HttpGenerator) -> object:
+            return await generator.report_plays(
+                [
+                    held("e1", plain),
+                    held("e2", plain, ("rec-2", "rec-3")),
+                    held("e3", hint),
+                    held("e4", {"arm": "plain"}),
+                    held("e5", plain, ()),
+                    held("e6", plain, ("rec-refused",)),
+                    held("e7", plain),
+                ],
+                scenario="spade",
+                score_of={"e1": 1.0, "e2": 0.0, "e3": 0.5, "e4": 1.0, "e5": 1.0, "e6": 1.0},
+                metadata={"round": "generation-00001", "round_plays": 2, "task": "never this"},
+            )
+
+        reported = run_with(built, body)
+    finally:
+        reef.close()
+    assert isinstance(reported, tuple)
+    assert [play.report_agent_record_ids for play in reported] == [
+        ("rep-1",),
+        ("rep-2",),
+        ("rep-3",),
+        ("rep-4",),
+        (),
+        (),
+        (),
+    ]
+    assert reported[4].error == "" and reported[6].error == "", "no receipt or no score: unreported, no failure"
+    assert reported[5].error.startswith("the report for t-held was refused (400)")
+    assert plays.built == [plain, hint, {"arm": "plain"}], "one player per distinct label set"
+    bodies = [report["body"] for report in reef.reports]
+    assert [body["score"] for body in bodies] == [1.0, 0.0, 0.5, 1.0, 1.0]
+    assert [body["references"] for body in bodies] == [
+        ["rec-1"],
+        ["rec-2", "rec-3"],
+        ["rec-1"],
+        ["rec-1"],
+        ["rec-refused"],
+    ]
+    assert [body["metadata"]["episode"]["labels"] for body in bodies] == [plain, plain, hint, {"arm": "plain"}, plain]
+    first = bodies[0]
+    assert first["metadata"]["round"] == "generation-00001" and first["metadata"]["round_plays"] == 2
+    assert first["metadata"]["task"]["name"] == "t-held", "extra metadata never replaces the task"
+    assert first["metadata"]["episode"]["id"] == "e1" and first["metadata"]["episode"]["trial_uri"] == "trials/x"
+    assert first["feedback"] == "verifier reward 1.0 on t-held"
+    headers = reef.reports[0]["headers"]
+    assert headers["x-reef-scenario"] == "spade" and headers["authorization"] == "Bearer tok"
+
+
 def test_a_manifest_splits_the_named_tasks_under_the_root(tmp_path: Path) -> None:
     built, _, _, _ = service(tmp_path)
 
@@ -702,6 +916,12 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     assert play_from_document(play_document(play)) == play
     with pytest.raises(ValueError, match="failed_calls"):
         play_from_document({**play_document(play), "failed_calls": "2"})
+    labelled = TaskPlay(tmp_path / "t", "t", "e2", 1.0, {"reward": 1.0}, "", ("r1",), 0, (), None, {"arm": "plain"})
+    assert play_document(labelled)["labels"] == {"arm": "plain"}
+    assert play_from_document(play_document(labelled)) == labelled
+    assert play_from_document(play_document(play)).labels == {}
+    with pytest.raises(ValueError, match="labels must map names to text"):
+        play_from_document({**play_document(play), "labels": {"arm": 1}})
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:

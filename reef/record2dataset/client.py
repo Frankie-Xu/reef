@@ -22,6 +22,7 @@ from reef.record2dataset.wire import (
     checked_object,
     checked_string,
     oracle_from_document,
+    play_document,
     play_from_document,
     task_document,
     task_from_document,
@@ -109,6 +110,18 @@ class Generator(ABC):
         tags: Mapping[str, str],
         model: str | None = None,
     ) -> tuple[TaskPlay, ...]: ...
+
+    @abstractmethod
+    async def report_plays(
+        self,
+        plays: Sequence[TaskPlay],
+        *,
+        scenario: str,
+        score_of: Mapping[str, float],
+        metadata: Mapping[str, object],
+        model: str | None = None,
+    ) -> tuple[TaskPlay, ...]:
+        """Report held plays after the fact, each with the score ``score_of`` names by episode id; the plays with their report ids."""
 
     @abstractmethod
     async def write_manifest(
@@ -277,13 +290,35 @@ class HttpGenerator(Generator):
         if model is not None:
             body["model"] = model
         result = await self.job_result(await self.call("POST", "/plays", body=body))
+        return self.plays_of(result, "the play")
+
+    async def report_plays(
+        self,
+        plays: Sequence[TaskPlay],
+        *,
+        scenario: str,
+        score_of: Mapping[str, float],
+        metadata: Mapping[str, object],
+        model: str | None = None,
+    ) -> tuple[TaskPlay, ...]:
+        body: dict[str, object] = {
+            "scenario": scenario,
+            "plays": [play_document(play) for play in plays],
+            "scores": dict(score_of),
+            "metadata": dict(metadata),
+        }
+        if model is not None:
+            body["model"] = model
+        return self.plays_of(await self.call("POST", "/plays/report", body=body), "the report")
+
+    def plays_of(self, result: Mapping[str, object], label: str) -> tuple[TaskPlay, ...]:
         rows = result.get("plays")
         if not isinstance(rows, list):
-            raise GeneratorError("the play's result holds no episodes")
+            raise GeneratorError(f"{label}'s result holds no episodes")
         try:
             return tuple(play_from_document(row) for row in rows)
         except WireError as exc:
-            raise GeneratorError(f"the play's episodes cannot be read: {exc}") from exc
+            raise GeneratorError(f"{label}'s episodes cannot be read: {exc}") from exc
 
     async def write_manifest(self, *, generation: int, names: Sequence[str], eval_fraction: float, seed: int) -> Path:
         answer = await self.call(
