@@ -1,0 +1,43 @@
+# The Reef training stack for the Science Q&A stream (Reef, Ray, Slime/Megatron,
+# SGLang) in the reef image. run.sh supplies image, paths, GPU pool, and a
+# per-run token.
+services:
+  reef:
+    image: ${REEF_IMAGE}
+    container_name: reef-sdft-science-qa
+    command: reef serve -c /workspace/Reef/recipes/sdft/examples/science_qa/serve.yaml
+    # Host networking: run.py reaches Reef on the loopback port serve.yaml
+    # declares, and slime binds the training engines' router to the host.
+    network_mode: host
+    ipc: host
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Four actor GPUs and one rollout GPU.
+              device_ids:
+                - "${REEF_GPU_0:-0}"
+                - "${REEF_GPU_1:-1}"
+                - "${REEF_GPU_2:-2}"
+                - "${REEF_GPU_3:-3}"
+                - "${REEF_GPU_4:-4}"
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR}:/root/models
+      - ${RUN_DIR}:/var/lib/reef
+      - ${REEF_ROOT}:/workspace/Reef
+    environment:
+      RAY_ADDRESS: ${RAY_ADDRESS:-}
+      REEF_TOKEN: ${REEF_TOKEN}
+      PYTHONPATH: /workspace/Reef:/root/Megatron-LM
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:28901/healthz"]
+      interval: 10s
+      timeout: 5s
+      # The stack boots in a few minutes on H100s; 120 x 10s is the ceiling.
+      retries: 120
+      start_period: 30s

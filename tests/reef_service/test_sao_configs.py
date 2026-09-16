@@ -133,7 +133,9 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--expert-tensor-parallel-size",
         "--group-query-attention",
         "--hidden-dropout",
+        "--lr-decay-iters",
         "--lr-decay-style",
+        "--lr-warmup-iters",
         "--normalization",
         "--no-save-optim",
         "--optimizer",
@@ -371,6 +373,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sdft/examples/science_qa/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -393,6 +396,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "tutorials/evolve-your-harness/configs/serve.yaml",
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sdft/examples/science_qa/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

@@ -253,8 +253,18 @@ def sdft_loss(
                 sequence_importance_weight(student, rollout, mask, importance_sampling_cap)
                 for student, rollout, mask in zip(outputs["log_probs"], rollout_log_probs, loss_masks, strict=True)
             ]
+            student_log_probs = torch.cat(outputs["log_probs"], dim=0).float()
+            engine_log_probs = torch.cat(rollout_log_probs, dim=0).float()
         weighted_kl = torch.cat([sample_kl * weight for sample_kl, weight in zip(per_sample_kl, weights, strict=True)])
-        metrics["sdft_is_weight"] = torch.stack(weights).mean()
+        # Slime sums a micro-batch's metrics over its samples and divides the
+        # step's total by the global batch size, so every value here is a sum
+        # of per-sample means, as ``sum_of_sample_mean`` produces.
+        metrics["sdft_is_weight"] = torch.stack(weights).sum()
+        # How far the trainer's forward sits from the rollout engine on the
+        # sampled tokens: a large gap means a mismatch to fix, not to weight.
+        metrics["sdft_student_log_prob"] = sum_of_sample_mean(student_log_probs)
+        metrics["sdft_rollout_log_prob"] = sum_of_sample_mean(engine_log_probs)
+        metrics["sdft_log_prob_abs_diff"] = sum_of_sample_mean((student_log_probs - engine_log_probs).abs())
 
     loss = sum_of_sample_mean(weighted_kl)
     if weighted_kl.numel() == 0:
