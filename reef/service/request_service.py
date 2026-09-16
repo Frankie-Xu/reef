@@ -31,8 +31,8 @@ from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
-from reef.service.release_page import before_release_id, build_release_page
-from reef.service.request_page import build_request_page
+from reef.service.release_page import before_release_id, build_release_page, result_of
+from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
@@ -691,6 +691,52 @@ class RequestService:
         reserved = scenario.trainer.pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(record, rows, progress=progress, consumed=consumed, link_query=link_query)
+
+    def harness_request_progress(self, headers: Mapping[str, str], record_id: str) -> dict[str, Any]:
+        """Where a filed request stands, as JSON, for a client with no browser to open its page.
+
+        The same reading the page renders: the state
+        (``queued``, ``proposing``, ``evaluating``, ``running``, ``settling``,
+        else the settled row's result), what it means in the page's words,
+        and, once a row answers the request, the step it landed as. A client
+        polls this to show a phase; the page itself stays the readable view.
+        An unknown id, or one that is not a training instruction, raises
+        ArtifactNotFound naming it.
+        """
+        scenario = self._file_scenario(headers)
+        record = self._dispatcher.read_record(scenario.name, record_id)
+        if record is None or record.get("request_type") != RequestType.TRAIN.value:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
+        rows = list(reversed(scenario.releases()))
+        step = settled_step(rows, record_id)
+        if step is not None:
+            return {
+                "request_id": record_id,
+                "settled": True,
+                "step": step,
+                "state": result_of(rows[step], rows),
+                "meaning": None,
+                "started_at": None,
+                "episodes_total": None,
+                "step_record": None,
+            }
+        backend = scenario.trainer.candidate_backend
+        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        reserved = scenario.trainer.pending_batch
+        consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
+        state = request_state(record, progress, consumed)
+        mine = progress if progress is not None and progress.request_id == record_id else None
+        return {
+            "request_id": record_id,
+            "settled": False,
+            "step": None,
+            "state": state,
+            "meaning": STATE_WORDS.get(state),
+            # The step's own clock, so a client shows the time in the step and not the time since it asked.
+            "started_at": None if mine is None else mine.started_at,
+            "episodes_total": None if mine is None else mine.episodes_total,
+            "step_record": None if mine is None else mine.step_record,
+        }
 
     def harness_install_script(
         self,

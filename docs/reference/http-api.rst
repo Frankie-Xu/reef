@@ -67,6 +67,9 @@ Routes
 | ``GET /reef/harness/requests/{record_id}/page``        | one HTML page per filed harness request: its      |
 |                                                        | step's state, then the result; reloads itself     |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/progress``    | the same reading as JSON: the step's phase, for a |
+|                                                        | client with no browser to open the page           |
++--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/harness/proposals``                       | an agent's proposed tree change, admitted or not  |
@@ -768,6 +771,19 @@ results show the session command to install or promote when the person is
 ready, alongside a link to the version page. An unknown
 id, or one that is not a training instruction, is HTTP 404 naming it.
 
+``GET /reef/harness/requests/{record_id}/progress`` answers the same reading
+as JSON (``Cache-Control: no-store``), for a client that polls rather than a
+browser that renders: ``request_id``, ``settled``, ``step`` (the step the
+row landed as once it settles, else null), ``state`` (the page's own
+``queued``, ``proposing``, ``evaluating``, ``running`` or ``settling``, and
+the settled row's result once a row answers the request), ``meaning`` (the
+words the page prints beside the state, null once settled), and, while a
+step holds this request, ``started_at``, ``episodes_total`` and
+``step_record`` from the backend's progress. The phase is what the pi
+extension's spinner names while the step runs. Unlike the two pages this is
+an ordinary route: it reads the headers alone, and a ``?token=`` is HTTP
+401. An unknown id, or one that is not a training instruction, is HTTP 404
+naming it.
 
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
 ``evaluation_task_count`` and ``evaluation_context``. Running episodes use the

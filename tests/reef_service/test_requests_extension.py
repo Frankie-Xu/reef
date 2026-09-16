@@ -50,6 +50,7 @@ import requests from "./requests.mjs";
 
 const tools = {};
 const commands = {};
+const shortcuts = {};
 const handlers = {};
 const events = [];
 const execAnswers = JSON.parse(process.env.TEST_EXEC || "{}");
@@ -64,6 +65,7 @@ const execAnswerFor = (args) => {
 const pi = {
   registerTool(definition) { tools[definition.name] = definition; },
   registerCommand(name, definition) { commands[name] = definition; },
+  registerShortcut(key, definition) { shortcuts[key] = definition; },
   on(name, handler) { handlers[name] = handler; },
   sendUserMessage(text, options) { events.push({ kind: "user_message", text, options: options ?? null }); },
   sendMessage(message, options) { events.push({ kind: "message", message, options: options ?? null }); },
@@ -83,6 +85,7 @@ const ctx = {
     select: async (title, options) => { events.push({ kind: "select", title, options }); return selections.shift() ?? undefined; },
     input: async (title, placeholder) => { events.push({ kind: "input", title, placeholder }); return inputs.shift() ?? undefined; },
     setStatus: (key, text) => events.push({ kind: "status", key, text: text ?? null }),
+    setWidget: (key, content) => events.push({ kind: "widget", key, content: content ?? null }),
   },
   sessionManager: { getSessionId: () => "sess-1234" },
 };
@@ -114,7 +117,7 @@ if (process.env.TEST_CLOCK_SKEW_AFTER_MS) {
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 requests(pi);
-const out = { tools: Object.keys(tools), commands: Object.keys(commands), handlers: Object.keys(handlers).sort(), events, result: null, error: null, fetchesAtShutdown: null };
+const out = { tools: Object.keys(tools), commands: Object.keys(commands), shortcuts: Object.keys(shortcuts), handlers: Object.keys(handlers).sort(), events, result: null, error: null, fetchesAtShutdown: null };
 const params = JSON.parse(process.env.TEST_PARAMS || "{}");
 const run = async () => {
   const step = process.env.TEST_STEP;
@@ -136,6 +139,13 @@ if (process.env.TEST_SHUTDOWN_AFTER_MS) {
     out.fetchesAtShutdown = events.filter((event) => event.kind === "fetch").length;
     await shutdown();
   }, Number(process.env.TEST_SHUTDOWN_AFTER_MS));
+}
+// The look-in key, fired the way pi fires it: once per listed delay, so a case can open and close the spinner.
+for (const at of JSON.parse(process.env.TEST_SHORTCUT_AT_MS || "[]")) {
+  setTimeout(async () => {
+    events.push({ kind: "shortcut", key: Object.keys(shortcuts)[0] });
+    await shortcuts[Object.keys(shortcuts)[0]].handler(ctx);
+  }, Number(at));
 }
 await sleep(Number(process.env.TEST_WAIT_MS || 0));
 console.log(JSON.stringify(out));
@@ -173,6 +183,7 @@ KNOBS = (
     "TEST_CLOCK_SKEW_MS",
     "TEST_HANG",
     "TEST_EXEC",
+    "TEST_SHORTCUT_AT_MS",
 )
 #: The environment the extension reads beyond the three it needs; each case sets what it needs and the rest stays unset.
 SETTINGS = ("PI_OFFLINE", "REEF_TOKEN", "REEF_HARNESS_WATCH_MS", "REEF_HARNESS_FETCH_MS", "REEF_HARNESS_WRAPPER")
@@ -453,6 +464,7 @@ def test_versions_lists_the_chain_oldest_first_one_line_per_row(tmp_path: Path) 
         '2  rel-1111  rejected  "answer with care"',
         '3  rel-3333  pending  "log when blocked"',
         "4  rel-1111  skipped",
+        "installed (this tree): the version this tree runs; current: the newest version",
     ]
 
 
@@ -664,6 +676,7 @@ def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_pa
         "2  rel-1111  rejected",
         "3  rel-1111  rejected",
         "4  rel-4444  pending",
+        "installed (this tree): the version this tree runs; current: the newest version",
     ]
     head = _versions(tmp_path, agent_dir, catalog, args="1")
     assert _notices(head)[0]["message"].splitlines()[0] == "Harness step 1: rel-1111-selected (selected, current)"
@@ -673,12 +686,60 @@ def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_pa
     assert lines[6].startswith("back to the head: ") and "release_id=rel-1111-selected'" in lines[6]
 
 
+def test_versions_marks_the_installed_release_apart_from_the_head(tmp_path: Path) -> None:
+    # The tree runs rel-1111; its row is marked installed (and current, since it is the head). A row that is
+    # neither the installed release nor the newest stays unmarked, and the fallback release file.
+    installed = _install_root(tmp_path, with_release_file=False)
+    (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-1111-selected"}), encoding="utf-8")
+    listed = _versions(tmp_path, installed, CATALOG)
+    (notice,) = _notices(listed)
+    assert notice["message"].splitlines() == [
+        "0  rel-0000  creation",
+        f'1  rel-1111  selected  installed (this tree)  current  "{LONG_TEXT[:57]}..."',
+        '2  rel-1111  rejected  "answer with care"',
+        '3  rel-3333  pending  "log when blocked"',
+        "4  rel-1111  skipped",
+        "installed (this tree): the version this tree runs; current: the newest version",
+    ]
+    shown = _versions(tmp_path, installed, CATALOG, args="1")
+    assert (
+        _notices(shown)[0]["message"].splitlines()[0]
+        == "Harness step 1: rel-1111-selected (selected, installed (this tree), current)"
+    )
+
+
+def test_versions_distinguishes_an_installed_older_release_from_a_newer_head(tmp_path: Path) -> None:
+    # The tree runs rel-0000 (creation); a promoted rel-5555 is the head. The listing marks rel-0000 installed and
+    # rel-5555 current, the two apart.
+    installed = _install_root(tmp_path, with_release_file=False)
+    (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-0000-creation"}), encoding="utf-8")
+    listed = _versions(tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}})
+    (notice,) = _notices(listed)
+    assert notice["message"].splitlines() == [
+        "0  rel-0000  creation  installed (this tree)",
+        '1  rel-1111  selected  "say when blocked"',
+        "2  rel-1111  rejected",
+        "3  rel-1111  rejected",
+        "4  rel-4444  promoted at step 5",
+        "5  rel-5555  promote  current",
+        "installed (this tree): the version this tree runs; current: the newest version",
+    ]
+    shown = _versions(
+        tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}, args="5"
+    )
+    assert _notices(shown)[0]["message"].splitlines()[0] == "Harness step 5: rel-5555-promote (promote, current)"
+
+
 def test_versions_reads_a_promoted_pending_row_as_promoted_and_offers_no_promote(tmp_path: Path) -> None:
     agent_dir = _install_root(tmp_path)
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
     listed = _versions(tmp_path, agent_dir, catalog)
     (notice,) = _notices(listed)
-    assert notice["message"].splitlines()[4:] == ["4  rel-4444  promoted at step 5", "5  rel-5555  promote  current"]
+    assert notice["message"].splitlines()[4:] == [
+        "4  rel-4444  promoted at step 5",
+        "5  rel-5555  promote  current",
+        "installed (this tree): the version this tree runs; current: the newest version",
+    ]
     shown = _versions(tmp_path, agent_dir, catalog, args="4")
     lines = _notices(shown)[0]["message"].splitlines()
     assert lines[0] == "Harness step 4: rel-4444-pending (promoted at step 5)"
@@ -718,6 +779,7 @@ QUESTIONS = {
     ]
 }
 OTHER = "Other (type an answer)"
+CANCEL = "Cancel this request"
 FILED = (
     "filed request q-1; reef is running the step, which usually takes one to three minutes, and will report here "
     f"when it settles. Watch it here: {REQUEST_PAGE}&token=tok"
@@ -778,25 +840,54 @@ def test_ask_user_returns_the_chosen_option_or_the_typed_answer(tmp_path: Path) 
         {"question": "Which channel?", "answer": "SMS"},
         {"question": "When?", "answer": "Slack"},
     ]
+    # Every question offers its options, then the free text answer and the way out.
     assert [event["options"] for event in _of_kind(out, "select")] == [
-        ["SMS", "Email", OTHER],
-        ["Always", "Nights", "Weekends", OTHER],
+        ["SMS", "Email", OTHER, CANCEL],
+        ["Always", "Nights", "Weekends", OTHER, CANCEL],
     ]
     assert _of_kind(out, "input") == [{"kind": "input", "title": "When?", "placeholder": ""}]
-    # No choice (Esc) opens the input as Other does; no typed answer records that none was given.
+
+
+@pytest.mark.parametrize(
+    ("selects", "inputs", "asked", "typed"),
+    [
+        # Esc on the first question: no second question, and no free text fallback.
+        ([None], [], 1, 0),
+        # The explicit way out reads the same as Esc.
+        ([CANCEL], [], 1, 0),
+        # Esc on the second question stops there, keeping no partial answers.
+        (["SMS", None], [], 2, 0),
+        # Esc on the free text answer backs out of the request too, for one meaning of Esc throughout.
+        ([OTHER], [None], 1, 1),
+    ],
+    ids=["escape", "cancel-option", "escape-later", "escape-the-input"],
+)
+def test_ask_user_cancels_the_whole_request_and_files_nothing(
+    tmp_path: Path, selects: list, inputs: list, asked: int, typed: int
+) -> None:
+    """Esc is the way out of a clarification, not a skipped question: nothing is filed and the model is told so."""
     out = _tool(
         tmp_path,
-        agent_dir,
+        _install_root(tmp_path),
         "ask_user",
         QUESTIONS,
-        TEST_SELECT=json.dumps([None, None]),
-        TEST_INPUT=json.dumps(["typed"]),
+        TEST_SELECT=json.dumps(selects),
+        TEST_INPUT=json.dumps(inputs),
     )
-    assert json.loads(out["result"]["content"][0]["text"]) == [
-        {"question": "Which channel?", "answer": "typed"},
-        {"question": "When?", "answer": "no answer"},
+    assert out["error"] is None
+    assert out["result"]["content"] == [
+        {
+            "type": "text",
+            "text": "the user cancelled this harness request: do not file it, do not ask again, and say it was cancelled",
+        }
     ]
-    assert len(_of_kind(out, "input")) == 2
+    # The dialogs stop at the cancel: no later question is asked, and no answer is kept.
+    assert len(_of_kind(out, "select")) == asked and len(_of_kind(out, "input")) == typed
+    assert _notices(out) == [
+        {"kind": "notify", "message": "reef: request cancelled; nothing was filed", "type": "info"}
+    ]
+    # Nothing is filed and nothing is watched: the request never reaches the service.
+    assert _fetches(out) == [] and _of_kind(out, "status") == [] and _of_kind(out, "widget") == []
 
 
 def test_ask_user_without_a_ui_tells_the_model_to_assume_and_say_so(tmp_path: Path) -> None:
@@ -922,6 +1013,141 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PROGRESS_PATH = "/reef/harness/requests/q-1/progress"
+#: A catalog that never carries the request, so the watch keeps polling and the spinner keeps drawing.
+WAITING = {
+    "POST /reef/train": {"status": 200, "body": ACCEPTED},
+    "GET /reef/harness/releases": {"status": 200, "body": {"scenario": "code-repair", "releases": [CREATION_ROW]}},
+}
+
+
+def _widgets(out: dict[str, Any]) -> list[Any]:
+    """What the spinner drew, in order; a cleared widget is None."""
+    return [event["content"] for event in _of_kind(out, "widget")]
+
+
+def _running(state: str, **rest: Any) -> dict[str, Any]:
+    body = {
+        "request_id": "q-1",
+        "settled": False,
+        "step": None,
+        "state": state,
+        "meaning": None,
+        "started_at": None,
+        "episodes_total": None,
+        "step_record": None,
+        **rest,
+    }
+    return {"status": 200, "body": body}
+
+
+def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_reports(tmp_path: Path) -> None:
+    """The step runs in the background: a widget above the editor, not a line the person has to read in the chat."""
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        {
+            **WAITING,
+            f"GET {PROGRESS_PATH}": _running("evaluating", episodes_total=2, step_record="/work/steps/1"),
+            f"GET {RECORD_PATH}": {"status": 200, "body": {}},
+        },
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="150",
+    )
+    assert out["error"] is None
+    drawn = [content for content in _widgets(out) if content]
+    assert drawn, "the spinner never drew"
+    # One line while it is closed, above the input box, naming the phase in the person's words and the way in.
+    assert all(len(content) == 1 for content in drawn)
+    assert any("checking the harness" in content[0] for content in drawn)
+    assert all("ctrl+r to look in" in content[0] for content in drawn)
+    # The frames turn, so the person sees the step is alive between the polls.
+    assert len({content[0][0] for content in drawn}) > 1
+    # The phase is the service's own, read from the route the page reads.
+    assert [event["url"] for event in _fetches(out) if event["url"].endswith("/progress")]
+
+
+def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path: Path) -> None:
+    """pi offers no click target for a widget, so the key the spinner names is how a person looks in."""
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        {
+            **WAITING,
+            f"GET {PROGRESS_PATH}": _running("proposing", step_record="/work/steps/1"),
+            f"GET {RECORD_PATH}": {"status": 200, "body": {}},
+        },
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="240",
+        TEST_SHORTCUT_AT_MS=json.dumps([80, 170]),
+    )
+    assert out["error"] is None
+    assert out["shortcuts"] == ["ctrl+r"]
+    opened = [content for content in _widgets(out) if content and len(content) > 1]
+    assert opened, "the key never opened the spinner"
+    panel = opened[-1]
+    assert "ctrl+r to close" in panel[0] and "writing the change" in panel[0]
+    body = "\n".join(panel[1:])
+    assert "asked: text me when you are blocked" in body and "request: q-1" in body
+    assert "step record: /work/steps/1" in body
+    # The page link is the full detail, and the person is told the step keeps running without them.
+    assert f"full detail: {REQUEST_PAGE}" in body
+    assert "the step runs in the background; your input stays yours" in body
+    # The second press closes it: the spinner is one line again.
+    assert len(_widgets(out)[-1]) == 1
+
+
+def test_the_look_in_key_says_so_when_no_step_is_running(tmp_path: Path) -> None:
+    out = _run(
+        tmp_path,
+        _install_root(tmp_path),
+        TEST_STEP="session_start",
+        TEST_ANSWERS=json.dumps(CATALOG),
+        TEST_WAIT_MS="60",
+        TEST_SHORTCUT_AT_MS=json.dumps([20]),
+    )
+    assert out["error"] is None
+    assert {"kind": "notify", "message": "reef: no harness request is running", "type": "info"} in _notices(out)
+    assert _widgets(out) == []
+
+
+@pytest.mark.parametrize(
+    "progress",
+    [{"status": 404, "body": {}}, {"status": 500, "body": {}}],
+    ids=["no-such-route", "service-error"],
+)
+def test_the_spinner_falls_back_to_queued_when_the_service_reports_no_phase(
+    tmp_path: Path, progress: dict[str, Any]
+) -> None:
+    """An older service has no progress route; the spinner still turns and the watch still settles."""
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        {**WAITING, f"GET {PROGRESS_PATH}": progress, f"GET {RECORD_PATH}": {"status": 200, "body": {}}},
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="120",
+    )
+    assert out["error"] is None
+    drawn = [content for content in _widgets(out) if content]
+    assert drawn and all("queued, waiting for a step" in content[0] for content in drawn)
+
+
+def test_a_headless_session_draws_no_spinner(tmp_path: Path) -> None:
+    """Without a UI there is no input box to sit above; the footer and the report carry the result as before."""
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        _catalog_with(SELECTED_ROW),
+        REEF_HARNESS_WATCH_MS="10",
+        TEST_WAIT_MS="150",
+        TEST_HEADLESS="1",
+    )
+    assert out["error"] is None
+    # The widget is only ever cleared, never drawn: stopWatch clears both indicators whatever the mode.
+    assert all(content is None for content in _widgets(out))
+    assert _of_kind(out, "message")
+
+
 @pytest.mark.parametrize(
     ("row", "expected"),
     [
@@ -965,18 +1191,23 @@ def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     )
     assert out["error"] is None
     kinds = [event["kind"] for event in out["events"]]
-    assert kinds == ["fetch", "notify", "status", "fetch", "status", "message", "notify"]
-    catalog = out["events"][3]
+    # The filing, then the watch: the catalog read that finds the row ends it, and the report follows.
+    assert kinds[:3] == ["fetch", "notify", "status"]
+    assert kinds[-2:] == ["message", "notify"]
+    (catalog,) = [event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]
     assert catalog["method"] == "GET" and catalog["url"] == "http://reef:8900/reef/harness/releases"
-    assert out["events"][2] == {"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}
-    assert out["events"][4] == {"kind": "status", "key": "reef", "text": None}
+    statuses = _of_kind(out, "status")
+    assert statuses[0] == {"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}
+    # The settled step clears both indicators: the footer line and the spinner above the input.
+    assert statuses[-1] == {"kind": "status", "key": "reef", "text": None}
+    assert _of_kind(out, "widget")[-1] == {"kind": "widget", "key": "reef-harness", "content": None}
     # The report is a custom message the chat renders and the session keeps, without a turn, then the notice.
-    assert out["events"][5] == {
+    assert out["events"][-2] == {
         "kind": "message",
         "message": {"customType": "reef-harness", "content": expected, "display": True},
         "options": {"triggerTurn": False},
     }
-    assert out["events"][6] == {"kind": "notify", "message": expected, "type": "info"}
+    assert out["events"][-1] == {"kind": "notify", "message": expected, "type": "info"}
     # The report delivered, the stored filing is dropped.
     assert _stored(tmp_path) == []
 
@@ -994,11 +1225,13 @@ def test_the_watch_gives_up_after_its_cap_and_says_where_the_result_will_show(tm
         TEST_WAIT_MS="200",
     )
     kinds = [event["kind"] for event in out["events"]]
-    assert kinds[:3] == ["fetch", "notify", "status"] and kinds[-2:] == ["status", "notify"]
-    assert 2 <= kinds.count("fetch") <= 12  # a handful of polls (catalog and record), then no more past the cap
+    # The cap clears both indicators, the footer then the spinner, and says where the result will show.
+    assert kinds[:3] == ["fetch", "notify", "status"] and kinds[-3:] == ["status", "widget", "notify"]
+    assert 2 <= kinds.count("fetch") <= 24  # a handful of polls (catalog, progress and record), then none past the cap
     # The record route answered nothing, so the footer stayed at queued until the watch cleared it.
     assert [event["text"] for event in _of_kind(out, "status")] == ["reef: request q-1 queued", None]
-    assert out["events"][-2] == {"kind": "status", "key": "reef", "text": None}
+    assert out["events"][-3] == {"kind": "status", "key": "reef", "text": None}
+    assert out["events"][-2] == {"kind": "widget", "key": "reef-harness", "content": None}
     assert out["events"][-1] == {
         "kind": "notify",
         "message": f"reef: no result yet for '{ASK}'; /reef-versions shows it when it settles",
@@ -1086,10 +1319,9 @@ def test_a_second_filing_replaces_the_first_watch(tmp_path: Path) -> None:
         TEST_WAIT_MS="150",
     )
     assert out["error"] is None
-    kinds = [event["kind"] for event in out["events"]]
-    # Two filings, one watch: the second clears the first's footer, and one poll settles one notice.
-    assert kinds == ["fetch", "status", "fetch", "status", "status", "fetch", "status", "message", "notify"]
-    assert [event["method"] for event in _fetches(out)] == ["POST", "POST", "GET"]
+    # Two filings, one watch: the second clears the first's indicators, and one poll settles one notice.
+    assert [event["kind"] for event in out["events"]][-2:] == ["message", "notify"]
+    assert [event["method"] for event in _fetches(out)][:2] == ["POST", "POST"]
     assert [event["text"] for event in _of_kind(out, "status")] == [
         "reef: request q-1 queued",
         None,
@@ -1155,7 +1387,7 @@ def test_versions_with_a_step_prints_the_design_and_what_the_review_left_uncover
     lines = _notices(out)[0]["message"].splitlines()
     assert lines[1] == "design: short" and not any(line.startswith("not covered") for line in lines)
     listed = _versions(tmp_path, _install_root(tmp_path / "list"), catalog)
-    assert len(_notices(listed)[0]["message"].splitlines()) == 5
+    assert len(_notices(listed)[0]["message"].splitlines()) == 6
 
 
 # -- the report that survives: the stored filings, the session start and the fetch deadline ---------------------
@@ -1318,8 +1550,11 @@ def _settle(
     )
     assert out["error"] is None
     kinds = [event["kind"] for event in out["events"]]
-    assert kinds[:7] == ["fetch", "notify", "status", "fetch", "status", "message", "notify"]
-    return out["events"][7:]
+    assert kinds[:3] == ["fetch", "notify", "status"]
+    # The settle: the report, then the notice. What follows them is what the case reads.
+    report = kinds.index("message")
+    assert kinds[report : report + 2] == ["message", "notify"]
+    return out["events"][report + 2 :]
 
 
 def install_step(tmp_path: Path, agent_dir: Path, row: dict[str, object], **env: str) -> list[dict[str, object]]:

@@ -580,9 +580,16 @@ two commands, two tools and two event handlers:
   is sent.
 - ``reef_ask_user``, a tool: up to four questions, each with two to four
   options offered through ``ctx.ui.select`` plus ``Other (type an answer)``,
-  which opens ``ctx.ui.input`` (so does no choice). It returns the question
-  and answer pairs as JSON; without a UI it returns ``no UI in this session:
-  proceed with your best assumptions and list them in the request``.
+  which opens ``ctx.ui.input``, and ``Cancel this request``. Escape is the
+  way out of the whole request, not a skipped question: no choice on a
+  question, the cancel option, or no text in the free text answer all stop
+  the dialogs there, notify ``reef: request cancelled; nothing was filed``
+  and return ``the user cancelled this harness request: do not file it, do
+  not ask again, and say it was cancelled``, so the model stops instead of
+  filing a request the person backed out of. The dialogs carry the turn's
+  abort signal, so an aborted turn dismisses them. Otherwise it returns the
+  question and answer pairs as JSON; without a UI it returns ``no UI in this
+  session: proceed with your best assumptions and list them in the request``.
 - ``reef_file_request``, a tool: the request verbatim, then, when there are
   clarifications, a ``Clarifications:`` block of ``- Q:`` / ``A:`` pairs,
   capped at 4000 characters, filed the way the command files it. It returns
@@ -593,12 +600,31 @@ two commands, two tools and two event handlers:
   request's page, ``GET /reef/harness/requests/<id>/page`` with ``scenario``
   and, when ``REEF_TOKEN`` is set, ``token`` as query parameters, so a
   browser opens it without the headers.
+- The spinner, while a step runs: ``ctx.ui.setWidget`` draws one line above
+  the input box, an animated frame, the phase in the person's words
+  (``queued, waiting for a step``, ``writing the change``, ``checking the
+  harness``, ``running the step``, ``saving the result``), the time in the
+  step and ``ctrl+r to look in``. The frames turn every 250 ms, so the step
+  reads as alive between polls. ``ctrl+r``
+  (``pi.registerShortcut``) expands the same widget in place with the
+  request asked, its id, the evaluation's episode count and step record when
+  the service reports them, the request page link for the full detail, and a
+  line saying the step runs in the background; ``ctrl+r`` again closes it. pi
+  offers no click target for a widget, so the key the spinner names is how a
+  person opens it. Expanding costs no request: it redraws what the last poll
+  read. The widget is cleared when the step settles, and a headless session
+  draws none.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
   <id> queued`` and, once the request's record (``GET
   /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
   carries a ``compacted_at`` time, ``reef: step for request <id> running for
   <Nm SSs>``, counted from the first poll that saw it; a failed record read
-  keeps the footer as it was. Meanwhile the extension polls ``GET
+  keeps the footer as it was. Each poll also reads ``GET
+  /reef/harness/requests/<id>/progress`` for the step's phase, its episode
+  count and its step record, and counts from the step's own
+  ``started_at`` when the service reports one; a service without that route
+  leaves the spinner at ``queued`` and changes nothing else. Meanwhile the
+  extension polls ``GET
   /reef/harness/releases`` every ``REEF_HARNESS_WATCH_MS`` milliseconds
   (5000 by default) for the row whose ``metrics.training_request.id`` is the
   filed record, for at most 30 minutes, checked on every tick; one watch

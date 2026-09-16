@@ -22,7 +22,7 @@ from reef_service.test_harness_proposals import _dispatcher, _recipe
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app
 from reef.service.release_page import build_release_page
-from reef.service.request_page import REFRESH_SECONDS, build_request_page, settled_step
+from reef.service.request_page import REFRESH_SECONDS, STATE_WORDS, build_request_page, settled_step
 from reef.train.cordis_backend import Mutation, StepProgress
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
@@ -328,6 +328,18 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             )
             assert "into the step" in page
 
+            # The same reading as JSON, for a client with no browser: the phase the TUI's spinner names.
+            progress_route = f"/reef/harness/requests/{record_id}/progress"
+            response = await client.get(progress_route, headers=headers)
+            progress = await response.json()
+            assert response.status == 200 and response.headers["Cache-Control"] == "no-store"
+            assert progress["state"] == "proposing" and progress["settled"] is False and progress["step"] is None
+            assert progress["request_id"] == record_id
+            assert progress["meaning"] == STATE_WORDS["proposing"]
+            # A JSON route reads the headers alone: the page's query token is refused here.
+            assert (await client.get(progress_route, params=QUERY)).status == 401
+            assert (await client.get("/reef/harness/requests/nope/progress", headers=headers)).status == 404
+
             # The version page opens the same way; the wrong token, no token or a token elsewhere does not.
             response = await client.get("/reef/harness/releases/0/page", params=QUERY)
             assert response.status == 200 and "<title>Harness step 0</title>" in await response.text()
@@ -358,6 +370,9 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
                 await asyncio.sleep(0.05)
             assert response.status == 200 and REFRESH not in page, page
             assert '<span class="selected">Published</span>' in page
+            # The settled request reads as settled on the JSON route too, naming the step its row landed as.
+            settled = await (await client.get(progress_route, headers=headers)).json()
+            assert settled["settled"] is True and settled["step"] == 1 and settled["state"] == "selected"
             assert "Published as release " in page and "/reef-versions 1 install" in page
             assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View step 1' in page
             assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page

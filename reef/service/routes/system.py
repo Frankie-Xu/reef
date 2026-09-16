@@ -54,6 +54,13 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         # The page changes every few seconds while the step runs; nothing should serve a stale copy.
         return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
+    async def harness_request_progress(request: web.Request) -> web.Response:
+        progress = await asyncio.to_thread(
+            request_service.harness_request_progress, request.headers, request.match_info["record_id"]
+        )
+        # The state changes every few seconds while the step runs; nothing should serve a stale copy.
+        return web.json_response(progress, headers={"Cache-Control": "no-store"})
+
     async def harness_step_records(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
             request_service.harness_step_records,
@@ -103,6 +110,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/page", harness_release_page)
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", harness_step_records)
     app.router.add_get("/reef/harness/requests/{record_id}/page", harness_request_page)
+    app.router.add_get("/reef/harness/requests/{record_id}/progress", harness_request_progress)
     app.router.add_post("/reef/harness/proposals", harness_proposals)
     app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)

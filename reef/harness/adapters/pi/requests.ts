@@ -11,7 +11,8 @@
 // the chat keeps, with why the proposer produced nothing when it did. The
 // filed requests not yet reported are kept beside the release file, so a
 // restarted pi reports their results at its next session start. /reef-versions
-// lists the release chain with each step's result and request, prints a
+// lists the release chain with each step's result and request, marks the step
+// this tree runs as installed and the newest published one as current, prints a
 // step's page link and, for a pending release, the promote action and a trial
 // install, and runs the promote after a confirmation. A result only reports
 // the result and the commands to act on it, leaving the user's input free.
@@ -31,6 +32,9 @@ const RELEASE_FILE = ".reef-harness-release";
 const WRAPPER_NAME = "reef-pi";
 const INSTALL_LATER_TEXT = "reef: install it later with reef-pi update, then reef-pi setup";
 const NO_WRAPPER_TEXT = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup";
+// The marker /reef-versions puts on the step this tree runs, so a read lists the installed version beside the
+// newest one. The tree always comes from reef's install channel, which writes the release file that names it.
+const INSTALLED_MARK = "installed (this tree)";
 // The wrapper's exit code for an update it refused because an item is unmet: the setup loop runs, then the
 // update again.
 const UPDATE_REFUSED_CODE = 3;
@@ -47,11 +51,30 @@ const WATCH_CAP_MS = 30 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10000;
 // The custom message type the report is appended to the session as; pi renders plain text content itself.
 const REPORT_MESSAGE_TYPE = "reef-harness";
+// The spinner above the input box while a step runs: its key, its frames and how often they turn. The widget
+// sits above the editor, so the step is visible without taking the screen or the person's input.
+const WIDGET_KEY = "reef-harness";
+const SPINNER_FRAMES = ["|", "/", "-", "\\"];
+const SPINNER_INTERVAL_MS = 250;
+// The key that opens the spinner's detail, which the spinner itself names so the person knows it is there.
+const WATCH_SHORTCUT = "ctrl+r";
+// The service's phase for a running step, in the words the spinner and the panel show.
+const PHASE_WORDS = {
+  queued: "queued, waiting for a step",
+  proposing: "writing the change",
+  evaluating: "checking the harness",
+  running: "running the step",
+  settling: "saving the result",
+};
 // The service caps a request's text; the filed text stays within it.
 const REQUEST_MAX_CHARS = 4000;
-// The choice under every question that opens a free text answer.
+// The choice under every question that opens a free text answer, and the one that drops the request.
 const OTHER = "Other (type an answer)";
+const CANCEL = "Cancel this request";
 const NO_UI_TEXT = "no UI in this session: proceed with your best assumptions and list them in the request";
+// What the model is told when the person backs out: it must not file, and it must not ask again.
+const CANCELLED_TEXT =
+  "the user cancelled this harness request: do not file it, do not ask again, and say it was cancelled";
 
 // Tool parameters as plain JSON schema: pi compiles them with typebox, which reads JSON schema as is, so the
 // extension needs no import beyond node.
@@ -269,6 +292,15 @@ export default function requests(pi) {
     if (!response.ok) throw new Error(`reef refused the catalog read (HTTP ${response.status}): ${await response.text()}`);
     const rows = (await response.json()).releases;
     return Array.isArray(rows) ? rows : [];
+  };
+
+  // Where the step for a request stands: the service's own phase for it, which the record alone cannot tell.
+  // An older service has no such route; a 404 there reads as no progress rather than a lost request.
+  const requestProgress = async (recordId) => {
+    const path = `/reef/harness/requests/${encodeURIComponent(recordId)}/progress`;
+    const response = await fetchWithTimeout(`${serviceUrl}${path}`, { headers: reefHeaders() });
+    if (!response.ok) return null;
+    return await response.json();
   };
 
   // The request's own record: its compacted_at is null while the request is queued and a time once a step
@@ -506,8 +538,37 @@ export default function requests(pi) {
   const stopWatch = (ctx) => {
     if (!watch) return;
     clearInterval(watch.timer);
+    if (watch.spinner) clearInterval(watch.spinner);
     watch = null;
     ctx.ui.setStatus("reef", undefined);
+    ctx.ui.setWidget(WIDGET_KEY, undefined);
+  };
+
+  // What the panel and the widget both read: the phase in the person's words, and how long the step has run.
+  const progressLines = (mine) => {
+    const phase = PHASE_WORDS[mine.state] || mine.state;
+    const since = mine.startedAt === null ? "" : ` ${elapsedText(Date.now() - mine.startedAt)}`;
+    return { phase, since };
+  };
+
+  // What the expanded spinner shows under its first line: the step as it stands now, read from the watch, so
+  // looking in costs no request and never blocks the session.
+  const watchLines = () => {
+    const lines = [`  asked: ${watch.ask}`, `  request: ${watch.recordId.slice(0, 8)}`];
+    if (watch.episodes !== null) lines.push(`  evaluation episodes: ${watch.episodes}`);
+    if (watch.stepRecord) lines.push(`  step record: ${watch.stepRecord}`);
+    lines.push(`  full detail: ${requestPageLink(watch.recordId)}`);
+    lines.push("  the step runs in the background; your input stays yours");
+    return lines;
+  };
+
+  // The spinner above the input box: one line while it is closed, the step's detail under it once opened.
+  const redraw = (ctx) => {
+    if (!watch) return;
+    const { phase, since } = progressLines(watch);
+    const frame = SPINNER_FRAMES[watch.frame % SPINNER_FRAMES.length];
+    const head = `${frame} reef: ${phase}${since} - ${WATCH_SHORTCUT} to ${watch.expanded ? "close" : "look in"}`;
+    ctx.ui.setWidget(WIDGET_KEY, watch.expanded ? [head, ...watchLines()] : [head]);
   };
 
   const startWatch = (recordId, text, ctx) => {
@@ -515,8 +576,29 @@ export default function requests(pi) {
     const ask = clip(text.trim(), 60);
     const id8 = recordId.slice(0, 8);
     const deadline = Date.now() + WATCH_CAP_MS;
-    // startedAt is the first poll that saw a step holding the request; the footer counts from it.
-    const mine = { timer: null, polling: false, startedAt: null, status: null, missing: 0 };
+    // startedAt is the first poll that saw a step holding the request; the indicators count from it. state is
+    // the service's own phase for the step, "queued" until a step takes the request.
+    const mine = {
+      timer: null,
+      spinner: null,
+      polling: false,
+      startedAt: null,
+      status: null,
+      missing: 0,
+      state: "queued",
+      recordId,
+      ask,
+      episodes: null,
+      stepRecord: null,
+      frame: 0,
+      expanded: false,
+    };
+    // The spinner redraws on its own clock, so the frames turn between polls.
+    const draw = () => {
+      if (watch !== mine) return;
+      mine.frame++;
+      redraw(ctx);
+    };
     const show = (status) => {
       if (status === mine.status) return; // the footer is redrawn only when its text changes
       mine.status = status;
@@ -545,12 +627,27 @@ export default function requests(pi) {
         ctx.ui.notify(`reef: no result yet for '${ask}'; /reef-versions shows it when it settles`, "warning");
         return;
       }
+      // The step's own phase, which the record alone cannot tell: proposing, evaluating, and the episode count.
+      let progress;
+      try {
+        progress = await requestProgress(recordId);
+      } catch {
+        progress = undefined; // an older service, or a missed poll: the elapsed time still counts
+      }
+      if (watch !== mine) return;
+      if (progress) {
+        mine.state = String(progress.state || mine.state);
+        mine.episodes = typeof progress.episodes_total === "number" ? progress.episodes_total : null;
+        mine.stepRecord = typeof progress.step_record === "string" ? progress.step_record : null;
+        // The step's own clock beats the watch's: a reconnecting session counts from when the step began.
+        if (typeof progress.started_at === "number") mine.startedAt = progress.started_at * 1000;
+      }
       if (mine.startedAt === null) {
         let record;
         try {
           record = await requestRecord(recordId);
         } catch {
-          record = undefined; // a failed record read keeps the footer as it was; the next tick reads again
+          record = undefined; // a failed record read keeps the indicators as they were; the next tick reads again
         }
         if (watch !== mine) return;
         // Two polls in a row without the record: one 404 can be a record not written yet, two is a reset.
@@ -566,6 +663,7 @@ export default function requests(pi) {
       if (mine.startedAt !== null) {
         show(`reef: step for request ${id8} running for ${elapsedText(Date.now() - mine.startedAt)}`);
       }
+      draw();
     };
     const poll = async () => {
       if (mine.polling) return; // a slow read never overlaps the next tick
@@ -577,10 +675,15 @@ export default function requests(pi) {
       }
     };
     mine.timer = setInterval(poll, watchIntervalMs());
-    // A headless session exits when its turn ends; the timer must not hold the process open for the result.
+    // A headless session exits when its turn ends; the timers must not hold the process open for the result.
     if (typeof mine.timer.unref === "function") mine.timer.unref();
+    if (ctx.hasUI) {
+      mine.spinner = setInterval(draw, SPINNER_INTERVAL_MS);
+      if (typeof mine.spinner.unref === "function") mine.spinner.unref();
+    }
     watch = mine;
     show(`reef: request ${id8} queued`);
+    if (ctx.hasUI) draw();
   };
 
   // A filing: the request is stored until its report is delivered, and the watch starts.
@@ -618,22 +721,51 @@ export default function requests(pi) {
 
   pi.on("session_shutdown", async (_event, ctx) => stopWatch(ctx));
 
+  // Looking in on the running step: the spinner opens in place, above the input, and closes the same way. pi
+  // offers no click target for a widget, so the key it names is how a person opens it.
+  pi.registerShortcut(WATCH_SHORTCUT, {
+    description: "Look in on the running reef harness step",
+    handler: async (ctx) => {
+      if (!watch) {
+        ctx.ui.notify("reef: no harness request is running", "info");
+        return;
+      }
+      watch.expanded = !watch.expanded;
+      redraw(ctx);
+    },
+  });
+
+  // The person backed out of the clarification: the model hears it as a result, not an error, so the turn ends
+  // without a filing, and the notice says the request is gone rather than leaving the person guessing.
+  const cancelled = (ctx) => {
+    ctx.ui.notify("reef: request cancelled; nothing was filed", "info");
+    return { content: [{ type: "text", text: CANCELLED_TEXT }], details: {} };
+  };
+
   pi.registerTool({
     name: "reef_ask_user",
     label: "Ask the user",
     description:
       "Ask the user up to 4 questions before filing a harness change with reef_file_request, each about one " +
       "decision that changes what gets built, with 2 to 4 concrete options that do not overlap; the user can " +
-      "always type an answer of their own. Never ask for a setup value (a phone number, a credential, an " +
-      "account, a permission): reef-pi setup collects those after the install.",
+      "always type an answer of their own, and can cancel the whole request. Never ask for a setup value (a " +
+      "phone number, a credential, an account, a permission): reef-pi setup collects those after the install.",
     parameters: ASK_USER_PARAMETERS,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return { content: [{ type: "text", text: NO_UI_TEXT }], details: {} };
       const answers = [];
       for (const item of params.questions) {
-        const choice = await ctx.ui.select(item.question, [...item.options, OTHER]);
-        const answer = choice === undefined || choice === OTHER ? await ctx.ui.input(item.question, "") : choice;
-        answers.push({ question: item.question, answer: answer === undefined ? "no answer" : answer });
+        // Esc on a question is the person dropping the request, not an unanswered question: the dialogs stop
+        // here and nothing is filed. A dialog the turn aborted reads the same way.
+        const choice = await ctx.ui.select(item.question, [...item.options, OTHER, CANCEL], { signal });
+        if (choice === undefined || choice === CANCEL) return cancelled(ctx);
+        let answer = choice;
+        if (choice === OTHER) {
+          answer = await ctx.ui.input(item.question, "", { signal });
+          // Esc on the free text answer steps back out of the request too, for one meaning of Esc throughout.
+          if (answer === undefined) return cancelled(ctx);
+        }
+        answers.push({ question: item.question, answer });
       }
       return { content: [{ type: "text", text: JSON.stringify(answers) }], details: {} };
     },
@@ -715,11 +847,20 @@ export default function requests(pi) {
     return text ? `"${clip(text, 60)}"` : "";
   };
 
+  // The release this tree runs now, so /reef-versions shows which version is installed as well as which is the
+  // newest (the head). A step that is both is marked "installed (this tree), current"; one that is only the
+  // head is "current".
+  const installedStep = (rows) => {
+    const installed = installedRelease();
+    return installed ? rows.findIndex((row) => row.release_id === installed) : -1;
+  };
+
   const lineOf = (step, rows) =>
     [
       String(step),
       String(rows[step].release_id || "").slice(0, 8),
       resultOf(rows[step], rows),
+      step === installedStep(rows) ? INSTALLED_MARK : "",
       step === headStep(rows) ? "current" : "",
       requestText(rows[step]),
     ]
@@ -761,9 +902,13 @@ export default function requests(pi) {
   const stepLines = (step, rows) => {
     const row = rows[step];
     const head = headStep(rows);
+    const installed = installedStep(rows);
     const selectionResult = resultOf(row, rows);
+    const marks = [selectionResult];
+    if (step === installed) marks.push(step === head ? `${INSTALLED_MARK}, current` : INSTALLED_MARK);
+    else if (step === head) marks.push("current");
     const lines = [
-      `Harness step ${step}: ${row.release_id} (${selectionResult}${step === head ? ", current" : ""})`,
+      `Harness step ${step}: ${row.release_id} (${marks.join(", ")})`,
       ...notesLines(row),
       `page: ${stepPageLink(step)}`,
       `read it: ${curl()}'${pageUrl(step)}' > harness-step-${step}.html`,
@@ -806,7 +951,13 @@ export default function requests(pi) {
         return;
       }
       if (step === null) {
-        ctx.ui.notify(rows.length ? rows.map((_, index) => lineOf(index, rows)).join("\n") : "no release on record", "info");
+        ctx.ui.notify(
+          rows.length
+            ? rows.map((_, index) => lineOf(index, rows)).join("\n") +
+                `\n${INSTALLED_MARK}: the version this tree runs; current: the newest version`
+            : "no release on record",
+          "info",
+        );
         return;
       }
       const row = rows[step];

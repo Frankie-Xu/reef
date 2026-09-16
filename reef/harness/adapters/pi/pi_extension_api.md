@@ -81,11 +81,17 @@ Also: before_agent_start (return { systemPrompt } to add instructions for the tu
 - ctx.hasUI: true in the TUI and RPC modes, false under -p and --mode json. Guard every dialog with it.
 - ctx.ui.notify(text, "info" | "warning" | "error"): a line that does not block.
 - await ctx.ui.confirm(title, message): boolean.
-- await ctx.ui.select(title, options): the chosen string or undefined.
+- await ctx.ui.select(title, options): the chosen string or undefined. Undefined is Escape: treat it as the person backing out, not as a skipped question.
 - await ctx.ui.input(title, placeholder): a string or undefined.
-- ctx.ui.setStatus(key, text): a footer status until cleared.
+- Every dialog takes an options argument, { signal, timeout }: pass ctx.signal (or the tool's own) so an aborted turn dismisses it.
+- ctx.ui.setStatus(key, text): a footer status until cleared; pass undefined to clear.
+- ctx.ui.setWidget(key, lines): an array of strings shown above the input box until cleared with undefined. This is where a long job's progress belongs, so the session's own output stays the person's.
 - ctx.cwd, ctx.model, ctx.signal (the turn's abort signal), ctx.isIdle().
 - ctx.sessionManager.getSessionId(), getSessionFile(), getEntries(), getBranch().
+
+## Keys
+
+- pi.registerShortcut("ctrl+r", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
 
 ## Messages
 

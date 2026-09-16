@@ -541,10 +541,17 @@ With ``evolution.requests: true``, a tree that boots from the seed also
 carries the pi ``/reef-harness <request>`` command, which uses the same manual
 training API with pi's current session id. In the session the model first
 thinks the request through and asks what is unclear, a few options plus a
-typed answer per question, then files the request with the answers;
+typed answer per question, then files the request with the answers. Every
+question also offers ``Cancel this request``, and Escape does the same: it
+drops the whole request rather than skipping the question, so nothing is
+filed and the agent is told you backed out.
 ``/reef-harness --direct <request>`` files it as is, and either way the
-filing answers with the link to the request's page. A footer status shows
-the request queued, then the step running and for how long, and the
+filing answers with the link to the request's page. A spinner then sits just
+above your input box with the step's phase (writing the change, checking the
+harness) and how long it has run; ``ctrl+r`` expands it in place with the
+request, the evaluation's episode count and step record when reef reports
+them, and the page link for the full detail, and ``ctrl+r`` closes it again.
+The step runs in the background the whole time, so you can keep typing. The
 result is reported when it settles, with the same next actions as
 ``--wait`` and the step whose page has the details, as a message the chat
 keeps beside a notice. This background result opens no dialog, so you can
