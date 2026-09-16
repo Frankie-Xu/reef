@@ -10,8 +10,9 @@ coordination of separate training and inference runtimes to ``RuntimeScheduler``
 The GPU stack is reached by full path so importing ``reef.train`` itself stays light.
 
 ``algos/`` turns a reserved batch into a ``StepSignal`` — the same
-computation no matter which backend executes it — and its ``StepScheduling``
-says how the runtime cuts one batch into optimizer steps. ``evaluation/`` is
+computation no matter which backend executes it; the recipe's ``StepScheduling``
+(``reef.core.batches``) says how the runtime cuts one batch into optimizer
+steps. ``evaluation/`` is
 the recipe's candidate gate; ``Trainer`` runs it between prepare and settle.
 
 The package does not import recipes or service assembly. ``CordisRecipe``

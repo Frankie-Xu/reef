@@ -121,7 +121,7 @@ class Scenario:
 
         Every mutating path goes through a Scenario method so it is serialized
         against rollback and commit by the committer lock. Reading state
-        that is not part of a transaction (step-preparer identity, consumption
+        that is not part of a transaction (objective identity, consumption
         watermarks, processor schema) is safe here; do not reserve batches,
         replace results, or compact through this handle.
         """

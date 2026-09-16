@@ -1124,9 +1124,8 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
     assert '"pi"' in text
     assert "PI_CODING_AGENT_DIR" in text
     # the interpreter behind the python3 the install resolved (the shim execs sys.executable), by absolute
-    # path, with -P where it exists; never python3 from a later PATH
-    safe_path = " -P" if sys.version_info >= (3, 11) else ""
-    assert f'exec "{sys.executable}"{safe_path} -m reef.harness.client.wrapper "$@"' in text
+    # path, with -P; never python3 from a later PATH
+    assert f'exec "{sys.executable}" -P -m reef.harness.client.wrapper "$@"' in text
     # compose dir is baked as an absolute path (resolved at install time)
     assert "$COMPOSE_ABS" not in text
     assert str(dest / "pi-agent") in text
@@ -1273,7 +1272,6 @@ def test_install_refuses_an_interpreter_without_reef_and_installs_nothing_on_its
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(sys.version_info < (3, 11), reason="-P exists from Python 3.11")
 def test_install_and_wrapper_ignore_a_reef_directory_in_the_working_directory(tmp_path) -> None:
     """A directory named ``reef`` in the working directory (a checkout's parent, for one) shadows
     the package for a bare ``python3 -c`` or ``-m``. The import check runs with ``-P`` and sees

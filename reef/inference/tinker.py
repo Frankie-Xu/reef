@@ -14,7 +14,6 @@ import asyncio
 import importlib
 import json
 import math
-import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -85,8 +84,6 @@ class TinkerSDKSampler(TinkerSampler):
     def __init__(
         self, base_model: str, *, api_key: str, project_id: str | None = None, timeout_s: float = 300.0
     ) -> None:
-        if sys.version_info < (3, 11):
-            raise RuntimeError("Tinker requires Python 3.11 or newer; Reef's other backends still support 3.10")
         try:
             self._sdk = importlib.import_module("tinker")
         except ImportError as exc:

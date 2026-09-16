@@ -241,7 +241,7 @@ const glossaryTerms = [
   "Recipe",
   "Recipe reference",
   "Loss family",
-  "Preparer",
+  "Training objective",
   "Release chain",
   "Artifact",
   "Surface",

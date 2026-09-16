@@ -11,6 +11,7 @@ from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
+from reef.train.algos import StepScheduling
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -43,7 +44,12 @@ class SAORecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="sao", loss_family="sao", processor=SAOProcessor)
+        return WeightTrainingSpec(
+            objective="sao",
+            processor=SAOProcessor,
+            # Each rollout is its own DP unit; the backend's configured step size applies.
+            scheduling=StepScheduling(unit="sample"),
+        )
 
     def __post_init__(self) -> None:
         super().__post_init__()

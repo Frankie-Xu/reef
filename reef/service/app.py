@@ -29,7 +29,7 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
             logger.exception("record retention failed; will retry on the next sweep")
         try:
             await asyncio.wait_for(stopped.wait(), timeout=_RECORD_RETENTION_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
 
 

@@ -6,7 +6,6 @@ and concurrency tests can make a batch ready after one report.
 
 from __future__ import annotations
 
-
 from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Any
@@ -15,6 +14,7 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
+from reef.train.algos import StepScheduling
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
@@ -66,7 +66,7 @@ class TestPolicyRecipe(WeightTrainingRecipe):
                 )
             ),
             candidate_backend=RuntimeCandidateBackend(
-                self.training_runtime, "sft", inference_runtime=self.runtime, scenario=scenario
+                self.training_runtime, "sft", StepScheduling(), inference_runtime=self.runtime, scenario=scenario
             ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,

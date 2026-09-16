@@ -19,7 +19,7 @@ from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
 from reef.harness.tree.render import render_composition
 
-pytest.importorskip("harbor", reason="the terminus extra is not installed")
+pytest.importorskip("harbor", reason="harbor is not installed")
 
 NODES = [
     ("rules", {"text": "Be brief."}),

@@ -60,6 +60,7 @@ from reef.service.deploy.deployment_config import (
 )
 from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
+from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
 from reef.service.deploy.service_config import (
     normalize_service_config,
@@ -308,7 +309,7 @@ class _Stack:
         for name, executor in ordered:
             try:
                 executor.rpc(0, "request_stop", timeout=10)
-            except Exception as exc:  # noqa: PERF203 -- each remote worker must be cleaned independently
+            except Exception as exc:
                 _log(f"{name}: stop RPC failed: {exc}")
         deadline = time.monotonic() + max(0, grace)
         pending = ordered
@@ -318,7 +319,7 @@ class _Stack:
                 try:
                     if executor.rpc(0, "tree_alive", timeout=min(2, max(0.01, deadline - time.monotonic()))):
                         living.append((name, executor))
-                except Exception:  # noqa: PERF203 -- a failed node must not skip other nodes
+                except Exception:
                     living.append((name, executor))
             pending = living
             if pending:
@@ -327,7 +328,7 @@ class _Stack:
             try:
                 executor.rpc(0, "shutdown", kwargs={"grace": 0}, timeout=15)
                 self._drain_log(name)
-            except Exception as exc:  # noqa: PERF203 -- continue teardown after a worker failure
+            except Exception as exc:
                 _log(f"{name}: process cleanup failed: {exc}")
             finally:
                 try:
@@ -442,6 +443,7 @@ def resolve_deployment_config(
                 assemble_training_services(normalized_config)
             else:
                 assemble_provider_services(normalized_config)
+            attach_generator_service(normalized_config)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root

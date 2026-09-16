@@ -151,3 +151,18 @@ Beta recipes
 **beta** until complete, reproducible learning results are published. Both
 live under ``recipes/beta/coral/``. Integration and smoke tests validate the
 wiring but do not establish learning performance.
+
+`SPADE <../../recipes/beta/spade/README.md>`__ (self play in adaptive
+synthetic executable environments, `arXiv:2608.19197
+<https://arxiv.org/abs/2608.19197>`__) is **beta** under
+``recipes/beta/spade/``: one policy plays an Environment Designer that writes
+executable environments and a Reasoning Agent that learns in them. Reef knows
+one task format, Harbor, and the Designer writes it directly: an instruction,
+a container, a verifier and a reference solution, a task any Harbor agent can
+play. Writing, checking and playing those tasks is Reef's
+(``reef.record2dataset``, the generator service ``reef serve`` starts beside
+the HTTP service); the package holds the method: the Designer's adversarial
+experience section, the two arms each task is played with, the hint based
+regret reported against the Designer's receipt, and the Reasoning Agent's
+group relative training on the plain arm's episodes, all driven from its
+processor. The Designer's own training follows.

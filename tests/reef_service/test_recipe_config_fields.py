@@ -36,7 +36,7 @@ class ConfiguredRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="sft", loss_family="sft", processor=ThresholdProcessor)
+        return WeightTrainingSpec(objective="sft", processor=ThresholdProcessor)
 
 
 @pytest.mark.unit
@@ -207,28 +207,28 @@ def test_default_build_uses_declared_processor_and_config_fields() -> None:
     assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
     assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
     assert trainer.candidate_evaluator._candidate_backend is trainer.candidate_backend
-    assert trainer.candidate_backend.step_preparer == "sft"
+    assert trainer.candidate_backend.objective == "sft"
     assert trainer.processor.context.config["batch_size"] == 2
     assert "max_staleness" not in trainer.processor.context.config
 
 
 @pytest.mark.unit
-def test_default_build_requires_processor_and_step_preparer_declarations() -> None:
+def test_default_build_requires_processor_and_objective_declarations() -> None:
     from reef.storage.sqlite import SQLiteRecordStore
 
     @dataclass(frozen=True)
     class NoProcessorRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(step_preparer="sft", loss_family="sft")
+            return WeightTrainingSpec(objective="sft")
 
     @dataclass(frozen=True)
-    class NoPreparerRecipe(WeightTrainingRecipe):
+    class NoObjectiveRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(step_preparer="", loss_family="sft", processor=ThresholdProcessor)
+            return WeightTrainingSpec(objective="", processor=ThresholdProcessor)
 
     with pytest.raises(TypeError, match=r"declares no processor.*training_spec\(\).*override build"):
         NoProcessorRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
-    with pytest.raises(TypeError, match=r"declares no step_preparer.*registered preparer name.*'module:callable'"):
-        NoPreparerRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
+    with pytest.raises(TypeError, match=r"declares no objective.*registered objective name.*'module:Objective'"):
+        NoObjectiveRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())

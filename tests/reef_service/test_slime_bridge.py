@@ -1518,11 +1518,22 @@ def test_driver_rejects_a_recipe_with_an_unknown_loss_family(monkeypatch) -> Non
 
     from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
     from reef.service.training_driver import _resolve_training_recipe
+    from reef.train.algos import TrainingObjective
+    from reef.train.algos.registry import OBJECTIVES
+
+    class UnknownLossObjective(TrainingObjective):
+        name = "unknown-loss"
+        loss_family = "grpo"
+
+        def prepare(self, batch, state):
+            raise AssertionError("the driver must reject the loss before preparation")
+
+    monkeypatch.setitem(OBJECTIVES.objectives, "unknown-loss", UnknownLossObjective())
 
     class UnknownLossRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls):
-            return WeightTrainingSpec(step_preparer="unused", loss_family="grpo")
+            return WeightTrainingSpec(objective="unknown-loss")
 
     module = ModuleType("unknown_loss_recipe")
     module.UnknownLossRecipe = UnknownLossRecipe
@@ -1938,17 +1949,22 @@ def test_to_slime_rollout_data_validates_step_layout() -> None:
 
 @pytest.mark.unit
 def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
-    from reef.train.algos import StepSignal
+    from reef.train.algos import StepSignal, TrainingObjective
     from reef.train.slime_backend.reef_adapters import preparation
 
-    def preparer(batch, state):
-        return StepSignal(
-            "train", "pg", {}, {"steps": 1}, tuple(range(8)), StepScheduling(batch_size=3, epochs=2, remainder="drop")
-        )
+    class ScheduleObjective(TrainingObjective):
+        name = "test-schedule"
+        loss_family = "pg"
+        supports_multiple_epochs = True
 
-    monkeypatch.setattr(preparation, "resolve_preparer", lambda _name: preparer)
+        def prepare(self, batch, state):
+            return StepSignal("train", {}, {"steps": 1}, tuple(range(8)))
 
-    result = preparation.prepare_slime_step(_grouped_batch(8, 1), "any", {})
+    monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
+
+    result = preparation.prepare_slime_step(
+        _grouped_batch(8, 1), "any", {}, StepScheduling(batch_size=3, epochs=2, remainder="drop")
+    )
 
     assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
     assert result.payload is not None and len(result.payload["samples"]) == 12

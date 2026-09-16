@@ -60,7 +60,7 @@ the evaluator measures the candidate and the selector decides whether to publish
 Before you write one
 --------------------
 
-If an existing recipe's processor, preparer, loss family, gate, and surface
+If an existing recipe's processor, objective, gate, and surface
 already match your method, change its config instead. Re-read `Choosing a recipe
 <../user-guide/recipes.rst>`__.
 
@@ -71,16 +71,17 @@ A weight recipe is four pieces plus the class that binds them.
 
 .. config::
 
-   step preparer | a plain function turning a typed batch into a ``StepSignal``: the loss family, the per-sample advantages, and the next algorithm state. No torch, Ray, or Slime import.
+   training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(batch, state)`` to return advantages, metrics, and proposed state in a ``StepSignal``. No torch, Ray, or Slime import.
+   step schedule | a ``StepScheduling`` the recipe binds beside its objective: rollout unit, optimizer step size, epochs, shuffle, and remainder handling. The objective declares only whether its loss tolerates more than one pass.
    processor | assembles valid reports and referenced records into samples and typed batches
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``BackendAlwaysSelectPlugin``, selects whatever the backend produced
-   recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the preparer (by dotted path), and the loss family
+   recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the objective (by registered name or dotted class/instance path), and the step schedule
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
 alongside this page. Its four files total fewer than 200 lines: ``recipe.py``,
-``processor.py``, ``preparer.py``, and the ``slime/`` loss family.
+``processor.py``, ``objective.py``, and the ``slime/`` loss family.
 
 Configure it
 ~~~~~~~~~~~~

@@ -2,6 +2,7 @@
 
 import json
 import pickle
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +18,9 @@ from reef.core.trajectories import (
     source_record_id,
     trajectory_reward,
 )
+from reef.runtime.interfaces import InferenceStream
+from reef.service.streaming import stream_record
+from reef.train.algos import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TaskItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
 
@@ -60,6 +64,14 @@ def test_mixed_items_survive_worker_serialization():
     assert isinstance(batch.items[1], TaskItem)
 
 
+# The cookbook recipes' step schedules, as their ``training_spec()`` binds them.
+SCHEDULING = {
+    "sao": StepScheduling(unit="sample"),
+    "openclawrl": StepScheduling(unit="sample"),
+    "tttd": StepScheduling(unit="sample", batch_size="actual"),
+}
+
+
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
 def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algorithm):
     items = tuple(replace(captured_trajectory(str(index), float(index)), group_id="group") for index in range(2))
@@ -67,7 +79,9 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     loaded = TrainingBatch(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
     )
-    assert prepare_slime_step(loaded, algorithm, {}) == prepare_slime_step(original, algorithm, {})
+    assert prepare_slime_step(loaded, algorithm, {}, SCHEDULING[algorithm]) == prepare_slime_step(
+        original, algorithm, {}, SCHEDULING[algorithm]
+    )
     assert loaded.items[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
 
 
@@ -90,19 +104,77 @@ def test_original_provider_payloads_and_feedback_survive_json_roundtrip():
     assert loaded.metadata["feedback"] == {"detail": "feedback"}
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_completed_stream_messages_survive_multiturn_atif_conversion(provider: str) -> None:
+    records = []
+    messages = []
+    for question, answer in (("First question", "First answer"), ("Next question", "Next answer")):
+        if provider == "openai":
+            event = {"choices": [{"index": 0, "delta": {"content": answer}}]}
+            terminal = "[DONE]"
+        else:
+            event = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": answer}}
+            terminal = json.dumps({"type": "message_stop"})
+        body = f"data: {json.dumps(event)}\n\ndata: {terminal}\n\n".encode()
+
+        async def _chunks(body: bytes = body) -> AsyncIterator[bytes]:
+            yield body
+
+        stream = InferenceStream(status=200, headers={"content-type": "text/event-stream"}, chunks=_chunks())
+        response = stream_record(stream, body, complete=True)
+        messages.append({"role": "user", "content": question})
+        records.append(
+            AgentRecord.create(
+                scenario="stream",
+                request_type=RequestType.INFERENCE,
+                payload={"messages": list(messages), "response": response},
+            )
+        )
+        messages.append({"role": "assistant", "content": answer})
+
+    item = make_trajectory(records, reward=1.0)
+    loaded = TrajectoryItem(json.loads(json.dumps(item.trajectory)))
+
+    assert [(step["source"], step["message"]) for step in loaded.trajectory["steps"]] == [
+        ("user", "First question"),
+        ("agent", "First answer"),
+        ("user", "Next question"),
+        ("agent", "Next answer"),
+    ]
+    assert recorded_payloads(loaded) == tuple(record.payload for record in records)
+    assert item.source_agent_record_ids == tuple(record.agent_record_id for record in records)
+    assert trajectory_reward(loaded) == 1.0
+    assert loaded.training == {}
+
+
+def test_training_response_message_takes_precedence_over_stream_summary() -> None:
+    item = recorded_trajectory(
+        "stream",
+        {
+            "response": {
+                "message": {"role": "assistant", "content": "Stream summary"},
+                "training": {"response_message": {"role": "assistant", "content": "Captured answer"}},
+            }
+        },
+        1.0,
+    )
+
+    assert item.trajectory["steps"][0]["message"] == "Captured answer"
+
+
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
 def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(algorithm):
     batch = TrainingBatch("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported item 1"):
-        prepare_slime_step(batch, algorithm, state)
+        prepare_slime_step(batch, algorithm, state, SCHEDULING[algorithm])
     assert state == {"steps": 3}
     assert isinstance(batch.items[1], TaskItem)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
-    prepared = prepare_slime_step(TrainingBatch("plain", (item,)), "sao", {})
+    prepared = prepare_slime_step(TrainingBatch("plain", (item,)), "sao", {}, SCHEDULING["sao"])
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     with pytest.raises(ValueError, match="training tensors"):
@@ -118,15 +190,15 @@ def test_groups_preserve_row_and_advantage_order():
     batch = TrainingBatch("groups", items)
     assert trajectories(batch) == items
     assert trajectory_groups(batch) == (items[:2], items[2:])
-    from recipes.tttd.preparer import TttdPreparer
+    from recipes.tttd.objective import TttdObjective
 
-    preparer = TttdPreparer()
+    objective = TttdObjective()
     expected = tuple(
         value
         for group in (items[:2], items[2:])
-        for value in preparer.adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
+        for value in objective.adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
     )
-    assert preparer(batch, {}).advantages == expected
+    assert objective.prepare(batch, {}).advantages == expected
 
 
 def test_noncontiguous_groups_fail_before_misaligned_training():
@@ -205,7 +277,7 @@ def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = TrainingBatch(
         "grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2))
     )
-    result = prepare_slime_step(batch, algorithm, {})
+    result = prepare_slime_step(batch, algorithm, {}, SCHEDULING[algorithm])
     assert result.payload["rollout_ids"] == [0, 1]
     assert result.payload["source_rows"] == [0, 1]
 

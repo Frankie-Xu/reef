@@ -764,6 +764,10 @@ select the Slime training-worker and rollout-control executors (both default
 ``gpus_per_worker``. Counts must be positive integers; resource quantities must
 be finite nonnegative numbers. Numeric environment interpolation is accepted.
 
+``execution.generator`` selects the executor of the generator service a
+``generator`` section adds (default ``auto``, one local process); it accepts
+what ``execution.services`` accepts, with one worker.
+
 ``execution.evolution`` selects harness evaluation workers (default ``auto``).
 Unlike Slime, ordinary harness evolution calls external model endpoints and
 does not need local GPUs: one worker selects ``uni``, multiple workers select
@@ -926,6 +930,51 @@ Plain function factories and structural lookalikes are not accepted.
 
 The plugin interface is in `Write a recipe
 <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
+
+The ``generator`` section
+-------------------------
+
+Absent by default. When present, ``reef serve`` starts the generator service
+(``python -m reef.record2dataset``) before the HTTP service, which depends on
+it, and publishes its address as ``${endpoints.generator}`` for the recipe to
+consume. The generator writes, checks and plays Harbor tasks for a task
+generating processor such as SPADE, under the same interpreter as the Reef
+service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
+``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
+place it on the host that has Docker.
+
+.. config::
+
+   generator.tasks-root | the directory generated tasks, manifests and Harbor job files live under. Required.
+   generator.host | 127.0.0.1 | bind address
+   generator.port | 8910 | bind port
+   generator.work-dir | ``<tasks-root>/.play`` | where the task player keeps trials
+   generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders
+   generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
+   generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
+   generator.concurrency | 2 | episodes in flight per play request
+   generator.designer-url | a Reef service the designer calls go to instead of this deployment's
+   generator.designer-token | the token for ``designer-url``
+   generator.designer-model | the served model the designer asks for; the deployment's by default
+   generator.designer-timeout-s | 1800 | seconds one designer call may take; ``inference.timeout-s`` must allow it too
+   generator.designer-options | extra fields of the designer's chat request, e.g. ``{"reasoning_effort": "none"}``
+   generator.ready-timeout | 60 | seconds ``reef serve`` waits for the generator to answer
+
+.. code:: yaml
+
+   generator:
+     tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
+   execution:
+     generator: auto
+   recipe:
+     config:
+       generator-url: ${endpoints.generator}
+
+The generator reads the resolved deployment through ``REEF_CONFIG`` like the
+other children: the Reef address from ``reef.host`` and ``reef.port``, the
+token from ``reef.token``, and the served model from ``inference.model-path``
+or ``inference.upstream-model``. Without ``reef serve``,
+``python -m reef.record2dataset -c serve.yaml`` runs it from the same file.
 
 Experiment tracking
 -------------------

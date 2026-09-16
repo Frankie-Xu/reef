@@ -6,7 +6,7 @@ weights or the harness*. This package holds everything a method binds to:
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
   ``build``, ``build_artifact_validator``, ``build_surface``, the
   ``CheckpointStrategy``) and ``WeightTrainingRecipe`` with its
-  ``WeightTrainingSpec`` (step preparer, loss family, data processor).
+  ``WeightTrainingSpec`` (training objective and data processor).
 - ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
 - ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement.

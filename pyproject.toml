@@ -13,10 +13,8 @@ description = "A framework-agnostic runtime for continuously improving agents"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Human-Agent-Society" }]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: System :: Distributed Computing",
@@ -29,8 +27,9 @@ dependencies = [
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    # Harbor and reef-eval: the terminus runner, the task player and the generator service play Harbor tasks.
+    "reef-eval[harbor]>=0.1.1",
     "sqlalchemy>=2.0,<3",
-    "tomli; python_version < '3.11'",
     "tomli-w",
 ]
 
@@ -38,15 +37,12 @@ dependencies = [
 # Python-side inference adapters; install native SGLang in its GPU environment.
 sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 tinker = [
-    "tinker==0.28.1; python_version >= '3.11'",
+    "tinker==0.28.1",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
-    "tinker-cookbook==0.5.7; python_version >= '3.11'",
-    "jinja2>=3.1.0; python_version >= '3.11'",
+    "tinker-cookbook==0.5.7",
+    "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
-terminus = [
-    "reef-eval[harbor]>=0.1.1; python_version >= '3.12'",
-]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [
@@ -126,7 +122,7 @@ reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.
 profile = "black"  # black-compatible
 line_length = 119  # should match black parameters
 ignore_whitespace = true  # ignore whitespace for compatibility with the initial style
-py_version = 310  # python 3.10 as a target version
+py_version = 312  # sync with requires-python in [project]
 sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
 default_section = "THIRDPARTY"
 known_first_party = ["reef", "recipes"]
@@ -140,7 +136,7 @@ src_paths = ["reef", "recipes"]
 line_length = 119
 
 [tool.ruff]
-target-version = "py310"  # sync with requires-python in [project]
+target-version = "py312"  # sync with requires-python in [project]
 line-length = 119  # sync with [tool.black] and [tool.isort]
 
 [tool.ruff.lint]
@@ -167,6 +163,9 @@ ignore = [
     "E501",
     # N818: existing public exception names omit an Error suffix; renaming them would break callers
     "N818",
+    # UP046/UP047: PEP 695 type parameter syntax; the codebase declares TypeVars, and mypy reads both forms
+    "UP046",
+    "UP047",
 ]
 # Math notation in the RL objective docstrings: SAO's alpha/gamma, and the
 # true minus sign used alongside other Unicode math (∇, π, Â) in the SAO loss
@@ -186,7 +185,7 @@ allowed-confusables = ["α", "γ", "−"]
 # Reef's training adapters are checked with the rest of the package; the
 # runtime remains a separately installed distribution.
 files = ["reef"]
-python_version = "3.10"  # sync with requires-python in [project]
+python_version = "3.12"  # sync with requires-python in [project]
 ignore_missing_imports = true
 
 # The training runtime and its GPU dependencies do not ship type information

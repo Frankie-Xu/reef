@@ -7,16 +7,11 @@ import importlib
 import importlib.util
 import runpy
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
-    import tomli as tomllib
-
 
 ROOT = Path(__file__).resolve().parents[1]
 # An example lives beside its method under recipes/<method>/examples/; the

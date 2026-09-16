@@ -107,6 +107,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "execution",
         "executors",
         "evaluation",
+        "generator",
         "observability",
     }
     extra = set(pending) - known_sections
@@ -223,7 +224,7 @@ def translate_references(config: dict[str, Any], arguments: tuple[ConfigArgument
     return convert(config)
 
 
-_EXECUTION_ROLES = ("services", "training", "rollout", "evolution")
+_EXECUTION_ROLES = ("services", "training", "rollout", "evolution", "generator")
 
 
 def _recipe_definition(config: Mapping[str, Any]) -> tuple[type[Recipe] | None, tuple[str, ...]]:
@@ -363,7 +364,7 @@ def normalize_component_config(config: Mapping[str, Any], arguments: tuple[Confi
         factory.parse_config(runtime, os.environ)
     execution = normalized.get("execution", {})
     if not isinstance(execution, Mapping) or set(execution) - set(_EXECUTION_ROLES):
-        raise ValueError("execution must be an object with services, training, rollout or evolution roles")
+        raise ValueError("execution must be an object with services, training, rollout, evolution or generator roles")
     for selection in execution.values():
         executor_settings(normalized, selection)
     return normalized
