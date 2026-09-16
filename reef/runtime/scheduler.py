@@ -29,7 +29,7 @@ from threading import Lock, RLock
 from typing import Any, Literal
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.batches import TrainingBatch
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.evaluation import SelectionDecision
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
@@ -566,12 +566,14 @@ class RuntimeScheduler:
         batch: TrainingBatch,
         objective: str,
         algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
         scenario_step: int,
     ) -> PreparedTrainingStep:
         return self.training_runtime.prepare_training_step(
             batch,
             objective,
             algorithm_state,
+            scheduling,
             scenario_step,
             serving_runtime_load_id=(
                 self.inference_runtime.serving_runtime_load_id()
@@ -810,9 +812,13 @@ class TrainingCoordinator:
         )
 
     def prepare_training_step(
-        self, batch: TrainingBatch, objective: str, algorithm_state: Mapping[str, Any]
+        self,
+        batch: TrainingBatch,
+        objective: str,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return self._training.prepare_training_step(batch, objective, algorithm_state)
+        return self._training.prepare_training_step(batch, objective, algorithm_state, scheduling)
 
     def shutdown(self) -> None:
         """Close training workers; deployment ownership closes inference separately."""

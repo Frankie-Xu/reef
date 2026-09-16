@@ -17,6 +17,7 @@ from reef.recipe import WeightTrainingRecipe
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
+from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.evaluation import (
     BackendEvaluateMixin,
@@ -62,7 +63,7 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, self._objective, state)
+        prepared = prepare_slime_step(batch, self._objective, state, StepScheduling())
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -85,7 +86,7 @@ def test_training_backend_names_both_sides_of_the_durable_commit_handshake() -> 
 
     runtime = StubTrainingRuntime()
     runtime.inference = Receiver(runtime, base_url="http://inference")
-    backend = candidate_backend(runtime, "sft")
+    backend = candidate_backend(runtime, "sft", StepScheduling())
 
     assert not hasattr(CandidateBackend, "reconcile")
     assert hasattr(CandidateBackend, "recover_pending_step")
@@ -396,14 +397,14 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1}))
     sft_processor.ingest(inference("i1"))
     sft_processor.ingest(report("r1", "i1", 1.0))
-    sft_result = prepare_slime_step(sft_processor.build_batch(), "sft", {})
+    sft_result = prepare_slime_step(sft_processor.build_batch(), "sft", {}, StepScheduling())
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = GroupedPolicyProcessor(ProcessorContext("math", {"batch_size": 1}))
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
         grpo_processor.ingest(inference(rid))
         grpo_processor.ingest(report("r" + rid, rid, score, comparison_set="x"))
-    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_OBJECTIVE, {})
+    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_OBJECTIVE, {}, StepScheduling())
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
 
@@ -772,9 +773,9 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             return None
 
         def prepare_training_step(
-            self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+            self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
         ):
-            prepared = prepare_slime_step(batch, objective, algorithm_state)
+            prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
             assert prepared.payload is not None
             self.calls.append(("prepare", batch, objective))
             return PreparedTrainingStep(
@@ -815,7 +816,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
                 scenario,
                 records,
                 processor_factory=lambda context: GroupedPolicyProcessor(context.with_config({"batch_size": 1})),
-                candidate_backend=candidate_backend(self.training_runtime, self.objective),
+                candidate_backend=candidate_backend(self.training_runtime, self.objective, StepScheduling()),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
             )
@@ -888,7 +889,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     processor.ingest(report("r1", "i1", 1.0))
     batch = processor.build_batch()
     assert len(batch.items) == 1
-    prepared = prepare_slime_step(batch, "sao", {})
+    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)

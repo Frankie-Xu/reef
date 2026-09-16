@@ -10,7 +10,7 @@ from reef.core.trajectories import trajectory_reward
 from reef.train.algos import TrainingObjective
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.registry import register_objective
-from reef.train.algos.signals import StepScheduling, StepSignal
+from reef.train.algos.signals import StepSignal
 from reef.train.types import TrainingBatch, trajectory_groups
 
 
@@ -113,5 +113,4 @@ class TttdObjective(TrainingObjective):
                 "steps": steps,
             },
             normalized,
-            StepScheduling(unit="sample", batch_size="actual"),
         )

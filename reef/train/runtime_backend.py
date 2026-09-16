@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import asdict
 from typing import Any
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
@@ -18,6 +19,7 @@ from reef.runtime.interfaces import (
     TrainingRuntime,
 )
 from reef.runtime.scheduler import RuntimeScheduler
+from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
 
@@ -29,6 +31,7 @@ class RuntimeCandidateBackend(CandidateBackend):
         self,
         training_runtime: TrainingRuntime,
         objective: str,
+        scheduling: StepScheduling,
         *,
         inference_runtime: InferenceRuntime,
         loss_family: str | None = None,
@@ -36,8 +39,11 @@ class RuntimeCandidateBackend(CandidateBackend):
     ) -> None:
         if not objective:
             raise ValueError("objective must be non-empty")
+        if not isinstance(scheduling, StepScheduling):
+            raise TypeError(f"scheduling must be a StepScheduling, got {type(scheduling).__name__}")
         self.scheduler = RuntimeScheduler(training_runtime, inference_runtime)
         self.objective = objective
+        self.scheduling = scheduling
         self._loss_family = loss_family
         self._scenario = scenario
 
@@ -57,6 +63,7 @@ class RuntimeCandidateBackend(CandidateBackend):
         return {
             "runtime": type(self.training_runtime).__name__,
             "objective": self.objective,
+            "scheduling": asdict(self.scheduling),
             **({"loss_family": self._loss_family} if self._loss_family is not None else {}),
         }
 
@@ -89,12 +96,7 @@ class RuntimeCandidateBackend(CandidateBackend):
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
-        prepared = self.prepare_training_step(
-            batch,
-            self.objective,
-            state,
-            scenario_step,
-        )
+        prepared = self.prepare_training_step(batch, self.objective, state, self.scheduling, scenario_step)
         next_state = dict(prepared.next_algorithm_state)
         metrics = dict(prepared.metrics)
         if prepared.action == "skip":
@@ -173,9 +175,10 @@ class RuntimeCandidateBackend(CandidateBackend):
         batch: TrainingBatch,
         objective: str,
         algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
         scenario_step: int,
     ) -> PreparedTrainingStep:
-        return self.scheduler.prepare_training_step(batch, objective, algorithm_state, scenario_step)
+        return self.scheduler.prepare_training_step(batch, objective, algorithm_state, scheduling, scenario_step)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self.scheduler.execute_training_job(payload)

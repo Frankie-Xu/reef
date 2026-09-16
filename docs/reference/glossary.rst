@@ -122,9 +122,11 @@ Training objective
 
 The method-owned ``TrainingObjective`` declares its backend loss family and
 prepares a complete reserved batch. Its ``prepare`` method returns advantages,
-scheduling, metrics, and proposed algorithm state in a ``StepSignal`` before
-optimizer or worker partitioning. It imports no training stack. A recipe
-selects it by registered name or dotted class/instance path.
+metrics, and proposed algorithm state in a ``StepSignal`` before optimizer or
+worker partitioning. It imports no training stack. A recipe selects it by
+registered name or dotted class/instance path and binds the ``StepScheduling``
+the runtime cuts each batch with; the objective only rejects a schedule its
+loss cannot train.
 
 Loss family
 -----------

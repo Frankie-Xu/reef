@@ -23,6 +23,7 @@ import recipes.tttd  # noqa: F401  (registration side effect)
 from recipes.beta.coral.processor import CoralProcessor
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
+from reef.train.algos import StepScheduling
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -33,7 +34,12 @@ class CoralRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="tttd", processor=CoralProcessor)
+        return WeightTrainingSpec(
+            objective="tttd",
+            processor=CoralProcessor,
+            # Sibling groups train as one optimizer step, as TTTD's grid does.
+            scheduling=StepScheduling(unit="sample", batch_size="actual"),
+        )
 
     def __post_init__(self) -> None:
         # Validate our own field first: the group barrier is checkable

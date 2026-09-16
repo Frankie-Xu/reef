@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.batches import TrainingBatch, trajectories
+from reef.core.batches import StepScheduling, TrainingBatch, trajectories
 from reef.runtime.interfaces import PreparedTrainingStep
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import materialize_schedule, schedule_seed
@@ -18,17 +18,19 @@ def prepare_tinker_step(
     batch: TrainingBatch,
     objective: str,
     state: Mapping[str, Any],
+    scheduling: StepScheduling,
     *,
     batch_size: int,
     runtime_load_id: str | None = None,
 ) -> PreparedTrainingStep:
-    """Shape one batch into Tinker optimizer batches.
+    """Shape one batch into Tinker optimizer batches under the recipe's ``scheduling``.
 
     With ``runtime_load_id`` the payload also records that serving version
     and whether any trajectory was produced under another one; without it,
     Reef's coordinator performs staleness admission from the batch itself.
     """
     method = resolve_objective(objective)
+    method.validate_scheduling(scheduling)
     signal = method.prepare(batch, state)
     if signal.action == "skip":
         return PreparedTrainingStep("skip", signal.next_algorithm_state, signal.metrics)
@@ -52,8 +54,7 @@ def prepare_tinker_step(
                     stale = True
         rows.append(asdict(TokenRow.from_item(item, advantage)))
         key = f"group:{item.group_id}" if item.group_id is not None else f"row:{index}"
-        rollout_ids.append(index if signal.scheduling.unit == "sample" else groups.setdefault(key, len(groups)))
-    scheduling = signal.scheduling
+        rollout_ids.append(index if scheduling.unit == "sample" else groups.setdefault(key, len(groups)))
     if scheduling.batch_size == "configured":
         if scheduling.remainder == "error" and batch_size > len(set(rollout_ids)):
             raise ValueError("Tinker configured batch_size exceeds the available comparison sets")

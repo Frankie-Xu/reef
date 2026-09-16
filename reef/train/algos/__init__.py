@@ -5,8 +5,9 @@ the schedule materializer backends share lives in :mod:`reef.train.algos.schedul
 Registered-objective APIs live in :mod:`reef.train.algos.registry`.
 """
 
+from reef.core.batches import StepScheduling
 from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.signals import StepScheduling, StepSignal
+from reef.train.algos.signals import StepSignal
 
 __all__ = [
     "StepScheduling",

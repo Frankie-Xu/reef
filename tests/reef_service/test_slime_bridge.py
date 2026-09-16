@@ -1955,15 +1955,16 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
     class ScheduleObjective(TrainingObjective):
         name = "test-schedule"
         loss_family = "pg"
+        supports_multiple_epochs = True
 
         def prepare(self, batch, state):
-            return StepSignal(
-                "train", {}, {"steps": 1}, tuple(range(8)), StepScheduling(batch_size=3, epochs=2, remainder="drop")
-            )
+            return StepSignal("train", {}, {"steps": 1}, tuple(range(8)))
 
     monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
 
-    result = preparation.prepare_slime_step(_grouped_batch(8, 1), "any", {})
+    result = preparation.prepare_slime_step(
+        _grouped_batch(8, 1), "any", {}, StepScheduling(batch_size=3, epochs=2, remainder="drop")
+    )
 
     assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
     assert result.payload is not None and len(result.payload["samples"]) == 12

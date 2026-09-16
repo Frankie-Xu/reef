@@ -23,9 +23,15 @@ def prepare_slime_step(
     batch: TrainingBatch,
     objective_id: str,
     algorithm_state: Mapping[str, Any],
+    scheduling: StepScheduling,
 ) -> PreparedTrainingStep:
-    """Resolve a training objective and produce its complete Slime training payload."""
+    """Resolve a training objective and produce its complete Slime training payload.
+
+    ``scheduling`` is the recipe's step schedule; the objective rejects one its
+    loss cannot train before any payload is built.
+    """
     objective = resolve_objective(objective_id)
+    objective.validate_scheduling(scheduling)
     signal = objective.prepare(batch, algorithm_state)
     if signal.action == "skip":
         return PreparedTrainingStep(
@@ -33,8 +39,8 @@ def prepare_slime_step(
             next_algorithm_state=signal.next_algorithm_state,
             metrics=signal.metrics,
         )
-    schedule = _materialize(batch, signal.scheduling)
-    payload = _build_payload(batch, objective.loss_family, signal.advantages, signal.scheduling)
+    schedule = _materialize(batch, scheduling)
+    payload = _build_payload(batch, objective.loss_family, signal.advantages, scheduling)
     metrics = dict(signal.metrics)
     if schedule.epochs > 1:
         metrics.setdefault("epochs", schedule.epochs)

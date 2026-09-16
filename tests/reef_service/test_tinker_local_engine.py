@@ -18,9 +18,9 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.training import local_model_required, training_deployment_for
 from reef.surface.adapter import adapter_name
+from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.algos.signals import StepScheduling, StepSignal
 from reef.train.tinker_backend.backend import ADAPTER_DIR, TinkerTrainingBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerConfig
@@ -124,7 +124,6 @@ class SampleObjective(TrainingObjective):
             "train",
             {"steps": state.get("steps", 0) + 1},
             advantages=tuple(1.0 for _ in batch.items),
-            scheduling=StepScheduling(unit="sample", batch_size="actual"),
         )
 
 
@@ -169,7 +168,12 @@ class Stack:
 
     def payload(self, objective, *, step):
         version = self.coordinator.serving_runtime_load_id()
-        prepared = self.coordinator.prepare_training_step(TrainingBatch("b", (item(version),)), objective.name, {})
+        prepared = self.coordinator.prepare_training_step(
+            TrainingBatch("b", (item(version),)),
+            objective.name,
+            {},
+            StepScheduling(unit="sample", batch_size="actual"),
+        )
         return {**prepared.payload, "scenario": "math", "rollout_id": step, "expected_runtime_load_id": version}
 
 

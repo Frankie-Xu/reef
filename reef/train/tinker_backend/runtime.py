@@ -19,7 +19,7 @@ from threading import RLock
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.batches import TrainingBatch
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.interfaces import ModelCandidate, PreparedTrainingStep, StaleCandidate, TrainingRuntime
 from reef.runtime.recovery import read_json, write_json
@@ -90,6 +90,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
         batch: TrainingBatch,
         objective: str,
         algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
         scenario_step: int,
         *,
         serving_runtime_load_id: str | None = None,
@@ -98,6 +99,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
             batch,
             objective,
             algorithm_state,
+            scheduling,
             batch_size=self._config.batch_size,
             runtime_load_id=serving_runtime_load_id,
         )

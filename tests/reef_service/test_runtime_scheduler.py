@@ -17,6 +17,7 @@ from reef.runtime.interfaces import (
     TrainingRuntime,
 )
 from reef.runtime.scheduler import RuntimeScheduler
+from reef.train.algos import StepScheduling
 
 
 class CheckpointTrainer(TrainingRuntime):
@@ -40,7 +41,9 @@ class CheckpointTrainer(TrainingRuntime):
     def training_job_status(self):
         return self.journal
 
-    def prepare_training_step(self, batch, objective, algorithm_state, scenario_step, *, serving_runtime_load_id=None):
+    def prepare_training_step(
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+    ):
         self.calls.append(("prepare", serving_runtime_load_id))
         return PreparedTrainingStep("train", algorithm_state, {}, {"rollout_id": scenario_step})
 
@@ -230,7 +233,7 @@ def test_preparation_passes_only_the_required_serving_version_value(max_stalenes
     inference = WeightReceiver()
     scheduler = RuntimeScheduler(training, inference)
     inference.loaded = "engine:1"
-    prepared = scheduler.prepare_training_step(TrainingBatch("batch-1"), "test", {}, 0)
+    prepared = scheduler.prepare_training_step(TrainingBatch("batch-1"), "test", {}, StepScheduling(), 0)
     assert prepared.payload == {"rollout_id": 0}
     assert training.calls == [("prepare", expected)]
     assert not hasattr(training, "inference_runtime")

@@ -25,6 +25,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, Training
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
 from reef.surface.weights import create_weight_surface
+from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
@@ -187,10 +188,16 @@ class WeightTrainingSpec:
     Keeping the binding behind one explicit hook leaves the recipe dataclass
     to describe instance configuration only. The service and training driver
     can still inspect a recipe class without constructing it.
+
+    ``scheduling`` is how the training runtime cuts each reserved batch into
+    optimizer steps (rollout unit, step size, epochs, shuffle, remainder). It
+    is the recipe's choice, not the objective's; the objective only rejects a
+    schedule its loss cannot train, at build time and again in the backend.
     """
 
     objective: str
     processor: type[DataProcessor] | None = None
+    scheduling: StepScheduling = field(default_factory=StepScheduling)
 
     @property
     def loss_family(self) -> str:
@@ -205,8 +212,8 @@ class WeightTrainingRecipe(Recipe):
     Requires an independent :class:`TrainingRuntime` in ``training_runtime``
     (the first positional argument of every training recipe).
 
-    :meth:`training_spec` binds the data processor and training objective, which declares its
-    backend loss family. Keeping that static machinery in one structured return value
+    :meth:`training_spec` binds the data processor, the training objective, which declares its
+    backend loss family, and the step schedule. Keeping that static machinery in one structured return value
     means the dataclass fields remain the recipe's instance configuration. The
     training driver reads the selected class from the same deployment config
     and obtains its loss family from this hook; deployments do not repeat that
@@ -237,7 +244,7 @@ class WeightTrainingRecipe(Recipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        """Return the processor and objective binding for this recipe.
+        """Return the processor, objective and step-schedule binding for this recipe.
 
         Concrete weight recipes override this hook. A recipe with bespoke
         trainer wiring may omit ``processor`` and override :meth:`build`.
@@ -401,9 +408,10 @@ class WeightTrainingRecipe(Recipe):
                 f"(see reef.train.algos) or a dotted 'module:Objective' path from training_spec(), "
                 f"or override build()"
             )
-        # Validate the method before starting workers. The runtime carries the
-        # reference and resolves it in its own process before batch partitioning.
-        resolve_objective(spec.objective)
+        # Validate the method and its schedule before starting workers. The
+        # runtime carries the reference and the schedule to the backend, which
+        # resolves the objective in its own process before batch partitioning.
+        resolve_objective(spec.objective).validate_scheduling(spec.scheduling)
         config = self.processor_config()
         candidate_evaluator = None
         if self.candidate_evaluation is not None:
@@ -420,6 +428,7 @@ class WeightTrainingRecipe(Recipe):
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
                 spec.objective,
+                spec.scheduling,
                 inference_runtime=self.runtime,
                 loss_family=spec.loss_family,
                 scenario=scenario,

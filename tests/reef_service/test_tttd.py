@@ -15,6 +15,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.train import ProcessorContext
+from reef.train.algos import StepScheduling
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrajectoryItem, trajectory_groups
@@ -338,7 +339,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
             processor.ingest(_report(0, group, rollout, 1.0))
 
     batch = processor.build_batch()
-    result = prepare_slime_step(batch, "tttd", {})
+    result = prepare_slime_step(batch, "tttd", {}, StepScheduling(unit="sample", batch_size="actual"))
 
     assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None

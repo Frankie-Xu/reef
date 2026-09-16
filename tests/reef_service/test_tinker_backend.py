@@ -24,9 +24,9 @@ from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.weights import WeightLoader
+from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.algos.signals import StepScheduling, StepSignal
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
@@ -87,7 +87,6 @@ class SampleObjective(TrainingObjective):
     name = "tinker-test-objective"
 
     def __init__(self):
-        self.scheduling = StepScheduling(unit="sample", batch_size="actual")
         self.loss_family = "importance_sampling"
         self.action = "train"
 
@@ -96,8 +95,11 @@ class SampleObjective(TrainingObjective):
             self.action,
             {"steps": state.get("steps", 0) + 1},
             advantages=tuple(float(i + 1) for i in range(len(batch.items))),
-            scheduling=self.scheduling,
         )
+
+
+# The schedule a recipe over this objective binds: one step over every sample.
+SCHEDULING = StepScheduling(unit="sample", batch_size="actual")
 
 
 @pytest.fixture
@@ -117,7 +119,7 @@ class Deployment:
         self.inference = TinkerInferenceRuntime(client, base_model="Qwen/Qwen3-8B")
 
     def backend(self, objective):
-        return RuntimeCandidateBackend(self.training, objective.name, inference_runtime=self.inference)
+        return RuntimeCandidateBackend(self.training, objective.name, SCHEDULING, inference_runtime=self.inference)
 
     def shutdown(self):
         self.training.shutdown()
@@ -155,7 +157,7 @@ def item(version, group="g"):
 
 def prepared(runtime, objective, *, step=0):
     batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
-    return runtime.training.prepare_training_step(batch, objective.name, {}, step)
+    return runtime.training.prepare_training_step(batch, objective.name, {}, SCHEDULING, step)
 
 
 def decision(selected):
@@ -326,9 +328,10 @@ def test_unsupported_chat_options_fail_explicitly(runtime, tmp_path, extra):
 
 
 def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
-    objective.scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
+    objective.supports_multiple_epochs = True
+    scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_step(batch, objective.name, {}, runtime_load_id="v", batch_size=1)
+    step = prepare_tinker_step(batch, objective.name, {}, scheduling, runtime_load_id="v", batch_size=1)
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -615,8 +618,8 @@ def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, ob
 
 
 def test_configured_batch_size_respects_error_remainder(objective):
-    objective.scheduling = StepScheduling(batch_size="configured", remainder="error")
+    scheduling = StepScheduling(batch_size="configured", remainder="error")
     with pytest.raises(ValueError, match="configured batch_size"):
         prepare_tinker_step(
-            TrainingBatch("batch", (item("v"),)), objective.name, {}, runtime_load_id="v", batch_size=2
+            TrainingBatch("batch", (item("v"),)), objective.name, {}, scheduling, runtime_load_id="v", batch_size=2
         )

@@ -9,6 +9,7 @@ from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
+from reef.train.algos import StepScheduling
 
 _logger = logging.getLogger(__name__)
 
@@ -62,7 +63,12 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     def training_spec(cls) -> WeightTrainingSpec:
         # The paper objective is the verbatim upstream top-K select loss
         # (recipes/openclawrl/slime), not the plain pg surrogate.
-        return WeightTrainingSpec(objective="openclawrl", processor=OpenClawRLProcessor)
+        return WeightTrainingSpec(
+            objective="openclawrl",
+            processor=OpenClawRLProcessor,
+            # Each turn-sample is its own rollout; the backend's configured step size applies.
+            scheduling=StepScheduling(unit="sample"),
+        )
 
     def __post_init__(self) -> None:
         super().__post_init__()

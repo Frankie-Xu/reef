@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.batches import TrainingBatch
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import Executor
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
@@ -65,7 +65,11 @@ class CoordinatorClient(ABC):
 
     @abstractmethod
     def prepare_training_step(
-        self, batch: TrainingBatch, objective: str, algorithm_state: Mapping[str, Any]
+        self,
+        batch: TrainingBatch,
+        objective: str,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
     ) -> PreparedTrainingStep: ...
 
     @abstractmethod
@@ -131,8 +135,9 @@ class ExecutorCoordinatorClient(CoordinatorClient):
         batch: TrainingBatch,
         objective: str,
         algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return self._rpc("prepare_training_step", batch, objective, dict(algorithm_state))
+        return self._rpc("prepare_training_step", batch, objective, dict(algorithm_state), scheduling)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self._rpc("execute_training_job", dict(payload))

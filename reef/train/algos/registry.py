@@ -32,6 +32,8 @@ class ObjectiveRegistry:
             raise ValueError("an objective must declare a non-empty name")
         if not isinstance(objective.loss_family, str) or not objective.loss_family.strip():
             raise ValueError("an objective must declare a non-empty loss_family")
+        if not isinstance(objective.supports_multiple_epochs, bool):
+            raise ValueError("an objective must declare supports_multiple_epochs as a bool")
         existing = self.objectives.get(objective.name)
         if existing is objective:
             return objective

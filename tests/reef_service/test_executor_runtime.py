@@ -33,6 +33,7 @@ from reef.service import assembly
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.runtime import connect_ray_runtime
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.algos import StepScheduling
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.runtime import ExecutorTrainingRuntime
 
@@ -48,7 +49,7 @@ class Coordinator(DeferredWeightUpdateTrainGroupHandle):
     def health(self):
         return {**super().health(), "inference_url": self.inference_url}
 
-    def prepare_training_step(self, batch, objective, algorithm_state):
+    def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
         self.calls.append("prepare")
         return PreparedTrainingStep(
             action="train", payload={"samples": ["prepared"]}, next_algorithm_state=dict(algorithm_state), metrics={}
@@ -81,7 +82,7 @@ def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
     try:
         assert runtime.model_path == "model-path"
         assert runtime.base_url == "http://router"
-        prepared = runtime.prepare_training_step(policy_batch(), "custom-objective", {}, 0)
+        prepared = runtime.prepare_training_step(policy_batch(), "custom-objective", {}, StepScheduling(), 0)
         assert prepared.payload["expected_runtime_load_id"] == "v0"
         candidate = runtime.train_candidate(prepared.payload)
         assert worker.calls == ["prepare", "execute"]

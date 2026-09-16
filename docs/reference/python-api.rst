@@ -198,7 +198,8 @@ Common members
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open). Weight-training recipes add
 ``training_spec()``, which binds the processor, the registered or dotted training
-objective, which declares the backend loss family; ``max_staleness``, the accepted
+objective, which declares the backend loss family, and the ``StepScheduling`` the
+runtime cuts each batch with; ``max_staleness``, the accepted
 producing-to-serving version lag, which must match the runtime; and
 ``candidate_evaluation``, the optional plugin configured by the deployment's
 ``evaluation`` section.
@@ -218,6 +219,7 @@ producing-to-serving version lag, which must match the runtime; and
            return WeightTrainingSpec(
                processor=MyMethodProcessor,
                objective="my_method.objective:MyObjective",
+               scheduling=StepScheduling(unit="sample"),
            )
 
 ``frozen=True`` is required by the base. ``kw_only=True`` keeps later fields
@@ -826,7 +828,7 @@ Training objective
 Each method defines a ``TrainingObjective`` in its own ``objective.py``. It
 owns full-batch signal preparation and declares the backend loss family.
 Recipes bind it with ``WeightTrainingSpec(objective="my_method.objective:MyObjective",
-processor=MyProcessor)``. The dotted reference names a class with a zero-argument
+processor=MyProcessor, scheduling=StepScheduling(...))``. The dotted reference names a class with a zero-argument
 constructor or an existing instance; its module must be importable in both the
 service and training processes.
 
@@ -857,6 +859,18 @@ function accepts an explicit instance. Core never imports method packages.
 ``WeightTrainingSpec.loss_family`` is derived from the objective, so neither
 the recipe nor the signal repeats that choice.
 
+``WeightTrainingSpec.scheduling`` is the recipe's ``StepScheduling``
+(``reef.core.batches``): the rollout unit (``comparison_set`` or ``sample``),
+rollouts per optimizer step (``configured``, ``actual`` or an int), ``epochs``,
+``shuffle`` and ``remainder`` handling. It is deployment configuration rather
+than method math, so it lives on the recipe and the runtime carries it to the
+backend with the objective reference. An objective declares only what its loss
+tolerates: ``supports_multiple_epochs`` (default ``False``) says whether passes
+after the first, which train off-policy against log-probs computed once, are
+valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
+``epochs > 1`` otherwise, at recipe build and again in each backend before
+preparation.
+
 ``StepSignal`` carries:
 
 - ``action``: ``train`` runs backend training; ``skip`` commits a state-only
@@ -865,8 +879,6 @@ the recipe nor the signal repeats that choice.
 - ``next_algorithm_state``: proposed state committed through the trainer's
   existing step lifecycle.
 - ``metrics``: method telemetry carried to the commit record.
-- ``scheduling``: ``StepScheduling`` controls sample/comparison-set units,
-  optimizer batch size, epochs, shuffle, and remainder handling.
 
 ``prepare`` runs on the complete reserved batch before optimizer or worker
 partitioning. Compute group-relative statistics here. Keep this entry point
@@ -878,14 +890,19 @@ the selected backend resolves its own loss implementation lazily.
 
 Migration: move the former ``StepPreparer.__call__`` body to
 ``TrainingObjective.prepare`` in the method's ``objective.py``, declare
-``loss_family`` on that class, and remove it from ``StepSignal``. Replace
-``WeightTrainingSpec(step_preparer=..., loss_family=...)`` with
-``WeightTrainingSpec(objective=...)``. Plain function references are replaced
-by objective class/instance references. Runtime preparation's string argument
-is now named ``objective``; its positional RPC order is unchanged. Update
-custom runtimes and upgrade coordinators and workers together. Experiment
-backend metadata now uses ``objective`` instead of ``step_preparer``; committed
-algorithm state, training payloads, checkpoints and artifact formats are unchanged.
+``loss_family`` on that class, and remove it from ``StepSignal``. Move the
+``StepScheduling`` the preparer returned to the recipe:
+``WeightTrainingSpec(step_preparer=..., loss_family=...)`` becomes
+``WeightTrainingSpec(objective=..., scheduling=...)``, and ``StepSignal`` no
+longer carries ``scheduling``. Declare ``supports_multiple_epochs = True`` on
+an objective whose loss is clipped for off-policy passes. Plain function
+references are replaced by objective class/instance references. Runtime
+preparation's string argument is now named ``objective`` and is followed by
+the recipe's ``scheduling`` in every ``prepare_training_step`` signature,
+including the coordinator RPC. Update custom runtimes and upgrade coordinators
+and workers together. Experiment backend metadata now uses ``objective`` and
+``scheduling`` instead of ``step_preparer``; committed algorithm state,
+training payloads, checkpoints and artifact formats are unchanged.
 
 Harness method
 --------------
