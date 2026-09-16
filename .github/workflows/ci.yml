@@ -78,17 +78,40 @@ jobs:
       - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
-  approval:
+  select-tests:
     needs: [lint]
-    if: github.event_name != 'push' && !github.event.pull_request.draft
-    uses: ./.github/workflows/ci-approval.yml
+    if: '!github.event.pull_request.draft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      python-versions: ${{ steps.select.outputs.python-versions }}
+    steps:
+      - name: Select routine or full validation
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          versions='["3.10","3.11","3.12"]'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '[.state, .draft, .head.sha] | @tsv')
+            expected=$(printf 'open\tfalse\t%s' "$EXPECTED_HEAD_SHA")
+            if [ "$current" != "$expected" ]; then
+              echo "::error::This PR is closed, draft, or has newer commits. Use its latest ready run."
+              exit 1
+            fi
+            if [ "$GITHUB_RUN_ATTEMPT" -eq 1 ]; then
+              versions='["3.12"]'
+              echo "Routine PR checks use Python 3.12. Before merging, request the full matrix:" >> "$GITHUB_STEP_SUMMARY"
+              echo "gh run rerun $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "python-versions=$versions" >> "$GITHUB_OUTPUT"
 
   test-suites:
-    needs: [lint, approval]
-    if: >-
-      !cancelled() && needs.lint.result == 'success' &&
-      (github.event_name == 'push' ||
-      (needs.approval.result == 'success' && needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)))
+    needs: [select-tests]
     name: ${{ matrix.suite }} tests (${{ matrix.python-version }})
     # Real nested network namespaces are only proven on the GitHub runner.
     runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-latest' || 'blacksmith-8vcpu-ubuntu-2404' }}
@@ -113,7 +136,7 @@ jobs:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
         suite: [source, sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,17 +245,17 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
-  # Preserve the existing required check names. A failed, skipped, or cancelled
-  # suite must not turn these gates green; 3.12 also checks combined coverage.
+  # Full reruns expand these existing required checks to every supported
+  # version. Routine runs leave the 3.10/3.11 checks pending before merge.
   test:
-    needs: [test-suites]
-    if: always()
+    needs: [select-tests, test-suites]
+    if: always() && !github.event.pull_request.draft
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
     steps:
       - name: Require every source and sandbox suite to pass
         env:
@@ -273,18 +296,14 @@ jobs:
           if-no-files-found: error
 
   package:
-    needs: [lint, approval]
-    if: >-
-      !cancelled() && needs.lint.result == 'success' &&
-      (github.event_name == 'push' ||
-      (needs.approval.result == 'success' && needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)))
+    needs: [select-tests]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

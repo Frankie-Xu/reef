@@ -44,20 +44,15 @@ jobs:
           smoke=false
           while IFS= read -r file; do
             case "$file" in
-              reef/harness/*|reef/train/cordis_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml|.github/workflows/ci-approval.yml)
+              reef/harness/*|reef/train/cordis_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml)
                 smoke=true ;;
             esac
           done <<< "$files"
           echo "smoke=$smoke" >> "$GITHUB_OUTPUT"
 
-  approval:
+  real-pi:
     needs: [changes]
     if: needs.changes.outputs.smoke == 'true'
-    uses: ./.github/workflows/ci-approval.yml
-
-  real-pi:
-    needs: [approval]
-    if: needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
@@ -88,8 +83,8 @@ jobs:
 
   # The same guard for the pinned Codex CLI (tests/smoke/test_real_codex.py).
   real-codex:
-    needs: [approval]
-    if: needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
@@ -118,8 +113,8 @@ jobs:
 
   # The same guard for the pinned DeepSeek Harness (tests/smoke/test_real_dsh.py).
   real-dsh:
-    needs: [approval]
-    if: needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
@@ -143,8 +138,8 @@ jobs:
   # The same guard for the pinned Hermes Agent (tests/smoke/test_real_hermes.py):
   # the vendor's channel is a git checkout installed editable into a venv.
   real-hermes:
-    needs: [approval]
-    if: needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
@@ -172,8 +167,8 @@ jobs:
   # roots. A full episode needs Docker and a model, so it stays the opt-in
   # tests/smoke/test_real_terminus.py.
   real-terminus:
-    needs: [approval]
-    if: needs.approval.outputs.run_attempt == format('{0}', github.run_attempt)
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:

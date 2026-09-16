@@ -197,39 +197,38 @@ comments and may respectfully challenge a request with technical reasoning.
 
 ### 5. Continuous integration
 
-Draft pull requests run only lint, type checks, and static Dockerfile checks.
-The first ready run stops at `Approve full CI` with an "Awaiting maintainer
-approval" message. After checking the author's local validation, any repository
-collaborator with `maintain` or `admin` permission can release a run:
+Draft pull requests run lint, type checks, and static Dockerfile checks. Ready
+pull requests automatically run the Python 3.12 source, sandbox, installed-wheel,
+and combined coverage checks after lint succeeds. Documentation and real-harness
+smoke workflows select their jobs from changed paths, including renamed files.
+No maintainer action is needed for this routine feedback.
+
+Before merging, a contributor with repository write access requests a complete
+Python 3.10/3.11/3.12 run on the final revision:
 
 ```bash
 gh run rerun RUN_ID --repo Human-Agent-Society/reef
 ```
 
-The Actions UI equivalent is **Re-run all jobs**. Rerun the latest ready run for
-each relevant workflow: `ci`, `Docs Build`, and `harness-smoke`. The main test
-and package matrices wait for lint before checking approval. Use a full rerun
-so the approval job executes in the same attempt as the heavy jobs; partial
-reruns cannot reuse an earlier attempt's authorization.
+Use the latest ready `ci` run and **Re-run all jobs**, not a partial rerun. The
+matrix selection job executes again and expands coverage on subsequent attempts.
+Failed-jobs-only reruns may reuse an earlier matrix; they are useful for retrying
+failures but do not replace the full-run request. This uses GitHub's native write
+permission for reruns, with no maintainer-only role check or protected environment.
+Authors without write access can ask any collaborator with that permission.
 
-The shared approval workflow checks `github.triggering_actor`, rather than
-`github.actor`, which remains the original author during a rerun. It reads the
-collaborator's current `role_name` from GitHub and accepts only `maintain` or
-`admin`. Ordinary `write` permission is insufficient. This includes external
-collaborators and follows repository role changes without a separate reviewer
-list, organization invitation, or protected environment. A maintainer may
-release their own PR's CI; this compute decision does not replace code review.
+Keep the existing required `lint`, `test (3.10)`, `test (3.11)`, `test (3.12)`,
+and package checks in the `protect-main` ruleset. Routine runs produce only the
+3.12 checks; the missing 3.10/3.11 checks remain pending and block merging until
+full validation succeeds on the current revision. Skipped suites must not turn
+the test gates green. The `docs-gate` permits a skipped build only for a draft
+or a successfully evaluated change set that does not affect documentation.
 
-Approval covers the current revision and attempt. New commits and conversion
-to draft cancel previous runs. Before releasing heavy jobs, the approval job
-checks that the PR is still open, ready, and at the same head SHA. Authors must
-batch review fixes and request a rerun for the new revision. Manual dispatches
-also require `maintain` or `admin` permission; `main` push checks stay automatic.
-
-Retain the required `lint`, `test (3.10)`, `test (3.11)`, `test (3.12)`, and
-package checks in the `protect-main` ruleset. The test gates fail when their
-suites are skipped, and `docs-gate` fails unless the documentation build
-succeeds. Do not replace these gates with conditionally skipped required jobs.
+New pushes and conversion to draft cancel previous runs. A new ready revision
+starts with the routine matrix; full reruns validate that the PR is still open,
+ready, and at the original head SHA. Main pushes and manual dispatches always
+run the full matrix. Manual dispatches are diagnostic runs; use the original
+PR workflow's full rerun to satisfy merge checks for that PR.
 
 Required checks must pass on the reviewed revision. CI is a gate, not a
 substitute for review. The Merge Oncall may request focused or environment-

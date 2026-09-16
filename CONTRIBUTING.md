@@ -329,33 +329,32 @@ Use a draft pull request when the design or implementation is not ready for
 acceptance. Do not mix a functional change with drive-by formatting, generated
 rewrites, or unrelated cleanup.
 
-Draft pull requests run lint, type checks, and static Dockerfile checks only;
-the test and package matrices, documentation build, and real-harness smoke
-tests wait until the pull request is ready and a maintainer approves full CI.
-Run the relevant checks locally and push a complete batch of changes before
-marking the pull request ready. Complete each round of review fixes locally
-before pushing again.
+Draft pull requests run lint, type checks, and static Dockerfile checks only.
+Once ready, each update automatically runs the source, sandbox, and installed-
+wheel suites on Python 3.12, including the combined coverage check. Documentation
+builds and real-harness smoke tests run automatically when their files change.
+Run relevant checks locally and batch each round of review fixes before pushing.
 
-The first run of a ready pull request stops at `Approve full CI` with an
-"Awaiting maintainer approval" message. Any collaborator with repository
-`maintain` or `admin` permission can release the current revision by rerunning
-the entire workflow:
+Before merging, run the complete Python 3.10/3.11/3.12 test and package matrices
+on the final revision. Any contributor with repository write access can request
+this by rerunning the entire latest `ci` workflow:
 
 ```bash
 gh run rerun RUN_ID --repo Human-Agent-Society/reef
 ```
 
-The equivalent Actions UI command is **Re-run all jobs**. Each workflow needs
-its own rerun; use the latest ready run for `ci`, `Docs Build`, and applicable
-`harness-smoke` checks. The main `ci` workflow runs lint before checking approval.
-Use a full rerun, not a single-job or failed-jobs-only rerun: approval is bound
-to the attempt and must run again. Ordinary write access cannot authorize CI.
+The Actions UI equivalent is **Re-run all jobs**. Rerunning the entire workflow
+recalculates the matrix for full validation; **Re-run failed jobs** may reuse the
+previous matrix and is intended for retrying failures, not expanding coverage.
+No separate maintainer approval is needed. Authors without repository write
+access can ask a collaborator to request the final full run.
 
-A new push or conversion back to draft cancels the previous run, and a new
-ready revision needs approval again. Re-running an old run cannot authorize a
-newer revision. Missing approval or skipped tests do not satisfy the required
-test checks. Manual workflow dispatches also check the triggering user's
-`maintain` or `admin` permission; pushes to `main` run automatically.
+Routine runs leave the required Python 3.10/3.11 checks pending. These checks
+must pass on the latest revision before merging; the Python 3.12 routine run
+alone is insufficient. A new push cancels older runs and returns to the routine
+matrix. Full reruns reject closed, draft, or superseded PR revisions. Main-branch
+pushes and manual workflow dispatches run all supported Python versions;
+use the PR's `ci` rerun to satisfy its merge checks.
 
 ## Review and acceptance
 

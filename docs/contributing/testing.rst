@@ -65,19 +65,23 @@ The sandbox jobs set ``REEF_REQUIRE_SANDBOX=1``: a missing bubblewrap binary or
 failed nested-jail preflight fails CI instead of silently skipping isolation
 checks. Local runs still skip these tests on unsupported hosts.
 
-On pull requests, these matrices run only after lint succeeds and a maintainer
-reruns the latest ready workflow with ``gh run rerun RUN_ID`` (or **Re-run all
-jobs** in Actions). The first ready run intentionally stops at ``Approve full
-CI`` awaiting that rerun. The approval job checks the rerun initiator's current
-repository role: ``maintain`` and ``admin`` are accepted; ``write`` is not.
-Drafts run only lint, type checks, and static Dockerfile checks. Documentation
-builds and applicable harness smoke workflows also require their own rerun.
-New pushes cancel old runs and require approval for the new revision; turning
-a PR back into a draft cancels its runs without starting heavy jobs. Approval
-rejects closed, draft, and superseded revisions. Heavy jobs require approval
-from the same attempt, so rerun the whole workflow rather than individual or
-failed jobs. Manual dispatches check the initiating user's role too. Pushes to
-``main`` remain automatic. See the
+Ready pull requests automatically run these suites on Python 3.12 after lint
+passes, including installed-wheel tests and combined coverage. Drafts run only
+lint, type checks, and static Dockerfile checks. Documentation builds and
+harness smoke tests run automatically when relevant files change.
+
+Before merging, request the full Python 3.10/3.11/3.12 matrix with
+``gh run rerun RUN_ID --repo Human-Agent-Society/reef``, using the latest ready
+``ci`` run. **Re-run all jobs** in Actions does the same thing. Any collaborator
+with repository write access can request it; no maintainer-only approval is
+needed. Full reruns execute matrix selection again; failed-jobs-only reruns may
+reuse the previous matrix. The required 3.10/3.11 checks remain pending until
+full validation passes on the current revision.
+
+New pushes cancel older runs and return to routine coverage. Matrix selection
+rejects closed, draft, and superseded PR revisions. Main pushes and manual
+workflow dispatches run the full matrix; use a PR workflow rerun to satisfy
+that PR's required checks. See the
 `maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
 
 Tests in the same file stay in one worker, preserving
