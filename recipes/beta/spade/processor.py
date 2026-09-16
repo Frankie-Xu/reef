@@ -137,6 +137,10 @@ def reported_arm(report: AgentRecord) -> str | None:
     return arm if isinstance(arm, str) else None
 
 
+class UnassembledEpisode(ValueError):
+    """An episode whose records do not chain into one sample: a mid episode failure or a forked history."""
+
+
 class ProposalRefused(ValueError):
     """The Designer's reply was no task; the record its call left is kept for the report."""
 
@@ -176,6 +180,8 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         config = dict(context.config)
         self.tasks_per_step = int(config.get("tasks_per_step", DEFAULT_TASKS_PER_STEP))
         self.rollouts_per_task = int(config.get("rollouts_per_task", DEFAULT_ROLLOUTS_PER_TASK))
+        # Episodes given up per group key; they count toward the group's size.
+        self.unassembled_episodes: dict[Hashable, int] = {}
         if self.tasks_per_step <= 0:
             raise ValueError("tasks_per_step must be positive")
         if self.rollouts_per_task < 2:
@@ -263,11 +269,23 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         task_name = reported_task_name(context.report)
         if task_name is None:
             raise ValueError("SPADE training requires metadata.task.name on the report, as the task player sends it")
-        sample = self._assembly.build(context, context.require_score())
+        try:
+            sample = self._assembly.build(context, context.require_score())
+        except ValueError as error:
+            raise UnassembledEpisode(str(error)) from error
         stamped = reported_round(context.report)
         if stamped is not None:
             sample = sample.with_metadata(round=stamped[0], round_plays=stamped[1])
         return replace(sample, group_id=task_name)
+
+    def unassembled(self, context: ReportContext, error: ValueError) -> bool:
+        # An episode that cannot be assembled is given up and still counts toward its group, so the
+        # group completes instead of waiting forever for a sample that will never come.
+        if not isinstance(error, UnassembledEpisode):
+            return False
+        key, _ = self.grouping(context)
+        self.unassembled_episodes[key] = self.unassembled_episodes.get(key, 0) + 1
+        return True
 
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         # A round's plays are one unit, so one step trains on all of them before the weights move.
@@ -277,10 +295,11 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         return reported_task_name(context.report), None
 
     def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
+        arrived = len(items) + self.unassembled_episodes.get(key, 0)
         if isinstance(key, str) and key.startswith(ROUND_KEY):
             sizes = [int(item.metadata["round_plays"]) for item in items if isinstance(item, TrajectoryItem)]
-            return GroupDecision.READY if sizes and len(items) >= sizes[0] else GroupDecision.INCOMPLETE
-        return GroupDecision.READY if len(items) >= self.rollouts_per_task else GroupDecision.INCOMPLETE
+            return GroupDecision.READY if sizes and arrived >= sizes[0] else GroupDecision.INCOMPLETE
+        return GroupDecision.READY if arrived >= self.rollouts_per_task else GroupDecision.INCOMPLETE
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
         # The objective reads contiguous task groups, so a round's interleaved plays are ordered by task.
@@ -324,6 +343,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
     def status(self) -> Mapping[str, Any]:
         return {
             **super().status(),
+            "unassembled_episodes": sum(self.unassembled_episodes.values()),
             "generation": {
                 "in_flight": self._in_flight,
                 "next": self._next_generation,

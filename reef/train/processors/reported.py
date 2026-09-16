@@ -169,6 +169,17 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         """
         return True
 
+    def unassembled(self, context: ReportContext, error: ValueError) -> bool:
+        """Whether a report whose sample cannot be built is given up.
+
+        ``make_sample`` raised ``error`` for it. ``True`` releases the report
+        with its sources (as ``is_training_report`` does) and refreshes its
+        group, so a method that counts such reports toward a group can still
+        complete it; ``False``, the default, keeps the report retained and
+        raises, so the trainer retries it on the next drain.
+        """
+        return False
+
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         """Return the batching group and retry slot; defaults to an independent report.
 
@@ -212,7 +223,20 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         # Retain the report before assembly: a contract failure must not let
         # compaction delete its inputs or turn a retry into a successful no-op.
         self._reports[item.agent_record_id] = item
-        sample = self.make_sample(context)
+        try:
+            sample = self.make_sample(context)
+        except ValueError as error:
+            if not self.unassembled(context, error):
+                raise
+            # The method gave the episode up: released like a report that is not training data.
+            self._reports.pop(item.agent_record_id, None)
+            self._seen_reports.add(item.agent_record_id)
+            self._terminate(item)
+            logger.warning("report %s released unassembled: %s", item.agent_record_id, error)
+            key, _ = self.grouping(context)
+            if key is not None and key in self._groups:
+                self._refresh_group(key)
+            return
         if not isinstance(sample, (TrajectoryItem, TaskItem)):
             raise TypeError(f"{type(self).__name__}.make_sample must return a TrainDataItem")
         key, slot = self.grouping(context)

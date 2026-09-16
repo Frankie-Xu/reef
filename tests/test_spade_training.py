@@ -1132,3 +1132,76 @@ def test_the_real_worker_runs_a_generation_off_the_trainers_thread(tmp_path: Pat
         assert p.operational_metrics()["generations_completed"] == 1
     finally:
         p.close()
+
+
+def turn(record_id: str, tokens: list[int], loss_mask: list[int]) -> AgentRecord:
+    payload = {
+        "messages": [{"role": "user", "content": "ls"}],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        "training": {
+            "tokens": tokens,
+            "loss_mask": loss_mask,
+            "rollout_log_probs": [-0.1] * sum(loss_mask),
+            "runtime_load_id": "r1",
+        },
+    }
+    return AgentRecord.create(
+        scenario="spade", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=record_id
+    )
+
+
+def forked_episode(processor: SpadeProcessor, task: str, tag: str, **metadata: object) -> None:
+    """Two turns whose second prompt does not extend the first: no sample can be built from them."""
+    processor.ingest(turn(f"{tag}-a", [1, 2, 3], [0, 1, 1]))
+    processor.ingest(turn(f"{tag}-b", [9, 9, 9, 4], [0, 0, 0, 1]))
+    payload: dict[str, object] = {
+        "score": 1.0,
+        "feedback": "verifier reward 1.0",
+        "references": [f"{tag}-a", f"{tag}-b"],
+        "metadata": {"task": {"name": task, "path": f"/tasks/{task}", "digest": "ab" * 32}, **metadata},
+    }
+    processor.ingest(
+        AgentRecord.create(
+            scenario="spade", request_type=RequestType.REPORT, payload=payload, agent_record_id=f"{tag}-rep"
+        )
+    )
+
+
+def test_an_episode_that_cannot_be_assembled_is_given_up_and_still_counts_toward_its_task_group() -> None:
+    p = processor(tasks_per_step=1, rollouts_per_task=2)
+    played(p, "harbor-00000-000", 0, 1.0)
+    forked_episode(p, "harbor-00000-000", "fork")
+    assert p.status()["unassembled_episodes"] == 1
+    assert p.ready(), "one sample plus one given up episode complete a group of two"
+    batch = p.build_batch()
+    assert [sample.group_id for sample in batch.items] == ["harbor-00000-000"]
+    releasable = p.retention_decision().releasable_agent_record_ids
+    assert {"fork-a", "fork-b", "fork-rep"} <= releasable, "the given up episode and its report are released"
+
+
+def test_a_given_up_episode_counts_toward_its_round_unit() -> None:
+    p = processor(tasks_per_step=4, rollouts_per_task=3)
+    p.ingest(inference("rec-0"))
+    p.ingest(report("rep-0", "rec-0", "harbor-00003-000", 1.0, round="generation-00003", round_plays=2))
+    assert not p.ready()
+    forked_episode(p, "harbor-00003-001", "fork", round="generation-00003", round_plays=2)
+    assert p.ready(), "the round's two plays arrived, one of them given up"
+    assert [sample.group_id for sample in p.build_batch().items] == ["harbor-00003-000"]
+
+
+def test_the_designer_processor_keeps_the_engines_default_and_retries_an_unassembled_report() -> None:
+    p = designer_processor()
+    p.ingest(turn("d-a", [1, 2, 3], [0, 1, 1]))
+    p.ingest(turn("d-b", [9, 9, 9, 4], [0, 0, 0, 1]))
+    payload: dict[str, object] = {
+        "score": 0.5,
+        "feedback": "SPADE Designer regret",
+        "references": ["d-a", "d-b"],
+        "metadata": {"generation": 1, "proposals": 1},
+    }
+    report_record = AgentRecord.create(
+        scenario="spade", request_type=RequestType.REPORT, payload=payload, agent_record_id="d-rep"
+    )
+    with pytest.raises(ValueError, match="cannot assemble"):
+        p.ingest(report_record)
+    assert "d-rep" in p.retention_decision().protected_agent_record_ids, "retained for the next drain"
