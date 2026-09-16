@@ -3,8 +3,16 @@
 Runtime-general facts for running Reef's [MLX backend](../../../../../reef/train/mlx_backend)
 on Apple Silicon: how it is wired, how to read a step's training metrics, what a
 published adapter looks like, and how large a model fits. The numbers here are
-measurements, not the gsm8k result — that is in
-[the 9B run](2026-09-10-gsm8k-stream-qwen3.5-9b-mlx/README.md).
+measurements of the runtime, not a gsm8k result.
+
+There is no recorded MLX gsm8k run to point at. Two were kept here and have been
+withdrawn: both trained with no KL term and on roughly half their intended
+training pairs, because the deployment's `kl_coef` never reached the objective
+this recipe selects and `session-ttl-s: 45` retired sessions before the student
+reaction that judges a reply arrived. Both defects are fixed, and the numbers
+those runs reported were not properties of the method. The reference result for
+this recipe is the seven-GPU run in
+[the example README](../README.md#gsm8k-homework-stream).
 
 ## Topology
 
