@@ -16,7 +16,14 @@ from recipes.beta.spade import SpadeObjective, SpadeProcessor, SpadeRecipe
 from recipes.beta.spade.processor import GenerationJob, reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest, write_harbor_task, write_split_manifest
+from reef.core.tasks import (
+    HarborTask,
+    HarborTaskConflict,
+    read_harbor_task,
+    read_split_manifest,
+    write_harbor_task,
+    write_split_manifest,
+)
 from reef.core.trajectories import make_trajectory
 from reef.harness.client.tasks import TaskPlay
 from reef.inference.http import InferenceProxyRuntime
@@ -27,6 +34,7 @@ from reef.record2dataset import (
     GeneratorError,
     OracleResult,
     ProposedTask,
+    TaskNameConflict,
     WrittenTask,
     content_hash,
     split_generation,
@@ -277,10 +285,13 @@ class StandInGenerator(Generator):
         hint: float = 0.75,
         play_error: str = "",
         fail_after: int | None = None,
+        taken: Sequence[str] = (),
     ) -> None:
         self.root = root
         self.refusals = dict(refusals or {})
         self.same_port = same_port
+        # Names no write ever takes, the way a directory that is no task of reef's holds one.
+        self.taken = set(taken)
         self.is_solvable = is_solvable
         self.rewards = {"plain": plain, "hint": hint}
         self.play_error = play_error
@@ -331,7 +342,12 @@ class StandInGenerator(Generator):
         )
         if content_hash(task) in known:
             raise DuplicateTask("duplicate of a task already under the root")
-        path = write_harbor_task(task, self.root)
+        if task.name in self.taken:
+            raise TaskNameConflict(f"a different task holds the name {task.name}: it is not a task reef wrote")
+        try:
+            path = write_harbor_task(task, self.root)
+        except HarborTaskConflict as exc:
+            raise TaskNameConflict(f"a different task holds the name {task.name}: {exc}") from exc
         return WrittenTask(path=path, name=task.name, digest=task.digest)
 
     async def delete_task(self, name: str) -> None:
@@ -616,6 +632,28 @@ def test_refused_proposals_are_reported_as_zero_and_never_stay_under_the_root(tm
         "harbor-00000-001",
         "manifest-00000.json",
     ]
+
+
+def test_a_rerun_generation_replaces_the_tasks_its_earlier_attempt_wrote(tmp_path: Path) -> None:
+    root = tmp_path / "tasks"
+    earlier = task_for("harbor-00000-000", "designer-earlier", 1, skill=None)
+    write_harbor_task(earlier, root)
+    p, generator = generating(tmp_path, StandInGenerator(root), skills=())
+    assert not looked(p)
+    assert generator.deleted == ["harbor-00000-000"]
+    assert read_harbor_task(root / "harbor-00000-000").digest != earlier.digest
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert [task["name"] for task in document["tasks"]] == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
+    assert [proposal["refusal"] for proposal in document["proposals"]] == ["", "", ""] and document["error"] == ""
+
+    kept = StandInGenerator(tmp_path / "again" / "tasks", taken=("harbor-00000-000",))
+    p, generator = generating(tmp_path / "again", kept, skills=())
+    assert not looked(p)
+    assert generator.deleted == ["harbor-00000-000"], "replaced once; a second conflict is a refusal"
+    document = json.loads((tmp_path / "again" / "state" / "generation-00000.json").read_text())
+    assert document["proposals"][0]["refusal"].startswith("refused: a different task holds the name harbor-00000-000")
+    assert [task["name"] for task in document["tasks"]] == ["harbor-00000-001", "harbor-00000-002"]
+    assert [r["score"] for r in generator.reports] == [0.0, 0.5, 0.5] and document["error"] == ""
 
 
 def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path: Path) -> None:

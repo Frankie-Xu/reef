@@ -38,6 +38,10 @@ class DuplicateTask(GeneratorError):
     """A task with the same content is already under the tasks root."""
 
 
+class TaskNameConflict(GeneratorError):
+    """A different task already holds the name under the tasks root."""
+
+
 @dataclass(frozen=True)
 class ProposedTask:
     """What one designer call produced: the record its call left, and the task or the reason there is none."""
@@ -196,6 +200,8 @@ class HttpGenerator(Generator):
         status, document = await self.request("POST", "/tasks", body=task_document(task))
         if status == 409 and document.get("duplicate") is True:
             raise DuplicateTask(str(document.get("error")))
+        if status == 409 and document.get("duplicate") is False:
+            raise TaskNameConflict(str(document.get("error")))
         if status >= 400:
             raise GeneratorError(f"POST /tasks was refused ({status}): {document.get('error', document)}")
         return WrittenTask(

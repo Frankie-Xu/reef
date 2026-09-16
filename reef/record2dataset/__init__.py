@@ -24,6 +24,7 @@ from reef.record2dataset.client import (
     GeneratorError,
     HttpGenerator,
     ProposedTask,
+    TaskNameConflict,
     WrittenTask,
 )
 from reef.record2dataset.designer import (
@@ -68,6 +69,7 @@ __all__ = [
     "ReefDesigner",
     "ReefTaskPlays",
     "TaskChecks",
+    "TaskNameConflict",
     "TaskPlays",
     "WrittenTask",
     "content_hash",

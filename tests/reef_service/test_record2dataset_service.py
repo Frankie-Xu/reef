@@ -22,6 +22,7 @@ from reef.record2dataset import (
     HttpGenerator,
     OracleResult,
     TaskChecks,
+    TaskNameConflict,
     TaskPlays,
 )
 from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
@@ -223,6 +224,28 @@ def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_pat
         return None
 
     run_with(built, body)
+
+
+def test_a_taken_name_is_a_name_conflict_told_apart_from_a_duplicate(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        await generator.write_task(proposed.task)
+        with pytest.raises(TaskNameConflict, match="a different task holds the name harbor-00001-000-inspection"):
+            await generator.write_task(
+                HarborTask(
+                    name=proposed.task.name,
+                    instruction=proposed.task.instruction + "Hurry.\n",
+                    tests=proposed.task.tests,
+                    environment=proposed.task.environment,
+                )
+            )
+        return None
+
+    run_with(built, body)
+    assert issubclass(TaskNameConflict, GeneratorError) and not issubclass(TaskNameConflict, DuplicateTask)
 
 
 def test_a_check_runs_the_oracle_on_a_task_under_the_root_only(tmp_path: Path) -> None:

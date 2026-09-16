@@ -9,9 +9,10 @@ the last generation's results in the prompt as SPADE's experience section, and `
 oracle and nop agents on the written task.
 
 One generation is one job on a private worker, off the trainer's thread: ``count`` proposals, each parsed,
-written (a duplicate refused), validated, played ``rollouts_per_task`` times as it is (the training data)
-and ``hint_plays`` times with the hint appended (measured only), and reported against the Designer's
-receipt with its regret as the score. The first generation starts when the processor first looks for a
+written (a duplicate refused; a name an earlier attempt of the generation took before a reload cancelled
+it is replaced), validated, played ``rollouts_per_task`` times as it is (the training data) and
+``hint_plays`` times with the hint appended (measured only), and reported against the Designer's receipt
+with its regret as the score. The first generation starts when the processor first looks for a
 batch; the next once ``batches_per_generation`` batches were acknowledged since the previous one started
 (its episodes train while it runs), so the Designer always writes for the policy that trains now; a
 generation that measured no task is followed at once. Every generation's report goes under ``state_dir``,
@@ -47,7 +48,14 @@ from recipes.beta.spade.generation import (
 )
 from reef.core import AgentRecord
 from reef.core.tasks import HarborTask
-from reef.record2dataset.client import DuplicateTask, Generator, GeneratorError, HttpGenerator
+from reef.record2dataset.client import (
+    DuplicateTask,
+    Generator,
+    GeneratorError,
+    HttpGenerator,
+    TaskNameConflict,
+    WrittenTask,
+)
 from reef.record2dataset.designer import DesignerRequest
 from reef.train.processors.computed import Failed, JudgingWorker, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
@@ -341,6 +349,17 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             raise ProposalRefused(proposed.refusal, proposed.record_id)
         return proposed.task
 
+    async def write(self, task: HarborTask) -> WrittenTask:
+        """The task written under the generator's root; a name an earlier attempt of the generation took is replaced."""
+        if self.generator is None:
+            raise GeneratorError("this processor has no generator service to ask")
+        try:
+            return await self.generator.write_task(task)
+        except TaskNameConflict:
+            # A reload cancelled this generation's earlier attempt; what it wrote under the name gives way.
+            await self.generator.delete_task(task.name)
+            return await self.generator.write_task(task)
+
     async def validate(self, task_path: Path) -> TaskValidationResult:
         """Harbor's oracle and nop agents on the written task: the reference solution scores 1, doing nothing below 1."""
         if self.generator is None:
@@ -393,8 +412,8 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             return await self.reported(ProposalRecord(index, skill, exc.record_id, None, str(exc)), None)
         record_id = task.source_agent_record_ids[0]
         try:
-            written = await self.generator.write_task(task)
-        except DuplicateTask as exc:
+            written = await self.write(task)
+        except (DuplicateTask, TaskNameConflict) as exc:
             return await self.reported(ProposalRecord(index, skill, record_id, None, f"refused: {exc}"), None)
         validation = await self.validate(written.path)
         if not validation.is_valid:
