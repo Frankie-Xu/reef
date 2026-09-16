@@ -120,7 +120,6 @@ def test_the_service_carries_the_designer_model_when_the_section_names_one_not_o
     assert built.designer_model is None and built.default_model == "m"
 
 
-def test_the_service_carries_the_designer_scenario_when_the_section_names_one_not_otherwise(tmp_path: Path) -> None:
 def test_the_service_pulls_the_designers_prompt_from_the_harness_release_the_section_names(tmp_path: Path) -> None:
     deployment = {
         "schema-version": 2,
@@ -129,7 +128,6 @@ def test_the_service_pulls_the_designers_prompt_from_the_harness_release_the_sec
         "generator": {
             "tasks-root": str(tmp_path / "tasks"),
             "designer-url": "http://127.0.0.1:8901",
-            "designer-scenario": "designer",
             "designer-token": "d",
             "designer-scenario": "designer",
             "designer-prompt": "harness",
@@ -138,12 +136,6 @@ def test_the_service_pulls_the_designers_prompt_from_the_harness_release_the_sec
     resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
     settings = service_config_from_mapping(resolved)
     built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
-    assert built.designer_scenario == "designer"
-    del deployment["generator"]["designer-scenario"]
-    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
-    settings = service_config_from_mapping(resolved)
-    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
-    assert built.designer_scenario is None, "without the key the proposal's own scenario is the Designer's"
     assert isinstance(built.prompts, HarnessPrompt) and built.prompts.scenario == "designer"
     assert isinstance(built.designer, ReefDesigner) and built.prompts.client is built.designer.client
     assert built.prompts.client.service_url == "http://127.0.0.1:8901" and built.prompts.client.token == "d"
@@ -156,3 +148,25 @@ def test_the_service_pulls_the_designers_prompt_from_the_harness_release_the_sec
         generator_settings({"tasks-root": "/tmp/t", "designer-prompt": "harness"})
     with pytest.raises(ValueError, match=r"designer-prompt must be one of \('fixed', 'harness'\)"):
         generator_settings({"tasks-root": "/tmp/t", "designer-prompt": "evolved"})
+
+
+def test_the_service_carries_the_designer_scenario_when_the_section_names_one_not_otherwise(tmp_path: Path) -> None:
+    deployment = {
+        "schema-version": 2,
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {
+            "tasks-root": str(tmp_path / "tasks"),
+            "designer-url": "http://127.0.0.1:8901",
+            "designer-scenario": "designer",
+        },
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_scenario == "designer"
+    del deployment["generator"]["designer-scenario"]
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_scenario is None, "without the key the proposal's own scenario is the Designer's"
