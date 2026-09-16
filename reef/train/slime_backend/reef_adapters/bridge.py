@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.core.batches import TrainingBatch
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
@@ -342,11 +342,12 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        step_preparer: str,
+        objective: str,
         algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
         """Prepare a framework-neutral Reef batch with Slime-owned logic."""
-        prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
+        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
         if prepared.payload is not None:
             self._algo.validate_payload(prepared.payload)
         return prepared

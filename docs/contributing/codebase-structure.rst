@@ -11,7 +11,7 @@ Choose a destination
 at ``reef/train/cordis_backend/``. The built-in Reefine recipe lives under
 ``reef/recipe/reefine/``. Paper-backed methods live in separate
 packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``skillclaw``)
-with that method's recipe, processor, step preparer, and, for weight methods,
+with that method's recipe, processor, training objective, and, for weight methods,
 the ``slime/`` subpackage only the training plane imports. Nothing under
 ``reef/`` imports a method package.
 
@@ -98,7 +98,7 @@ import a concrete integration.
 | ``reef/harness/``    | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
 |                      | episodes, trajectories                                   |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``recipes/``         | one method per package: recipe, processor, preparer,     | shared machinery, or another method        |
+| ``recipes/``         | one method per package: recipe, processor, objective,    | shared machinery, or another method        |
 |                      | and its runnable examples                                |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``tests/``           | repository-level tests grouped by responsibility         | tests hidden inside an integration subtree |

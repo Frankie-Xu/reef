@@ -184,7 +184,7 @@ agent call served and attributed through Reef. CORAL's gateway traffic carries
 Reef receipts into an append-only call journal; a watcher reports each
 finalized attempt exactly once with its exact inference references, and
 sibling attempts of one parent commit train as one grouped relative-reward
-step (reusing the TTT-Discover preparer and loss family). Its example is a
+step (reusing the TTT-Discover objective and loss family). Its example is a
 real CORAL task driven by CORAL's own runtime, plus a no-GPU smoke lane that
 runs the whole loop against the production Reef service with a canned model.
 

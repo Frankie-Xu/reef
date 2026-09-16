@@ -19,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from reef.core.batches import TrainingBatch
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.interfaces import (
     PreparedTrainingJob,
     PreparedTrainingStep,
@@ -96,7 +96,7 @@ class TinkerTrainingBackend(TrainingBackend):
 
         The recipe registered its loss family in the driver's process; this
         process learns the same dotted reference, and resolving it imports the
-        recipe package here, which registers the step preparer the coordinator
+        recipe package here, which registers the training objective the coordinator
         will be asked for. An unknown family fails now, before any job.
         """
         if self._loss_family:
@@ -131,10 +131,14 @@ class TinkerTrainingBackend(TrainingBackend):
         return self._base
 
     def prepare_training_step(
-        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
+        self,
+        batch: TrainingBatch,
+        objective: str,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
         # Staleness admission is the coordinator's; the payload carries only the rows.
-        return prepare_tinker_step(batch, step_preparer, algorithm_state, batch_size=self._config.batch_size)
+        return prepare_tinker_step(batch, objective, algorithm_state, scheduling, batch_size=self._config.batch_size)
 
     @contextmanager
     def prepare(
