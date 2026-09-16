@@ -5,27 +5,33 @@ plus, for an extension update, the file the release replaced. A step whose
 method recorded ``proposal_notes`` (Reefine's design, review, refused
 requires and undeclared variables) also gets a Design section after Why and
 a Review section after What changed, and why the proposer produced nothing,
-when the step recorded that, is a row of the Result table. The page loads
-no asset and carries its data inline, so one curl with the scenario header
-is the whole read. The step is the row's position in the catalog oldest
-first, the creation row being 0: a rejected step publishes nothing and its
-row carries the head's release id, so only the step names it.
+when the step recorded that, is a row of the Result section. The step is the
+row's position in the catalog oldest first, the creation row being 0: a
+rejected step publishes nothing and its row carries the head's release id,
+so only the step names it.
+
+The chrome, the palette and the status wording come from
+:mod:`reef.service.page_chrome`, which the request page draws with too, so a
+person moving between the two pages by their links reads one design. The
+page carries its data inline and loads no asset, so one curl with the
+scenario header is the whole read.
 """
 
 from __future__ import annotations
 
 import difflib
-import html
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlencode
 
 from reef.core.requirements import required_by
+from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
 #: wins, losses and ties; a floor writes passed, failed and floor_score, and evaluation_sides when it ran one side only.
+#: ``selected`` is not among them: the result headline above the numbers already says whether the step was published.
 RESULT_FIELDS = (
-    "selected",
     "wins",
     "losses",
     "ties",
@@ -40,46 +46,83 @@ RESULT_FIELDS = (
     "proposer_output_tokens",
 )
 
+#: Each evaluation number in the words a person reads, in place of the record's own key.
+RESULT_LABELS = {
+    "wins": "Wins",
+    "losses": "Losses",
+    "ties": "Ties",
+    "passed": "Passed",
+    "failed": "Failed",
+    "floor_score": "Floor score",
+    "evaluation_sides": "Evaluation sides",
+    "current_score": "Current score",
+    "candidate_score": "Candidate score",
+    "episode_failures": "Episode failures",
+    "proposer_input_tokens": "Proposer input tokens",
+    "proposer_output_tokens": "Proposer output tokens",
+}
 
-def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | None:
-    """Input and output tokens over both sides' agents, or None when no agent reported any."""
-    inputs = outputs = 0
-    for side in ("candidate_agents", "current_agents"):
-        agents = metrics.get(side)
-        if not isinstance(agents, Mapping):
-            continue
-        for counts in agents.values():
-            if isinstance(counts, Mapping):
-                inputs += int(counts.get("input_tokens", 0) or 0)
-                outputs += int(counts.get("output_tokens", 0) or 0)
-    return (inputs, outputs) if inputs or outputs else None
-
+#: What each result means for the person reading the step, under the headline.
+RESULT_WORDS = {
+    "pending": "Passed the checks and waits for a promote; no session installs it until then.",
+    "selected": "Passed the checks and was published as the served head.",
+    "rejected": "Did not pass the checks. The head stayed where it was.",
+    "skipped": "No candidate reached the evaluation, so nothing changed.",
+    "creation": "The tree this scenario started from, before any step ran.",
+    "promote": "A person promoted a pending release, which now serves.",
+    "rollback": "A person moved the head back to an earlier release.",
+    "recovery": "The head this process recovered at boot.",
+}
 
 #: Node kinds whose config carries the change as ``text``; the page shows that text instead of the config JSON.
 TEXT_KINDS = ("rules", "skill", "agent_command")
 
+# What the shared chrome does not draw: the reading column, the diff, the metric grid and the chain list.
 STYLE = """
-:root{--bg:#f6f4ee;--ink:#1f2321;--mute:#6b6f6a;--line:#d9d5c9;--card:#fffdf8;--accent:#0a6f5c;--warn:#a1521a;--bad:#9b2c2c;--good:#2e7d4f;--code:#efece3}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#15171a;--ink:#e8e6df;--mute:#9a9d97;--line:#2e3236;--card:#1c1f23;--accent:#4fc3a8;--warn:#e0a05a;--bad:#e07474;--good:#7fcf9a;--code:#22262b}}
-:root[data-theme="dark"]{--bg:#15171a;--ink:#e8e6df;--mute:#9a9d97;--line:#2e3236;--card:#1c1f23;--accent:#4fc3a8;--warn:#e0a05a;--bad:#e07474;--good:#7fcf9a;--code:#22262b}
-body{background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;margin:0;padding:0 0 4rem}
-main{max-width:960px;margin:0 auto;padding:1.5rem 1.25rem}
-h1{font-size:1.5rem;margin:0 0 .25rem}h2{font-size:1.05rem;margin:2rem 0 .75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mute)}
-h3{font-size:.95rem;margin:1rem 0 .5rem;font-weight:600}
-.sub{color:var(--mute);margin:0 0 1rem}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem}
-.text{white-space:pre-wrap}
-.tag{display:inline-block;font-size:.72rem;padding:0 .35rem;border:1px solid var(--line);border-radius:3px;margin-right:.25rem;color:var(--mute)}
-.selected,.promoted,.complete{color:var(--good)}.rejected{color:var(--bad)}.pending,.skipped,.partial{color:var(--warn)}
-pre{white-space:pre-wrap;word-break:break-word;background:var(--code);padding:.5rem;border-radius:4px;max-height:32rem;overflow:auto;font-size:.8rem}
-.add{color:var(--good)}.del{color:var(--bad)}.hunk{color:var(--mute)}
-table{border-collapse:collapse;width:100%;font-size:.85rem}th,td{text-align:left;padding:.3rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--mute);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
-.empty{color:var(--mute);font-style:italic}
+main{max-width:1040px;margin:auto;padding:48px 40px 24px}
+.stack{display:grid;gap:24px}
+.headline{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}
+.headline .id{font-size:12px}
+.chip{display:inline-flex;align-items:center;gap:6px;border-radius:100px;padding:4px 10px;font-size:11px;
+font-weight:600;background:var(--good-bg);color:var(--good)}
+.steps{display:flex;align-items:center;gap:8px;margin-bottom:24px;font-size:12px}
+.steps a,.steps span{border:1px solid var(--line);border-radius:7px;padding:7px 12px;background:var(--card)}
+.steps span{color:var(--mute);opacity:.55}.steps a:hover{border-color:var(--accent);text-decoration:none}
+.steps .here{margin-left:auto;border:0;background:none;padding:7px 0}
+.text{font-size:16px;line-height:1.75;margin:0;padding-left:18px;border-left:2px solid var(--accent)}
+.origin{font-size:12px;color:var(--mute);margin:16px 0 0;display:grid;gap:4px}
+.origin span{overflow-wrap:anywhere}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--code);border:1px solid var(--line);
+border-radius:8px;padding:14px;margin:0;max-height:34rem;overflow:auto;
+font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}
+.change{border-top:1px solid var(--line);padding-top:20px;margin-top:20px}
+.change:first-child{border-top:0;padding-top:0;margin-top:0}
+.change-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:12px}
+.change-head .node-id{font-size:13px;font-weight:600;overflow-wrap:anywhere;min-width:0}
+.diff .add{color:var(--good);background:var(--good-bg);display:block}
+.diff .del{color:var(--bad);background:var(--bad-bg);display:block}
+.diff .hunk{color:var(--mute);display:block}
+.note{font-size:11px;color:var(--mute);margin:0 0 10px;overflow-wrap:anywhere}
+.outcome-summary{border-radius:8px;background:var(--status-bg);padding:18px;margin-bottom:22px}
+.outcome-summary .status{padding:0;background:none;margin-bottom:10px;font-weight:650}
+.outcome-summary p{font-size:13px;margin:0;line-height:1.8;overflow-wrap:anywhere}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:18px;margin:0 0 22px}
+.metrics dd{font-size:20px;font-weight:600;letter-spacing:-.5px;line-height:1.2}
+.details{margin:0;display:grid;gap:14px}
+.details>div{display:flex;justify-content:space-between;gap:18px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.details>div:last-child{padding-bottom:0;border-bottom:0}
+.details dt{font-size:12px;flex:none;margin:0}.details dd{text-align:right;min-width:0;font-size:12px}
+.chain{list-style:none;margin:20px 0 0;padding:0;display:grid;gap:10px}
+.chain li{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12px}
+.chain .step-name{font-weight:600}
+.review-list{margin:0;padding-left:18px;font-size:13px}.review-list li{padding:5px 0;overflow-wrap:anywhere}
+.card h3{margin:22px 0 10px}.card h3:first-child{margin-top:0}
+@media(min-width:1500px){main{padding-top:64px}}
+@media(max-width:800px){main{padding:32px 24px 24px}}
+@media(max-width:480px){main{padding:28px 16px 20px}.text{font-size:15px;padding-left:14px}
+.metrics{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:14px}.metrics dd{font-size:17px}
+.details>div{flex-direction:column;gap:4px}.details dd{text-align:left}}
 """
-
-
-def _esc(value: Any) -> str:
-    return html.escape("" if value is None else str(value), quote=True)
 
 
 def _short(release_id: Any) -> str:
@@ -133,14 +176,6 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
     return str(row.get("operation") or "unknown")
 
 
-def _class(selection_result: str) -> str:
-    return selection_result.split(" ")[0]
-
-
-def _span(selection_result: str) -> str:
-    return f'<span class="{_esc(_class(selection_result))}">{_esc(selection_result)}</span>'
-
-
 def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
     """The step whose release serves: the newest row that is neither pending nor a rejected or skipped step.
 
@@ -167,33 +202,45 @@ def before_release_id(row: Mapping[str, Any]) -> str | None:
     return None
 
 
+def step_href(step: int, link_query: Mapping[str, str] | None) -> str:
+    """The page of another step, opened the way this one was: the scenario and the token travel in the query."""
+    href = f"/reef/harness/releases/{step}/page"
+    if link_query:
+        href += "?" + urlencode(dict(link_query))
+    return href
+
+
+def _card(name: str, body: str) -> str:
+    return f'<section class="card">\n<h2>{name}</h2>\n{body}</section>\n'
+
+
 def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     operation = row.get("operation")
     if operation != "training":
         target = row.get("rollback_target_release_id")
         words = {
-            "creation": "the tree this scenario started from; no step made it",
-            "promote": f"a person promoted release {target} after reading it",
-            "rollback": f"a person rolled the head back to release {target}",
-            "recovery": "the head this process recovered at boot",
+            "creation": "The tree this scenario started from; no step made it.",
+            "promote": f"A person promoted release {target} after reading it.",
+            "rollback": f"A person rolled the head back to release {target}.",
+            "recovery": "The head this process recovered at boot.",
         }
-        return f"<p>{_esc(words.get(str(operation), f'a {operation} commit'))}</p>"
+        return f"<p>{escape(words.get(str(operation), f'A {operation} commit.'))}</p>"
     request = metrics.get("training_request")
     if isinstance(request, Mapping) and request.get("text"):
         return (
-            f"<p class=\"text\">{_esc(request['text'])}</p>"
-            f"<p class=\"sub\">request <span class=\"id\">{_esc(request.get('id'))}</span> from session "
-            f"<span class=\"id\">{_esc(request.get('session'))}</span> on release "
-            f"<span class=\"id\">{_esc(request.get('release_id'))}</span></p>"
+            f"<p class=\"text\">{escape(request['text'])}</p>"
+            f'<p class="origin"><span>Request <span class="id">{escape(request.get("id"))}</span></span>'
+            f'<span>Session <span class="id">{escape(request.get("session"))}</span></span>'
+            f'<span>Filed on release <span class="id">{escape(request.get("release_id"))}</span></span></p>'
         )
     proposal = metrics.get("proposal")
     if isinstance(proposal, Mapping) and proposal.get("reason"):
         return (
-            f"<p>{_esc(proposal['reason'])}</p>"
-            f"<p class=\"sub\">an agent's proposal <span class=\"id\">{_esc(proposal.get('id'))}</span> from session "
-            f"<span class=\"id\">{_esc(proposal.get('session'))}</span></p>"
+            f"<p class=\"text\">{escape(proposal['reason'])}</p>"
+            f'<p class="origin"><span>An agent\'s proposal <span class="id">{escape(proposal.get("id"))}</span>'
+            f'</span><span>Session <span class="id">{escape(proposal.get("session"))}</span></span></p>'
         )
-    return "<p>a failure in the batch</p>"
+    return "<p>A failure in the batch; no request asked for this step.</p>"
 
 
 def _design(metrics: Mapping[str, Any]) -> str:
@@ -201,7 +248,7 @@ def _design(metrics: Mapping[str, Any]) -> str:
     design = _notes(metrics).get("design")
     if not isinstance(design, str) or not design.strip():
         return ""
-    return f'<h2>Design</h2>\n<p class="text">{_esc(design)}</p>\n'
+    return _card("Design", f'<p class="text">{escape(design)}</p>\n')
 
 
 def _diff_block(path: str, before: str, after: str, before_id: str | None, release_id: Any) -> str:
@@ -216,18 +263,18 @@ def _diff_block(path: str, before: str, after: str, before_id: str | None, relea
     # By position, not prefix: the first two lines are the file headers, after which "++count;" is an addition.
     for index, line in enumerate(lines):
         if index < 2:
-            rendered.append(f'<span class="hunk">{_esc(line)}</span>')
+            rendered.append(f'<span class="hunk">{escape(line)}</span>')
         elif line.startswith("+"):
-            rendered.append(f'<span class="add">{_esc(line)}</span>')
+            rendered.append(f'<span class="add">{escape(line)}</span>')
         elif line.startswith("-"):
-            rendered.append(f'<span class="del">{_esc(line)}</span>')
+            rendered.append(f'<span class="del">{escape(line)}</span>')
         elif line.startswith("@@"):
-            rendered.append(f'<span class="hunk">{_esc(line)}</span>')
+            rendered.append(f'<span class="hunk">{escape(line)}</span>')
         else:
-            rendered.append(_esc(line))
+            rendered.append(escape(line))
     if not rendered:
-        return f'<p class="empty">{_esc(path)} is unchanged</p>'
-    return "<pre>" + "\n".join(rendered) + "</pre>"
+        return f'<p class="empty">{escape(path)} is unchanged</p>'
+    return '<pre class="diff">' + "\n".join(rendered) + "</pre>"
 
 
 def _mutation_block(
@@ -243,15 +290,20 @@ def _mutation_block(
     options = options if isinstance(options, Mapping) else {}
     previous = before_entries.get(entry_id, {})
     kind = str(options.get("name") or previous.get("name") or "?")
-    head = f'<h3><span class="tag">{_esc(op)}</span>{_esc(entry_id)} <span class="tag">{_esc(kind)}</span></h3>'
+    operation_class = op if op in ("create", "update", "delete", "remove") else "other"
+    head = (
+        f'<div class="change"><div class="change-head">'
+        f'<span class="tag operation-{escape(operation_class)}">{escape(op)}</span>'
+        f'<span class="node-id">{escape(entry_id)}</span><span class="tag">{escape(kind)}</span></div>'
+    )
     if op == "remove":
-        return head
+        return head + "</div>"
     config = options.get("config")
     config = config if isinstance(config, Mapping) else {}
     if kind == "code_extension":
         code = config.get("code")
         if not isinstance(code, str):
-            return head + '<p class="empty">this mutation changes no code</p>'
+            return head + '<p class="empty">this mutation changes no code</p></div>'
         previous_config = previous.get("config")
         previous_config = previous_config if isinstance(previous_config, Mapping) else {}
         name = config.get("name") or previous_config.get("name")
@@ -260,14 +312,14 @@ def _mutation_block(
             path = template.format(name=name)
             before = before_files.get(path)
             if before is not None:
-                return head + _diff_block(path, before, code, before_release_id(row), row.get("release_id"))
-        return head + f"<pre>{_esc(code)}</pre>"
+                return head + _diff_block(path, before, code, before_release_id(row), row.get("release_id")) + "</div>"
+        return head + f"<pre>{escape(code)}</pre></div>"
     if kind in TEXT_KINDS and isinstance(config.get("text"), str):
         rest = {key: value for key, value in options.items() if key not in ("config", "name")}
         rest.update({key: value for key, value in config.items() if key != "text"})
-        note = f'<p class="sub">{_esc(json.dumps(rest, sort_keys=True))}</p>' if rest else ""
-        return head + note + f"<pre>{_esc(config['text'])}</pre>"
-    return head + f"<pre>{_esc(json.dumps(options, indent=2, sort_keys=True))}</pre>"
+        note = f'<p class="note">{escape(json.dumps(rest, sort_keys=True))}</p>' if rest else ""
+        return head + note + f"<pre>{escape(config['text'])}</pre></div>"
+    return head + f"<pre>{escape(json.dumps(options, indent=2, sort_keys=True))}</pre></div>"
 
 
 def _what_changed(
@@ -281,7 +333,7 @@ def _what_changed(
     if mutations:
         return "".join(_mutation_block(m, row, before_entries, before_files, node_paths) for m in mutations)
     if metrics.get("skipped"):
-        return f'<p class="empty">nothing: the step skipped ({_esc(metrics["skipped"])})</p>'
+        return f'<p class="empty">nothing: the step skipped ({escape(metrics["skipped"])})</p>'
     if metrics.get("recheck"):
         return '<p class="empty">nothing new: a recheck of the last good tree against the published one</p>'
     if row.get("operation") == "training":
@@ -293,8 +345,8 @@ def _what_changed(
 
 def _listed(items: Sequence[str], empty: str) -> str:
     if not items:
-        return f'<p class="empty">{_esc(empty)}</p>'
-    return "<ul>" + "".join(f"<li>{_esc(item)}</li>" for item in items) + "</ul>"
+        return f'<p class="empty">{escape(empty)}</p>'
+    return '<ul class="review-list">' + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>"
 
 
 def _review(metrics: Mapping[str, Any]) -> str:
@@ -310,76 +362,80 @@ def _review(metrics: Mapping[str, Any]) -> str:
         return ""
     parts = []
     if isinstance(review, Mapping):
-        review_result = _span(str(review.get("result", review.get("verdict")) or "unknown"))
-        parts.append(f"<p>the proposer's review of its entries against the request: {review_result}</p>")
-        parts.append("<h3>covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
-        parts.append("<h3>uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
+        review_result = status_span(str(review.get("result", review.get("verdict")) or "unknown"))
+        parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
+        parts.append("<h3>Covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
+        parts.append("<h3>Uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
     else:
         parts.append('<p class="empty">no review on record</p>')
     if undeclared:
         parts.append(
-            "<p>the extension reads these variables and no requires item names them: "
-            f'<span class="id">{_esc(", ".join(undeclared))}</span></p>'
+            '<div class="failure"><h3>Undeclared variables</h3><p>The extension reads these and no requires item '
+            f'names them: <span class="id">{escape(", ".join(undeclared))}</span></p></div>'
         )
-    return "<h2>Review</h2>\n" + "".join(parts) + "\n"
+    return _card("Review", "".join(parts) + "\n")
+
+
+def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Input and output tokens over both sides' agents, or None when no agent reported any."""
+    inputs = outputs = 0
+    for side in ("candidate_agents", "current_agents"):
+        agents = metrics.get(side)
+        if not isinstance(agents, Mapping):
+            continue
+        for counts in agents.values():
+            if isinstance(counts, Mapping):
+                inputs += int(counts.get("input_tokens", 0) or 0)
+                outputs += int(counts.get("output_tokens", 0) or 0)
+    return (inputs, outputs) if inputs or outputs else None
 
 
 def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
+    """The Result section: the headline and what it means, then the evaluation's numbers and the step's record."""
     selection_result = result_of(row, rows)
-    notes = {
-        "pending": "passed the checks; waits for a promote before any session installs it",
-        "selected": "passed the checks and was published",
-        "rejected": "failed the checks; the head stayed",
-        "skipped": "no candidate reached the evaluation",
-    }
-    if _class(selection_result) == "promoted":
-        notes[selection_result] = (
-            f"passed the checks and was {selection_result}; the release that step published serves it"
+    words = dict(RESULT_WORDS)
+    if tone(selection_result) == "promoted":
+        words[selection_result] = (
+            f"Passed the checks and was {selection_result}; the release that step published serves it."
         )
-    lines = [f'<tr><th>result</th><td class="{_esc(_class(selection_result))}">{_esc(selection_result)}</td></tr>']
-    if selection_result in notes:
-        lines.append(f"<tr><th>meaning</th><td>{_esc(notes[selection_result])}</td></tr>")
-    if metrics.get("skipped"):
-        lines.append(f"<tr><th>skipped</th><td>{_esc(metrics['skipped'])}</td></tr>")
-    failure = _notes(metrics).get("failure")
-    if isinstance(failure, str) and failure.strip():
-        # Why the proposer produced nothing: a failed model call, a reply with no entry.
-        lines.append(f"<tr><th>proposer failure</th><td>{_esc(failure)}</td></tr>")
+    summary = (
+        f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
+        f"<p>{escape(words.get(selection_result, f'The step ended as {selection_result}.'))}</p></div>"
+    )
+    numbers = []
     for field in RESULT_FIELDS:
         legacy_field = "gate_sides" if field == "evaluation_sides" else field
         if field in metrics or legacy_field in metrics:
             value = metrics.get(field, metrics.get(legacy_field))
-            if isinstance(value, bool):
-                shown = json.dumps(value)
-            elif isinstance(value, Sequence) and not isinstance(value, str):
+            if isinstance(value, Sequence) and not isinstance(value, str):
                 shown = ", ".join(_strings(value))
             else:
                 shown = str(value)
-            lines.append(f"<tr><th>{_esc(field.replace('_', ' '))}</th><td>{_esc(shown)}</td></tr>")
+            numbers.append(f"<div><dt>{escape(RESULT_LABELS[field])}</dt><dd>{escape(shown)}</dd></div>")
     evaluation_tokens = evaluation_token_counts(metrics)
     if evaluation_tokens is not None:
-        lines.append(
-            f"<tr><th>evaluation tokens</th><td>{evaluation_tokens[0]} in, {evaluation_tokens[1]} out</td></tr>"
+        numbers.append(
+            f"<div><dt>Evaluation tokens</dt><dd>{evaluation_tokens[0]} in, {evaluation_tokens[1]} out</dd></div>"
         )
+    grid = f'<dl class="metrics">{"".join(numbers)}</dl>' if numbers else ""
+    details = []
+    if metrics.get("skipped"):
+        details.append(f"<div><dt>Skipped</dt><dd>{escape(metrics['skipped'])}</dd></div>")
     selection = metrics.get("selection")
     if isinstance(selection, Mapping) and selection.get("reason"):
-        lines.append(f"<tr><th>reason</th><td>{_esc(selection['reason'])}</td></tr>")
+        details.append(f"<div><dt>Reason</dt><dd>{escape(selection['reason'])}</dd></div>")
     if metrics.get("step_record"):
-        lines.append(f'<tr><th>step record</th><td class="id">{_esc(metrics["step_record"])}</td></tr>')
-    return "<table><tbody>" + "".join(lines) + "</tbody></table>"
+        details.append(f'<div><dt>Step record</dt><dd class="id">{escape(metrics["step_record"])}</dd></div>')
+    listed = f'<dl class="details">{"".join(details)}</dl>' if details else ""
+    failure = _notes(metrics).get("failure")
+    if isinstance(failure, str) and failure.strip():
+        # Why the proposer produced nothing: a failed model call, a reply with no entry.
+        listed += f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>'
+    return summary + grid + listed
 
 
-def _requires_table(items: Sequence[Mapping[str, Any]]) -> str:
-    """The ``requires`` items as setup reads them: name, kind, the check as written and the prompt setup shows."""
-    rows = "".join(
-        f"<tr><td>{_esc(item.get('name'))}</td><td>{_esc(item.get('kind'))}</td>"
-        f"<td class=\"id\">{_esc(item.get('check') or '')}</td><td>{_esc(item.get('prompt') or '')}</td></tr>"
-        for item in items
-    )
-    return (
-        "<table><thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table>"
-    )
+def _scrolled(table: str, label: str) -> str:
+    return f'<div class="table-scroll" role="region" aria-label="{escape(label)}" tabindex="0">{table}</div>'
 
 
 def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
@@ -394,8 +450,8 @@ def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
             # A malformed item need not be an object at all; its JSON stands where the name would.
             cells = (json.dumps(item, sort_keys=True), "", "", "")
         rows.append(
-            f'<tr><td>{_esc(cells[0])}</td><td>{_esc(cells[1])}</td><td class="id">{_esc(cells[2])}</td>'
-            f"<td>{_esc(cells[3])}</td><td>{_esc(entry.get('reason'))}</td></tr>"
+            f'<tr><td>{escape(cells[0])}</td><td>{escape(cells[1])}</td><td class="id">{escape(cells[2])}</td>'
+            f"<td>{escape(cells[3])}</td><td>{escape(entry.get('reason'))}</td></tr>"
         )
     return (
         "<table><thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>"
@@ -428,13 +484,23 @@ def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Ma
         for entry in source
         if isinstance(entry, Mapping)
     ]
-    tail = f"<h3>refused by the step</h3>{_refused_table(refused)}" if refused else ""
+    tail = (
+        f'<h3>Refused by the step</h3>{_scrolled(_refused_table(refused), "Refused requirements")}' if refused else ""
+    )
     if not own and not carried:
         return '<p class="empty">this step names nothing to set up</p>' + tail
-    parts = [_requires_table(own) if own else '<p class="empty">this step names nothing of its own</p>']
+    parts = [
+        (
+            _scrolled(requires_table(own), "Requirements named by this step")
+            if own
+            else '<p class="empty">this step names nothing of its own</p>'
+        )
+    ]
     if carried:
-        parts.append(f"<h3>carried from earlier steps</h3>{_requires_table(carried)}")
-    parts.append('<p class="sub">reef-pi setup lists these and runs a check only after you confirm it</p>')
+        parts.append(
+            f'<h3>Carried from earlier steps</h3>{_scrolled(requires_table(carried), "Inherited requirements")}'
+        )
+    parts.append('<p class="note">reef-pi setup lists these and runs a check only after you confirm it</p>')
     return "".join(parts) + tail
 
 
@@ -448,35 +514,55 @@ def _ran_on(other: Mapping[str, Any], release_id: Any) -> bool:
     return before_release_id(other) == release_id
 
 
-def _chain(step: int, row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
+def _chain(
+    step: int, row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], link_query: Mapping[str, str] | None
+) -> str:
     release_id = row.get("release_id")
     selection_result = result_of(row)
     if selection_result in ("rejected", "skipped"):
         # The row carries the head's id and published nothing, so the head's parent and children are not its own.
-        ran_on = _esc(before_release_id(row) or "-")
         if selection_result == "rejected":
-            ran_on += " (the head at this step; the candidate published nothing)"
+            ran_on = "the head at this step; the candidate published nothing"
         else:
-            ran_on += " (the head at this step; nothing was evaluated)"
+            ran_on = "the head at this step; nothing was evaluated"
         return (
-            "<table><tbody>"
-            f'<tr><th>ran on</th><td class="id">{ran_on}</td></tr>'
-            '<tr><th>children</th><td><span class="empty">none (the candidate published nothing)</span></td></tr>'
-            "</tbody></table>"
+            '<dl class="details">'
+            f'<div><dt>Ran on</dt><dd class="id">{escape(before_release_id(row) or "-")} ({escape(ran_on)})</dd></div>'
+            "<div><dt>Children</dt><dd>none (the candidate published nothing)</dd></div>"
+            "</dl>"
         )
     children = [
-        f'<li>step {index} <span class="id">{_esc(other.get("release_id"))}</span> {_span(result_of(other, rows))}</li>'
+        f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">Step {index}</a>'
+        f'<span class="id">{escape(other.get("release_id"))}</span>{status_span(result_of(other, rows))}</li>'
         for index, other in enumerate(rows)
         if index != step and _ran_on(other, release_id)
     ]
-    listed = "<ul>" + "".join(children) + "</ul>" if children else '<span class="empty">none</span>'
-    return (
-        "<table><tbody>"
-        f'<tr><th>parent</th><td class="id">{_esc(row.get("parent_release_id") or "-")}</td></tr>'
-        f'<tr><th>this release</th><td class="id">{_esc(release_id)}</td></tr>'
-        f"<tr><th>children</th><td>{listed}</td></tr>"
-        "</tbody></table>"
+    listed = (
+        f'<h3>Children</h3><ul class="chain">{"".join(children)}</ul>'
+        if children
+        else '<h3>Children</h3><p class="empty">none</p>'
     )
+    return (
+        '<dl class="details">'
+        f'<div><dt>Parent</dt><dd class="id">{escape(row.get("parent_release_id") or "-")}</dd></div>'
+        f'<div><dt>This release</dt><dd class="id">{escape(release_id)}</dd></div>'
+        "</dl>" + listed
+    )
+
+
+def _steps_nav(step: int, rows: Sequence[Mapping[str, Any]], link_query: Mapping[str, str] | None) -> str:
+    """The walk along the catalog: the neighbouring steps, a dead end shown as text, and where this step sits."""
+    parts = []
+    if step > 0:
+        parts.append(f'<a href="{escape(step_href(step - 1, link_query))}" rel="prev">&#8592; Step {step - 1}</a>')
+    else:
+        parts.append("<span>&#8592; Step</span>")
+    if step + 1 < len(rows):
+        parts.append(f'<a href="{escape(step_href(step + 1, link_query))}" rel="next">Step {step + 1} &#8594;</a>')
+    else:
+        parts.append("<span>Step &#8594;</span>")
+    parts.append(f'<span class="here">Step {step} of {len(rows) - 1}</span>')
+    return f'<nav class="steps" aria-label="Catalog steps">{"".join(parts)}</nav>\n'
 
 
 def build_release_page(
@@ -486,15 +572,17 @@ def build_release_page(
     before_entries: Sequence[Mapping[str, Any]] = (),
     before_files: Mapping[str, str] | None = None,
     node_paths: Mapping[str, str] | None = None,
+    link_query: Mapping[str, str] | None = None,
 ) -> str:
     """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/releases`` lists them.
 
     ``before_entries`` and ``before_files`` describe the release an update is
     read against (see ``before_release_id``); ``node_paths`` is the adapter's
     render template per kind, which names an extension's file. Without them an
-    extension update shows its new text instead of a diff. Design and Review
-    appear only when the row's ``proposal_notes`` carry them. Pure ASCII out:
-    other characters leave as numeric references.
+    extension update shows its new text instead of a diff. ``link_query`` is
+    carried to the Chain's links, so a page opened through query parameters
+    links pages that open the same way. Design and Review appear only when the
+    row's ``proposal_notes`` carry them.
     """
     row = rows[step]
     metrics = row.get("metrics")
@@ -502,28 +590,40 @@ def build_release_page(
     entries = {str(entry["id"]): entry for entry in before_entries if isinstance(entry, Mapping) and "id" in entry}
     selection_result = result_of(row, rows)
     recorded = row.get("recorded_at")
-    title = f"Harness step {step}"
-    sub = f'release <span class="id">{_esc(row.get("release_id"))}</span> | {_span(selection_result)}'
+    headline = [f'<span class="id">{escape(row.get("release_id"))}</span>']
     if served_step(rows) == step:
-        sub += " | current"
+        headline.append('<span class="chip">Currently served</span>')
+    subtitle = f'<span class="headline">{"".join(headline)}</span>'
     if isinstance(recorded, (int, float)):
-        sub += f" | recorded at {recorded:.0f}"
-    # Every "<" leaves the JSON as \u003c: a code text holding "</script>" would otherwise close the data block.
+        subtitle += f"Recorded {stamp(recorded)}"
+    else:
+        subtitle += f"{escape(status_label(selection_result))} in this scenario's catalog"
+    # Every "<" leaves the JSON as \\u003c: a code text holding "</script>" would otherwise close the data block.
     data = json.dumps(row, ensure_ascii=True, sort_keys=True).replace("<", "\\u003c")
-    page = (
-        f"<title>{title}</title>\n<style>{STYLE}</style>\n<main>\n"
-        f'<h1>{title}</h1>\n<p class="sub">{sub}</p>\n'
-        f"<h2>Why</h2>\n{_why(row, metrics)}\n"
-        f"{_design(metrics)}"
-        f"<h2>What changed</h2>\n{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n"
-        f"{_review(metrics)}"
-        f"<h2>Result</h2>\n{result_html(row, metrics, rows)}\n"
-        f"<h2>Setup</h2>\n{_setup(row, metrics, rows)}\n"
-        f"<h2>Chain</h2>\n{_chain(step, row, rows)}\n"
-        "</main>\n"
-        f'<script id="data" type="application/json">{data}</script>\n'
+    served = served_step(rows)
+    return document(
+        title=f"Harness step {step}",
+        style=STYLE,
+        breadcrumb="Versions",
+        context=link_query.get("scenario", "") if link_query else "",
+        state=selection_result,
+        eyebrow="Harness evolution",
+        heading=f"Harness step {step}",
+        subtitle=subtitle,
+        # The served head is this scenario's home; on its own page the crumb stays text.
+        home="" if served is None or served == step else step_href(served, link_query),
+        body=_steps_nav(step, rows, link_query)
+        + '<div class="stack">\n'
+        + _card("Why", f"{_why(row, metrics)}\n")
+        + _design(metrics)
+        + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")
+        + _review(metrics)
+        + _card("Result", f"{result_html(row, metrics, rows)}\n")
+        + _card("Setup", f"{_setup(row, metrics, rows)}\n")
+        + _card("Chain", f"{_chain(step, row, rows, link_query)}\n")
+        + "</div>\n",
+        tail=f'<script id="data" type="application/json">{data}</script>\n',
     )
-    return page.encode("ascii", "xmlcharrefreplace").decode("ascii")
 
 
 # Compatibility aliases for existing imports.
@@ -532,11 +632,13 @@ verdict_of = result_of
 
 __all__ = [
     "RESULT_FIELDS",
+    "RESULT_LABELS",
     "VERDICT_FIELDS",
     "before_release_id",
     "build_release_page",
     "mutations_of",
     "result_of",
     "served_step",
+    "step_href",
     "verdict_of",
 ]

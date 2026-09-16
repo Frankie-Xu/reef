@@ -39,7 +39,9 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     async def harness_release_page(request: web.Request) -> web.Response:
         step = int(request.match_info["step"])
         headers = page_headers(request.headers, request.query)
-        page = await asyncio.to_thread(request_service.harness_release_page, headers, step)
+        # The chain's links open the way this page was opened: the query parameters travel with them.
+        link_query = {key: request.query[key] for key in ("scenario", "token") if key in request.query}
+        page = await asyncio.to_thread(request_service.harness_release_page, headers, step, link_query)
         return web.Response(text=page, content_type="text/html")
 
     async def harness_request_page(request: web.Request) -> web.Response:

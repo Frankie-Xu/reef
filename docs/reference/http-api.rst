@@ -672,38 +672,54 @@ page (``text/html``, no asset, its data inline) for one catalog row. ``step``
 is the row's position in ``GET /reef/harness/releases`` oldest first, the
 creation row being 0, which is the commit step: a rejected step publishes
 nothing and its row carries the head's release id, so the step is what names
-it. The page has up to seven sections in this order: Why (the request the
+it. The page shares its chrome with the request page below: the same branded
+header, palette, card layout, automatic light and dark themes and responsive
+behavior, and one status vocabulary, so a step reads ``Published``,
+``Ready for review``, ``Not selected`` or ``No changes`` in place of the
+record's own field names. The page has up to seven sections, each its own
+card, in this order: Why (the request the
 step read, else the claimed proposal's reason, else a failure in the batch),
 Design (the proposer's plan, ``proposal_notes.design``; only when the method
-recorded one), What changed (the step's mutations; an extension's file as
-text for a create, and for an update a line diff against the release the
+recorded one), What changed (the step's mutations, each with its operation,
+node id and kind; an extension's file as text for a create, and for an update
+a line diff against the release the
 candidate ran on when that release is restorable, else the new text), Review
 (``proposal_notes.review``: the proposer's result on its entries against the
 request, ``complete`` or ``partial``, then the points it covered and the ones
-it left uncovered, then one line naming ``proposal_notes.undeclared_env``,
+it left uncovered, then ``proposal_notes.undeclared_env``,
 the variables a written extension reads that no ``requires`` item names;
-only when the row carries a review or that list), Result (the result with
-``selected``, ``wins``, ``losses``, ``ties``, ``passed``, ``failed``,
+only when the row carries a review or that list), Result (the result and what
+it means, then the evaluation's numbers: ``wins``, ``losses``, ``ties``,
+``passed``, ``failed``,
 ``floor_score``, ``evaluation_sides``, ``current_score``, ``candidate_score`` and
 ``episode_failures``, each when the row carries it, so a ``floor`` evaluation,
 which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
-and no ``current_score``, ``proposal_notes.failure`` as ``proposer failure``
-when the step recorded one, and the step record directory when
-``evolution.step_record_dir`` is set), Setup (the request's ``requires`` with
+and no ``current_score``, then the skip reason, the selection reason, the step
+record directory when ``evolution.step_record_dir`` is set, and
+``proposal_notes.failure`` as the proposer failure
+when the step recorded one), Setup (the request's ``requires`` with
 name, kind, check and prompt, then the items the release carries from
 earlier steps in its chain, the same union the install script and
 ``reef-<adapter> setup`` read; a rejected or skipped row lists only its own
-items, since its release id is the head's; then, under "refused by the
+items, since its release id is the head's; then, under "Refused by the
 step", the items the step dropped from ``training_request.refused_requires``
 and ``proposal_notes.refused_requires``, each as written with its reason;
 nothing when all are empty) and Chain (the parent release, this release,
 and its children: the steps evaluated on it, won, lost or pending, and a promote
-or rollback made on it; a rejected or skipped step published nothing, so its
+or rollback made on it, each linking that step's own page; a rejected or
+skipped step published nothing, so its
 Chain names the head it ran on and no children).
-The line under the title marks the served head as ``current``: the newest
+Above the sections a step walk links the neighbouring steps, and the logo and
+the "Harness" crumb lead to the served head; a dead end, and the served head's
+own page, leave the link as plain text. Every link either page draws is one
+of the two ``/page`` routes, the only ones a browser can open, since the
+catalog answers JSON and refuses a query token.
+The line under the title carries the release id, marks the served head as
+``Currently served`` and reads the commit time as a date in UTC. The served
+head is the newest
 row that is neither pending nor a rejected or skipped step. A pending row
 that a later ``promote`` row names in ``rollback_target_release_id`` reads
-``promoted at step N``, where N is that later row's step. A step outside the
+``Promoted at step N``, where N is that later row's step. A step outside the
 catalog is HTTP 404 naming the range; a step that is not a number, or longer
 than nine digits, is HTTP 404 too. The row itself rides in a
 ``<script type="application/json">`` block at the end of the page, every
@@ -729,7 +745,8 @@ harness request, ``record_id`` being the ``agent_record_id`` that
 print the link. Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop
-and stacks them on narrow screens, with automatic light and dark themes.
+and stacks them on narrow screens, with automatic light and dark themes; it
+shares that chrome and its status wording with the version page above.
 Request highlights the instruction; session, release, request ID, submission
 time and machine requirements are available in expandable details.
 Progress shows
@@ -751,6 +768,7 @@ results show the session command to install or promote when the person is
 ready, alongside a link to the version page. An unknown
 id, or one that is not a training instruction, is HTTP 404 naming it.
 
+
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
 ``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
 phase ``evaluating``. Reviews and settled proposals store their outcome under
@@ -762,8 +780,8 @@ for existing clients.
 Both pages are links a person opens in a browser, which sends no header, so
 they also take the scenario and the token as query parameters,
 ``?scenario=<name>&token=<token>``, in place of ``x-reef-scenario`` and
-``Authorization: Bearer``; a header wins when present, and the request
-page's link to the version page carries the parameters it was opened with.
+``Authorization: Bearer``; a header wins when present, and each page's links
+to the other carry the parameters it was opened with.
 The token then sits in the URL, in the browser's history and in whatever
 logs request lines, so a deployment that hands out such links is a local
 one. Every other route reads the headers alone; a ``?token=`` elsewhere is

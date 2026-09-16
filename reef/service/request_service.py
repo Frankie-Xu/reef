@@ -621,7 +621,9 @@ class RequestService:
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
-    def harness_release_page(self, headers: Mapping[str, str], step: int) -> str:
+    def harness_release_page(
+        self, headers: Mapping[str, str], step: int, link_query: Mapping[str, str] | None = None
+    ) -> str:
         """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
 
         The rows are the ones ``harness_releases`` answers, so the step a
@@ -629,7 +631,9 @@ class RequestService:
         step ran on (the parent of a win, the head a rejected or skipped
         step ran on) comes through the artifact snapshot when it is
         restorable, so an extension update shows as a diff, else as its new
-        text. An unknown step raises ArtifactNotFound naming the range.
+        text. ``link_query`` is carried to the Chain's links, so a page
+        opened through query parameters links pages that open the same way.
+        An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.releases()))
@@ -659,6 +663,7 @@ class RequestService:
             before_entries=before_entries,
             before_files=before_files,
             node_paths=None if descriptor is None else descriptor.node_paths,
+            link_query=link_query,
         )
 
     def harness_request_page(

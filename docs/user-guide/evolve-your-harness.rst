@@ -654,15 +654,19 @@ release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
 answered. ``/reef-versions <step>`` prints the link to that step's page,
 ``GET /reef/harness/releases/<step>/page`` with the scenario and the token
 as query parameters so a browser opens it as is, one self contained HTML
-page with
+page that reads like the request page, light or dark with the system and
+usable on a phone, with
 five sections: Why (the request, else the proposal's reason, else a failure
 in the batch), What changed (the mutations; an extension update as a line
 diff against the release it ran on), Result (the evaluation's result and numbers,
 and the step record directory when ``evolution.step_record_dir`` is set),
 Setup (what the release needs from you: the step's own items, then those
 carried from earlier steps) and Chain (the parent, this release, and its
-children: the steps evaluated on it and any promote or rollback made on it; for
-a rejected or skipped step, the head it ran on). For a pending release the
+children: the steps evaluated on it and any promote or rollback made on it,
+each a link to its own page; for
+a rejected or skipped step, the head it ran on). The line under the title
+carries the release id, the commit time and ``Currently served`` on the head.
+For a pending release the
 command also prints the promote curl, a trial install with ``?release_id=``
 that replaces the tree at your install root, and the head's reinstall to
 return to it; ``/reef-versions <step> promote`` runs the promote from the

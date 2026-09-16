@@ -21,6 +21,7 @@ from reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app
+from reef.service.release_page import build_release_page
 from reef.service.request_page import REFRESH_SECONDS, build_request_page, settled_step
 from reef.train.cordis_backend import Mutation, StepProgress
 
@@ -82,10 +83,27 @@ def _section(page: str, name: str) -> str:
     return body
 
 
-def test_request_page_uses_the_readme_logo() -> None:
+def test_both_harness_pages_carry_the_readme_logo_from_the_shared_chrome() -> None:
     logo = (MODULE.parents[2] / "docs" / "assets" / "reef-logo-light.svg").read_text().strip()
     page = build_request_page(_record(), [CREATION], now=1_042.0)
     assert logo in page
+    # The version page draws with the same chrome, so one logo serves both.
+    assert logo in build_release_page(0, [CREATION])
+
+
+def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> None:
+    """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
+    rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION))]
+    page = build_request_page(_record(compacted_at=1_050.0), rows, link_query=QUERY, now=1_100.0)
+    head = "/reef/harness/releases/1/page?scenario=agents&amp;token=secret"
+    assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
+    assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
+    for href in re.findall(r'href="([^"]+)"', page):
+        assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
+    # A catalog with no served head leaves the crumb as text rather than a broken link.
+    pending_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, pending=True)]
+    bare = build_request_page(_record(), pending_only, now=1_100.0)
+    assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
 
 
 def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
