@@ -498,6 +498,45 @@ def test_hermes_state_database_outlives_the_run_so_a_later_run_can_resume_it(tmp
 
 
 @pytest.mark.unit
+def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
+    """A kept file the binary creates, or renames a new file over, is copied back with its mode after the run;
+    a later run reads it through the link."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
+    binary = tmp_path / "fake-claude"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json, os, sys
+            from pathlib import Path
+            path = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+            state = json.loads(path.read_text()) if path.exists() else {{}}
+            open({str(seen)!r}, "a").write(f"{{path.is_symlink()}} {{state}}\\n")
+            staging = path.with_name(".claude.json.tmp")
+            staging.write_text(json.dumps({{"numStartups": state.get("numStartups", 0) + 1}}))
+            staging.chmod(0o600)
+            os.replace(staging, path)
+            """
+        )
+    )
+    binary.chmod(0o755)
+
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", prompt])
+
+    assert seen.read_text().splitlines() == ["False {}", "True {'numStartups': 1}"]
+    kept = compose / ".claude.json"
+    assert json.loads(kept.read_text()) == {"numStartups": 2}
+    assert kept.stat().st_mode & 0o777 == 0o600
+    assert sorted(path.name for path in compose.iterdir()) == [".claude.json", "projects", "settings.json"]
+
+
+@pytest.mark.unit
 def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
     """When a later per-receipt post fails, the restored claim holds only the
     receipts that never went out, so a retry cannot duplicate reports."""

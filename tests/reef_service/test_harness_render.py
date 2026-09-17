@@ -395,22 +395,26 @@ def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
     assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
 
 
-def test_bundled_descriptors_keep_the_session_state_their_resume_reads() -> None:
-    """A reef-<adapter> run keeps what the binary's resume reads in the installed tree; dsh has no resume."""
+def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
+    """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
     kept = {name: get_adapter(name).client_state for name in ("pi", "claude", "codex", "hermes", "dsh")}
     assert kept == {
         "pi": (ClientState("pi-agent/sessions", "directory"),),
-        "claude": (ClientState("claude/projects", "directory"),),
+        "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
         "hermes": (ClientState("hermes/state.db", "sqlite"),),
-        "dsh": (),
+        "dsh": (
+            ClientState("dsh/.credentials.yaml", "file"),
+            ClientState("dsh/settings.yaml", "file"),
+            ClientState("dsh/.agent-presets", "directory"),
+        ),
     }
 
 
 @pytest.mark.parametrize(
     ("entry", "message"),
     [
-        ({"path": "pi-agent/sessions", "kind": "file"}, "'kind'"),
+        ({"path": "pi-agent/sessions", "kind": "link"}, "'kind'"),
         ({"kind": "directory"}, "'path'"),
         ({"path": "sessions", "kind": "directory"}, "not below 'pi-agent'"),
         ({"path": "pi-agent", "kind": "directory"}, "not below 'pi-agent'"),
