@@ -60,8 +60,13 @@ reference): learning rate 1e-5 with a cosine schedule and 10 warmup steps,
 prompt in a 2048-token window, truncated importance sampling capped at 2,
 the first three response tokens skipped, and the teacher a copy of the
 stage's initial weights moving 2% toward the policy after every step. The
-KL is the forward one, the reference's default and the paper's setting
-(that issue's run switched to reverse).
+KL is the forward one, the reference's default and the paper's setting.
+That issue's run switched to the reverse KL; on this stack the reverse KL
+left Tool Use at its baseline for 180 steps while its training KL fell
+from 0.32 to 0.08 (its gradient on the demonstration's action token scales
+with the student's own probability of it, so a student that rarely picks
+that action barely moves toward it), whereas the forward KL's gradient,
+the difference of the two distributions, carries it over directly.
 
 `run.py` keeps that protocol with Reef in the trainer's place. Each stage
 starts the arm's stack from the previous stage's HF export (the base model

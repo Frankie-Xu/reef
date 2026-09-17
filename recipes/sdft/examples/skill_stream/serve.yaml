@@ -128,7 +128,7 @@ training:
     loss-type: "custom_loss"
     use-rollout-logprobs: true
     disable-compute-advantages-and-returns: true
-    sdft-kl-direction: "reverse"
+    sdft-kl-direction: "forward"
     sdft-importance-sampling-cap: "2.0"
     sdft-skip-response-tokens: "3"
     # The reference's ref_model_mixup_alpha for these runs: the teacher is a
