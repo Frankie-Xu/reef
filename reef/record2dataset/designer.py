@@ -17,12 +17,15 @@ The Designer's deployment evolves between generations: a harness evolution deplo
 as a new release once it has consumed a generation's reports, a weight training deployment commits a step
 and serves a new runtime load id. Either takes time after the last report lands, and a generation that asks
 the Designer before then uses the version the previous generation used, so the rewrite or the step its
-reports produced is never used. ``DesignerTurn`` closes that gap: it remembers the version a generation
-used (the served release id under a harness prompt, else ``current_runtime_load_id`` of the Designer's
-scenario in ``GET /reef/status``) and, when that generation sent at least one report, holds the next
-generation's first proposal until the version changed, polling every ``poll_s`` seconds up to ``wait_s``.
-A deployment with neither a release nor a runtime load id is fixed and never waited on; a wait that runs
-out logs a warning and the generation proceeds, so no generation blocks forever or fails on the wait.
+reports produced is never used. ``DesignerTurn`` closes that gap: it reads the Designer's version (the served
+release id under a harness prompt, else ``current_runtime_load_id`` of the Designer's scenario in
+``GET /reef/status`` with the scenario's step, so a step that skips still counts) when a generation's first
+report goes out, and holds the next generation's first proposal until the version moved past that one,
+polling every ``poll_s`` seconds up to ``wait_s``. The version at report time is the one that matters: a
+release that appeared earlier in the generation, the scenario's creation release for one, is not the rewrite
+those reports produced. A deployment with neither a release nor a runtime load id is fixed and never
+waited on; a wait that runs out logs a warning and the generation proceeds, so no generation blocks forever
+or fails on the wait.
 """
 
 from __future__ import annotations
