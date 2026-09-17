@@ -880,6 +880,20 @@ string commands retain their current ``shlex`` parsing.
    services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead
    services[].env | extra environment variables
 
+The ``inference`` section
+-------------------------
+
+Read by every serving mode. ``inference.timeout-s`` limits one inference
+request. Buffered inference attempts share ``inference.retry-timeout-s``;
+when it is omitted, it follows ``inference.timeout-s``.
+
+.. config::
+
+   inference.timeout-s | 300.0 | maximum time for one inference request
+   inference.retry-timeout-s | ``inference.timeout-s`` (300.0 by default) | total deadline shared by inference attempts and retry delays
+   inference.retry-initial-s | 0.05 | delay before the first retry
+   inference.retry-max-s | 1.0 | maximum delay between retries
+
 The ``training`` section
 ------------------------
 
