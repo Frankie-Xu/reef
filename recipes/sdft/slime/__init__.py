@@ -81,11 +81,7 @@ class SdftAlgorithm(SlimeAlgorithm):
     rollout_tensor_dtypes: Mapping[str, str] = {"teacher_tokens": "long"}
     external_batch_keys = ("rollout_log_probs", "sdft_teacher_log_probs")
     rollout_log_skip_keys = ("teacher_tokens", "sdft_teacher_log_probs")
-    required_objective_hooks = (
-        "custom_loss_function_path",
-        "reef_actor_init_hook_path",
-        "reef_actor_pre_train_hook_path",
-    )
+    required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
 
     # --- stage 1: configure ---
 

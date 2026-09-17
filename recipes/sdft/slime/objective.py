@@ -291,17 +291,9 @@ def sdft_loss(
     return loss, metrics
 
 
-@objective("reef_actor_init_hook_path")
-def sdft_actor_init(actor: Any) -> None:
-    """Keep the initial weights as the teacher's starting point."""
-    from recipes.sdft.slime.teacher import initialize_teacher
-
-    initialize_teacher(actor)
-
-
 @objective("reef_actor_pre_train_hook_path")
 def sdft_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
-    """Move the teacher toward the policy, then score every sample's teacher sequence with it."""
+    """Move the teacher toward the policy (seeding it on the first step), then score every teacher sequence."""
     if not rollout_data.get("teacher_tokens"):
         raise ValueError("every sdft sample must carry teacher_tokens")
     from slime.utils.timer import timer

@@ -387,7 +387,7 @@ _EXPECTED_OBJECTIVE_CHANNELS = {
         }
     ),
     "sao": frozenset({"custom_advantage_function_path", "custom_pg_loss_function_path"}),
-    "sdft": frozenset({"custom_loss_function_path", "reef_actor_init_hook_path", "reef_actor_pre_train_hook_path"}),
+    "sdft": frozenset({"custom_loss_function_path", "reef_actor_pre_train_hook_path"}),
     "sft": frozenset(),
     "tttd": frozenset({"custom_advantage_function_path", "custom_loss_function_path"}),
 }

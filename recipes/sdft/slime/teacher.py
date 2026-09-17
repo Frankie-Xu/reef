@@ -44,12 +44,14 @@ _teacher_accumulator: dict[str, torch.Tensor] = {}
 
 
 def initialize_teacher(actor: Any) -> None:
-    """Seed the teacher from the actor's weights at init.
+    """Seed the teacher from the actor's weights before its first step.
 
     On a fresh start these are the base model's weights, the reference's
     starting teacher. A restart from a Megatron checkpoint seeds the teacher
     from the resumed weights instead: the copy the interrupted run had moved
-    is not checkpointed.
+    is not checkpointed. The seed is taken in the first pre-train hook rather
+    than at init: a colocated actor sleeps between the two, with its process
+    groups retired, and the backup walks the model through them.
     """
     update_rate = float(actor.args.sdft_teacher_update_rate)
     if update_rate >= 1.0:
@@ -173,7 +175,7 @@ def compute_sdft_teacher_log_probs(actor: Any, rollout_data: dict[str, Any]) -> 
     if teacher_is_a_copy:
         backuper = actor.weights_backuper
         if TEACHER_TAG not in backuper.backup_tags:
-            raise RuntimeError("the sdft teacher was never initialized; the actor init hook did not run")
+            initialize_teacher(actor)
         backuper.backup(ACTOR_TAG)
         if update_rate > 0.0:
             mix_teacher_weights(_teacher_accumulator, backuper.get(ACTOR_TAG), update_rate)
