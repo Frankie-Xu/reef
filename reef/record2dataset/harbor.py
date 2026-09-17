@@ -18,6 +18,7 @@ that write it.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import json
 import os
@@ -71,6 +72,8 @@ DOCKER_INSTRUCTIONS = frozenset(
     }
 )
 SETUP_INSTRUCTIONS = frozenset({"RUN", "COPY", "ADD", "ENV"})
+COPY_INSTRUCTIONS = frozenset({"COPY", "ADD"})
+URL_PREFIXES = ("http://", "https://")
 HEREDOC_PATTERN = re.compile(r"<<[-~]?[ \t]*['\"]?[A-Za-z_][A-Za-z0-9_]*")
 SCAFFOLD_LINES = (
     ("Dockerfile", "Install or copy over any environment dependencies here"),
@@ -135,29 +138,76 @@ class OracleUnavailable(RuntimeError):
     """The check could not run: harbor is not installed, or a harbor run ended without a trial to read."""
 
 
+def dockerfile_logical_lines(text: str) -> list[str]:
+    """The Dockerfile as the classic parser reads it: continuations joined, comments and blank lines dropped."""
+    lines: list[str] = []
+    is_continued = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        continues = stripped.endswith("\\")
+        body = stripped[:-1].rstrip() if continues else stripped
+        if is_continued and lines:
+            lines[-1] = f"{lines[-1]} {body}".rstrip()
+        else:
+            lines.append(body)
+        is_continued = continues
+    return lines
+
+
 def dockerfile_parse_errors(text: str) -> list[str]:
     """Logical lines the classic Docker parser rejects: continuations joined, comments dropped, an instruction first."""
     errors: list[str] = []
-    is_continued = False
-    for raw in text.splitlines():
-        line = raw.rstrip()
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        continues = line.endswith("\\")
-        if is_continued:
-            is_continued = continues
-            continue
-        keyword = stripped.split(None, 1)[0].upper()
+    for line in dockerfile_logical_lines(text):
+        keyword = line.split(None, 1)[0].upper()
         if keyword not in DOCKER_INSTRUCTIONS:
             hint = (
                 " (a heredoc body: the classic parser reads it as instructions)"
                 if HEREDOC_PATTERN.search(text)
                 else ""
             )
-            errors.append(f"{stripped[:90]}{hint}")
-        is_continued = continues
+            errors.append(f"{line[:90]}{hint}")
     return errors
+
+
+def copy_sources(line: str) -> list[str]:
+    """The sources a COPY or ADD instruction reads from the build context; empty for another stage or a URL."""
+    keyword, _, rest = line.partition(" ")
+    if keyword.upper() not in COPY_INSTRUCTIONS:
+        return []
+    rest = rest.strip()
+    if rest.startswith("["):
+        try:
+            words = json.loads(rest)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(words, list) or not all(isinstance(word, str) for word in words):
+            return []
+    else:
+        words = rest.split()
+    if any(word.startswith("--from=") for word in words):
+        return []
+    arguments = [word for word in words if not word.startswith("--")]
+    return [source for source in arguments[:-1] if not source.startswith(URL_PREFIXES)]
+
+
+def missing_copy_sources(dockerfile: str, environment: Mapping[str, str]) -> list[str]:
+    """COPY and ADD sources that name nothing under environment/, the build context Harbor hands the Dockerfile."""
+    missing: list[str] = []
+    for line in dockerfile_logical_lines(dockerfile):
+        for source in copy_sources(line):
+            path = source[2:] if source.startswith("./") else source
+            path = path.rstrip("/")
+            if path in ("", "."):
+                continue
+            if any(character in path for character in "*?["):
+                is_present = any(fnmatch.fnmatchcase(name, path) for name in environment)
+            else:
+                is_present = any(name == path or name.startswith(path + "/") for name in environment)
+            if not is_present:
+                missing.append(source)
+    return missing
 
 
 def reply_errors(reply: HarborReply) -> list[str]:
@@ -177,6 +227,11 @@ def reply_errors(reply: HarborReply) -> list[str]:
     # The agent's container has no network, so the image must carry what Terminus 2 needs to run in it.
     if "tmux" not in dockerfile:
         errors.append("the Dockerfile does not install tmux, which the agent needs inside the container")
+    errors.extend(
+        f"Dockerfile: COPY {source!r} names no file under environment/ (a source is a path relative to "
+        "environment/, and the file must be in the reply's environment)"
+        for source in missing_copy_sources(dockerfile, reply.environment)
+    )
     solution = reply.solution.get("solve.sh", "")
     if not [line for line in solution.splitlines() if line.strip() and not line.lstrip().startswith("#")]:
         errors.append("solution/solve.sh has no command")
