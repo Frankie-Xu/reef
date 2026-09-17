@@ -15,11 +15,12 @@ plus the student's response ids verbatim) scores the student's own tokens.
 from __future__ import annotations
 
 import importlib
-import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from reef.core.chat_request import normalize_messages_for_template
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
 DEFAULT_CONTEXT_TEMPLATE = (
@@ -52,64 +53,6 @@ class ChatTemplateTokenizer(TeacherPromptTokenizer):
             list(messages), tools=list(tools) if tools else None, tokenize=False, add_generation_prompt=True
         )
         return [int(token) for token in self._tokenizer(rendered, add_special_tokens=False)["input_ids"]]
-
-
-def recorded_request(payload: Mapping[str, Any]) -> tuple[list[Any], list[Any] | None]:
-    """The messages and tools of a recorded inference request.
-
-    The rollout backend retains its provider-neutral copy under
-    ``response.training``; a record without it carries the request body.
-    """
-    response = payload.get("response")
-    training = response.get("training") if isinstance(response, Mapping) else None
-    if isinstance(training, Mapping) and isinstance(training.get("request_messages"), list):
-        messages = list(training["request_messages"])
-        tools = training.get("request_tools", payload.get("tools"))
-    else:
-        messages = list(payload.get("messages") or [])
-        tools = payload.get("tools")
-    return messages, list(tools) if isinstance(tools, list) and tools else None
-
-
-def flatten_content(content: Any) -> str:
-    """The plain text of an OpenAI-style message content field."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [item.get("text", "") for item in content if isinstance(item, Mapping) and item.get("type") == "text"]
-        return " ".join(parts) if parts else ""
-    return str(content) if content is not None else ""
-
-
-def normalize_messages_for_template(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Messages as a chat template expects them: text content, chat roles, tool arguments as objects."""
-    normalized: list[dict[str, Any]] = []
-    for message in messages:
-        entry = dict(message)
-        if entry.get("role") == "developer":
-            entry["role"] = "system"
-        content = entry.get("content")
-        if content is not None and not isinstance(content, str):
-            entry["content"] = flatten_content(content)
-        if entry.get("tool_calls"):
-            entry["tool_calls"] = [_normalize_tool_call(call) for call in entry["tool_calls"]]
-        normalized.append(entry)
-    return normalized
-
-
-def _normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = dict(call)
-    function = normalized.get("function")
-    if isinstance(function, Mapping):
-        function = dict(function)
-        arguments = function.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                function["arguments"] = json.loads(arguments)
-            except json.JSONDecodeError:
-                function["arguments"] = {}
-        normalized["function"] = function
-    return normalized
 
 
 @dataclass(frozen=True)

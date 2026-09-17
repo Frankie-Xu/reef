@@ -5,12 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable, Mapping
 
-from recipes.sdft.teacher_prompt import (
-    ChatTemplateTokenizer,
-    TeacherPromptTokenizer,
-    recorded_request,
-    resolve_teacher_prompt_builder,
-)
+from recipes.sdft.teacher_prompt import ChatTemplateTokenizer, TeacherPromptTokenizer, resolve_teacher_prompt_builder
+from reef.core.chat_request import recorded_request
 from reef.core.reports import TeacherContextReport
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
