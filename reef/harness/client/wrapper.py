@@ -146,12 +146,14 @@ and ``setup`` from the session.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -765,11 +767,26 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     except WrapperError as exc:
         sys.exit(f"reef-{adapter}: {exc}")
 
+    descriptor = get_adapter(adapter)
+    # The temp copy is removed after the run: state kept in the installed tree is linked into it
+    # instead, so a later run finds the sessions and settings an earlier run saved.
+    kept = {
+        state: PurePosixPath(state.path).relative_to(descriptor.compose_relocation()[1])
+        for state in descriptor.client_state
+    }
+    for state, relative in kept.items():
+        path = Path(compose_dir) / relative
+        if state.kind == "directory":
+            path.mkdir(parents=True, exist_ok=True)
+        elif state.kind == "sqlite" and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.closing(sqlite3.connect(path)) as database:
+                database.execute("VACUUM")  # writes the database header, so the file is a database
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
     env = os.environ.copy()
     env[env_var] = temp_dir
     # What an interactive run needs beyond the episode env; the person's own setting wins.
-    for key, value in get_adapter(adapter).client_env.items():
+    for key, value in descriptor.client_env.items():
         env.setdefault(key, value)
     # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
     for key, value in stored.items():
@@ -798,7 +815,20 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     finally:
         proxy.publish_turn()
         proxy.stop()
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            for state, relative in kept.items():
+                written = Path(temp_dir) / relative
+                # A file still linked was written through the link; a real one is new, or renamed over the link.
+                if state.kind != "file" or written.is_symlink() or not written.is_file():
+                    continue
+                destination = Path(compose_dir) / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                file_descriptor, staging = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}-")
+                os.close(file_descriptor)
+                shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
+                os.replace(staging, destination)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     sys.exit(result.returncode)
 

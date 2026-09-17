@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from reef.harness.client.wrapper import (
     harness,
@@ -425,6 +426,114 @@ def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
     entries = seen.read_text().split(os.pathsep)
     assert entries[0] == str(bin_dir.resolve())
     assert os.environ["PATH"].split(os.pathsep)[0] in entries[1:]
+
+
+@pytest.mark.unit
+def test_pi_sessions_outlive_the_run_so_a_later_run_can_resume_them(tmp_path) -> None:
+    """pi saves sessions under its agent dir, which a run points at a temp copy;
+    a second run lists what the first saved, as ``pi --resume`` does."""
+    compose = _make_compose(tmp_path, 1)
+    binary = tmp_path / "fake-pi"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import os
+            from pathlib import Path
+            sessions = Path(os.environ["PI_CODING_AGENT_DIR"]) / "sessions" / "--project--"
+            open({str(seen)!r}, "a").write(",".join(sorted(p.name for p in sessions.glob("*.jsonl"))) + "\\n")
+            sessions.mkdir(parents=True, exist_ok=True)
+            (sessions / f"{{len(list(sessions.glob('*.jsonl')))}}.jsonl").write_text("{{}}\\n")
+            """
+        )
+    )
+    binary.chmod(0o755)
+
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    env.pop("PI_CODING_AGENT_SESSION_DIR", None)
+    with patch.dict(os.environ, env, clear=True):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", prompt])
+
+    assert seen.read_text().splitlines() == ["", "0.jsonl"]
+    assert sorted(p.name for p in (Path(compose) / "sessions" / "--project--").iterdir()) == ["0.jsonl", "1.jsonl"]
+
+
+@pytest.mark.unit
+def test_hermes_state_database_outlives_the_run_so_a_later_run_can_resume_it(tmp_path) -> None:
+    """hermes reads its sessions from state.db; the run finds a database already kept in the installed tree."""
+    compose = tmp_path / "compose"
+    compose.mkdir()
+    (compose / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
+    )
+    binary = tmp_path / "fake-hermes"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import os, sqlite3, sys
+            from pathlib import Path
+            path = Path(os.environ["HERMES_HOME"]) / "state.db"
+            header = path.read_bytes()[:16]
+            database = sqlite3.connect(path)
+            database.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT)")
+            open({str(seen)!r}, "a").write(f"{{header!r}} {{[row for (row,) in database.execute('SELECT id FROM sessions')]}}\\n")
+            database.execute("INSERT INTO sessions VALUES (?)", (sys.argv[-1],))
+            database.commit()
+            """
+        )
+    )
+    binary.chmod(0o755)
+
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["-q", prompt])
+
+    assert seen.read_text().splitlines() == ["b'SQLite format 3\\x00' []", "b'SQLite format 3\\x00' ['first']"]
+
+
+@pytest.mark.unit
+def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
+    """A kept file the binary creates, or renames a new file over, is copied back with its mode after the run;
+    a later run reads it through the link."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
+    binary = tmp_path / "fake-claude"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json, os, sys
+            from pathlib import Path
+            path = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+            state = json.loads(path.read_text()) if path.exists() else {{}}
+            open({str(seen)!r}, "a").write(f"{{path.is_symlink()}} {{state}}\\n")
+            staging = path.with_name(".claude.json.tmp")
+            staging.write_text(json.dumps({{"numStartups": state.get("numStartups", 0) + 1}}))
+            staging.chmod(0o600)
+            os.replace(staging, path)
+            """
+        )
+    )
+    binary.chmod(0o755)
+
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", prompt])
+
+    assert seen.read_text().splitlines() == ["False {}", "True {'numStartups': 1}"]
+    kept = compose / ".claude.json"
+    assert json.loads(kept.read_text()) == {"numStartups": 2}
+    assert kept.stat().st_mode & 0o777 == 0o600
+    assert sorted(path.name for path in compose.iterdir()) == [".claude.json", "projects", "settings.json"]
 
 
 @pytest.mark.unit
