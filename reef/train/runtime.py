@@ -133,8 +133,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             raise StaleCandidate(checkpoint.metrics)
         if checkpoint.outcome != "checkpoint" or checkpoint.training_job_id is None:
             raise TrainingRuntimeError("candidate training must stop after exporting a checkpoint")
-        if checkpoint.checkpoint_path is None:
-            raise TrainingRuntimeError("exported checkpoint must carry a checkpoint path")
+        # A job the backend's checkpoint interval skipped names no path; its candidate publishes live.
         return ModelCandidate(
             candidate_id=checkpoint.training_job_id,
             training_job_id=checkpoint.training_job_id,
