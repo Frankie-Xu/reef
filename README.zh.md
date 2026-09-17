@@ -285,6 +285,7 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),
+[Shiyi Zoe Du](https://github.com/zoedsy),
 [Hao He](https://github.com/hehaodele),
 [Haoze He](https://github.com/HectorHHZ),
 [Chonghe Jiang](https://github.com/Chonghe-Jiang),
@@ -307,7 +308,8 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 [Kaichen Zhou](https://github.com/kaichen-z),
 [Zijian Zhou](https://github.com/BobbyZhouZijian),
 [Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
-[Dingyi Zhuang](https://github.com/ZhuangDingyi).
+[Dingyi Zhuang](https://github.com/ZhuangDingyi),
+[Xinkai Zou](https://github.com/jayzou3773).
 
 
 ## ⭐ Star History
