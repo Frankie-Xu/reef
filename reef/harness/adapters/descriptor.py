@@ -22,8 +22,8 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
-- ``client_state`` (optional): the session state a ``reef-<adapter>`` run keeps
-  in the installed tree, created before the run so its resume finds it.
+- ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
+  keeps in the installed tree, so a later run finds them.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
@@ -110,9 +110,11 @@ _INSTALL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _INSTALL_REPOSITORY_PATTERN = re.compile(r"^https://[A-Za-z0-9._/-]+$")
 
 
-#: What a ``client_state`` entry is created as: an empty directory, or an empty SQLite database (a
-#: zero-length file is not one, and a binary may set it aside and start a new one in its place).
-CLIENT_STATE_KINDS = ("directory", "sqlite")
+#: How a ``client_state`` entry is kept. ``directory`` and ``sqlite`` are created in the installed tree
+#: before the run: an empty directory, or an empty SQLite database (a zero-length file is not one, and a
+#: binary may set it aside and start a new one in its place). ``file`` is copied back after the run when
+#: the binary wrote it as a new file, or renamed a new file over the link, so its mode is kept too.
+CLIENT_STATE_KINDS = ("directory", "sqlite", "file")
 
 
 @dataclass(frozen=True)
@@ -122,7 +124,7 @@ class ClientState:
     The wrapper runs the binary on a temp copy of links to the installed
     composition and removes the copy afterwards, so what the binary creates
     there is lost; a path that already exists in the installed tree is
-    linked, and what the binary writes under it stays.
+    linked, and what the binary writes through the link stays.
     """
 
     path: str
@@ -192,8 +194,8 @@ class AdapterDescriptor:
     #: Commands the binary expects on PATH at first start and otherwise fetches
     #: itself, as ``(command, package)``; the install script names the missing ones.
     client_tools: tuple[tuple[str, str], ...] = ()
-    #: Root-relative session state below the composition that a ``reef-<adapter>`` run
-    #: creates in the installed tree first, so a later run resumes the sessions it saved.
+    #: Root-relative sessions and settings below the composition that a ``reef-<adapter>`` run
+    #: keeps in the installed tree, so a later run resumes its sessions and skips its first-run setup.
     client_state: tuple[ClientState, ...] = ()
 
     def compose_relocation(self) -> tuple[str, str]:
