@@ -102,6 +102,7 @@ Set the checkpoint cadence
 ``checkpoint_every_n_versions`` (default ``1``) decides how many accepted updates go by between durable checkpoints. Between checkpoints, new weights live only in the engine's memory: their versions are recorded, but their bytes are not. A restart restores the last checkpoint, and the step counter, algorithm state, and record progress continue from the log. Raise the cadence only when checkpoint writes are the bottleneck and losing live versions on a restart is acceptable.
 
 On a training deployment, checkpoint retention runs under ``--reef-checkpoint-policy`` (``latest`` or ``best_reward``) with storage-fraction limits; when storage is blocked the step is deferred rather than failed, and ``/reef/status`` shows ``checkpoint_storage``.
+``--reef-checkpoint-interval N`` writes the Megatron checkpoint and the HF export on every N-th training job only (default 1, every job); the jobs in between publish their weights live and leave no restart source, so a restart resumes from the last written checkpoint and those versions cannot become durable artifacts. Pick an interval that lands on the run's last step.
 
 Track experiments with W&B
 --------------------------

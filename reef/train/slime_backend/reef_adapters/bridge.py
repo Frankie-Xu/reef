@@ -98,6 +98,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         source_hf: str | None = None,
         source_megatron: str | None = None,
         colocate: bool = False,
+        checkpoint_interval: int = 1,
         lora: bool = False,
         adapter_capacity: int | None = None,
         keep_lora_base_resident: bool = False,
@@ -122,6 +123,17 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         self.critic_save_interval = critic_save_interval
         self._batch_processor = batch_processor
         self._save_hf_template = save_hf_template
+        if (
+            not isinstance(checkpoint_interval, int)
+            or isinstance(checkpoint_interval, bool)
+            or checkpoint_interval < 1
+        ):
+            raise ValueError("checkpoint_interval must be a positive integer")
+        # Every job publishes its weights; every checkpoint_interval-th job also
+        # writes the Megatron checkpoint and the HF export (the last job of a
+        # stream should be one of them). The jobs in between leave no restart
+        # source, so a restart resumes from the last written checkpoint.
+        self._checkpoint_interval = checkpoint_interval
         self._config = TrainingCoordinationConfig(
             save_hf_template, colocate, lora, adapter_capacity, keep_lora_base_resident
         )
@@ -205,7 +217,8 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise RuntimeError(f"expected rollout {self._next_rollout_id}, got {rollout_id}")
         max_staleness = _max_staleness(payload)
         checkpoint = Path(self._checkpoint_path(rollout_id))
-        if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
+        checkpoint_due = self.checkpoint_due(rollout_id)
+        if checkpoint_due and self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
         rollout_data = to_slime_rollout_data(dict(payload))
         rollout_versions = rollout_data.get("producing_runtime_load_ids")
@@ -217,7 +230,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise ValueError("loss-family row producing versions do not match the shared training payload")
         self._algo.validate_payload(rollout_data)
         context: Any = nullcontext(None)
-        if self._storage is not None:
+        if self._storage is not None and checkpoint_due:
             protected = marker_rollouts(prior_marker)
             if self._history is not None:
                 # Every scenario's latest checkpoint is its restart source.
@@ -274,10 +287,16 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         train_metrics.update(job.algorithm_metrics)
         return TrainingMetrics(training=train_metrics, durable=durable_metrics)
 
-    def save_job_checkpoint(self, job: _SlimePreparedTrainingJob) -> None:
-        """Persist the paired model/optimizer checkpoints and record the step."""
+    def checkpoint_due(self, rollout_id: int) -> bool:
+        """Whether the job at ``rollout_id`` writes its checkpoint under the interval."""
+        return (rollout_id + 1) % self._checkpoint_interval == 0
+
+    def save_job_checkpoint(self, job: _SlimePreparedTrainingJob) -> bool:
+        """Persist the paired model/optimizer checkpoints and record the step; False when the interval skips it."""
         checkpoint = job.checkpoint
         rollout_id = checkpoint.rollout_id
+        if not self.checkpoint_due(rollout_id):
+            return False
         self._group.save_model(rollout_id, force_sync=True)
         if self._critic_save_root is not None and critic_checkpoint_due(rollout_id, self.critic_save_interval):
             # Persist the critic's weights and optimizer alongside the actor
@@ -294,6 +313,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
         if checkpoint.scenario is not None:
             self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
+        return True
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
@@ -389,8 +409,8 @@ class _SlimePreparedTrainingJob(PreparedTrainingJob):
     def train(self) -> TrainingMetrics:
         return self._backend.train_job(self)
 
-    def save_checkpoint(self) -> None:
-        self._backend.save_job_checkpoint(self)
+    def save_checkpoint(self) -> bool:
+        return self._backend.save_job_checkpoint(self)
 
 
 @dataclass(frozen=True)
@@ -400,13 +420,20 @@ class BridgePreparation:
     retention: RetentionConfig
     loss_family: str | None
     lora: bool
+    checkpoint_interval: int = 1
 
 
 def prepare_bridge(
-    args: Any, *, retention: RetentionConfig | None = None, loss_family: str | None = None
+    args: Any,
+    *,
+    retention: RetentionConfig | None = None,
+    loss_family: str | None = None,
+    checkpoint_interval: int = 1,
 ) -> BridgePreparation:
     """Validate training configuration and checkpoint storage before allocation."""
     retention = retention or RetentionConfig()
+    if not isinstance(checkpoint_interval, int) or isinstance(checkpoint_interval, bool) or checkpoint_interval < 1:
+        raise ValueError("--reef-checkpoint-interval must be a positive integer")
     spec = resolve_loss_family(loss_family) if loss_family is not None else None
     validate_bridge_args(args, spec)
     if loss_family is not None and ":" not in loss_family:
@@ -423,7 +450,9 @@ def prepare_bridge(
 
     lora = megatron_lora_enabled(args)
     prepare_checkpoint_storage(args, retention)
-    return BridgePreparation(retention=retention, loss_family=loss_family, lora=lora)
+    return BridgePreparation(
+        retention=retention, loss_family=loss_family, lora=lora, checkpoint_interval=checkpoint_interval
+    )
 
 
 def create_training_backend(
@@ -448,6 +477,7 @@ def create_training_backend(
         source_hf=args.hf_checkpoint,
         source_megatron=args.load,
         colocate=bool(args.colocate),
+        checkpoint_interval=preparation.checkpoint_interval,
         lora=preparation.lora,
         adapter_capacity=lora_engine_slots(args) if preparation.lora else None,
         keep_lora_base_resident=bool(args.keep_lora_base_resident),

@@ -1173,6 +1173,40 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
 
 
 @pytest.mark.unit
+def test_bridge_checkpoint_interval_skips_the_jobs_between_saves(tmp_path) -> None:
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    group = _DurableGroup(template)
+    actor = build_slime_coordinator(
+        group,
+        _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
+        save_hf_template=template,
+        checkpoint_interval=2,
+    )
+    payload = _payload(loss="sft")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+
+    # The first job publishes live: nothing is written, and the marker says so.
+    first = _execute_and_update_weights(actor, payload)
+    assert first.outcome == "complete"
+    assert first.checkpoint_path is None
+    assert group.save_calls == []
+    assert not Path(template.format(rollout_id=0)).exists()
+    marker = read_marker(tmp_path / ".reef-latest-job.json")
+    assert marker["checkpoint_saved"] is False
+    assert marker["checkpoint_path"] is None
+    assert first.training_job_id is not None
+    actor.acknowledge_training_commit(first.training_job_id)
+
+    # The second job is the interval's: it writes the pair and names it.
+    second = _execute_and_update_weights(actor, {**payload, "rollout_id": 1})
+    assert second.outcome == "complete"
+    assert second.checkpoint_path == template.format(rollout_id=1)
+    assert group.save_calls == [(1, True)]
+    assert read_marker(tmp_path / ".reef-latest-job.json")["checkpoint_saved"] is True
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("status", "checkpoint_exists", "error"),
     [
@@ -1426,23 +1460,28 @@ def test_load_args_file_expands_variables_and_uses_shell_like_quotes(tmp_path: P
 @pytest.mark.unit
 def test_driver_ready_file_is_atomic_and_driver_option_is_not_forwarded(tmp_path: Path) -> None:
     from reef.service.training_driver import READY_MARKER, _driver_options, _write_ready_file
-    from reef.train.slime_backend.driver import _retention_options
+    from reef.train.slime_backend.driver import _checkpoint_options
 
     ready_file = tmp_path / "state" / "bridge.ready"
     parsed_ready_file, remaining = _driver_options([f"--ready-file={ready_file}", "--loss-type", "sft_loss"])
 
     assert parsed_ready_file == ready_file
     assert remaining == ["--loss-type", "sft_loss"]
-    retention, remaining = _retention_options(
+    retention, interval, remaining = _checkpoint_options(
         [
             "--reef-checkpoint-policy=best_reward",
             "--reef-checkpoint-max-storage=100GiB",
+            "--reef-checkpoint-interval=3",
             "--loss-type",
             "sft_loss",
         ]
     )
     assert retention == RetentionConfig(policy="best_reward", max_storage_bytes=100 * 1024**3)
+    assert interval == 3
     assert remaining == ["--loss-type", "sft_loss"]
+    assert _checkpoint_options(["--loss-type", "sft_loss"])[1] == 1
+    with pytest.raises(ValueError, match="positive integer"):
+        _checkpoint_options(["--reef-checkpoint-interval=0"])
 
     _write_ready_file(ready_file)
 
@@ -1783,7 +1822,8 @@ def test_training_preparation_keeps_a_resolvable_loss_family_reference(tmp_path,
         assert prepared.loss_family == "external_family_pkg:ALGORITHM"
     finally:
         unregister_loss_family("external_family")
-    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "sft"
+    # The cookbook's sft family is registered by reference, so the workers get the reference.
+    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "recipes.sft.slime:SftAlgorithm"
     assert args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}")
 
 

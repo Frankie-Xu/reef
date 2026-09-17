@@ -129,15 +129,21 @@ def _apply_bridge_resume_fallback(args) -> None:
     args.start_rollout_id = 0
 
 
-def _retention_options(arguments: Sequence[str]) -> tuple[RetentionConfig, list[str]]:
+def _checkpoint_options(arguments: Sequence[str]) -> tuple[RetentionConfig, int, list[str]]:
+    """The bridge's checkpoint flags: retention, and how many jobs apart checkpoints are written."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
     parser.add_argument("--reef-checkpoint-policy", dest="policy")
     parser.add_argument("--reef-checkpoint-max-storage-fraction", dest="max_storage_fraction", type=float)
     parser.add_argument("--reef-checkpoint-min-free-space-fraction", dest="min_free_space_fraction", type=float)
     parser.add_argument("--reef-checkpoint-max-storage", dest="max_storage_bytes", type=_size_bytes)
     parser.add_argument("--reef-checkpoint-min-free-space", dest="min_free_space_bytes", type=_size_bytes)
+    parser.add_argument("--reef-checkpoint-interval", dest="interval", type=int)
     options, remaining = parser.parse_known_args(arguments)
-    return RetentionConfig(**vars(options)), remaining
+    settings = vars(options)
+    interval = settings.pop("interval", 1)
+    if interval < 1:
+        raise ValueError("--reef-checkpoint-interval must be a positive integer")
+    return RetentionConfig(**settings), interval, remaining
 
 
 def _validate_tracking_args(args: Any) -> None:
@@ -205,7 +211,7 @@ def create_training_plan(
         *(load_args_file(args_file) if args_file else []),
         *direct_args,
     ]
-    retention, remaining_args = _retention_options(combined_args)
+    retention, checkpoint_interval, remaining_args = _checkpoint_options(combined_args)
     loss_family_config, slime_args = spec.parse_driver_options(remaining_args)
     args = _parse_slime_args(slime_args)
     _configure_executors(args, config, slime_args)
@@ -220,7 +226,9 @@ def create_training_plan(
 
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
-    prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
+    prepared = prepare_bridge(
+        args, retention=retention, loss_family=loss_family, checkpoint_interval=checkpoint_interval
+    )
     from reef.train.slime_backend.inference import inference_config
 
     training = SlimeTrainingService(

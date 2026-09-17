@@ -168,11 +168,22 @@ def _validate_marker(value: dict[str, Any], path: Path) -> None:
         raise RuntimeError(f"invalid training marker target runtime load ID: {path}")
     if status == "HEAD_COMMITTED" and commit_acknowledged is not True:
         raise RuntimeError(f"training marker state requires a commit acknowledgement: {path}")
+    saved = value.get("checkpoint_saved", True)
+    if not isinstance(saved, bool):
+        raise RuntimeError(f"invalid training marker checkpoint flag: {path}")
     if status != "RUNNING":
         checkpoint = value.get("checkpoint_path")
-        if not isinstance(checkpoint, str) or not checkpoint:
-            raise RuntimeError(f"training marker has no checkpoint: {path}")
-        if Path(checkpoint).is_symlink() or not Path(checkpoint).is_dir():
+        if not saved:
+            # The job skipped its checkpoint on the backend's interval; the
+            # marker says so and names nothing.
+            if checkpoint is not None:
+                raise RuntimeError(f"training marker skipped its checkpoint but names one: {path}")
+        elif (
+            not isinstance(checkpoint, str)
+            or not checkpoint
+            or Path(checkpoint).is_symlink()
+            or not Path(checkpoint).is_dir()
+        ):
             raise RuntimeError(f"training marker has no checkpoint: {path}")
     if status in PUBLISHED_STATES and not _is_non_empty_string(value.get("runtime_load_id")):
         raise RuntimeError(f"invalid training marker: {path}")
@@ -221,7 +232,7 @@ def marker_result(marker: Mapping[str, Any], *, metrics: Mapping[str, Any] | Non
     return TrainingJobResult(
         outcome="complete",
         runtime_load_id=str(marker["runtime_load_id"]),
-        checkpoint_path=str(marker["checkpoint_path"]),
+        checkpoint_path=_marker_checkpoint_path(marker),
         metrics=merged_metrics or None,
         training_job_id=str(marker["job_id"]),
     )
@@ -232,10 +243,16 @@ def marker_checkpoint_result(marker: Mapping[str, Any]) -> TrainingJobResult:
     return TrainingJobResult(
         outcome="checkpoint",
         runtime_load_id=str(marker.get("runtime_load_id", "pending")),
-        checkpoint_path=str(marker["checkpoint_path"]),
+        checkpoint_path=_marker_checkpoint_path(marker),
         metrics=_marker_metrics(marker) or None,
         training_job_id=str(marker["job_id"]),
     )
+
+
+def _marker_checkpoint_path(marker: Mapping[str, Any]) -> str | None:
+    """The checkpoint a marker names, or ``None`` for a job that skipped it."""
+    checkpoint = marker.get("checkpoint_path")
+    return None if checkpoint is None else str(checkpoint)
 
 
 def marker_rollouts(marker: Mapping[str, Any] | None) -> set[int]:

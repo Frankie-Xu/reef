@@ -152,6 +152,7 @@ class Job(PreparedTrainingJob):
     def save_checkpoint(self):
         self.events.append("training.checkpoint")
         self.checkpoint.path.mkdir()
+        return True
 
 
 def build(tmp_path, *, colocate=False, owns_training=True):
