@@ -1,8 +1,12 @@
 // Harness requests: the /reef-harness and /reef-versions commands and the
 // reef_ask_user and reef_file_request tools for reef-pi. The person asks in
-// plain words. With a UI the session model first thinks the request through,
-// asks what is unclear (reef_ask_user) and files it (reef_file_request); with
-// --direct, or headless, the command files it as is. A filed request goes to
+// plain words. With a UI the command clarifies the request in the background:
+// a loop beside the session calls the session's model with the request, the
+// recent conversation and the two tools, asks what is unclear (reef_ask_user)
+// and files it (reef_file_request). The chat keeps one collapsed entry for it,
+// whose expanded view holds the whole clarification, so the session's own
+// context and transcript stay free of it; with --direct, or headless, the
+// command files it as is. A filed request goes to
 // reef with this session's id and the installed release through native manual
 // training, and every filing answers with a link to the request's page. The
 // service proposer writes the change, and a watch here polls the catalog, shows
@@ -20,7 +24,8 @@
 // same install on demand, promoting a release held back from the served head
 // first, so installing is the one decision. Nothing here writes
 // a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
-// node can parse it in CI and pi's TS loader accepts it unchanged. Evaluation
+// node can parse it in CI and pi's TS loader accepts it unchanged; pi-tui, which draws the entry, is imported
+// lazily from pi's own loader, so plain node loads the file without it. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
 // evaluation never sees the commands or the tools.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -57,6 +62,12 @@ const REPORT_MESSAGE_TYPE = "reef-harness";
 const WIDGET_KEY = "reef-harness";
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
 const SPINNER_INTERVAL_MS = 250;
+// A terminal hyperlink (OSC 8): pi's TUI measures around it, and a click opens the URL. A terminal without
+// hyperlink support shows the label alone, so the widget's other ways in stay the ones that always work.
+function link(url, label) {
+  return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+
 // The key that opens the spinner's detail, which the spinner itself names so the person knows it is there.
 // pi's own keybindings hold every ctrl+letter this extension would want, so the key carries shift as well:
 // ctrl+r alone renames a session, and pi warns at startup about the clash.
@@ -78,9 +89,16 @@ const NO_UI_TEXT = "no UI in this session: proceed with your best assumptions an
 // What the model is told when the person backs out: it must not file, and it must not ask again.
 const CANCELLED_TEXT =
   "the user cancelled this harness request: do not file it, do not ask again, and say it was cancelled";
+// The background clarification: the entry type the chat keeps it as, the widget that shows it while it runs, the
+// model calls it may take, and how much of the recent conversation it reads as background.
+const CLARIFY_ENTRY_TYPE = "reef-harness-clarify";
+const CLARIFY_WIDGET_KEY = "reef-harness-clarify";
+const CLARIFY_MAX_TURNS = 8;
+const CONTEXT_MESSAGES = 6;
+const CONTEXT_MESSAGE_CHARS = 1200;
 
 // Tool parameters as plain JSON schema: pi compiles them with typebox, which reads JSON schema as is, so the
-// extension needs no import beyond node.
+// extension needs no static import beyond node.
 const ASK_USER_PARAMETERS = {
   type: "object",
   properties: {
@@ -114,6 +132,25 @@ const FILE_REQUEST_PARAMETERS = {
     },
   },
   required: ["request"],
+};
+// The two tools as the model sees them, registered on the session and offered to the background clarification.
+const ASK_USER_TOOL = {
+  name: "reef_ask_user",
+  label: "Ask the user",
+  description:
+    "Ask the user up to 4 questions before filing a harness change with reef_file_request, each about one " +
+    "decision that changes what gets built, with 2 to 4 concrete options that do not overlap; the user can " +
+    "always type an answer of their own, and can cancel the whole request. Never ask for a setup value (a " +
+    "phone number, a credential, an account, a permission): reef-pi setup collects those after the install.",
+  parameters: ASK_USER_PARAMETERS,
+};
+const FILE_REQUEST_TOOL = {
+  name: "reef_file_request",
+  label: "File a harness request",
+  description:
+    "File a harness change with reef: the user's original request and the answers reef_ask_user collected. " +
+    "Reef's service writes the change and reports here when the step settles.",
+  parameters: FILE_REQUEST_PARAMETERS,
 };
 
 function readJson(path) {
@@ -162,9 +199,29 @@ async function fetchWithTimeout(url, init = {}) {
   }
 }
 
-// What the session model does with a request before it files it: the request rides as data in a fence.
-function clarifyMessage(text) {
+// What the clarification's model does with a request before it files it. It sees no file and runs no command, so
+// the prompt says what reef-pi is: without it a model reads the name as an unrelated web app and asks about pages.
+const CLARIFY_SYSTEM_PROMPT = [
+  "You clarify a person's request for a change to their reef-pi harness and file it with reef.",
+  "reef-pi is pi, a coding agent that runs in a terminal (not a web or browser app), started with the reef-pi " +
+    "command in a project directory. Its harness is the files pi loads at startup: TypeScript extensions that " +
+    "run inside pi's process (commands, tools, handlers for events such as session_start, dialogs and widgets " +
+    "in the terminal UI), skills, AGENTS.md rules, prompt templates and settings.json. A session is one saved " +
+    "pi conversation, a JSONL file per project directory; pi starts a new session on every launch.",
+  "Word every question and default in those terms, in the language the request is written in. You cannot " +
+    "read files or run commands, and you do not " +
+    "write the change: reef's service writes it. Use only the reef_ask_user and reef_file_request tools, and " +
+    "end by filing the request.",
+].join("\n\n");
+
+// The clarification's first message: the recent conversation as background, then the request, each as data in
+// a fence.
+function clarifyMessage(text, conversation) {
+  const background = conversation
+    ? ["The recent conversation in the session, as background for what the request refers to:", "", "```", conversation, "```", ""]
+    : [];
   return [
+    ...background,
     "The user asked for this harness change:",
     "",
     "```",
@@ -228,12 +285,59 @@ function elapsedText(ms) {
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+// The text parts of a message's content, which is a string or a list of parts.
+function textOfContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+// The last few user and assistant messages on the session's branch, their text only and each clipped: what a
+// request such as "the thing we just discussed" refers to. Tool calls and their output stay out.
+function recentConversation(sessionManager) {
+  const lines = [];
+  for (const entry of sessionManager.getBranch()) {
+    if (entry.type !== "message" || !["user", "assistant"].includes(entry.message.role)) continue;
+    const text = textOfContent(entry.message.content).trim();
+    if (text) lines.push(`${entry.message.role}: ${clip(text, CONTEXT_MESSAGE_CHARS)}`);
+  }
+  return lines.slice(-CONTEXT_MESSAGES).join("\n\n");
+}
+
+// What is wrong with a tool call's arguments, or null. pi validates the registered tools' arguments against
+// their schema; the clarification calls the model itself, so it checks the fields the tools read.
+function argumentsProblem(name, args) {
+  if (name === ASK_USER_TOOL.name) {
+    const questions = args && args.questions;
+    const usable =
+      Array.isArray(questions) &&
+      questions.length > 0 &&
+      questions.every((item) => item && typeof item.question === "string" && Array.isArray(item.options));
+    return usable ? null : "questions must be a non-empty list of {question, options}";
+  }
+  if (name === FILE_REQUEST_TOOL.name) {
+    return args && typeof args.request === "string" && args.request.trim() ? null : "request must be a non-empty string";
+  }
+  return `no tool named ${name}; use ${ASK_USER_TOOL.name} or ${FILE_REQUEST_TOOL.name}`;
+}
+
 export default function requests(pi) {
   if (process.env.PI_OFFLINE) return; // hermetic episodes never see the commands or the tools
   const agentDir = process.env.PI_CODING_AGENT_DIR;
   const serviceUrl = process.env.REEF_SERVICE_URL;
   const scenario = process.env.REEF_SCENARIO;
   if (!agentDir || !serviceUrl || !scenario) return;
+  // pi-tui draws the clarification's entry; pi's loader resolves it, and without it the entry draws nothing.
+  let tui = null;
+  import("@earendil-works/pi-tui").then(
+    (module) => {
+      tui = module;
+    },
+    () => {},
+  );
   // The wrapper relocates the agent into a temp copy and exports the true
   // install root; a tree run directly falls back to the release file beside it.
   const destDir = process.env.REEF_HARNESS_DEST || join(agentDir, "..");
@@ -581,7 +685,10 @@ export default function requests(pi) {
     if (!watch) return;
     const { phase, since } = progressLines(watch);
     const frame = SPINNER_FRAMES[watch.frame % SPINNER_FRAMES.length];
-    const head = `${frame} reef: ${phase}${since} - ${WATCH_SHORTCUT} to ${watch.expanded ? "close" : "look in"}`;
+    const page = link(requestPageLink(watch.recordId), "open the page");
+    const head =
+      `${frame} reef: ${phase}${since} - ${page}, ${WATCH_SHORTCUT} or /reef-harness to ` +
+      `${watch.expanded ? "close" : "look in"}`;
     ctx.ui.setWidget(WIDGET_KEY, watch.expanded ? [head, ...watchLines()] : [head]);
   };
 
@@ -735,13 +842,48 @@ export default function requests(pi) {
     if (running) startWatch(running.id, running.text, ctx);
   };
 
-  pi.on("session_shutdown", async (_event, ctx) => stopWatch(ctx));
+  // The background clarification: one at a time, its state read by the widget and the look-in key.
+  let clarification = null;
 
-  // Looking in on the running step: the spinner opens in place, above the input, and closes the same way. pi
-  // offers no click target for a widget, so the key it names is how a person opens it.
+  const stopClarification = (ctx) => {
+    if (!clarification) return;
+    clarification.controller.abort();
+    clearInterval(clarification.spinner);
+    clarification = null;
+    ctx.ui.setWidget(CLARIFY_WIDGET_KEY, undefined);
+  };
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    stopClarification(ctx);
+    stopWatch(ctx);
+  });
+
+  // What the opened clarification shows under its first line: its latest steps, one line each.
+  const clarifyLines = () =>
+    clarification.transcript.slice(-8).map((item) => `  ${item.kind}: ${clip(item.text.replace(/\s+/g, " "), 160)}`);
+
+  // The clarification's widget: one line while it is closed, its latest steps under it once opened.
+  const redrawClarification = (ctx) => {
+    if (!clarification) return;
+    const frame = SPINNER_FRAMES[clarification.frame % SPINNER_FRAMES.length];
+    const since = elapsedText(Date.now() - clarification.startedAt);
+    const head =
+      `${frame} reef: clarifying '${clarification.ask}' ${since} - ${clarification.phase} - ` +
+      `${WATCH_SHORTCUT} or /reef-harness to ${clarification.expanded ? "close" : "look in"}`;
+    ctx.ui.setWidget(CLARIFY_WIDGET_KEY, clarification.expanded ? [head, ...clarifyLines()] : [head]);
+  };
+
+  // Looking in on what runs in the background: the clarification while it runs, else the step's spinner. Both
+  // open in place, above the input, and close the same way. pi offers no click target for a widget, so the key
+  // they name is how a person opens them.
   pi.registerShortcut(WATCH_SHORTCUT, {
-    description: "Look in on the running reef harness step",
+    description: "Look in on the running reef harness request",
     handler: async (ctx) => {
+      if (clarification) {
+        clarification.expanded = !clarification.expanded;
+        redrawClarification(ctx);
+        return;
+      }
       if (!watch) {
         ctx.ui.notify("reef: no harness request is running", "info");
         return;
@@ -752,65 +894,201 @@ export default function requests(pi) {
   });
 
   // The person backed out of the clarification: the model hears it as a result, not an error, so the turn ends
-  // without a filing, and the notice says the request is gone rather than leaving the person guessing.
-  const cancelled = (ctx) => {
-    ctx.ui.notify("reef: request cancelled; nothing was filed", "info");
-    return { content: [{ type: "text", text: CANCELLED_TEXT }], details: {} };
+  // without a filing.
+  const cancelled = () => ({ content: [{ type: "text", text: CANCELLED_TEXT }], details: { cancelled: true } });
+
+  const askUser = async (params, signal, ctx) => {
+    if (!ctx.hasUI) return { content: [{ type: "text", text: NO_UI_TEXT }], details: {} };
+    const answers = [];
+    for (const item of params.questions) {
+      // Esc on a question is the person dropping the request, not an unanswered question: the dialogs stop
+      // here and nothing is filed. A dialog the turn aborted reads the same way.
+      const choice = await ctx.ui.select(item.question, [...item.options, OTHER, CANCEL], { signal });
+      if (choice === undefined || choice === CANCEL) return cancelled();
+      let answer = choice;
+      if (choice === OTHER) {
+        answer = await ctx.ui.input(item.question, "", { signal });
+        // Esc on the free text answer steps back out of the request too, for one meaning of Esc throughout.
+        if (answer === undefined) return cancelled();
+      }
+      answers.push({ question: item.question, answer });
+    }
+    return { content: [{ type: "text", text: JSON.stringify(answers) }], details: {} };
+  };
+
+  const fileClarified = async (params, ctx) => {
+    const text = filedText(params.request, params.clarifications);
+    const recordId = await fileRequest(text, ctx); // a failure throws: the caller reports the message
+    filed(recordId, text, ctx);
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `filed request ${recordId}; reef is running the step, which usually takes one to three minutes, ` +
+            `and will report here when it settles. Watch it here: ${requestPageLink(recordId)}`,
+        },
+      ],
+      details: { recordId },
+    };
   };
 
   pi.registerTool({
-    name: "reef_ask_user",
-    label: "Ask the user",
-    description:
-      "Ask the user up to 4 questions before filing a harness change with reef_file_request, each about one " +
-      "decision that changes what gets built, with 2 to 4 concrete options that do not overlap; the user can " +
-      "always type an answer of their own, and can cancel the whole request. Never ask for a setup value (a " +
-      "phone number, a credential, an account, a permission): reef-pi setup collects those after the install.",
-    parameters: ASK_USER_PARAMETERS,
+    ...ASK_USER_TOOL,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) return { content: [{ type: "text", text: NO_UI_TEXT }], details: {} };
-      const answers = [];
-      for (const item of params.questions) {
-        // Esc on a question is the person dropping the request, not an unanswered question: the dialogs stop
-        // here and nothing is filed. A dialog the turn aborted reads the same way.
-        const choice = await ctx.ui.select(item.question, [...item.options, OTHER, CANCEL], { signal });
-        if (choice === undefined || choice === CANCEL) return cancelled(ctx);
-        let answer = choice;
-        if (choice === OTHER) {
-          answer = await ctx.ui.input(item.question, "", { signal });
-          // Esc on the free text answer steps back out of the request too, for one meaning of Esc throughout.
-          if (answer === undefined) return cancelled(ctx);
-        }
-        answers.push({ question: item.question, answer });
-      }
-      return { content: [{ type: "text", text: JSON.stringify(answers) }], details: {} };
+      const result = await askUser(params, signal, ctx);
+      // The notice says the request is gone rather than leaving the person guessing; the background
+      // clarification says it in its entry instead.
+      if (result.details.cancelled) ctx.ui.notify("reef: request cancelled; nothing was filed", "info");
+      return result;
     },
   });
 
   pi.registerTool({
-    name: "reef_file_request",
-    label: "File a harness request",
-    description:
-      "File a harness change with reef: the user's original request and the answers reef_ask_user collected. " +
-      "Reef's service writes the change and reports here when the step settles.",
-    parameters: FILE_REQUEST_PARAMETERS,
+    ...FILE_REQUEST_TOOL,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const text = filedText(params.request, params.clarifications);
-      const recordId = await fileRequest(text, ctx); // a failure throws: the model reads the message
-      filed(recordId, text, ctx);
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `filed request ${recordId}; reef is running the step, which usually takes one to three minutes, ` +
-              `and will report here when it settles. Watch it here: ${requestPageLink(recordId)}`,
-          },
-        ],
-        details: {},
-      };
+      return fileClarified(params, ctx);
     },
   });
+
+  // The chat's record of a clarification: one line, and the whole clarification once the person expands it with
+  // pi's own expand key. It is a custom entry, so the session's model never reads it.
+  pi.registerEntryRenderer(CLARIFY_ENTRY_TYPE, (entry, { expanded }, theme) => {
+    if (!tui) return undefined;
+    const data = entry.data;
+    const colour = { filed: "success", cancelled: "muted", unfiled: "warning", failed: "error" }[data.outcome];
+    const container = new tui.Container();
+    const hint = expanded ? "" : theme.fg("dim", " (ctrl+o to expand the clarification)");
+    container.addChild(new tui.Text(theme.fg(colour, `reef-harness: ${data.summary}`) + hint, 1, 0));
+    if (!expanded) return container;
+    container.addChild(new tui.Text(theme.fg("muted", `asked: ${data.request}`), 1, 0));
+    for (const item of data.transcript) {
+      container.addChild(new tui.Text(`${theme.fg("accent", `[${item.kind}]`)} ${item.text}`, 1, 0));
+    }
+    return container;
+  });
+
+  // The clarification itself: the session's model called directly with the two tools, so its turns stay out of
+  // the session. A filing, a cancel or a reply without a tool call ends it; the chat keeps the entry either way.
+  const clarify = async (text, ctx) => {
+    const state = {
+      ask: clip(text, 60),
+      startedAt: Date.now(),
+      phase: "thinking it through",
+      frame: 0,
+      expanded: false,
+      transcript: [],
+      controller: new AbortController(),
+      spinner: null,
+    };
+    clarification = state;
+    state.spinner = setInterval(() => {
+      state.frame++;
+      redrawClarification(ctx);
+    }, SPINNER_INTERVAL_MS);
+    if (typeof state.spinner.unref === "function") state.spinner.unref();
+    redrawClarification(ctx);
+    const note = (kind, noteText) => state.transcript.push({ kind, text: noteText });
+    const finish = (outcome, summary) => {
+      if (clarification !== state) return; // the session shut down meanwhile
+      stopClarification(ctx);
+      const seconds = Math.round((Date.now() - state.startedAt) / 1000);
+      pi.appendEntry(CLARIFY_ENTRY_TYPE, {
+        outcome,
+        summary: `${summary} (${seconds}s)`,
+        request: text,
+        transcript: state.transcript,
+      });
+    };
+    const messages = [
+      { role: "user", content: clarifyMessage(text, recentConversation(ctx.sessionManager)), timestamp: Date.now() },
+    ];
+    const tools = [ASK_USER_TOOL, FILE_REQUEST_TOOL].map(({ name, description, parameters }) => ({
+      name,
+      description,
+      parameters,
+    }));
+    for (let turn = 0; turn < CLARIFY_MAX_TURNS; turn++) {
+      state.phase = "thinking it through";
+      let reply;
+      try {
+        reply = await ctx.modelRegistry.complete(
+          ctx.model,
+          { systemPrompt: CLARIFY_SYSTEM_PROMPT, messages, tools },
+          { signal: state.controller.signal },
+        );
+      } catch (error) {
+        reply = { content: [], stopReason: "error", errorMessage: message(error) };
+      }
+      if (clarification !== state) return;
+      if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+        const why = reply.errorMessage || reply.stopReason;
+        note("error", why);
+        finish("failed", `the clarification failed: ${why}`);
+        ctx.ui.notify(`reef: the clarification failed (${why}); file it as is with /reef-harness --direct`, "error");
+        return;
+      }
+      messages.push(reply);
+      const calls = reply.content.filter((part) => part.type === "toolCall");
+      for (const part of reply.content) {
+        if (part.type === "thinking" && part.thinking.trim()) note("thinking", part.thinking.trim());
+        if (part.type === "text" && part.text.trim()) note("reply", part.text.trim());
+        if (part.type === "toolCall") note(part.name, JSON.stringify(part.arguments));
+      }
+      if (!calls.length) {
+        const said = textOfContent(reply.content).trim();
+        finish("unfiled", "the clarification ended without filing");
+        ctx.ui.notify(
+          `reef: the clarification ended without filing${said ? `: ${clip(said, 300)}` : ""}; ` +
+            "ask again, or file it as is with /reef-harness --direct",
+          "warning",
+        );
+        return;
+      }
+      for (const call of calls) {
+        const problem = argumentsProblem(call.name, call.arguments);
+        let result;
+        let failure = problem;
+        if (!problem) {
+          try {
+            if (call.name === ASK_USER_TOOL.name) {
+              state.phase = "waiting for your answers";
+              redrawClarification(ctx);
+              result = await askUser(call.arguments, state.controller.signal, ctx);
+            } else {
+              state.phase = "filing";
+              redrawClarification(ctx);
+              result = await fileClarified(call.arguments, ctx);
+            }
+          } catch (error) {
+            failure = message(error);
+          }
+        }
+        if (clarification !== state) return;
+        const resultText = failure ? `error: ${failure}` : textOfContent(result.content);
+        note("result", resultText);
+        if (result && result.details.cancelled) {
+          finish("cancelled", "request cancelled; nothing was filed");
+          return;
+        }
+        if (result && result.details.recordId) {
+          const recordId = result.details.recordId;
+          finish("filed", `filed request ${recordId.slice(0, 8)}; watch it at ${requestPageLink(recordId)}`);
+          return;
+        }
+        messages.push({
+          role: "toolResult",
+          toolCallId: call.id,
+          toolName: call.name,
+          content: [{ type: "text", text: resultText }],
+          isError: Boolean(failure),
+          timestamp: Date.now(),
+        });
+      }
+    }
+    finish("failed", `the clarification took more than ${CLARIFY_MAX_TURNS} model calls`);
+    ctx.ui.notify("reef: the clarification did not settle; file it as is with /reef-harness --direct", "error");
+  };
 
   pi.registerCommand("reef-harness", {
     description: "Ask reef to grow this harness: /reef-harness [--direct] <what it should do>",
@@ -819,6 +1097,16 @@ export default function requests(pi) {
       const direct = words === "--direct" || words.startsWith("--direct ");
       const text = (direct ? words.slice("--direct".length) : words).trim();
       if (!text) {
+        // The way in that needs neither a key the terminal may swallow nor a click it may not offer.
+        if (clarification) {
+          ctx.ui.notify([`reef: clarifying '${clarification.ask}' - ${clarification.phase}`, ...clarifyLines()].join("\n"), "info");
+          return;
+        }
+        if (watch) {
+          const { phase, since } = progressLines(watch);
+          ctx.ui.notify([`reef: ${phase}${since}`, ...watchLines()].join("\n"), "info");
+          return;
+        }
         ctx.ui.notify("Usage: /reef-harness <what the harness should do>", "warning");
         return;
       }
@@ -827,9 +1115,16 @@ export default function requests(pi) {
         return;
       }
       if (!direct && ctx.hasUI) {
-        // The session model asks what is unclear, then files through the tool; a busy agent takes it as a follow up.
-        pi.sendUserMessage(clarifyMessage(text), ctx.isIdle() ? undefined : { deliverAs: "followUp" });
-        ctx.ui.notify("reef: clarifying, then filing", "info");
+        if (clarification) {
+          ctx.ui.notify(`reef: still clarifying '${clarification.ask}'; ask again once it is filed`, "warning");
+          return;
+        }
+        if (!ctx.model) {
+          ctx.ui.notify("reef: no model to clarify with; pick one with /model, or use /reef-harness --direct", "error");
+          return;
+        }
+        // Not awaited: the clarification runs beside the session, so the person's input stays theirs.
+        clarify(text, ctx);
         return;
       }
       let recordId;

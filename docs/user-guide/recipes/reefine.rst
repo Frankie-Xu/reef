@@ -28,7 +28,9 @@ How it works
 ------------
 
 1. Ask. In a ``reef-pi`` session, ``/reef-harness <what it should do>`` has
-   the model think the change through before anything is filed: when it
+   the model think the change through in the background before anything is
+   filed, while the chat shows one line (``ctrl+o`` expands the whole
+   clarification) and the session keeps its input and context: when it
    triggers, what state the harness must know and how it learns it, what
    you must provide. When an open point would change what gets built, it
    asks you up to three questions, each with concrete options, then files
@@ -44,7 +46,13 @@ How it works
    request in one sentence, what triggers the behavior, what state the
    harness must know and where it comes from, what only you can provide as
    ``requires`` items with a ``prompt`` each), then the entries, and a
-   second call reviews them against the request. The evaluation runs the
+   second call reviews them against the request. The review also says
+   whether the entries deliver the requested behavior or only put a
+   substitute in its place, such as a rule describing it. When the review
+   is partial or finds a substitute, the model writes the answer again with
+   the review's findings, up to three answers in all. The step keeps the
+   delivering answer with the fewest uncovered points; when no answer
+   delivers, it is skipped with the reason. The evaluation runs the
    candidate on the health task: it publishes when the tree still works,
    and the step's page carries the design and the review either way.
 3. Result. The session that asked reports it in the chat when the step

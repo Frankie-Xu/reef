@@ -52,6 +52,7 @@ from reef.harness.tree.mutations import (
 from reef.harness.tree.nodes import (
     ALWAYS_REVIEWED_KINDS,
     NODE_KINDS,
+    RESERVED_ENTRY_IDS,
     directive_shaped,
     redact_secret_shaped,
     secret_shaped,
@@ -816,6 +817,53 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0, "entries": [dict(entry) for entry in self._seed]}
+
+    def shipped_content_update(self, state: Mapping[str, Any], published_tree: Path) -> TrainStepResult | None:
+        """Republish the reef-owned entries this Reef seeds when the served tree renders them differently.
+
+        Reef-owned entries (``RESERVED_ENTRY_IDS``) are copied from Reef's own assets
+        into a scenario's seed, and no proposal may change them, so a scenario keeps
+        the copy it was created with. The seed here is read from the running Reef's
+        assets; an entry whose rendered files differ from ``published_tree``, or that
+        the served tree lacks, is replaced in (or appended to) the state's entries,
+        and the whole tree is rendered again from them, the way a step publishes it.
+        """
+        shipped = {str(entry["id"]): dict(entry) for entry in self._seed if entry["id"] in RESERVED_ENTRY_IDS}
+        if not shipped:
+            return None
+        # A kind renders shared config files for any node; an entry owns the files beyond those.
+        shared = render_composition((), self._descriptor)
+        stale = []
+        for entry_id, entry in shipped.items():
+            owned = render_composition(((str(entry["name"]), entry.get("config")),), self._descriptor)
+            for relative, text in owned.items():
+                if relative in shared:
+                    continue
+                path = published_tree / relative
+                if not path.is_file() or path.read_text(encoding="utf-8") != text:
+                    stale.append(entry_id)
+                    break
+        if not stale:
+            return None
+        entries = [dict(entry) for entry in state["entries"]]
+        present = {str(entry.get("id")) for entry in entries}
+        entries = [dict(shipped[str(entry.get("id"))]) if entry.get("id") in stale else entry for entry in entries]
+        entries.extend(dict(shipped[entry_id]) for entry_id in stale if entry_id not in present)
+        published = {
+            **render_composition(_nodes_from(entries), self._descriptor),
+            **tree_files(self._descriptor, entries),
+        }
+        artifact = Artifact.local(_write_rendered_files(published))
+        # commit_applied discards the rendered directory once the commit is durable, as it does a step's.
+        step = int(state["steps"])
+        replaced = self._rendered_publications.get(step)
+        if replaced is not None:
+            replaced.discard()
+        self._rendered_publications[step] = artifact
+        # The loader takes the entries from the committed state when the next step prepares.
+        return TrainStepResult(
+            {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
+        )
 
     @property
     def step_progress(self) -> StepProgress | None:

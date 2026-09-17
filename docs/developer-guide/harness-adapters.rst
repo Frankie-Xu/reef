@@ -567,12 +567,23 @@ API reference the service proposer reads before it writes an extension).
 The extension registers nothing under ``PI_OFFLINE``; otherwise it registers
 two commands, two tools and two event handlers:
 
-- ``/reef-harness <request>``: with a UI, sends the session model one user
-  message that asks it to think the request through (when it triggers, what
-  state the harness must know and how it learns it, what the person must
-  set up, what is ambiguous), to ask about an open point with
-  ``reef_ask_user`` and to file with ``reef_file_request``, and notifies
-  ``reef: clarifying, then filing``. With ``--direct`` as the first word, or
+- ``/reef-harness <request>``: with a UI, clarifies the request in the
+  background instead of in the session. The command returns at once and a
+  loop calls the session's model through ``ctx.modelRegistry.complete`` with
+  the last six user and assistant messages of the session as background, the
+  request, and the same two tools. The model thinks the request through
+  (when it triggers, what state the harness must know and how it learns it,
+  what the person must set up, what is ambiguous), asks about an open point
+  with ``reef_ask_user`` and files with ``reef_file_request``. The filing,
+  a cancel, a reply without a tool call, a failed model call or eight model
+  calls end it. While it runs, a widget above the input shows the phase, and
+  ``ctrl+shift+r``, or ``/reef-harness`` with no argument, opens its latest
+  steps. When it ends, the chat keeps one
+  custom entry (``pi.appendEntry``, type ``reef-harness-clarify``) whose
+  line says what happened and whose expanded view (``ctrl+o``) holds the
+  whole clarification. The entry stays out of the session model's context.
+  Only one clarification runs at a time, and a session without a model is
+  told to pick one or use ``--direct``. With ``--direct`` as the first word, or
   without a UI, it files the request as is with ``POST /reef/train`` (the
   scenario runs in ``manual`` or ``hybrid``), leaving captured receipts
   available for feedback. Either way the ``.reef-harness-release`` file
@@ -584,7 +595,7 @@ two commands, two tools and two event handlers:
   way out of the whole request, not a skipped question: no choice on a
   question, the cancel option, or no text in the free text answer all stop
   the dialogs there, notify ``reef: request cancelled; nothing was filed``
-  and return ``the user cancelled this harness request: do not file it, do
+  (the background clarification records it in its entry instead) and return ``the user cancelled this harness request: do not file it, do
   not ask again, and say it was cancelled``, so the model stops instead of
   filing a request the person backed out of. The dialogs carry the turn's
   abort signal, so an aborted turn dismisses them. Otherwise it returns the
@@ -604,15 +615,20 @@ two commands, two tools and two event handlers:
   the input box, an animated frame, the phase in the person's words
   (``queued, waiting for a step``, ``writing the change``, ``checking the
   harness``, ``running the step``, ``saving the result``), the time in the
-  step and ``ctrl+shift+r to look in``. The frames turn every 250 ms, so the
-  step reads as alive between polls. ``ctrl+shift+r``
+  step, the request's page as a terminal hyperlink (OSC 8, which pi's TUI
+  measures around, so a click opens the page where the terminal offers one)
+  and ``ctrl+shift+r or /reef-harness to look in``. The frames turn every
+  250 ms, so the step reads as alive between polls. ``ctrl+shift+r``
   (``pi.registerShortcut``) expands the same widget in place with the
   request asked, its id, the evaluation's episode count and step record when
   the service reports them, the request page link for the full detail, and a
   line saying the step runs in the background; ``ctrl+shift+r`` again closes
-  it. pi offers no click target for a widget, so the key the spinner names is
-  how a person opens it. The key carries shift because pi binds ``ctrl+r``
-  itself, to renaming a session. Expanding costs no request: it redraws what
+  it. pi offers extensions no click event for a widget, so the line names
+  three ways in: the hyperlink, the key and the command. The key carries
+  shift because pi binds ``ctrl+r`` itself, to renaming a session, and a
+  terminal that reports no modified keys drops the shift; ``/reef-harness``
+  with no argument prints the same detail and needs neither the key nor a
+  click. Expanding costs no request: it redraws what
   the last poll read. The widget is cleared when the step settles, and a
   headless session draws none.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
@@ -715,7 +731,7 @@ to the recipe's ``propose`` and the commit records it under
 ``training_request``, the merged ``requires`` list included. The harness
 requests RFC (#310) kept the agent side free of tools so that it only asks;
 the two tools above change that rule on purpose (issue #435): a request is
-clarified in the session where the person asked it, while they are still
+clarified from the session where the person asked it, while they are still
 there to answer, and the tools still write no mutation and start no step of
 their own beyond the filing. Asking needs no extension:
 ``reef-<adapter> harness "<request>"`` is a wrapper subcommand on every
@@ -723,7 +739,18 @@ adapter. The ids ``reef-version-check``,
 ``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in
 `reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__: the seed
 and a recovered state carry them, and admission refuses a mutation that
-creates, updates or removes one, the way native tool names are reserved. An
+creates, updates or removes one, the way native tool names are reserved.
+Because no step changes them, a scenario would keep the copy it was created
+with; instead, whenever the service opens a scenario (at startup or on
+creation), ``CordisBackend.shipped_content_update`` renders each reserved
+entry of the running Reef's seed and compares its files with the served
+release. When one differs or is missing, the service replaces it in the
+recorded entries (appending a missing one), renders the whole tree again and
+commits it as a training release whose metrics are
+``{"shipped_content_update": {"entries": [<ids>]}}``. That release consumes
+no records, runs no evaluation and is not held for review, since its
+content is Reef's own; the update notice then offers it to installed trees
+like any other head. An
 evolved extension runs in pi's process with the person's privileges, and
 admission screens its text for credential shaped literals only, so the
 tutorial's pi deployment
