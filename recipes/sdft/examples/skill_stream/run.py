@@ -112,6 +112,8 @@ def start_stack(arm: str, model_path: str, steps: int, stage_dir: Path) -> None:
         "SERVE_CONFIG": ARM_CONFIGS[arm],
         "SDFT_MODEL_PATH": model_path,
         "SDFT_LR_DECAY_ITERS": str(max(steps, LR_WARMUP_STEPS + 1)),
+        # The stage checkpoints once, at its last step; every step's weights still reach the engines.
+        "SDFT_CHECKPOINT_INTERVAL": str(steps),
         "RUN_DIR": str(stage_dir),
         "EXPERIMENT_DIR": str(RUN_DIR),
     }

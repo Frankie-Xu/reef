@@ -70,7 +70,11 @@ steps (252 for Tool Use, 167 for Science Q&A: two shuffled epochs cut into
 steps of 32, the tail dropped), then runs the stage as a Harbor task. A
 stack is four GPUs, the actor (tensor parallel 4) colocated with four
 rollout engines, so the SDFT and SFT arms run side by side on an eight-GPU
-host, each on its own GPUs and host port. In the
+host, each on its own GPUs and host port. Every step's weights reach the
+engines live; the stack writes a checkpoint only at the stage's last step
+(`--reef-checkpoint-interval`), the export the next stage starts from, so a
+step costs the optimizer step, the teacher pass and the actor's offload and
+reload around sampling rather than a 30 GB save. In the
 task container, `stage.py` sends each step's 32 prompts through Reef at
 temperature 1.0, reports each demonstration as the report's `context`
 against the sample's receipt, and waits for the step's training release

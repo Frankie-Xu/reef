@@ -72,6 +72,9 @@ training:
       policy: latest
     global_batch_size: 32
   options:
+    # One checkpoint per stage, at its last step: the stage's export seeds
+    # the next stage, and the weights of every step reach the engines live.
+    reef-checkpoint-interval: "${SDFT_CHECKPOINT_INTERVAL}"
     reef-checkpoint-max-storage: "${training.config.checkpoint_retention.max_storage}"
     reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
     reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
@@ -128,7 +131,7 @@ training:
     loss-type: "custom_loss"
     use-rollout-logprobs: true
     disable-compute-advantages-and-returns: true
-    sdft-kl-direction: "forward"
+    sdft-kl-direction: "reverse"
     sdft-importance-sampling-cap: "2.0"
     sdft-skip-response-tokens: "3"
     # The reference's ref_model_mixup_alpha for these runs: the teacher is a

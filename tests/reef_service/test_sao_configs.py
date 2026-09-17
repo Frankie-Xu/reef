@@ -169,6 +169,7 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
     "REEF_TOKEN": "config-test-token",
+    "SDFT_CHECKPOINT_INTERVAL": "252",
     "SDFT_LR_DECAY_ITERS": "252",
     "SDFT_MODEL_PATH": "/root/models/Qwen2.5-7B-Instruct",
     "REEF_UPSTREAM_URL": "http://127.0.0.1:8000/v1",
@@ -284,7 +285,7 @@ def _parse_config(config_path: Path):
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
     from reef.service.training_driver import _driver_options, _resolve_training_recipe
-    from reef.train.slime_backend.driver import _retention_options
+    from reef.train.slime_backend.driver import _checkpoint_options
     from reef.train.slime_backend.loss_families import resolve_loss_family
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
@@ -295,7 +296,7 @@ def _parse_config(config_path: Path):
     assert resolved_recipe == recipe
 
     _, tokens = _driver_options(tokens)
-    _, tokens = _retention_options(tokens)
+    _, _, tokens = _checkpoint_options(tokens)
     options, tokens = spec.parse_driver_options(tokens)
     tokens = _strip_sglang_flags(tokens)
 
