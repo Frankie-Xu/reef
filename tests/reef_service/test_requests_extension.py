@@ -216,6 +216,10 @@ def _notices(out: dict[str, Any]) -> list[dict[str, Any]]:
     return [event for event in out["events"] if event["kind"] == "notify"]
 
 
+def _dialogs(out: dict[str, Any]) -> list[dict[str, Any]]:
+    return [event for event in out["events"] if event["kind"] == "confirm"]
+
+
 def _ask(
     tmp_path: Path,
     agent_dir: Path,
@@ -446,6 +450,10 @@ CATALOG = {"GET /reef/harness/releases": {"status": 200, "body": RELEASES}}
 PROMOTED = {"POST /reef/scenarios/code-repair/promote": {"status": 200, "body": {"release_id": "rel-4444-promote"}}}
 
 
+NO_WRAPPER = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup"
+INSTALL_LATER = "reef: install it later with reef-pi update, then reef-pi setup"
+
+
 def _versions(tmp_path: Path, agent_dir: Path, answers: dict[str, Any], args: str = "", **env: str) -> dict[str, Any]:
     return _run(tmp_path, agent_dir, TEST_STEP="versions", TEST_ARGS=args, TEST_ANSWERS=json.dumps(answers), **env)
 
@@ -468,87 +476,55 @@ def test_versions_lists_the_chain_oldest_first_one_line_per_row(tmp_path: Path) 
     ]
 
 
-def test_versions_with_a_step_prints_the_tokens_its_row_carries(tmp_path: Path) -> None:
-    out = _versions(tmp_path, _install_root(tmp_path), CATALOG, args="1", REEF_TOKEN="tok")
-    (notice,) = _notices(out)
-    lines = notice["message"].splitlines()
-    assert lines[0] == "Harness step 1: rel-1111-selected (selected, current)"
-    assert lines[-1] == "tokens: proposer 1200 in / 80 out, evaluation 950 in / 75 out"
-    # A row without usage prints no token line.
-    (tmp_path / "other").mkdir()
-    out = _versions(tmp_path / "other", _install_root(tmp_path / "other"), CATALOG, args="4", REEF_TOKEN="tok")
-    (notice,) = _notices(out)
-    assert not any(line.startswith("tokens:") for line in notice["message"].splitlines())
-
-
-def test_versions_with_a_step_prints_the_page_url_and_for_a_pending_release_the_promote_and_the_trial_install(
-    tmp_path: Path,
-) -> None:
+def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> None:
+    """The page holds the design, the review and the numbers, so the command offers it rather than reprinting it.
+    The confirmation names what the step is; taking it opens the page in the browser, declining prints the URL."""
     agent_dir = _install_root(tmp_path)
-    out = _versions(tmp_path, agent_dir, CATALOG, args="3", REEF_TOKEN="tok")
-    (notice,) = _notices(out)
-    lines = notice["message"].splitlines()
-    assert lines[0] == "Harness step 3: rel-3333-pending (pending)"
-    # The page link a browser opens carries the scenario and the token as query parameters.
-    assert lines[1] == "page: http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok"
-    auth = "-H 'x-reef-scenario: code-repair' -H \"Authorization: Bearer $REEF_TOKEN\" "
-    assert (
-        lines[2] == f"read it: curl -fsS {auth}'http://reef:8900/reef/harness/releases/3/page' > harness-step-3.html"
+    opened = _versions(tmp_path, agent_dir, CATALOG, args="3", TEST_CONFIRM="1", REEF_TOKEN="tok")
+    assert opened["error"] is None
+    assert [event["kind"] for event in opened["events"]] == ["fetch", "confirm", "exec"]
+    prompt = opened["events"][1]
+    assert prompt["title"] == "Open harness step 3?"
+    assert prompt["message"] == "rel-3333-pending (pending)"
+    # The page a browser opens carries the scenario and the token as query parameters, and is one argument.
+    page = "http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok"
+    assert opened["events"][2]["args"] == [page]
+    # Declining opens nothing and leaves the URL to open by hand.
+    declined = _versions(tmp_path, agent_dir, CATALOG, args="3", REEF_TOKEN="tok")
+    assert [event["kind"] for event in declined["events"]] == ["fetch", "confirm", "notify"]
+    assert declined["events"][2] == {"kind": "notify", "message": f"page: {page}", "type": "info"}
+    # A launcher that is not there leaves the URL too, never an error.
+    page1 = "http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
+    missing = _versions(
+        tmp_path, agent_dir, CATALOG, args="1", TEST_CONFIRM="1", TEST_EXEC=json.dumps({page1: {"code": 1}})
     )
-    assert lines[3] == (
-        f"promote: curl -fsS {auth}-X POST -H 'content-type: application/json' "
-        "-d '{\"release_id\":\"rel-3333-pending\"}' 'http://reef:8900/reef/scenarios/code-repair/promote'"
+    assert missing["error"] is None
+    assert _notices(missing)[0]["message"] == (
+        "reef: open it yourself: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
     )
-    assert lines[4] == "or from here: /reef-versions 3 promote"
-    assert lines[5] == (
-        f"trial install (replaces the tree at {tmp_path}): "
-        f"curl -fsS {auth}'http://reef:8900/reef/harness/install?adapter=pi&release_id=rel-3333-pending'"
-        f" | bash -s -- '{tmp_path}'"
-    )
-    # The way back rides beside the trial: the served head's own install, pinned by release id.
-    assert lines[6] == (
-        f"back to the head: curl -fsS {auth}'http://reef:8900/reef/harness/install?adapter=pi&release_id=rel-1111-selected'"
-        f" | bash -s -- '{tmp_path}'"
-    )
-    assert len(lines) == 7
-    # The printed commands name the token as the variable, not the value; only the page link carries it.
-    assert "tok" not in "\n".join(lines[2:]).replace("$REEF_TOKEN", "")
-
-    published = _versions(tmp_path, agent_dir, CATALOG, args="1")
-    (notice,) = _notices(published)
-    lines = notice["message"].splitlines()
-    assert lines[0] == "Harness step 1: rel-1111-selected (selected, current)"
-    assert lines[1] == "page: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
-    assert (
-        lines[2]
-        == "read it: curl -fsS -H 'x-reef-scenario: code-repair' 'http://reef:8900/reef/harness/releases/1/page' > harness-step-1.html"
-    )
-    assert lines[3] == "tokens: proposer 1200 in / 80 out, evaluation 950 in / 75 out"
-    assert len(lines) == 4 and "promote" not in notice["message"]
+    # Headless has no dialog to open: the summary and the URL are printed instead.
+    headless = _versions(tmp_path, agent_dir, CATALOG, args="1", TEST_HEADLESS="1")
+    assert [event["kind"] for event in headless["events"]] == ["fetch", "notify"]
+    assert headless["events"][1]["message"].splitlines() == [
+        "Harness step 1: rel-1111-selected (selected, current)",
+        "page: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair",
+    ]
 
 
-def test_versions_promotes_a_pending_release_after_the_confirm_and_not_without(tmp_path: Path) -> None:
+def test_versions_install_serves_a_pending_release_before_installing_it(tmp_path: Path) -> None:
+    """A release held back from the served head installs like any other: the confirmation is the person saying it
+    may run, so the install moves the head to it first and then installs what the promote minted."""
     agent_dir = _install_root(tmp_path)
     confirmed = _versions(
-        tmp_path,
-        agent_dir,
-        {**CATALOG, **PROMOTED},
-        args="3 promote",
-        TEST_CONFIRM="1",
-        REEF_TOKEN="tok",
+        tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="3 install", TEST_CONFIRM="1", REEF_TOKEN="tok"
     )
     assert confirmed["error"] is None
-    assert [event["kind"] for event in confirmed["events"]] == [
-        "fetch",
-        "confirm",
-        "fetch",
-        "notify",
-        "confirm",
-        "notify",
-    ]
+    assert [event["kind"] for event in confirmed["events"]] == ["fetch", "confirm", "fetch", "notify"]
     prompt = confirmed["events"][1]
-    assert prompt["title"] == "Promote harness step 3?"
-    assert "rel-3333-pending" in prompt["message"] and "/reef/harness/releases/3/page" in prompt["message"]
+    assert prompt["title"] == "Install release rel-3333 now?"
+    # The confirmation says what makes this release different and where to read it before answering.
+    assert "runs in pi with your privileges" in prompt["message"]
+    assert "http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok" in prompt["message"]
     promote = confirmed["events"][2]
     assert promote["method"] == "POST" and promote["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
     assert promote["headers"] == {
@@ -557,30 +533,35 @@ def test_versions_promotes_a_pending_release_after_the_confirm_and_not_without(t
         "content-type": "application/json",
     }
     assert promote["body"] == {"release_id": "rel-3333-pending"}
-    promoted = (
-        "Promoted step 3: the head is now rel-4444-promote; the update notice offers it at the next session start."
-    )
-    assert confirmed["events"][3] == {"kind": "notify", "message": promoted, "type": "info"}
-    # The promote made a new head, so its install is offered next; without a wrapper on disk the commands are named.
-    assert confirmed["events"][4] == {"kind": "confirm", "title": "Install release rel-4444 now?", "message": promoted}
-    assert confirmed["events"][5] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
+    # Without a wrapper on disk the install names the commands; the head it installs is the promote's own.
+    assert confirmed["events"][3] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
 
-    declined = _versions(tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="3 promote")
+    # Declining installs nothing and promotes nothing: the head does not move behind a refusal.
+    declined = _versions(tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="3 install")
     assert [event["kind"] for event in declined["events"]] == ["fetch", "confirm", "notify"]
-    assert declined["events"][2] == {"kind": "notify", "message": "step 3 not promoted", "type": "info"}
+    assert declined["events"][2] == {"kind": "notify", "message": INSTALL_LATER, "type": "info"}
 
-    not_pending = _versions(tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="1 promote", TEST_CONFIRM="1")
-    assert [event["kind"] for event in not_pending["events"]] == ["fetch", "notify"]
-    assert not_pending["events"][1] == {
-        "kind": "notify",
-        "message": "step 1 is not pending (selected); nothing to promote",
-        "type": "warning",
-    }
+    # A refused promote installs nothing and says why.
+    refused = _versions(
+        tmp_path,
+        agent_dir,
+        {**CATALOG, "POST /reef/scenarios/code-repair/promote": {"status": 409, "body": {"error": "no"}}},
+        args="3 install",
+        TEST_CONFIRM="1",
+    )
+    assert [event["kind"] for event in refused["events"]] == ["fetch", "confirm", "fetch", "notify"]
+    assert refused["events"][3]["type"] == "error"
+    assert refused["events"][3]["message"].startswith("reef refused the promote (HTTP 409)")
+
+    # A release already at the head needs no promote: the install runs straight through.
+    published = _versions(tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="1 install", TEST_CONFIRM="1")
+    assert [event["kind"] for event in published["events"]] == ["fetch", "confirm", "notify"]
+    assert published["events"][2] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
 
 
 def test_versions_reports_an_unreachable_reef_as_one_notice(tmp_path: Path) -> None:
     agent_dir = _install_root(tmp_path)
-    for args in ("", "3", "3 promote"):
+    for args in ("", "3", "3 install"):
         out = _versions(tmp_path, agent_dir, {}, args=args)
         assert out["error"] is None
         assert len(_fetches(out)) == 1
@@ -596,11 +577,11 @@ def test_versions_refuses_a_missing_step_and_bad_arguments_with_a_notice(tmp_pat
     assert _notices(missing) == [
         {"kind": "notify", "message": "no step 9: the catalog holds steps 0 to 4", "type": "warning"}
     ]
-    for args in ("three", "-1", "3 publish", "3 promote now", "install", "3 install now"):
+    for args in ("three", "-1", "3 publish", "3 promote", "install", "3 install now"):
         out = _versions(tmp_path, agent_dir, CATALOG, args=args)
         assert _fetches(out) == []
         assert _notices(out) == [
-            {"kind": "notify", "message": "Usage: /reef-versions [step] [promote|install]", "type": "warning"}
+            {"kind": "notify", "message": "Usage: /reef-versions [step] [install]", "type": "warning"}
         ]
     refused = _versions(
         tmp_path,
@@ -679,11 +660,9 @@ def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_pa
         "installed (this tree): the version this tree runs; current: the newest version",
     ]
     head = _versions(tmp_path, agent_dir, catalog, args="1")
-    assert _notices(head)[0]["message"].splitlines()[0] == "Harness step 1: rel-1111-selected (selected, current)"
+    assert _dialogs(head)[0]["message"] == "rel-1111-selected (selected, current)"
     pending = _versions(tmp_path, agent_dir, catalog, args="4")
-    lines = _notices(pending)[0]["message"].splitlines()
-    assert lines[0] == "Harness step 4: rel-4444-pending (pending)"
-    assert lines[6].startswith("back to the head: ") and "release_id=rel-1111-selected'" in lines[6]
+    assert _dialogs(pending)[0]["message"] == "rel-4444-pending (pending)"
 
 
 def test_versions_marks_the_installed_release_apart_from_the_head(tmp_path: Path) -> None:
@@ -702,10 +681,7 @@ def test_versions_marks_the_installed_release_apart_from_the_head(tmp_path: Path
         "installed (this tree): the version this tree runs; current: the newest version",
     ]
     shown = _versions(tmp_path, installed, CATALOG, args="1")
-    assert (
-        _notices(shown)[0]["message"].splitlines()[0]
-        == "Harness step 1: rel-1111-selected (selected, installed (this tree), current)"
-    )
+    assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, installed (this tree), current)"
 
 
 def test_versions_distinguishes_an_installed_older_release_from_a_newer_head(tmp_path: Path) -> None:
@@ -727,10 +703,12 @@ def test_versions_distinguishes_an_installed_older_release_from_a_newer_head(tmp
     shown = _versions(
         tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}, args="5"
     )
-    assert _notices(shown)[0]["message"].splitlines()[0] == "Harness step 5: rel-5555-promote (promote, current)"
+    assert _dialogs(shown)[0]["message"] == "rel-5555-promote (promote, current)"
 
 
-def test_versions_reads_a_promoted_pending_row_as_promoted_and_offers_no_promote(tmp_path: Path) -> None:
+def test_versions_reads_a_promoted_row_as_promoted_and_installs_it_without_promoting_again(tmp_path: Path) -> None:
+    """A promote is a row of its own naming the release it promoted, so the row it names reads "promoted at step
+    N". It is already served, so installing it needs no second promote."""
     agent_dir = _install_root(tmp_path)
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
     listed = _versions(tmp_path, agent_dir, catalog)
@@ -741,30 +719,22 @@ def test_versions_reads_a_promoted_pending_row_as_promoted_and_offers_no_promote
         "installed (this tree): the version this tree runs; current: the newest version",
     ]
     shown = _versions(tmp_path, agent_dir, catalog, args="4")
-    lines = _notices(shown)[0]["message"].splitlines()
-    assert lines[0] == "Harness step 4: rel-4444-pending (promoted at step 5)"
-    assert len(lines) == 3 and "promote" not in "\n".join(lines[1:]) and "install" not in "\n".join(lines)
-    refused = _versions(tmp_path, agent_dir, {**catalog, **PROMOTED}, args="4 promote", TEST_CONFIRM="1")
-    assert [event["kind"] for event in refused["events"]] == ["fetch", "notify"]
-    assert refused["events"][1] == {
-        "kind": "notify",
-        "message": "step 4 is already promoted at step 5; nothing to promote",
-        "type": "warning",
-    }
+    assert _dialogs(shown)[0]["message"] == "rel-4444-pending (promoted at step 5)"
+    installed = _versions(tmp_path, agent_dir, {**catalog, **PROMOTED}, args="4 install", TEST_CONFIRM="1")
+    assert [event["kind"] for event in installed["events"]] == ["fetch", "confirm", "notify"]
+    assert installed["events"][2] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
 
 
 def test_versions_takes_only_a_run_of_digits_as_the_step(tmp_path: Path) -> None:
     agent_dir = _install_root(tmp_path)
-    for args in ("1e0", "0x1", "1.0", "+1", "1 promote extra"):
+    for args in ("1e0", "0x1", "1.0", "+1", "1 install extra"):
         out = _versions(tmp_path, agent_dir, CATALOG, args=args)
         assert _fetches(out) == []
         assert _notices(out) == [
-            {"kind": "notify", "message": "Usage: /reef-versions [step] [promote|install]", "type": "warning"}
+            {"kind": "notify", "message": "Usage: /reef-versions [step] [install]", "type": "warning"}
         ]
     leading_zero = _versions(tmp_path, agent_dir, CATALOG, args="01")
-    assert (
-        _notices(leading_zero)[0]["message"].splitlines()[0] == "Harness step 1: rel-1111-selected (selected, current)"
-    )
+    assert _dialogs(leading_zero)[0]["message"] == "rel-1111-selected (selected, current)"
 
 
 # -- the clarify path, the two tools and the watch ---------------------------------------------------------------
@@ -1060,7 +1030,7 @@ def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_report
     # One line while it is closed, above the input box, naming the phase in the person's words and the way in.
     assert all(len(content) == 1 for content in drawn)
     assert any("checking the harness" in content[0] for content in drawn)
-    assert all("ctrl+r to look in" in content[0] for content in drawn)
+    assert all("ctrl+shift+r to look in" in content[0] for content in drawn)
     # The frames turn, so the person sees the step is alive between the polls.
     assert len({content[0][0] for content in drawn}) > 1
     # The phase is the service's own, read from the route the page reads.
@@ -1082,11 +1052,11 @@ def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path
         TEST_SHORTCUT_AT_MS=json.dumps([80, 170]),
     )
     assert out["error"] is None
-    assert out["shortcuts"] == ["ctrl+r"]
+    assert out["shortcuts"] == ["ctrl+shift+r"]
     opened = [content for content in _widgets(out) if content and len(content) > 1]
     assert opened, "the key never opened the spinner"
     panel = opened[-1]
-    assert "ctrl+r to close" in panel[0] and "writing the change" in panel[0]
+    assert "ctrl+shift+r to close" in panel[0] and "writing the change" in panel[0]
     body = "\n".join(panel[1:])
     assert "asked: text me when you are blocked" in body and "request: q-1" in body
     assert "step record: /work/steps/1" in body
@@ -1158,9 +1128,8 @@ def test_a_headless_session_draws_no_spinner(tmp_path: Path) -> None:
         ),
         (
             PENDING_ROW,
-            f"reef: '{ASK}' is ready as release rel-3333. This release changes an extension, so it is not installed "
-            "until you promote it: /reef-versions 1 promote. "
-            "Page: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair",
+            f"reef: '{ASK}' is ready as release rel-3333. This release changes an extension, so read it before "
+            "it runs: /reef-versions 1 opens the page, /reef-versions 1 install serves it.",
         ),
         (
             REJECTED_ROW,
@@ -1193,7 +1162,9 @@ def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     kinds = [event["kind"] for event in out["events"]]
     # The filing, then the watch: the catalog read that finds the row ends it, and the report follows.
     assert kinds[:3] == ["fetch", "notify", "status"]
-    assert kinds[-2:] == ["message", "notify"]
+    # The report is the message and the notice that follow it; an install the settle offers comes after them.
+    report = kinds.index("message")
+    assert kinds[report : report + 2] == ["message", "notify"]
     (catalog,) = [event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]
     assert catalog["method"] == "GET" and catalog["url"] == "http://reef:8900/reef/harness/releases"
     statuses = _of_kind(out, "status")
@@ -1202,12 +1173,12 @@ def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     assert statuses[-1] == {"kind": "status", "key": "reef", "text": None}
     assert _of_kind(out, "widget")[-1] == {"kind": "widget", "key": "reef-harness", "content": None}
     # The report is a custom message the chat renders and the session keeps, without a turn, then the notice.
-    assert out["events"][-2] == {
+    assert out["events"][report] == {
         "kind": "message",
         "message": {"customType": "reef-harness", "content": expected, "display": True},
         "options": {"triggerTurn": False},
     }
-    assert out["events"][-1] == {"kind": "notify", "message": expected, "type": "info"}
+    assert out["events"][report + 1] == {"kind": "notify", "message": expected, "type": "info"}
     # The report delivered, the stored filing is dropped.
     assert _stored(tmp_path) == []
 
@@ -1335,7 +1306,7 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
     first = "reef: /reef-harness <what it should do> asks for a harness change; /reef-versions lists the versions."
     out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(CATALOG))
     assert out["error"] is None
-    review = "1 release(s) await your review: /reef-versions 3 (promote with /reef-versions 3 promote)"
+    review = "1 release(s) ready to install: /reef-versions 3 (install with /reef-versions 3 install)"
     assert _notices(out) == [{"kind": "notify", "message": f"{first}\n{review}", "type": "info"}]
     # Two pending rows list both steps; a promoted pending row no longer waits.
     two = {**RELEASES, "releases": [*RELEASES["releases"], {**PENDING_ROW, "release_id": "rel-5555-pending"}]}
@@ -1346,7 +1317,7 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
         TEST_ANSWERS=json.dumps({"GET /reef/harness/releases": {"status": 200, "body": two}}),
     )
     assert _notices(out)[0]["message"].splitlines()[1] == (
-        "2 release(s) await your review: /reef-versions 3, 5 (promote with /reef-versions <step> promote)"
+        "2 release(s) ready to install: /reef-versions 3, 5 (install with /reef-versions <step> install)"
     )
     promoted = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
     out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(promoted))
@@ -1358,7 +1329,9 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
     assert out["events"] == []
 
 
-def test_versions_with_a_step_prints_the_design_and_what_the_review_left_uncovered(tmp_path: Path) -> None:
+def test_versions_lists_one_line_per_row_whatever_the_step_recorded(tmp_path: Path) -> None:
+    """The design and the review belong to the step's page, which the command offers; the listing stays one line
+    per row however much a row carries."""
     notes = {
         "design": "D" * 300,
         "review": {"result": "partial", "covered": ["x"], "uncovered": ["two way replies", "idle detection"]},
@@ -1368,26 +1341,11 @@ def test_versions_with_a_step_prints_the_design_and_what_the_review_left_uncover
         for index, row in enumerate(RELEASES["releases"])
     ]
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": {**RELEASES, "releases": rows}}}
-    out = _versions(tmp_path, _install_root(tmp_path), catalog, args="1")
-    lines = _notices(out)[0]["message"].splitlines()
-    assert lines[:4] == [
-        "Harness step 1: rel-1111-selected (selected, current)",
-        f"design: {'D' * 197}...",
-        "not covered: two way replies; idle detection",
-        "page: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair",
-    ]
-    # A design alone prints no "not covered" line, and the listing stays one line per row.
-    rows[1] = {**rows[1], "metrics": {**rows[1]["metrics"], "proposal_notes": {"design": "short"}}}
-    out = _versions(
-        tmp_path,
-        _install_root(tmp_path / "one"),
-        catalog | {"GET /reef/harness/releases": {"status": 200, "body": {**RELEASES, "releases": rows}}},
-        args="1",
-    )
-    lines = _notices(out)[0]["message"].splitlines()
-    assert lines[1] == "design: short" and not any(line.startswith("not covered") for line in lines)
-    listed = _versions(tmp_path, _install_root(tmp_path / "list"), catalog)
+    listed = _versions(tmp_path, _install_root(tmp_path), catalog)
     assert len(_notices(listed)[0]["message"].splitlines()) == 6
+    # The step's own dialog names the release and its result, not the notes.
+    shown = _versions(tmp_path, _install_root(tmp_path / "one"), catalog, args="1")
+    assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, current)"
 
 
 # -- the report that survives: the stored filings, the session start and the fetch deadline ---------------------
@@ -1499,8 +1457,6 @@ def test_a_hung_read_ends_at_the_fetch_deadline_so_the_watch_goes_on_and_a_filin
 
 # -- the next step after a result: the install through the wrapper, and for a pending release the promote first --
 
-NO_WRAPPER = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup"
-INSTALL_LATER = "reef: install it later with reef-pi update, then reef-pi setup"
 INSTALL_REASON = "Read the change first: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
 INSTALLED_LINE = "Installed release rel-1111. Type /reload to load it now."
 CHECK = "osascript -e 'display notification \"reef\"'"
@@ -1565,12 +1521,14 @@ def install_step(tmp_path: Path, agent_dir: Path, row: dict[str, object], **env:
     return out["events"][1:]
 
 
-@pytest.mark.parametrize("row", [PENDING_ROW, REJECTED_ROW, SKIPPED_ROW], ids=["pending", "rejected", "skipped"])
-def test_versions_install_requires_a_published_step(tmp_path: Path, row: dict[str, object]) -> None:
+@pytest.mark.parametrize("row", [REJECTED_ROW, SKIPPED_ROW], ids=["rejected", "skipped"])
+def test_versions_install_refuses_a_step_that_published_no_tree(tmp_path: Path, row: dict[str, object]) -> None:
+    """A rejected or skipped step commits no tree of its own: its row carries the head's id, so installing it
+    would install the version already there. A release merely held back from the head is not refused."""
     events = install_step(tmp_path, _install_root(tmp_path), row, TEST_CONFIRM="1")
     assert len(events) == 1
     assert events[0]["kind"] == "notify" and events[0]["type"] == "warning"
-    assert "choose a published step to install with /reef-versions" in events[0]["message"]
+    assert "published no tree" in events[0]["message"]
 
 
 def _exec_args(events: list[dict[str, Any]]) -> list[list[str]]:
@@ -1784,7 +1742,11 @@ def test_without_a_wrapper_on_disk_the_install_names_the_commands(tmp_path: Path
 
 @pytest.mark.parametrize("busy", ["0", "1"])
 @pytest.mark.parametrize("headless", ["0", "1"])
-def test_a_settle_asks_nothing_and_runs_nothing(tmp_path: Path, busy: str, headless: str) -> None:
+def test_a_settle_offers_the_install_only_when_the_session_is_between_turns(
+    tmp_path: Path, busy: str, headless: str
+) -> None:
+    """A win reaches the person who asked for it without them going looking: the settle offers its install. The
+    dialog waits for a turn to end, so a busy session keeps the report's commands, and headless has no dialog."""
     agent_dir = _install_root(tmp_path)
     wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
     for row in (SELECTED_ROW, PENDING_ROW):
@@ -1795,50 +1757,54 @@ def test_a_settle_asks_nothing_and_runs_nothing(tmp_path: Path, busy: str, headl
             TEST_HEADLESS=headless,
             TEST_BUSY=busy,
             TEST_CONFIRM="1",
+            TEST_EXEC=_exec_answers(NOTHING_TO_SET_UP),
+            REEF_HARNESS_WRAPPER=wrapper,
+        )
+        if busy == "1" or headless == "1":
+            assert events == []
+            continue
+        assert events[0]["kind"] == "confirm"
+        assert events[0]["title"] == f"Install release {str(row['release_id'])[:8]} now?"
+        # A pending release says what makes it different before the person answers.
+        pending = row is PENDING_ROW
+        assert ("runs in pi with your privileges" in events[0]["message"]) is pending
+        # A pending release is served before it is installed; a published one installs straight through.
+        assert [event["kind"] for event in events[1:]] == (
+            ["fetch", "exec", "exec", "notify"] if pending else ["exec", "exec", "notify"]
+        )
+        if pending:
+            assert events[1]["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
+            assert events[1]["body"] == {"release_id": row["release_id"]}
+        assert events[-1]["message"].endswith("Type /reload to load it now.")
+
+
+def test_a_settle_that_published_no_tree_offers_no_install(tmp_path: Path) -> None:
+    """A rejected or skipped step commits no tree of its own, so its report ends the settle."""
+    agent_dir = _install_root(tmp_path)
+    wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
+    for row in (REJECTED_ROW, SKIPPED_ROW):
+        events = _settle(
+            tmp_path,
+            agent_dir,
+            row,
+            TEST_CONFIRM="1",
             TEST_EXEC=_exec_answers(),
             REEF_HARNESS_WRAPPER=wrapper,
         )
         assert events == []
 
 
-def test_versions_promote_runs_the_install_flow_through_the_wrapper(tmp_path: Path) -> None:
-    agent_dir = _install_root(tmp_path)
-    wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
-    promoted = (
-        "Promoted step 3: the head is now rel-4444-promote; the update notice offers it at the next session start."
-    )
-    out = _versions(
+def test_a_settle_whose_install_is_declined_runs_nothing(tmp_path: Path) -> None:
+    """The offer is a question: declining it installs nothing, promotes nothing and names the commands."""
+    events = _settle(
         tmp_path,
-        agent_dir,
-        {**CATALOG, **PROMOTED},
-        args="3 promote",
-        TEST_CONFIRM="1",
-        TEST_EXEC=_exec_answers(NOTHING_TO_SET_UP),
-        REEF_HARNESS_WRAPPER=wrapper,
+        _install_root(tmp_path),
+        PENDING_ROW,
+        TEST_EXEC=_exec_answers(),
+        REEF_HARNESS_WRAPPER=_wrapper(tmp_path / "bin" / "reef-pi"),
     )
-    assert out["error"] is None
-    assert [event["kind"] for event in out["events"]][:3] == ["fetch", "confirm", "fetch"]
-    assert out["events"][3:] == [
-        {"kind": "notify", "message": promoted, "type": "info"},
-        {"kind": "confirm", "title": "Install release rel-4444 now?", "message": promoted},
-        {"kind": "exec", "command": wrapper, "args": ["update", "--release", "rel-4444-promote"]},
-        {"kind": "exec", "command": wrapper, "args": ["setup", "--json", "--release", "rel-4444-promote"]},
-        {"kind": "notify", "message": "Installed release rel-4444. Type /reload to load it now.", "type": "info"},
-    ]
-    # The install declined after the promote: the commands, and nothing runs.
-    out = _versions(
-        tmp_path,
-        agent_dir,
-        {**CATALOG, **PROMOTED},
-        args="3 promote",
-        TEST_CONFIRM=json.dumps([True, False]),
-        TEST_EXEC=_exec_answers(NOTHING_TO_SET_UP),
-        REEF_HARNESS_WRAPPER=wrapper,
-    )
-    assert out["events"][4:] == [
-        {"kind": "confirm", "title": "Install release rel-4444 now?", "message": promoted},
-        {"kind": "notify", "message": INSTALL_LATER, "type": "info"},
-    ]
+    assert [event["kind"] for event in events] == ["confirm", "notify"]
+    assert events[1] == {"kind": "notify", "message": INSTALL_LATER, "type": "info"}
 
 
 def test_a_request_the_service_no_longer_knows_ends_the_watch_with_one_notice_and_is_dropped(tmp_path: Path) -> None:

@@ -236,9 +236,10 @@ reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test f
 
 Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
-extension, and the next session's update notice offers the install; review the
-versions with `/reef-versions`, and promote an extension with
-`/reef-versions <step> promote` before it is offered. To change the model, restart
+extension, and the next session's update notice offers the install; a step that
+settles while you are between turns offers its install right away. Review the
+versions with `/reef-versions`, which opens a step's page, and install one with
+`/reef-versions <step> install`. To change the model, restart
 `reef serve` with another `--inference.upstream-model` and rerun the install
 command: installation writes the model ID into the local harness configuration.
 See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and

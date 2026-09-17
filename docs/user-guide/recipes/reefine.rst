@@ -49,14 +49,15 @@ How it works
    published as a release, ready but waiting for your review because it
    changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
-4. Promote. A release that touches a ``code_extension`` waits as pending.
-   The session links its page (``/reef-versions <step>``, ``reef-pi page
-   <step>``). The result is a non-blocking notice: keep chatting, then run
-   ``/reef-versions <step> promote`` when you are ready to review it.
-5. Install and set up. Run ``/reef-versions <step> install`` for a published
-   release (``reef-pi update`` from the shell); an explicit promote also
-   offers to install its new release. After confirmation, the session
-   collects what the change needs: for each unmet ``requires`` item it shows the item's
+4. Read. A release that touches a ``code_extension`` is held back from the
+   served head, so it reaches no session on its own. ``/reef-versions
+   <step>`` opens its page (``reef-pi page <step>`` from the shell), which
+   carries the design, the review and the numbers.
+5. Install and set up. A step that settles while you are between turns offers
+   its install there; otherwise run ``/reef-versions <step> install``
+   (``reef-pi update`` from the shell). A release held back from the head is
+   served as part of installing it, so installing is the one decision. After
+   confirmation, the session collects what the change needs: for each unmet ``requires`` item it shows the item's
    ``prompt`` and asks for the value of an ``env`` item, kept in
    ``.reef-harness-env`` beside the install, or for a confirmation before a
    ``permission`` or ``service`` check runs (``reef-pi setup`` asks the

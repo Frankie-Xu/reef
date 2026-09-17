@@ -518,9 +518,9 @@ release catalog every 5 s for the step that consumed the request, says
 ``the step started; usually one to three minutes`` once the request's
 record shows a step took it, and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``
-for; a pending one with ``This release changes an extension, so it is not
-installed until you promote it: /reef-versions <step> promote. Page:
-<link>``; a rejected step with the evaluation's reason; a skipped step with why
+for; a pending one with ``This release changes an extension, so read it before
+it runs: /reef-versions <step> opens the page, /reef-versions <step> install
+serves it. Page: <link>``; a rejected step with the evaluation's reason; a skipped step with why
 (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
 points the change left out. The exit status is 0 for a selected or pending
@@ -548,25 +548,28 @@ filed and the agent is told you backed out.
 ``/reef-harness --direct <request>`` files it as is, and either way the
 filing answers with the link to the request's page. A spinner then sits just
 above your input box with the step's phase (writing the change, checking the
-harness) and how long it has run; ``ctrl+r`` expands it in place with the
-request, the evaluation's episode count and step record when reef reports
-them, and the page link for the full detail, and ``ctrl+r`` closes it again.
+harness) and how long it has run; ``ctrl+shift+r`` expands it in place with
+the request, the evaluation's episode count and step record when reef reports
+them, and the page link for the full detail, and ``ctrl+shift+r`` closes it
+again.
 The step runs in the background the whole time, so you can keep typing. The
 result is reported when it settles, with the same next actions as
 ``--wait`` and the step whose page has the details, as a message the chat
-keeps beside a notice. This background result opens no dialog, so you can
-keep talking to the agent. When ready, use ``/reef-versions <step> install``
-for a published release, or ``/reef-versions <step> promote`` for a pending
-one. These explicit actions ask for confirmation before installing or
-promoting. Installation runs ``reef-pi update`` for that release, collects
+keeps beside a notice. If the step settles while you are between turns, the
+session offers its install right there; while you are mid turn it stays a
+report, so your input is never taken away, and the next session start offers
+the same release. ``/reef-versions <step> install`` starts the same install
+whenever you are ready, after a confirmation linking the step's page. A
+release still held back from the served head is served as part of installing
+it, so installing is the one decision. Installation runs ``reef-pi update`` for that release, collects
 its setup items and ends with ``Installed release <id8>. Type /reload to
 load it now.`` You can also use ``reef-pi update`` and ``reef-pi setup``
 from a separate terminal. A request filed before a restart, or settled
 while you were away, is
 reported at the next session start, where the update notice offers the
 install. A session start also says the commands exist and counts the
-releases awaiting your review, with the ``/reef-versions <step> promote``
-that promotes one and then offers its install. Recovered trees keep their
+releases ready to install, with the ``/reef-versions <step> install`` that
+installs one. Recovered trees keep their
 existing entries, as with ``version_check``. The proposer must explicitly
 accept ``requests``. The tutorial's proposer asks the served model for a
 skill, rules entry, command, or extension, using the bundled
@@ -673,16 +676,11 @@ children: the steps evaluated on it and any promote or rollback made on it,
 each a link to its own page; for
 a rejected or skipped step, the head it ran on). The line under the title
 carries the release id, the commit time and ``Currently served`` on the head.
-For a pending release the
-command also prints the promote curl, a trial install with ``?release_id=``
-that replaces the tree at your install root, and the head's reinstall to
-return to it; ``/reef-versions <step> promote`` runs the promote from the
-TUI after you confirm it, then asks ``Install release <id8> now?`` and runs
-the install and setup flow. ``/reef-versions <step> install`` starts that
-flow for a published step when you are ready. When the step recorded the
-proposer's plan and its review, ``/reef-versions <step>`` also prints
-``design:`` and ``not covered:``. The command also prints a curl that
-fetches the page with the
+``/reef-versions <step> install`` runs the install and setup flow for that
+step after you confirm it, serving a release still held back from the head
+first. The page holds the proposer's plan, its review and the numbers, so
+``/reef-versions <step>`` offers to open it rather than reprinting it. The
+page itself can also be fetched with a curl that carries the
 scenario header and the token into a file, for a hosted deployment where
 the link is not enough, and ``reef-pi page <step>`` fetches it the same way
 into ``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html``
@@ -712,16 +710,15 @@ Promote a pending release
 
 A win that touches a kind in ``evolution.review_kinds`` (``code_extension``
 in the tutorial's ``deployment.yaml``) or a ``native_loop`` sits in the
-catalog with ``pending: true`` and is served to no session until you promote
-it. The notice never offers it either: it offers the newest release that is
-not pending, so a pending release shows only under a promote or a trial
-install by id. Find its id in ``GET /reef/harness/releases`` (the newest row
-marked ``pending``), read the change (``?release_id=<id>`` on the install
-route installs that tree for a trial session), and name it to ``POST
-/reef/scenarios/{scenario}/promote``. The answer is the new head with a fresh
-release id, because a promote republishes the tree as a commit of its own;
-the next ``reef-pi`` session offers the update through the notice, and
-``/reef-versions <step> promote`` in a session offers it at once. Both
+catalog with ``pending: true`` and is served to no session on its own. In a
+``reef-pi`` session it is offered like any other release, because installing
+one is your decision: taking the offer names it to ``POST
+/reef/scenarios/{scenario}/promote`` and installs what that answers. The
+answer is the new head with a fresh release id, because a promote republishes
+the tree as a commit of its own. By hand, find its id in ``GET
+/reef/harness/releases`` (the newest row marked ``pending``), read the change
+(``?release_id=<id>`` on the install route installs that tree without moving
+the head), and name it to the promote route yourself. Both
 calls name the scenario your install used: the ``x-reef-scenario`` header
 you gave the install command or, without one, the generated name the script
 baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;

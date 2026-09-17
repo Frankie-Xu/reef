@@ -604,16 +604,17 @@ two commands, two tools and two event handlers:
   the input box, an animated frame, the phase in the person's words
   (``queued, waiting for a step``, ``writing the change``, ``checking the
   harness``, ``running the step``, ``saving the result``), the time in the
-  step and ``ctrl+r to look in``. The frames turn every 250 ms, so the step
-  reads as alive between polls. ``ctrl+r``
+  step and ``ctrl+shift+r to look in``. The frames turn every 250 ms, so the
+  step reads as alive between polls. ``ctrl+shift+r``
   (``pi.registerShortcut``) expands the same widget in place with the
   request asked, its id, the evaluation's episode count and step record when
   the service reports them, the request page link for the full detail, and a
-  line saying the step runs in the background; ``ctrl+r`` again closes it. pi
-  offers no click target for a widget, so the key the spinner names is how a
-  person opens it. Expanding costs no request: it redraws what the last poll
-  read. The widget is cleared when the step settles, and a headless session
-  draws none.
+  line saying the step runs in the background; ``ctrl+shift+r`` again closes
+  it. pi offers no click target for a widget, so the key the spinner names is
+  how a person opens it. The key carries shift because pi binds ``ctrl+r``
+  itself, to renaming a session. Expanding costs no request: it redraws what
+  the last poll read. The widget is cleared when the step settles, and a
+  headless session draws none.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
   <id> queued`` and, once the request's record (``GET
   /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
@@ -634,9 +635,9 @@ two commands, two tools and two event handlers:
   so a hung read costs one poll, not every later tick. When the row appears,
   the report quotes the request's first 60 characters and names the next
   action by result: a selected release names ``/reef-versions <step> install``;
-  a pending one says ``This release changes an
-  extension, so it is not installed until you promote it: /reef-versions
-  <step> promote. Page: <link>``; a rejected step quotes
+  a pending one says ``This release changes an extension, so read it before it
+  runs: /reef-versions <step> opens the page, /reef-versions <step> install
+  serves it.``; a rejected step quotes
   ``selection.reason`` and says to rephrase or split the request; a skipped
   step quotes ``metrics.skipped`` and, when the step recorded one,
   ``proposal_notes.failure``, why the proposer produced nothing. The
@@ -648,14 +649,15 @@ two commands, two tools and two event handlers:
   renders and the session file keeps, and as a notice, which the next
   status line may overwrite. Past the cap the watch says ``/reef-versions``
   shows the result when it settles.
-- A background result opens no confirmation, selection or input dialog,
-  whether the agent is busy or idle. The report names the next command,
-  leaving the person free to keep chatting. ``/reef-versions <step> install``
-  explicitly starts the install of a published step after a confirmation
-  linking its page. Pending, rejected and skipped steps cannot be installed
-  through that action; use ``/reef-versions <step> promote`` to review and
-  promote a pending release first. The automatic update notice at session
-  start remains a separate entry point.
+- A settled step offers its install, so a win reaches the person who asked
+  without them going looking. The dialog waits for a turn to end
+  (``ctx.isIdle()``): a busy session keeps the report's commands instead, and
+  the next session start offers the same release. ``/reef-versions <step>
+  install`` starts the same install on demand after a confirmation linking the
+  step's page. A release still held back from the served head is promoted as
+  part of installing it, so installing is the one decision; only a rejected or
+  skipped step, which published no tree of its own, is refused. The automatic
+  update notice at session start remains a separate entry point.
 - The install, through the ``reef-pi`` wrapper (``REEF_HARNESS_WRAPPER``,
   which ``run_agent`` exports, else ``reef-pi`` beside the release file;
   with neither on disk the notice is ``reef: no reef-pi wrapper found;
@@ -695,19 +697,18 @@ two commands, two tools and two event handlers:
   catalog does not hold yet gets the watch again. So a restarted pi, or a
   report the person missed, still gets the result in the chat.
 - ``session_start``: with a UI, one info line says the two commands exist,
-  and a second line counts the pending releases no promote has named yet
-  and says how to see and promote them: ``N release(s) await your review:
-  /reef-versions <step>[, <step>] (promote with /reef-versions <step>
-  promote)``.
-- ``/reef-versions [step] [promote|install]``: lists the release chain with each
-  step's result and request. With a step it prints ``design:`` (the
-  proposer's plan, first 200 characters) and ``not covered:`` when the row
-  carries ``proposal_notes``, then the step's page link (``GET
+  and a second line counts the releases held back from the served head and
+  says how to install them: ``N release(s) ready to install: /reef-versions
+  <step>[, <step>] (install with /reef-versions <step> install)``.
+- ``/reef-versions [step] [install]``: lists the release chain with each
+  step's result and request. With a step it offers the step's page (``GET
   /reef/harness/releases/{step}/page`` with the scenario and the token as
-  query parameters) and a curl that fetches the page with the headers into
-  a file, and, for a pending release, the promote action and a trial
-  install command; ``/reef-versions <step> promote`` runs the promote after
-  a confirmation, then offers the install of the head the promote made.
+  query parameters), which holds the design, the review and the numbers;
+  taking the offer opens it through the platform's launcher (``open``,
+  ``xdg-open``, ``rundll32``), and declining prints the URL. Headless prints
+  the summary and the URL instead. ``/reef-versions <step> install`` installs
+  the step after a confirmation, promoting a release still held back from the
+  served head first.
 
 The writing happens on the service, where the evolve step hands the request
 to the recipe's ``propose`` and the commit records it under

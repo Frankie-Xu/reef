@@ -1397,8 +1397,9 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
             0,
             [
                 "reef-pi: 'text me when you are blocked' is ready as release rel-3333. This release changes an "
-                "extension, so it is not installed until you promote it: /reef-versions 1 promote. Page: {page}",
-                "reef-pi: next: /reef-versions 1 promote in a reef-pi session, then reef-pi setup and reef-pi update",
+                "extension, so read it before it runs: /reef-versions 1 opens the page, /reef-versions 1 install "
+                "serves it. Page: {page}",
+                "reef-pi: next: /reef-versions 1 install in a reef-pi session, or reef-pi setup and reef-pi update",
             ],
         ),
         (
@@ -1510,7 +1511,7 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             pending,
             "\n",
             0,
-            "reef-pi: Promote now? [y/N] reef-pi: next: /reef-versions 1 promote in a reef-pi session, then reef-pi setup and reef-pi update",
+            "reef-pi: Promote now? [y/N] reef-pi: next: /reef-versions 1 install in a reef-pi session, or reef-pi setup and reef-pi update",
         ),
         ("selected-failed", selected, "yes\n", 3, "reef-pi: Install now? [Y/n] "),
     ]
