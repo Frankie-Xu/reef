@@ -24,7 +24,8 @@ forgetting.
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
-| Example     | none yet                                                   |
+| Example     | `SDFT on a skill stream                                    |
+|             | <../../../recipes/sdft/examples/skill_stream/README.md>`__ |
 +-------------+------------------------------------------------------------+
 
 What it does

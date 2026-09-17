@@ -61,7 +61,7 @@ learns from each score before the next task arrives.
      - model weights
      - ``recipes/sdft/``
      - `SDFT <recipes/sdft.rst>`__
-     - none yet
+     - `SDFT on a skill stream <../../recipes/sdft/examples/skill_stream/README.md>`__
    * - SFT
      - model weights
      - ``recipes/sft/``
