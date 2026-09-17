@@ -154,6 +154,7 @@ def _dispatcher(
     batch_policy: str = "reports",
     batch_size: int = 1,
     seed: tuple[dict, ...] = (),
+    api: str = "openai",
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -164,7 +165,7 @@ def _dispatcher(
         resolve_episode_scorer(evaluate),
         ("task one",),
         binary=str(binary),
-        runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000"),
+        runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
         batch_policy=batch_policy,
         batch_size=batch_size,
         seed=seed,
@@ -1531,6 +1532,28 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
             assert f'"baseUrl": "http://{host}/v1"' in script
             assert '"id": "demo-model"' in script  # the recipe's runtime model, since no gate ran yet
             assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("api", "pi_api"), [("responses", "openai-responses"), ("anthropic", "anthropic-messages")])
+def test_install_script_binds_the_client_in_the_served_models_dialect(tmp_path, api: str, pi_api: str) -> None:
+    """Reef forwards a call to the upstream unchanged, so an installed reef-pi must speak the upstream's API."""
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed, api=api)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/reef/harness/install", params={"adapter": "pi"}, headers={"x-reef-scenario": "delivery"}
+            )
+            assert response.status == 200
+            assert f'"api": "{pi_api}"' in await response.text()
         finally:
             await client.close()
 
