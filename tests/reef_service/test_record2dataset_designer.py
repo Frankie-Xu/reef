@@ -144,6 +144,8 @@ def test_an_indented_json_block_with_trailing_blanks_is_accepted() -> None:
         (lambda d: d["tests"].__setitem__("Test.sh", "x"), "tests: "),
         (lambda d: d.__setitem__("solution", "solve.sh"), "solution must be an object"),
         (lambda d: d["tests"].__setitem__("../escape.sh", "x"), "names a file the task cannot hold"),
+        (lambda d: d["tests"].__setitem__("..", "x"), "names a file the task cannot hold"),
+        (lambda d: d["tests"].__setitem__("a/./b.sh", "x"), "names a file the task cannot hold"),
         (lambda d: d["tests"].__setitem__("/abs.sh", "x"), "names a file the task cannot hold"),
         (lambda d: d["tests"].__setitem__("a/b/c/d/e.sh", "x"), "names a file the task cannot hold"),
         (lambda d: d["environment"].__setitem__("data.bin", 3), "must be text"),
@@ -155,6 +157,14 @@ def test_an_unusable_harbor_reply_is_refused(change, message: str) -> None:
     change(document)
     with pytest.raises(DesignerReplyError, match=message):
         parse_harbor_reply("```json\n" + json.dumps(document) + "\n```")
+
+
+def test_a_dotfile_is_a_file_the_task_can_hold() -> None:
+    document = json.loads(json.dumps(HARBOR_DOCUMENT))
+    document["environment"][".hidden_config"] = "token=1\n"
+    document["environment"]["home/.bashrc"] = "alias ll='ls -la'\n"
+    reply = parse_harbor_reply("```json\n" + json.dumps(document) + "\n```")
+    assert reply.environment[".hidden_config"] == "token=1\n" and "home/.bashrc" in reply.environment
 
 
 def test_a_harbor_reply_without_json_is_refused() -> None:
