@@ -279,9 +279,8 @@ class _TinkerPreparedJob(PreparedTrainingJob):
     def train(self) -> TrainingMetrics:
         return self._backend.train_job(self)
 
-    def save_checkpoint(self) -> bool:
+    def save_checkpoint(self) -> None:
         self._backend.save_job_checkpoint(self)
-        return True
 
 
 def read_incumbent(path: Path) -> dict[str, Any] | None:

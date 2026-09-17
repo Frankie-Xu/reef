@@ -107,7 +107,6 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
         assert self.state.phase == "checkpointing"
         self.event("save")
         self.checkpoint.path.mkdir()
-        return True
 
 
 @pytest.fixture
@@ -272,7 +271,6 @@ def test_second_backend_uses_same_coordinator_and_checkpoint_contract(tmp_path):
         def save_checkpoint(self):
             self.checkpoint.path.mkdir()
             (self.checkpoint.path / "weights").write_text(str(self.value))
-            return True
 
     backend = FileTrainingBackend(tmp_path)
     result = coordinator(backend).execute(PAYLOAD)
@@ -281,27 +279,11 @@ def test_second_backend_uses_same_coordinator_and_checkpoint_contract(tmp_path):
 
 
 def test_missing_checkpoint_never_becomes_a_candidate(backend, monkeypatch):
-    monkeypatch.setattr(backend, "save_checkpoint", lambda: True)
+    monkeypatch.setattr(backend, "save_checkpoint", lambda: None)
     with pytest.raises(RuntimeError, match="missing or unsafe"):
         coordinator(backend).execute(PAYLOAD)
     assert markers.read_marker(backend.path)["status"] == "RUNNING"
     assert backend.state.phase == "checkpoint_failed"
-
-
-def test_skipped_checkpoint_is_recorded_without_a_path_and_replays(backend, monkeypatch):
-    # A backend on a checkpoint interval reports False for the jobs in
-    # between: the marker says so and names nothing, the result carries no
-    # checkpoint, and a replay returns the same result from the marker.
-    monkeypatch.setattr(backend, "save_checkpoint", lambda: False)
-    result = coordinator(backend).execute(PAYLOAD)
-    assert result.outcome == "checkpoint"
-    assert result.checkpoint_path is None
-    marker = markers.read_marker(backend.path)
-    assert marker["status"] == "CHECKPOINT"
-    assert marker["checkpoint_saved"] is False
-    assert marker["checkpoint_path"] is None
-    assert not backend.checkpoint.path.exists()
-    assert coordinator(backend).execute(PAYLOAD) == result
 
 
 def test_training_and_publication_share_progress_and_keep_serving_unchanged_until_commit(backend):

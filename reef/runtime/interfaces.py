@@ -132,17 +132,14 @@ class ModelCandidate(UpdateCandidate):
     """A checkpointed model update that has not changed serving weights."""
 
     training_job_id: str
-    #: The exported checkpoint, or ``None`` for a job whose backend skipped it
-    #: on its checkpoint interval; such a candidate publishes live weights only.
-    checkpoint_path: str | None
+    checkpoint_path: str
     current_runtime_load_id: str | None
     training_metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         _require_non_empty(self.training_job_id, "training_job_id")
-        if self.checkpoint_path is not None:
-            _require_non_empty(self.checkpoint_path, "checkpoint_path")
+        _require_non_empty(self.checkpoint_path, "checkpoint_path")
         if self.current_runtime_load_id is not None and (
             not isinstance(self.current_runtime_load_id, str) or not self.current_runtime_load_id
         ):
@@ -169,11 +166,6 @@ class TrainingJobResult:
     ``TrainStepResult.metrics``: the backend that produced it owns the schema,
     reef never interprets it, and it reaches the commit record so per-step
     metrics remain available when the resulting version is served.
-
-    ``checkpoint_path`` names the checkpoint the job exported. A backend that
-    checkpoints on an interval reports ``None`` for the jobs in between: their
-    weights are published live, the version cannot become a durable artifact
-    or be restored, and a restart resumes from the last exported checkpoint.
     """
 
     outcome: Literal["complete", "checkpoint", "stale", "storage_blocked"]
@@ -184,13 +176,11 @@ class TrainingJobResult:
     training_job_id: str | None = None
 
     def __post_init__(self) -> None:
-        # Fail closed at the boundary: a job that names a checkpoint must name
-        # it fully, or it would reach the committer and be published as a
-        # durable version pointing at nothing. Skipping one is explicit: None.
-        if self.checkpoint_path is not None and (
-            not isinstance(self.checkpoint_path, str) or not self.checkpoint_path
-        ):
-            raise ValueError(f"a {self.outcome} training job must report the checkpoint path it exported, or None")
+        # Fail closed at the boundary: a completed job that cannot name the
+        # checkpoint it exported would otherwise reach the committer and
+        # be published as a durable version pointing at nothing.
+        if self.outcome in {"complete", "checkpoint"} and not self.checkpoint_path:
+            raise ValueError(f"a {self.outcome} training job must report the checkpoint path it exported")
         if not self.runtime_load_id:
             raise ValueError("a training job result must report a runtime load ID")
         if self.training_job_id is not None and (
@@ -674,10 +664,8 @@ class PreparedTrainingJob(ABC):
 
     ``train`` may change model/optimizer state and returns all training metrics.
     ``save_checkpoint`` synchronously persists every required model/optimizer
-    checkpoint and backend recovery metadata, and returns whether it did: a
-    backend that checkpoints on an interval returns ``False`` on the jobs in
-    between, which then publish live weights without a checkpoint. Neither
-    method may publish serving weights or advance Reef's job marker.
+    checkpoint and backend recovery metadata. Neither method may publish serving
+    weights or advance Reef's job marker.
     """
 
     @property
@@ -688,7 +676,7 @@ class PreparedTrainingJob(ABC):
     def train(self) -> TrainingMetrics: ...
 
     @abstractmethod
-    def save_checkpoint(self) -> bool: ...
+    def save_checkpoint(self) -> None: ...
 
 
 @dataclass(frozen=True)

@@ -514,16 +514,12 @@ class TrainingExecution:
                 self._publisher.prepare_training()
             metrics = prepared.train()
             self._state.phase = "checkpointing"
-            saved = prepared.save_checkpoint()
-            if saved and (checkpoint.path.is_symlink() or not checkpoint.path.is_dir()):
+            prepared.save_checkpoint()
+            if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
                 raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
             # Replay must see all telemetry with the checkpoint, even if
-            # the process dies immediately after this transition. A skipped
-            # checkpoint is recorded as such: the marker names no path.
-            updates: dict[str, Any] = {
-                "checkpoint_path": str(checkpoint.path) if saved else None,
-                "checkpoint_saved": saved,
-            }
+            # the process dies immediately after this transition.
+            updates: dict[str, Any] = {"checkpoint_path": str(checkpoint.path)}
             durable = {**admission_metrics, **metrics.durable}
             if durable:
                 updates["metrics"] = durable

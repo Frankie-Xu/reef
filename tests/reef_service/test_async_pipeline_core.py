@@ -269,14 +269,11 @@ def _wait_for_error(dispatcher: Dispatcher) -> str:
 
 @pytest.mark.unit
 def test_empty_checkpoint_result_fails_closed() -> None:
-    # The invariant lives on the result type, so a completed job that names
-    # its checkpoint emptily cannot be constructed at all -- it can never
-    # reach the committer and be published as a durable version. Skipping the
-    # checkpoint is explicit: None, which publishes live weights only.
+    # The invariant lives on the result type, so a completed job that cannot
+    # name its exported checkpoint cannot be constructed at all -- it can never
+    # reach the committer and be published as a durable version.
     with pytest.raises(ValueError, match="must report the checkpoint path"):
         TrainingJobResult(outcome="complete", runtime_load_id="v1", checkpoint_path="")
-    skipped = TrainingJobResult(outcome="checkpoint", runtime_load_id="v1", checkpoint_path=None)
-    assert skipped.checkpoint_path is None
 
 
 @pytest.mark.unit
