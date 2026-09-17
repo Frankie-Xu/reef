@@ -101,9 +101,45 @@ def token_kl(
         cross = sum_across_vocab_shards((teacher_probs * student_logits).sum(dim=-1), tp_group, tp_world)
         negative_entropy = sum_across_vocab_shards((teacher_probs * teacher_log_probs).sum(dim=-1), tp_group, tp_world)
         return negative_entropy - cross + teacher_mass * log_sum_exp
-    student_log_probs = student_logits - log_sum_exp[:, None]
-    divergence = (student_log_probs.exp() * (student_log_probs - teacher_log_probs)).sum(dim=-1)
-    return sum_across_vocab_shards(divergence, tp_group, tp_world)
+    return _ReverseKl.apply(student_logits, teacher_log_probs, log_sum_exp.detach(), tp_group, tp_world)
+
+
+class _ReverseKl(torch.autograd.Function):
+    """KL(student || teacher) per row over vocab shards, with its gradient written out.
+
+    The divergence is a sum of per-shard terms that all depend on the
+    student's global log-sum-exp; letting autograd differentiate a shard's
+    term alone drops the other shards' dependence on that log-sum-exp, and
+    the missing piece is a push down on every logit in proportion to its
+    probability, flattening the student a little more each step. The exact
+    gradient of ``sum_v p_v (log p_v - log t_v)`` is ``p_u ((log p_u - log t_u)
+    - KL)`` for every logit ``u``, which needs only the local rows and the
+    all-reduced divergence.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        student_logits: torch.Tensor,
+        teacher_log_probs: torch.Tensor,
+        log_sum_exp: torch.Tensor,
+        tp_group: Any,
+        tp_world: int,
+    ) -> torch.Tensor:
+        student_log_probs = student_logits - log_sum_exp[:, None]
+        probs = student_log_probs.exp()
+        gap = student_log_probs - teacher_log_probs
+        divergence = (probs * gap).sum(dim=-1)
+        if tp_world > 1:
+            dist.all_reduce(divergence, op=dist.ReduceOp.SUM, group=tp_group)
+        ctx.save_for_backward(probs, gap, divergence)
+        return divergence
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None, None, None]:
+        probs, gap, divergence = ctx.saved_tensors
+        grad = grad_output[:, None] * probs * (gap - divergence[:, None])
+        return grad, None, None, None, None
 
 
 def chunked_token_kl(

@@ -158,3 +158,47 @@ def test_teacher_weights_move_toward_the_actor_in_float32() -> None:
     assert teacher["steps"].tolist() == [3]
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
         mix_teacher_weights(teacher, actor, 1.5)
+
+
+# --- the vocab shards -----------------------------------------------------------
+
+
+def _sharded_kl_worker(rank: int, world: int, port: int, direction: str, seed: int) -> None:
+    """One tensor-parallel rank: its vocab shard's KL and gradient must match the dense computation."""
+    import torch.distributed as dist
+
+    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world)
+    try:
+        generator = torch.Generator().manual_seed(seed)
+        rows, vocab = 5, 24
+        student = torch.randn(rows, vocab, generator=generator, dtype=torch.float64) * 3
+        teacher = torch.log_softmax(torch.randn(rows, vocab, generator=generator, dtype=torch.float64) * 3, dim=-1)
+        dense = student.clone().requires_grad_(True)
+        dense_kl = token_kl(dense, teacher, direction=direction, tp_group=None, tp_world=1)
+        dense_kl.sum().backward()
+
+        shard = slice(rank * vocab // world, (rank + 1) * vocab // world)
+        local = student[:, shard].clone().requires_grad_(True)
+        kl = token_kl(local, teacher[:, shard], direction=direction, tp_group=dist.group.WORLD, tp_world=world)
+        kl.sum().backward()
+        assert torch.allclose(kl, dense_kl.detach(), atol=1e-9), (rank, kl, dense_kl)
+        assert torch.allclose(local.grad, dense.grad[:, shard], atol=1e-9), (rank, local.grad, dense.grad[:, shard])
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("direction", ["forward", "reverse"])
+def test_token_kl_gradient_matches_the_dense_computation_across_vocab_shards(direction: str) -> None:
+    # Every rank sees one vocab shard and the all-reduced totals, the way
+    # tensor-parallel Megatron hands the loss its logits; the gradient on a
+    # shard must be the dense gradient's slice, coupling through the global
+    # log-sum-exp included.
+    import socket
+
+    import torch.multiprocessing as multiprocessing
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    multiprocessing.spawn(_sharded_kl_worker, args=(4, port, direction, 3), nprocs=4, join=True)
