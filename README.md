@@ -315,6 +315,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),
+[Shiyi Zoe Du](https://github.com/zoedsy),
 [Hao He](https://github.com/hehaodele),
 [Haoze He](https://github.com/HectorHHZ),
 [Chonghe Jiang](https://github.com/Chonghe-Jiang),
@@ -337,7 +338,8 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Kaichen Zhou](https://github.com/kaichen-z),
 [Zijian Zhou](https://github.com/BobbyZhouZijian),
 [Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
-[Dingyi Zhuang](https://github.com/ZhuangDingyi).
+[Dingyi Zhuang](https://github.com/ZhuangDingyi),
+[Xinkai Zou](https://github.com/jayzou3773).
 
 
 ## ⭐ Star History
