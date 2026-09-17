@@ -62,6 +62,11 @@ learns from each score before the next task arrives.
      - ``recipes/sdft/``
      - `SDFT <recipes/sdft.rst>`__
      - none yet
+   * - SFT
+     - model weights
+     - ``recipes/sft/``
+     - `SFT <recipes/sft.rst>`__
+     - the SFT arm of `SDFT on a skill stream <../../recipes/sdft/examples/skill_stream/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``

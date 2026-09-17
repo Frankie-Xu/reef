@@ -57,6 +57,8 @@ objective; the driver checks it at start and refuses a mismatch.
 +----------------+-----------------------------+----------------------------+
 | ``sdft``       | ``custom_loss``             | ``--use-rollout-logprobs`` |
 +----------------+-----------------------------+----------------------------+
+| ``sft``        | ``sft_loss``                | not required               |
++----------------+-----------------------------+----------------------------+
 
 The spec
 --------
@@ -147,4 +149,5 @@ Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` (a self-teacher forward pass
-with the current weights and a full-vocabulary KL in the loss).
+with the current weights and a full-vocabulary KL in the loss),
+``recipes/sft/slime/`` (the smallest family: a stock Slime loss, no hooks).
