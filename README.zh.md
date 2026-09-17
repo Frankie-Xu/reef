@@ -203,17 +203,16 @@ reef serve --recipe reefine \
 
 该示例连接本地 Ollama 服务。使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
-`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，token 为 `reef-local`，状态保存在
+`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，不启用认证（启动前设置 `REEF_TOKEN` 即要求该 token），状态保存在
 `.reef/reefine/`（`--recipe harness-evolve` 是旧名称，启动的是同一个配置）。
 需要修改其他内容时，复制[该部署配置](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
 
 在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`），创建 scenario、安装 harness 并提出修改请求：
 
 ```bash
-export REEF_TOKEN=reef-local
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+curl -fsS -H "Content-Type: application/json" \
   -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: my-harness" \
+curl -fsS -H "x-reef-scenario: my-harness" \
   'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
 reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"

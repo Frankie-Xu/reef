@@ -3,7 +3,8 @@ schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8901
-  token: reef-local
+  # Unset REEF_TOKEN leaves the loopback service without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
   run-dir: .reef/reefine/stack
 
 recipe:

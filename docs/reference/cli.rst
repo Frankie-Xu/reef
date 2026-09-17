@@ -50,7 +50,7 @@ and bare values are model IDs and need an upstream URL.
 An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
 the prefix. The ``reefine`` profile ships its proposer and evaluator in the
 wheel, so it runs from an installed package; it listens on
-``127.0.0.1:8901`` with token ``reef-local`` and keeps its state under
+``127.0.0.1:8901`` without authentication unless ``REEF_TOKEN`` is set, and keeps its state under
 ``.reef/reefine/``. To change anything else, copy
 ``reef/service/profiles/reefine.yaml`` and pass the copy with ``-c``.
 ``--recipe harness-evolve``, the former name of the profile folded into it,

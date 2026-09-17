@@ -214,7 +214,8 @@ reef serve --recipe reefine \
 The example connects to a local Ollama server. For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
 `REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
-listens on `127.0.0.1:8901` with token `reef-local` and keeps its state under
+listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
+starting it to require that token) and keeps its state under
 `.reef/reefine/` (`--recipe harness-evolve`, the former name, starts the same
 configuration). To change anything else, copy
 [the deployment configuration](reef/service/profiles/reefine.yaml) and pass
@@ -225,10 +226,9 @@ bakes that terminal's `python3` into `reef-pi`), create a scenario, install the
 harness, and ask for a change:
 
 ```bash
-export REEF_TOKEN=reef-local
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+curl -fsS -H "Content-Type: application/json" \
   -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: my-harness" \
+curl -fsS -H "x-reef-scenario: my-harness" \
   'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
 reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
