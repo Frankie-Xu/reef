@@ -377,8 +377,8 @@ the built-in Reefine profile and name the model:
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b
 
-The profile is Reefine's own default (loopback, port 8901, token
-``reef-local``, state under ``.reef/reefine/``); its proposer and evaluator
+The profile is Reefine's own default (loopback, port 8901, no token unless
+``REEF_TOKEN`` is set, state under ``.reef/reefine/``); its proposer and evaluator
 ship in the wheel, so it needs no checkout, and ``--recipe harness-evolve``,
 the former name of the profile folded into it, starts the same profile. This
 example's own stack stays in ``configs/serve.yaml``, which ``run.sh`` passes

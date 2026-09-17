@@ -15,7 +15,7 @@ Start the bundled profile with an OpenAI-compatible endpoint:
      --inference.upstream-model gemma4:26b \
      --inference.upstream-api-key dummy
 
-The profile listens on ``127.0.0.1:8901``, uses token ``reef-local``, and keeps
+The profile listens on ``127.0.0.1:8901``, requires no token unless ``REEF_TOKEN`` is set, and keeps
 state under ``.reef/reefine/``. For custom deployments, copy
 ``reef/service/profiles/reefine.yaml`` and pass it with ``-c``. The
 `Reefine tutorial <https://github.com/Human-Agent-Society/reef/tree/main/tutorials/reefine>`__
