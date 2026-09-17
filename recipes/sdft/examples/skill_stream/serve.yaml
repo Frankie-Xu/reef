@@ -5,9 +5,10 @@
 # runs (idanshen/Self-Distillation, issue 9): learning rate 1e-5 with a
 # cosine schedule over the stage's steps and 10 warmup steps, 32 prompts per
 # step for two epochs, one on-policy sample per prompt in a 2048-token
-# window, reverse KL to the demonstration-conditioned teacher, the truncated
-# importance-sampling cap of 2, three skipped leading tokens, the teacher
-# copy moving 2% toward the policy per step, no weight decay, clipping at 1.
+# window, the truncated importance-sampling cap of 2, three skipped leading
+# tokens, the teacher copy moving 2% toward the policy per step, no weight
+# decay, clipping at 1. The KL is the forward one, the reference's default
+# and what the paper's results used (that issue's run switched to reverse).
 #
 # run.py sets SDFT_MODEL_PATH (the stage's starting weights) and
 # SDFT_LR_DECAY_ITERS (its step count) per stage; docker-compose.yaml hands
@@ -127,7 +128,7 @@ training:
     loss-type: "custom_loss"
     use-rollout-logprobs: true
     disable-compute-advantages-and-returns: true
-    sdft-kl-direction: "reverse"
+    sdft-kl-direction: "forward"
     sdft-importance-sampling-cap: "2.0"
     sdft-skip-response-tokens: "3"
     # The reference's ref_model_mixup_alpha for these runs: the teacher is a

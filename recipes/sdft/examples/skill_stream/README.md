@@ -57,9 +57,11 @@ skill a single-task run started from the previous one's weights. The
 settings are the ones the authors gave for these runs (issue 9 of the
 reference): learning rate 1e-5 with a cosine schedule and 10 warmup steps,
 32 prompts per optimizer step for two epochs, one on-policy sample per
-prompt in a 2048-token window, reverse KL, truncated importance sampling
-capped at 2, the first three response tokens skipped, and the teacher a copy
-of the stage's initial weights moving 2% toward the policy after every step.
+prompt in a 2048-token window, truncated importance sampling capped at 2,
+the first three response tokens skipped, and the teacher a copy of the
+stage's initial weights moving 2% toward the policy after every step. The
+KL is the forward one, the reference's default and the paper's setting
+(that issue's run switched to reverse).
 
 `run.py` keeps that protocol with Reef in the trainer's place. Each stage
 starts the arm's stack from the previous stage's HF export (the base model
