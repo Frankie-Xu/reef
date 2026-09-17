@@ -99,6 +99,13 @@ Also: before_agent_start (return { systemPrompt } to add instructions for the tu
 - pi.sendUserMessage(text): a user message that starts a turn. While the agent streams pass { deliverAs: "steer" } or { deliverAs: "followUp" }; without one it throws.
 - pi.sendMessage({ customType, content, display: true }, { triggerTurn: true }): a custom message in the model's context.
 - pi.appendEntry(customType, data): persisted, not in the model's context.
+- pi.sendUserMessage("/name args", { expandPromptTemplates: true }) runs your own command /name instead of starting a turn. An event handler reaches what only a command's ctx has this way.
+
+## Sessions
+
+- A session is one saved conversation: a .jsonl file in ctx.sessionManager.getSessionDir(), one directory per project. pi starts a new one on every launch; event.reason on session_start is "startup" for that launch.
+- ctx.switchSession(path, { withSession }), ctx.newSession({ withSession }) and ctx.fork(entryId, { withSession }) exist only on a command's ctx. They replace the session the person sees, history included, and leave the old ctx stale: do follow-up work in withSession, with the ctx it receives.
+- To open another session at launch, register a command that calls ctx.switchSession, and from session_start with reason "startup" run it with pi.sendUserMessage as above. Never paste an old transcript into the new session's context in its place: the person would still see an empty session.
 
 ## Running commands: pi.exec
 

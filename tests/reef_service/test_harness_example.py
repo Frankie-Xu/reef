@@ -482,7 +482,8 @@ ENTRIES = (
 
 DESIGN = "The user wants the tests run before every answer. Trigger: every task; no state. Nothing to set up."
 
-REVIEW = {"result": "partial", "covered": ["the tests run first"], "uncovered": ["no second reviewer"]}
+#: A complete review, so a case answers once; the retry after a short review has cases of its own.
+REVIEW = {"result": "complete", "covered": ["the tests run first"], "uncovered": []}
 
 
 def designed(*entries: dict, design: str = DESIGN, requires: list | None = None) -> str:
@@ -1446,3 +1447,73 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     empty = replay.collect(tmp_path / "nothing")
     assert empty == {"releases": [], "sessions": [], "process": [], "seed_entries": []}
     assert '<script id="data" type="application/json">' in replay.render(empty)
+
+
+# -- propose: a request whose review finds the answer short is answered again ------
+
+SHORT = {"result": "partial", "delivers": True, "covered": ["the tests run first"], "uncovered": ["no retry"]}
+SUBSTITUTE = {
+    "result": "partial",
+    "delivers": False,
+    "covered": [],
+    "uncovered": ["a rule tells the model about the session instead of opening it"],
+}
+
+
+def test_a_short_review_sends_the_request_back_with_its_findings_and_keeps_the_complete_answer(evolution) -> None:
+    model = Model(
+        designed(skill("run-tests")),
+        json.dumps(SHORT),
+        designed(skill("run-tests", "# improved\n\nretry once"), design="Second design."),
+        json.dumps(REVIEW),
+    )
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
+    assert proposal.mutations[0].options["config"]["text"].endswith("retry once")
+    assert proposal.notes == {"design": "Second design.", "review": REVIEW, "attempts": 2}
+    # plan, answer, review, answer again, review: a complete review ends the loop.
+    assert model.calls == 5
+    retry_prompt = model.prompts[3]
+    assert retry_prompt.startswith(model.prompts[1])
+    assert "An earlier answer to this request was reviewed and fell short." in retry_prompt
+    assert f"Its design was:\n{DESIGN}\n" in retry_prompt and "- no retry\n" in retry_prompt
+    assert "It did not deliver the behavior at all" not in retry_prompt
+    # The prompts say what delivering means: no substitute in place of the behavior.
+    assert "a rule, a note or a workaround that only imitates the behavior is not an answer" in model.prompts[1]
+    assert '"delivers": true or false' in model.prompts[2]
+
+
+def test_answers_that_never_deliver_skip_the_step_after_the_last_attempt_saying_why(evolution) -> None:
+    answer = designed(rules("resume", "Resume the last session."))
+    model = Model(answer, json.dumps(SUBSTITUTE), answer, json.dumps(SUBSTITUTE), answer, json.dumps(SUBSTITUTE))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.mutations == ()
+    assert proposal.notes["failure"] == (
+        "the change does not deliver the request: a rule tells the model about the session instead of opening it"
+    )
+    assert proposal.notes["attempts"] == 3
+    assert model.calls == 1 + 2 * 3
+    assert "It did not deliver the behavior at all" in model.prompts[-2]
+    # A failed call after a substitute reports the substitute, which says more than the failed call.
+    model = Model(answer, json.dumps(SUBSTITUTE), ModelBindingError("endpoint down"))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.mutations == () and proposal.notes["failure"].startswith("the change does not deliver")
+
+
+def test_the_kept_answer_is_the_delivering_one_with_the_fewest_uncovered_points(evolution) -> None:
+    two_gaps = {**SHORT, "uncovered": ["no retry", "no log"]}
+    model = Model(
+        designed(skill("first")),
+        json.dumps(two_gaps),
+        designed(rules("second", "A substitute.")),
+        json.dumps(SUBSTITUTE),
+        designed(skill("third")),
+        json.dumps(SHORT),
+    )
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [m.id for m in proposal.mutations] == ["third"]
+    assert proposal.notes["review"] == SHORT and proposal.notes["attempts"] == 3
+    # A failed call after a delivering answer keeps that answer rather than skipping the step.
+    model = Model(designed(skill("first")), json.dumps(two_gaps), ModelBindingError("endpoint down"))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [m.id for m in proposal.mutations] == ["first"] and proposal.notes["attempts"] == 2

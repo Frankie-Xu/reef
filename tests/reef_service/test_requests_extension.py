@@ -1,8 +1,10 @@
 """The harness requests extension: reef-pi's commands and tools, run under node with stubs.
 
 The asset registers nothing under ``PI_OFFLINE``. With a UI the ask command
-hands the request to the session model, which asks what is unclear through
-``reef_ask_user`` and files through ``reef_file_request``; with ``--direct``
+clarifies the request in the background: it calls the session's model with the
+two tools, asks what is unclear through ``reef_ask_user``, files through
+``reef_file_request`` and keeps the clarification as one collapsed chat entry,
+out of the session's context; with ``--direct``
 or headless it posts the request with the session id and the release file's
 release, leaves inference receipts available for feedback, and reports
 durable acceptance with a link to the request's page. A watch then reports
@@ -37,14 +39,17 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not i
 ACCEPTED = {"agent_record_id": "q-1", "scenario": "code-repair", "request_type": "train"}
 # One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command,
 # tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch, and prints what the
-# extension registered and every call it made. TEST_SELECT and TEST_INPUT script the dialogs, one answer per
+# extension registered and every call it made. TEST_ARGS_2 is what a second TEST_REPEAT run passes instead of
+# TEST_ARGS. TEST_SELECT and TEST_INPUT script the dialogs, one answer per
 # call; TEST_CONFIRM is 1 (yes to every confirm), 0 or unset (no), or a JSON list consumed in order, the last one
 # repeating; TEST_EXEC maps a joined argv of a pi.exec call, or a prefix of it, to the {stdout, stderr, code} the
 # stub answers (no key: exit 0, nothing printed); TEST_SHUTDOWN_AFTER_MS fires session_shutdown mid run;
 # TEST_CLOCK_SKEW_AFTER_MS moves the clock forward by TEST_CLOCK_SKEW_MS, past the watch's 30 minute cap by
 # default. An answer that is a list is consumed in order, the last one repeating, for a route or a call whose
 # answer changes over the polls. TEST_HANG lists the routes ("METHOD path") whose fetch never answers and ends
-# only with the caller's abort.
+# only with the caller's abort. TEST_REPLIES scripts the model's replies to the background clarification, one
+# per call (a {throw} entry rejects the call, a {hang} entry never answers); TEST_BRANCH is the session branch it reads as background, and
+# TEST_NO_MODEL=1 leaves the session without a model.
 RUNNER = """
 import requests from "./requests.mjs";
 
@@ -53,6 +58,7 @@ const commands = {};
 const shortcuts = {};
 const handlers = {};
 const events = [];
+const entryRenderers = [];
 const execAnswers = JSON.parse(process.env.TEST_EXEC || "{}");
 const execAnswerFor = (args) => {
   const joined = args.join(" ");
@@ -69,6 +75,8 @@ const pi = {
   on(name, handler) { handlers[name] = handler; },
   sendUserMessage(text, options) { events.push({ kind: "user_message", text, options: options ?? null }); },
   sendMessage(message, options) { events.push({ kind: "message", message, options: options ?? null }); },
+  appendEntry(customType, data) { events.push({ kind: "entry", customType, data }); },
+  registerEntryRenderer(customType) { entryRenderers.push(customType); },
   exec: async (command, args) => { events.push({ kind: "exec", command, args }); return execAnswerFor(args); },
 };
 const selections = JSON.parse(process.env.TEST_SELECT || "[]");
@@ -76,8 +84,19 @@ const inputs = JSON.parse(process.env.TEST_INPUT || "[]");
 const confirmRaw = JSON.parse(process.env.TEST_CONFIRM || "0");
 const confirms = Array.isArray(confirmRaw) ? confirmRaw : [confirmRaw === 1];
 const confirmAnswer = () => (confirms.length > 1 ? confirms.shift() : confirms[0]) === true;
+const replies = JSON.parse(process.env.TEST_REPLIES || "[]");
 const ctx = {
   hasUI: process.env.TEST_HEADLESS !== "1",
+  model: process.env.TEST_NO_MODEL === "1" ? undefined : { provider: "reef", id: "served" },
+  modelRegistry: {
+    complete: async (model, context, options) => {
+      events.push({ kind: "model_call", model, context: JSON.parse(JSON.stringify(context)), signal: options.signal instanceof AbortSignal });
+      const reply = replies.shift();
+      if (reply && reply.hang) return new Promise(() => {});
+      if (!reply || reply.throw) throw new Error(reply ? reply.throw : "no scripted reply");
+      return { role: "assistant", stopReason: "stop", ...reply };
+    },
+  },
   isIdle: () => process.env.TEST_BUSY !== "1",
   ui: {
     confirm: async (title, message) => { events.push({ kind: "confirm", title, message }); return confirmAnswer(); },
@@ -87,7 +106,7 @@ const ctx = {
     setStatus: (key, text) => events.push({ kind: "status", key, text: text ?? null }),
     setWidget: (key, content) => events.push({ kind: "widget", key, content: content ?? null }),
   },
-  sessionManager: { getSessionId: () => "sess-1234" },
+  sessionManager: { getSessionId: () => "sess-1234", getBranch: () => JSON.parse(process.env.TEST_BRANCH || "[]") },
 };
 const answers = JSON.parse(process.env.TEST_ANSWERS || "{}");
 const answerFor = (key) => {
@@ -117,11 +136,14 @@ if (process.env.TEST_CLOCK_SKEW_AFTER_MS) {
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 requests(pi);
-const out = { tools: Object.keys(tools), commands: Object.keys(commands), shortcuts: Object.keys(shortcuts), handlers: Object.keys(handlers).sort(), events, result: null, error: null, fetchesAtShutdown: null };
+const out = { tools: Object.keys(tools), commands: Object.keys(commands), shortcuts: Object.keys(shortcuts), handlers: Object.keys(handlers).sort(), entryRenderers, events, result: null, error: null, fetchesAtShutdown: null };
 const params = JSON.parse(process.env.TEST_PARAMS || "{}");
-const run = async () => {
+const run = async (index) => {
   const step = process.env.TEST_STEP;
-  if (step === "command") return commands["reef-harness"].handler(process.env.TEST_ARGS || "", ctx);
+  if (step === "command") {
+    const later = index > 0 && process.env.TEST_ARGS_2 !== undefined;
+    return commands["reef-harness"].handler(later ? process.env.TEST_ARGS_2 : process.env.TEST_ARGS || "", ctx);
+  }
   if (step === "versions") return commands["reef-versions"].handler(process.env.TEST_ARGS || "", ctx);
   if (step === "ask_user") return tools.reef_ask_user.execute("call-1", params, undefined, undefined, ctx);
   if (step === "file_request") return tools.reef_file_request.execute("call-1", params, undefined, undefined, ctx);
@@ -130,7 +152,8 @@ const run = async () => {
 };
 const shutdown = () => handlers.session_shutdown({ type: "session_shutdown" }, ctx);
 try {
-  for (let repeat = Number(process.env.TEST_REPEAT || 1); repeat > 0; repeat--) out.result = await run();
+  const repeats = Number(process.env.TEST_REPEAT || 1);
+  for (let index = 0; index < repeats; index++) out.result = await run(index);
 } catch (error) {
   out.error = error.message;
 }
@@ -169,6 +192,7 @@ def _install_root(tmp_path: Path, *, with_release_file: bool = True) -> Path:
 KNOBS = (
     "TEST_STEP",
     "TEST_ARGS",
+    "TEST_ARGS_2",
     "TEST_PARAMS",
     "TEST_ANSWERS",
     "TEST_REPEAT",
@@ -184,6 +208,9 @@ KNOBS = (
     "TEST_HANG",
     "TEST_EXEC",
     "TEST_SHORTCUT_AT_MS",
+    "TEST_REPLIES",
+    "TEST_BRANCH",
+    "TEST_NO_MODEL",
 )
 #: The environment the extension reads beyond the three it needs; each case sets what it needs and the rest stays unset.
 SETTINGS = ("PI_OFFLINE", "REEF_TOKEN", "REEF_HARNESS_WATCH_MS", "REEF_HARNESS_FETCH_MS", "REEF_HARNESS_WRAPPER")
@@ -275,10 +302,12 @@ def test_the_assets_are_ascii_and_the_skill_body_is_a_short_pi_skill() -> None:
 
 
 def test_the_extension_imports_node_only_and_the_ask_path_confirms_nothing() -> None:
-    """The tools declare plain JSON schema parameters, so the one file needs no typebox import."""
+    """The tools declare plain JSON schema parameters, so the one file needs no typebox import; pi-tui, which draws
+    the clarification's entry, is the one module loaded lazily through pi's loader."""
     text = ASSET.read_text(encoding="utf-8")
     imports = re.findall(r'^import .* from "([^"]+)";$', text, flags=re.MULTILINE)
     assert imports and all(module.startswith("node:") for module in imports)
+    assert re.findall(r'import\("([^"]+)"\)', text) == ["@earendil-works/pi-tui"]
     assert text.count("pi.registerTool(") == 2
     # Asking confirms nothing: from the first tool through the ask command no confirm runs. The confirms guard the
     # next steps (the install, the promote, a setup check) in the helpers before the tools and in /reef-versions.
@@ -308,6 +337,7 @@ def test_registers_the_two_tools_the_commands_and_the_session_events(tmp_path: P
     assert out["tools"] == ["reef_ask_user", "reef_file_request"]
     assert out["commands"] == ["reef-harness", "reef-versions"]
     assert out["handlers"] == ["session_shutdown", "session_start"]
+    assert out["entryRenderers"] == ["reef-harness-clarify"]
     assert out["events"] == []
 
 
@@ -756,28 +786,164 @@ FILED = (
 )
 
 
-def test_the_command_with_a_ui_hands_the_request_to_the_session_model_and_files_nothing(tmp_path: Path) -> None:
-    out = _ask(
-        tmp_path, _install_root(tmp_path), {"POST /reef/train": {"status": 200, "body": ACCEPTED}}, direct=False
+def _call(name: str, arguments: dict[str, Any], call_id: str = "c-1") -> dict[str, Any]:
+    """A scripted model reply that calls one tool."""
+    return {
+        "content": [{"type": "toolCall", "id": call_id, "name": name, "arguments": arguments}],
+        "stopReason": "toolUse",
+    }
+
+
+BRANCH = [
+    {"type": "message", "message": {"role": "user", "content": "we keep missing the blocked builds"}},
+    {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "I can watch them."}]}},
+    {"type": "message", "message": {"role": "toolResult", "content": [{"type": "text", "text": "tool output"}]}},
+    {"type": "custom", "customType": "other"},
+]
+
+
+def _clarify(tmp_path: Path, replies: list[dict[str, Any]], **env: str) -> dict[str, Any]:
+    return _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        {"POST /reef/train": {"status": 200, "body": ACCEPTED}},
+        direct=False,
+        TEST_REPLIES=json.dumps(replies),
+        TEST_BRANCH=json.dumps(BRANCH),
+        TEST_WAIT_MS="300",
+        **env,
     )
+
+
+def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(tmp_path: Path) -> None:
+    thinking = {"type": "thinking", "thinking": "the channel is open"}
+    filing = {
+        "request": "text me when you are blocked",
+        "clarifications": [{"question": "Which channel?", "answer": "SMS"}],
+    }
+    replies = [
+        {"content": [thinking, *_call("reef_ask_user", QUESTIONS)["content"]], "stopReason": "toolUse"},
+        _call("reef_file_request", filing, "c-2"),
+    ]
+    out = _clarify(tmp_path, replies, TEST_SELECT=json.dumps(["SMS", "Nights"]), REEF_TOKEN="tok")
     assert out["error"] is None
+    # Nothing reaches the session: no message in it, and the model is called directly with the two tools.
+    assert _of_kind(out, "user_message") == [] and _of_kind(out, "message") == []
+    first, second = _of_kind(out, "model_call")
+    assert first["signal"] is True and first["model"] == {"provider": "reef", "id": "served"}
+    assert [tool["name"] for tool in first["context"]["tools"]] == ["reef_ask_user", "reef_file_request"]
+    assert "Use only the reef_ask_user and reef_file_request tools" in first["context"]["systemPrompt"]
+    # The model hears what reef-pi is, so it never takes the name for an unrelated web app.
+    assert "a coding agent that runs in a terminal (not a web or browser app)" in first["context"]["systemPrompt"]
+    (prompt,) = first["context"]["messages"]
+    # The recent conversation rides as background, user and assistant text only, before the request.
+    assert prompt["content"].startswith(
+        "The recent conversation in the session, as background for what the request refers to:\n\n```\n"
+        "user: we keep missing the blocked builds\n\nassistant: I can watch them.\n```\n\n" + CLARIFY_HEAD
+    )
+    assert "tool output" not in prompt["content"]
+    assert "- at most 3, one decision per question" in prompt["content"]
+    assert prompt["content"].endswith("Do not write the change yourself: reef's service writes it.")
+    # The second call carries the answers back as the first call's tool result.
+    tool_result = second["context"]["messages"][-1]
+    assert tool_result["role"] == "toolResult" and tool_result["toolCallId"] == "c-1"
+    assert json.loads(tool_result["content"][0]["text"])[1] == {"question": "When?", "answer": "Nights"}
+    (request,) = _fetches(out)
+    assert request["body"]["text"] == "text me when you are blocked\n\nClarifications:\n- Q: Which channel?\n  A: SMS"
+    # The filing ends it at once: no further model call, its widget is cleared, and the step's watch starts.
+    widgets = [event for event in _of_kind(out, "widget") if event["key"] == "reef-harness-clarify"]
+    assert widgets[0]["content"][0].endswith("thinking it through - ctrl+shift+r or /reef-harness to look in")
+    assert widgets[-1]["content"] is None
+    assert _of_kind(out, "status")[0] == {"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}
+    (entry,) = _of_kind(out, "entry")
+    assert entry["customType"] == "reef-harness-clarify"
+    data = entry["data"]
+    assert data["outcome"] == "filed" and data["request"] == "text me when you are blocked"
+    assert data["summary"].startswith(f"filed request q-1; watch it at {REQUEST_PAGE}&token=tok (")
+    kinds = [item["kind"] for item in data["transcript"]]
+    assert kinds == ["thinking", "reef_ask_user", "result", "reef_file_request", "result"]
+    assert data["transcript"][-1]["text"] == FILED
+
+
+def test_the_command_without_an_argument_says_what_is_running(tmp_path: Path) -> None:
+    """The way in that needs no key the terminal may swallow and no click it may not offer: the command itself
+    names the phase and the clarification's steps so far; with nothing running it prints the usage."""
+    out = _clarify(tmp_path, [{"hang": True}], TEST_REPEAT="2", TEST_ARGS_2="")
+    (notice,) = _notices(out)
+    assert notice["type"] == "info"
+    assert notice["message"].startswith("reef: clarifying 'text me when you are blocked' - thinking it through")
+
+
+@pytest.mark.parametrize(
+    ("replies", "selects", "outcome", "notice"),
+    [
+        ([_call("reef_ask_user", QUESTIONS)], [CANCEL], "cancelled", None),
+        (
+            [{"content": [{"type": "text", "text": "What should I file?"}]}],
+            [],
+            "unfiled",
+            (
+                "warning",
+                "reef: the clarification ended without filing: What should I file?; ask again, or file it as is "
+                "with /reef-harness --direct",
+            ),
+        ),
+        (
+            [{"throw": "connection reset"}],
+            [],
+            "failed",
+            ("error", "reef: the clarification failed (connection reset); file it as is with /reef-harness --direct"),
+        ),
+    ],
+    ids=["cancelled", "no-tool-call", "model-error"],
+)
+def test_a_clarification_that_does_not_file_says_why_and_sends_nothing(
+    tmp_path: Path, replies: list[dict[str, Any]], selects: list[str], outcome: str, notice: tuple[str, str] | None
+) -> None:
+    """The entry says what happened; a cancel the person chose needs no notice beside it."""
+    out = _clarify(tmp_path, replies, TEST_SELECT=json.dumps(selects))
     assert _fetches(out) == [] and _of_kind(out, "status") == []
-    (sent,) = _of_kind(out, "user_message")
-    assert sent["options"] is None
-    assert sent["text"].startswith(CLARIFY_HEAD + "reef_file_request, decide what would be built: ")
-    assert "- at most 3, one decision per question" in sent["text"]
-    assert "never ask for a value or a setup detail the user provides when the change is installed" in sent["text"]
-    assert sent["text"].endswith("Do not write the change yourself: reef's service writes it.")
-    assert _notices(out) == [{"kind": "notify", "message": "reef: clarifying, then filing", "type": "info"}]
+    (entry,) = _of_kind(out, "entry")
+    assert entry["data"]["outcome"] == outcome
+    assert _notices(out) == ([] if notice is None else [{"kind": "notify", "message": notice[1], "type": notice[0]}])
+
+
+def test_a_bad_tool_call_goes_back_to_the_model_as_an_error(tmp_path: Path) -> None:
+    replies = [_call("reef_file_request", {"request": ""}), _call("reef_file_request", {"request": "text me"}, "c-2")]
+    out = _clarify(tmp_path, replies)
+    retry = _of_kind(out, "model_call")[1]["context"]["messages"][-1]
+    assert retry["isError"] is True and retry["content"][0]["text"] == "error: request must be a non-empty string"
+    assert _fetches(out)[0]["body"]["text"] == "text me"
+    assert _of_kind(out, "entry")[0]["data"]["outcome"] == "filed"
+
+
+def test_the_command_without_a_model_or_while_clarifying_starts_nothing(tmp_path: Path) -> None:
+    out = _clarify(tmp_path, [], TEST_NO_MODEL="1")
+    assert _of_kind(out, "model_call") == [] and _of_kind(out, "entry") == []
+    assert _notices(out) == [
+        {
+            "kind": "notify",
+            "message": "reef: no model to clarify with; pick one with /model, or use /reef-harness --direct",
+            "type": "error",
+        }
+    ]
+    # A second ask while the first is still running is refused; the first goes on.
+    out = _clarify(tmp_path / "twice", [{"hang": True}], TEST_REPEAT="2")
+    assert len(_of_kind(out, "model_call")) == 1
+    assert _notices(out)[0] == {
+        "kind": "notify",
+        "message": "reef: still clarifying 'text me when you are blocked'; ask again once it is filed",
+        "type": "warning",
+    }
     # The release file is checked before the model is engaged: without it nothing is sent or asked.
-    out = _ask(
+    bare = _ask(
         tmp_path / "bare",
         _install_root(tmp_path / "bare", with_release_file=False),
         {"POST /reef/train": {"status": 200, "body": ACCEPTED}},
         direct=False,
     )
-    assert _of_kind(out, "user_message") == []
-    (notice,) = out["events"]
+    assert _of_kind(bare, "model_call") == []
+    (notice,) = bare["events"]
     assert notice["type"] == "error" and "nothing was sent" in notice["message"]
 
 
@@ -1030,7 +1196,9 @@ def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_report
     # One line while it is closed, above the input box, naming the phase in the person's words and the way in.
     assert all(len(content) == 1 for content in drawn)
     assert any("checking the harness" in content[0] for content in drawn)
-    assert all("ctrl+shift+r to look in" in content[0] for content in drawn)
+    assert all("ctrl+shift+r or /reef-harness to look in" in content[0] for content in drawn)
+    # The line carries the request's page as a terminal hyperlink, so a click opens it where the terminal offers one.
+    assert all(f"\x1b]8;;{REQUEST_PAGE}\x1b\\open the page\x1b]8;;\x1b\\" in content[0] for content in drawn)
     # The frames turn, so the person sees the step is alive between the polls.
     assert len({content[0][0] for content in drawn}) > 1
     # The phase is the service's own, read from the route the page reads.
@@ -1056,7 +1224,7 @@ def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path
     opened = [content for content in _widgets(out) if content and len(content) > 1]
     assert opened, "the key never opened the spinner"
     panel = opened[-1]
-    assert "ctrl+shift+r to close" in panel[0] and "writing the change" in panel[0]
+    assert "ctrl+shift+r or /reef-harness to close" in panel[0] and "writing the change" in panel[0]
     body = "\n".join(panel[1:])
     assert "asked: text me when you are blocked" in body and "request: q-1" in body
     assert "step record: /work/steps/1" in body

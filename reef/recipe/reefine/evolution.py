@@ -98,7 +98,9 @@ REQUEST_PROMPT = (
     "grant. The value of an env item is read at run time from process.env.NAME; an extension never asks "
     "the user for it, never stores it in a file of its own and never hardcodes it.\n"
     "4. Then write the entries: complete for what the request implies, and nothing the request did not "
-    "ask for.\n\n"
+    "ask for. When these kinds and the extension API cannot deliver the behavior the request asks for, "
+    "write the design saying why and no entry: a rule, a note or a workaround that only imitates the "
+    "behavior is not an answer.\n\n"
     "Current harness entries (id, kind, and the start of each body):\n{entries}\n\n"
     "You may write entries of these kinds, with exactly these config fields:\n"
     '- skill: {{"name": <id>, "text": <SKILL.md>}}; the text must start with YAML frontmatter '
@@ -149,10 +151,31 @@ REVIEW_PROMPT = (
     "that no entry performs, a variable an extension reads that no requires item names (PI_OFFLINE, "
     "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none), a value the user must "
     "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
+    "Then decide whether the entries deliver the behavior the request asks for at all. They do not when "
+    "they put a substitute in its place: a rule or a note where the request asks for behavior, or a "
+    "workaround that only imitates it (context the model reads instead of the session the user sees, say). "
+    "A gap beside a delivered behavior is uncovered, not undelivered.\n"
     "Respond with one JSON object and nothing else:\n"
-    '{{"result": "complete" or "partial", "covered": ["<one point per item>"], '
+    '{{"result": "complete" or "partial", "delivers": true or false, "covered": ["<one point per item>"], '
     '"uncovered": ["<one point per item>"]}}\n'
-    "The result is complete only when uncovered is empty."
+    "The result is complete only when uncovered is empty. When delivers is false, the first uncovered item "
+    "says what the entries put in the behavior's place."
+)
+
+#: How many answers a request may get: the first, then one more each time the review finds the last one short.
+REQUEST_ATTEMPTS = 3
+
+#: The prompt section a request gets again after a review found the previous answer short.
+RETRY_SECTION = (
+    "An earlier answer to this request was reviewed and fell short.{delivered} Its design was:\n{design}\n"
+    "The review found:\n{findings}\n"
+    "Write the whole answer again, design first, so that it covers these points.\n\n"
+)
+
+#: What the retry section adds when the earlier answer only put a substitute in place of the behavior.
+RETRY_UNDELIVERED = (
+    " It did not deliver the behavior at all: it put a substitute in its place. Deliver the behavior itself, "
+    "or, when these kinds and the extension API cannot, write the design saying why and no entry."
 )
 
 #: The prompt section carrying the failures a step in training_mode hybrid hands over beside the request.
@@ -267,12 +290,73 @@ def _answer_request(
     with the notes the step records: the design written first, the review of the entries, the requires
     items that could not be honored and the variables the extensions read that no item names.
 
-    A ``{"requires": [...]}`` object beside the entries is what the change
-    needs from the user's machine; its items are appended to the request
-    mapping's ``requires``, where the backend reads them back. When the call
-    fails or the reply gives nothing to apply, the proposal has no mutations
-    and its notes carry the reason under ``failure``."""
+    A review that finds the answer short (partial, or not delivering the
+    behavior at all) sends the request back with what it found, up to
+    ``REQUEST_ATTEMPTS`` answers in all; a complete review ends the loop at
+    once. The answer kept is the delivering one with the fewest uncovered
+    points, and ``attempts`` in the notes counts the answers written when
+    there was more than one. When no
+    answer delivers the behavior, the proposal has no mutations and its notes
+    say why under ``failure``, as they do when a call fails or a reply gives
+    nothing to apply.
+
+    A ``{"requires": [...]}`` object beside the kept entries is what the
+    change needs from the user's machine; its items are appended to the
+    request mapping's ``requires``, where the backend reads them back."""
     prompt = _request_prompt(nodes, request, samples, models, entries)
+    own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
+    kept: tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | None = None
+    undelivered: StepProposal | None = None
+    retry = ""
+    attempt = 0
+    while attempt < REQUEST_ATTEMPTS:
+        attempt += 1
+        answer = _answer_once(prompt + retry, request, models, nodes, entries, own)
+        if isinstance(answer, StepProposal):
+            # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
+            # earlier substitute says more about the request than the failed call does.
+            if kept is None:
+                if undelivered is not None:
+                    return undelivered
+                return answer if attempt == 1 else StepProposal((), {**answer.notes, "attempts": attempt})
+            break
+        mutations, added, notes = answer
+        review = notes.get("review")
+        if review is not None and review.get("delivers") is False:
+            reason = review["uncovered"][0] if review["uncovered"] else "the entries only imitate the behavior"
+            undelivered = StepProposal(
+                (), {**notes, "failure": f"the change does not deliver the request: {reason}", "attempts": attempt}
+            )
+        elif kept is None or _uncovered_count(notes) < _uncovered_count(kept[2]):
+            kept = (mutations, added, notes)
+        if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
+            break
+        retry = RETRY_SECTION.format(
+            design=notes.get("design", "(none written)"),
+            findings="\n".join(f"- {point}" for point in review["uncovered"]) or "- (the review named no point)",
+            delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
+        )
+    if kept is None:
+        return undelivered
+    mutations, added, notes = kept
+    if attempt > 1:
+        notes["attempts"] = attempt
+    # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
+    if added and isinstance(request, dict):
+        request["requires"] = [*own, *added]
+    return StepProposal(tuple(mutations), notes)
+
+
+def _answer_once(
+    prompt: str,
+    request: Mapping[str, Any],
+    models: ModelBindings,
+    nodes: Sequence[tuple[str, Any]],
+    entries: Sequence[Mapping[str, Any]],
+    own: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal:
+    """One answer and its review: the mutations, the requires items the reply added and the notes, or a
+    proposal without mutations whose notes say why there is nothing to apply."""
     # An extension is longer than a skill, and a thinking model reasons for tens of thousands of tokens before
     # it writes one, answering with no text when the budget ends inside that reasoning; the request path pays
     # for the room and the minutes, the failure path and the review keep their shorter budgets.
@@ -287,11 +371,7 @@ def _answer_request(
         return _nothing_to_apply(
             reply, "every entry in the reply was dropped: a reserved id, or an id another kind holds"
         )
-    own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
     added, refused = _parse_requires(reply)
-    # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
-    if added and isinstance(request, dict):
-        request["requires"] = [*own, *added]
     design = _parse_design(reply)
     notes: dict[str, Any] = {}
     if design is not None:
@@ -304,7 +384,13 @@ def _answer_request(
     undeclared = _undeclared_env(mutations, [*own, *added])
     if undeclared:
         notes["undeclared_env"] = undeclared
-    return StepProposal(tuple(mutations), notes)
+    return mutations, added, notes
+
+
+def _uncovered_count(notes: Mapping[str, Any]) -> int:
+    """How many points an answer's review left uncovered; an answer without a review counts none."""
+    review = notes.get("review")
+    return 0 if review is None else len(review["uncovered"])
 
 
 def _nothing_to_apply(reply: str, reason: str) -> StepProposal:
@@ -421,11 +507,15 @@ def _parse_review(reply: str) -> dict[str, Any] | None:
     review_result = str(value.get("result", value.get("verdict", ""))).strip().lower()
     if review_result not in REVIEW_RESULTS:
         return None
-    return {
+    review: dict[str, Any] = {
         "result": review_result,
         "covered": _strings_of(value.get("covered")),
         "uncovered": _strings_of(value.get("uncovered")),
     }
+    # Only an explicit boolean decides delivery; a review that says nothing about it keeps the change.
+    if isinstance(value.get("delivers"), bool):
+        review["delivers"] = value["delivers"]
+    return review
 
 
 def _strings_of(value: Any) -> list[str]:
