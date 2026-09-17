@@ -461,6 +461,8 @@ class DesignerTurn:
         self.version: str | None = None
         self.generation_of: dict[str, int] = {}
         self.report_counts: dict[int, int] = {}
+        # The version the Designer served when a generation's first report went out: what the next one waits past.
+        self.reported_versions: dict[int, str | None] = {}
         # Proposals register on the job thread while reports arrive on the event loop thread.
         self.lock = threading.Lock()
 
@@ -469,21 +471,42 @@ class DesignerTurn:
         with self.lock:
             self.generation_of[record_id] = generation
 
-    def reported(self, record_id: str) -> None:
-        """Count a report sent for a record one of this service's proposals left."""
+    def reported(self, record_id: str, scenario: str) -> None:
+        """Count a report for one of this service's proposals; a generation's first report reads the Designer's version.
+
+        The read goes over HTTP, so the caller runs this off the event loop.
+        """
         with self.lock:
             generation = self.generation_of.get(record_id)
-            if generation is not None:
-                self.report_counts[generation] = self.report_counts.get(generation, 0) + 1
+            if generation is None:
+                return
+            count = self.report_counts.get(generation, 0) + 1
+            self.report_counts[generation] = count
+        if count > 1:
+            return
+        try:
+            version = self.version_of(scenario)
+        except DesignerError as exc:
+            logger.warning("%s; generation %d's reports are timed at its start version", exc, generation)
+            version = self.version
+        with self.lock:
+            self.reported_versions[generation] = version
 
     def begin(self, generation: int, scenario: str) -> None:
-        """Before a proposal: a generation's first waits for the Designer's version to move past the last generation's."""
+        """Before a proposal: a generation's first waits for the Designer's version to move past the last generation's.
+
+        The version to move past is the one the Designer served when the last generation's reports went out, so a
+        release or a load that appeared before those reports (the scenario's creation release) does not count.
+        """
         if generation == self.generation:
             return
         with self.lock:
             reported = self.report_counts.get(self.generation, 0) if self.generation is not None else 0
-        if self.version is not None and reported > 0:
-            version = self.wait_past(scenario, generation=generation, reported=reported)
+            previous = (
+                self.reported_versions.get(self.generation, self.version) if self.generation is not None else None
+            )
+        if previous is not None and reported > 0:
+            version = self.wait_past(scenario, generation=generation, reported=reported, previous=previous)
         else:
             try:
                 version = self.version_of(scenario)
@@ -499,7 +522,11 @@ class DesignerTurn:
         self.version = version
 
     def version_of(self, scenario: str) -> str | None:
-        """The Designer's version now: the served release id, else the scenario's runtime load id; None when fixed."""
+        """The Designer's version now: the served release id, else the runtime load id with the scenario's step; None when fixed.
+
+        The step is part of a weight Designer's version because a step that skips (every proposal scored alike)
+        leaves the load id where it was and still took the generation in.
+        """
         try:
             if self.is_harness_prompt:
                 manifest = self.client.get(HARNESS_PATH, extra_headers={"x-reef-scenario": scenario})
@@ -508,6 +535,9 @@ class DesignerTurn:
                 scenarios = self.client.get(STATUS_PATH).get("scenarios")
                 block = scenarios.get(scenario) if isinstance(scenarios, Mapping) else None
                 value = block.get("current_runtime_load_id") if isinstance(block, Mapping) else None
+                step = block.get("scenario_step") if isinstance(block, Mapping) else None
+                if isinstance(value, str) and value and isinstance(step, int) and not isinstance(step, bool):
+                    value = f"{value}@{step}"
         except ReefClientError as exc:
             # A scenario that serves no files is a fixed Designer, not a failed read.
             if self.is_harness_prompt and exc.status == 404:
@@ -517,9 +547,8 @@ class DesignerTurn:
             raise DesignerError(f"the Designer's version could not be read: {exc}") from exc
         return value if isinstance(value, str) and value else None
 
-    def wait_past(self, scenario: str, *, generation: int, reported: int) -> str | None:
-        """Poll until the Designer serves a version other than the last generation's or ``wait_s`` runs out; the version then."""
-        previous = self.version
+    def wait_past(self, scenario: str, *, generation: int, reported: int, previous: str) -> str | None:
+        """Poll until the Designer serves a version other than ``previous`` or ``wait_s`` runs out; the version then."""
         logger.info(
             "generation %d waits at Designer version %s for the deployment to take generation %s in (%d reported)",
             generation,

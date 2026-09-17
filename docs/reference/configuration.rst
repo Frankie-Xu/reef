@@ -962,7 +962,7 @@ place it on the host that has Docker.
    generator.designer-options | extra fields of the designer's chat request, e.g. ``{"reasoning_effort": "none"}``
    generator.designer-prompt | fixed | where the Designer's prompt comes from: ``fixed``, or ``harness`` for the tree ``designer-url`` serves under ``designer-scenario``, pulled once per generation (a scenario without files keeps the fixed prompt)
    generator.designer-poll-s | 5 | seconds between two looks at the Designer's version while a generation waits for it to change
-   generator.designer-wait-s | 1800 | seconds a generation's first proposal waits for the Designer's deployment to serve a new version (the harness release under ``designer-prompt: harness``, else the runtime load id of the Designer's scenario) after the previous generation's reports; a deployment with neither is never waited on, and on timeout the generation proceeds with a warning
+   generator.designer-wait-s | 1800 | seconds a generation's first proposal waits for the Designer's deployment to serve a version (the harness release under ``designer-prompt: harness``, else the runtime load id and step of the Designer's scenario) other than the one it served when the previous generation's reports went out; a deployment with neither is never waited on, and on timeout the generation proceeds with a warning
    generator.ready-timeout | 60 | seconds ``reef serve`` waits for the generator to answer
 
 .. code:: yaml

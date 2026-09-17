@@ -252,7 +252,7 @@ class StandInDesignerService(ReefClient):
         self,
         *,
         releases: Sequence[str | ReefClientError | None] = (),
-        load_ids: Sequence[str | ReefClientError | None] = (),
+        load_ids: Sequence[str | tuple[str, int] | ReefClientError | None] = (),
     ) -> None:
         super().__init__("http://127.0.0.1:1", token="t")
         self.releases = list(releases)
@@ -266,6 +266,8 @@ class StandInDesignerService(ReefClient):
         if isinstance(entry, ReefClientError):
             raise entry
         if path != "/reef/harness":
+            if isinstance(entry, tuple):
+                return {"scenarios": {"designer": {"current_runtime_load_id": entry[0], "scenario_step": entry[1]}}}
             return {"scenarios": {"designer": {"current_runtime_load_id": entry}}}
         if entry is None:
             raise ReefClientError(404, "no files")
@@ -446,8 +448,9 @@ def test_the_service_asks_the_designer_with_the_prompt_its_generation_gets(tmp_p
 def test_a_generation_waits_for_the_release_the_last_generations_reports_produced_before_it_pulls_the_prompt(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # r1 answers generation 0's look and pull and generation 1's first two polls; r2 the third poll and the pull after it.
-    client = StandInDesignerService(releases=["r1", "r1", "r1", "r1", "r2"])
+    # r1 answers generation 0's look and pull, the read its first report makes, and generation 1's first two polls;
+    # r2 the third poll and the pull after it.
+    client = StandInDesignerService(releases=["r1", "r1", "r1", "r1", "r1", "r2"])
     turn = DesignerTurn(client, is_harness_prompt=True, poll_s=0.001, wait_s=5.0)
     built, designer, _, _ = service(
         tmp_path, designer_scenario="designer", prompts=HarnessPrompt(client, "designer"), turn=turn
@@ -469,8 +472,8 @@ def test_a_generation_waits_for_the_release_the_last_generations_reports_produce
         systems == ["System of r1."] * 2 + ["System of r2."] * 2
     ), "generation 1 asks with the release its wait ended on"
     assert (
-        client.calls == [{"path": "/reef/harness", "x-reef-scenario": "designer"}] * 6
-    ), "generation 0: one look and one pull; generation 1: three polls, then the pull"
+        client.calls == [{"path": "/reef/harness", "x-reef-scenario": "designer"}] * 7
+    ), "generation 0: one look, one pull, one read at its first report; generation 1: three polls, then the pull"
     assert turn.generation == 1 and turn.version == "r2"
     assert turn.report_counts == {0: 1}, "a report for a record the service never proposed counts for no generation"
     messages = [record.getMessage() for record in caplog.records]
@@ -482,6 +485,27 @@ def test_a_generation_waits_for_the_release_the_last_generations_reports_produce
     assert service(tmp_path / "without")[0].turn is None, "no turn unless the deployment gives one"
 
 
+def test_a_release_that_appeared_before_the_reports_went_out_does_not_end_the_wait(tmp_path: Path) -> None:
+    # Generation 0 looks and pulls before the scenario exists (404, the fixed prompt); its first call creates the
+    # scenario and the creation release c1; its first report reads c1; generation 1 must wait for t1, the rewrite.
+    client = StandInDesignerService(releases=[None, None, "c1", "c1", "t1"])
+    turn = DesignerTurn(client, is_harness_prompt=True, poll_s=0.001, wait_s=5.0)
+    built, designer, _, _ = service(
+        tmp_path, designer_scenario="designer", prompts=HarnessPrompt(client, "designer"), turn=turn
+    )
+
+    async def body(generator: HttpGenerator) -> object:
+        first = await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+        await generator.report_proposal(first.record_id, scenario="spade", score=-1.0, metadata={})
+        await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        return None
+
+    run_with(built, body)
+    systems = [call["messages"][0]["content"] for call in designer.calls]
+    assert systems[0] != "System of c1." and systems[1] == "System of t1.", "generation 1 asks with the rewrite"
+    assert turn.reported_versions == {0: "c1"} and turn.version == "t1"
+
+
 def test_a_generation_waits_for_the_designers_runtime_load_id_to_change(caplog: pytest.LogCaptureFixture) -> None:
     client = StandInDesignerService(load_ids=["load-1", "load-1", ReefClientError(503, "busy"), "load-2"])
     turn = DesignerTurn(client, poll_s=0.001, wait_s=5.0)
@@ -489,8 +513,8 @@ def test_a_generation_waits_for_the_designers_runtime_load_id_to_change(caplog: 
     turn.begin(0, "designer")
     assert turn.version == "load-1" and client.calls == [{"path": "/reef/status"}], "one look per generation"
     turn.proposed(0, "designer-1")
-    turn.reported("designer-1")
-    turn.reported("designer-1")
+    turn.reported("designer-1", "designer")
+    turn.reported("designer-1", "designer")
     with caplog.at_level(logging.INFO, logger="reef.record2dataset.designer"):
         turn.begin(1, "designer")
     assert turn.generation == 1 and turn.version == "load-2" and len(client.calls) == 4
@@ -500,6 +524,16 @@ def test_a_generation_waits_for_the_designers_runtime_load_id_to_change(caplog: 
     )
     assert messages[1] == "the Designer's version could not be read (503): busy; the wait goes on"
     assert messages[2].startswith("generation 1 asks the Designer at version load-2 after") and len(messages) == 3
+
+
+def test_a_weight_designers_skipped_step_moves_its_version() -> None:
+    client = StandInDesignerService(load_ids=[("load-1", 1), ("load-1", 1), ("load-1", 1), ("load-1", 2)])
+    turn = DesignerTurn(client, poll_s=0.001, wait_s=5.0)
+    turn.begin(0, "designer")
+    turn.proposed(0, "designer-1")
+    turn.reported("designer-1", "designer")
+    turn.begin(1, "designer")
+    assert turn.version == "load-1@2" and turn.reported_versions == {0: "load-1@1"} and len(client.calls) == 4
 
 
 def test_a_fixed_designer_is_looked_at_once_per_generation_and_never_waited_on(
@@ -514,13 +548,14 @@ def test_a_fixed_designer_is_looked_at_once_per_generation_and_never_waited_on(
         with caplog.at_level(logging.WARNING, logger="reef.record2dataset.designer"):
             turn.begin(0, "designer")
         turn.proposed(0, "designer-1")
-        turn.reported("designer-1")
+        turn.reported("designer-1", "designer")
         started = time.monotonic()
         turn.begin(1, "designer")
-        assert turn.version is None and len(client.calls) == 2 and time.monotonic() - started < 1.0
+        assert turn.version is None and len(client.calls) == 3 and time.monotonic() - started < 1.0
     warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
     assert warnings == [
         "the Designer's version could not be read (500): down; generation 0 proceeds without one",
+        "the Designer's version could not be read (500): down; generation 0's reports are timed at its start version",
         "the Designer's version could not be read (500): down; generation 1 proceeds without one",
     ]
 
@@ -532,7 +567,7 @@ def test_a_designer_that_never_moves_is_waited_on_up_to_the_limit_and_the_genera
     turn = DesignerTurn(client, poll_s=0.002, wait_s=0.02)
     turn.begin(0, "designer")
     turn.proposed(0, "designer-1")
-    turn.reported("designer-1")
+    turn.reported("designer-1", "designer")
     with caplog.at_level(logging.WARNING, logger="reef.record2dataset.designer"):
         started = time.monotonic()
         turn.begin(1, "designer")

@@ -712,7 +712,7 @@ class GeneratorService:
         except (DesignerError, ReefClientError, OSError) as exc:
             return error_response(502, str(exc))
         if self.turn is not None:
-            self.turn.reported(record_id)
+            await asyncio.to_thread(self.turn.reported, record_id, scenario)
         return web.json_response({"agent_record_id": report_id})
 
     async def write_task(self, request: web.Request) -> web.Response:
