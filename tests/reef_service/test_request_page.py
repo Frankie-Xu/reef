@@ -213,7 +213,7 @@ def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_r
     assert "Proposed changes" in _sections(page)
     assert "Release rel-1 is ready. This change includes an extension" in page
     assert REFRESH not in page
-    assert "<code>/reef-versions 1 promote</code>" in page
+    assert "<code>/reef-versions 1 install</code>" in page
     promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending, promote], now=1_100.0)
     assert '<span class="promoted">Promoted at step 2</span>' in page

@@ -12,12 +12,13 @@
 // filed requests not yet reported are kept beside the release file, so a
 // restarted pi reports their results at its next session start. /reef-versions
 // lists the release chain with each step's result and request, marks the step
-// this tree runs as installed and the newest published one as current, prints a
-// step's page link and, for a pending release, the promote action and a trial
-// install, and runs the promote after a confirmation. A result only reports
-// the result and the commands to act on it, leaving the user's input free.
-// /reef-versions <step> install starts the install and setup flow on demand;
-// promote also offers the install of the head it creates. Nothing here writes
+// this tree runs as installed and the newest published one as current, and
+// offers a step's page, which holds the design, the review and the numbers.
+// A settled step offers its install once the session is between turns, so a
+// win reaches the person who asked without them going looking; a busy session
+// keeps the report's commands instead. /reef-versions <step> install runs the
+// same install on demand, promoting a release held back from the served head
+// first, so installing is the one decision. Nothing here writes
 // a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
 // node can parse it in CI and pi's TS loader accepts it unchanged. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
@@ -57,7 +58,9 @@ const WIDGET_KEY = "reef-harness";
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
 const SPINNER_INTERVAL_MS = 250;
 // The key that opens the spinner's detail, which the spinner itself names so the person knows it is there.
-const WATCH_SHORTCUT = "ctrl+r";
+// pi's own keybindings hold every ctrl+letter this extension would want, so the key carries shift as well:
+// ctrl+r alone renames a session, and pi warns at startup about the clash.
+const WATCH_SHORTCUT = "ctrl+shift+r";
 // The service's phase for a running step, in the words the spinner and the panel show.
 const PHASE_WORDS = {
   queued: "queued, waiting for a step",
@@ -348,8 +351,8 @@ export default function requests(pi) {
     }
     if (selectionResult === "pending") {
       return (
-        `reef: '${ask}' is ready as release ${release}. This release changes an extension, so it is not ` +
-        `installed until you promote it: /reef-versions ${step} promote. Page: ${stepPageLink(step)}`
+        `reef: '${ask}' is ready as release ${release}. This release changes an extension, so read it before ` +
+        `it runs: /reef-versions ${step} opens the page, /reef-versions ${step} install serves it.`
       );
     }
     if (selectionResult === "rejected") {
@@ -489,29 +492,34 @@ export default function requests(pi) {
     ctx.ui.notify(`Installed release ${releaseId.slice(0, 8)}. Type /reload to load it now.`, "info");
   };
 
-  // The install after a confirmation that says why; a decline names the commands for later.
-  const offerInstall = async (releaseId, why, ctx) => {
+  // The install after a confirmation that says why; a decline names the commands for later. A pending release
+  // is promoted first: it is held back from the served head, and installing it is the person saying it may run.
+  const offerInstall = async (releaseId, why, ctx, { pending = false } = {}) => {
     if (!ctx.hasUI) return;
     const confirmed = await ctx.ui.confirm(`Install release ${releaseId.slice(0, 8)} now?`, why);
     if (!confirmed) {
       ctx.ui.notify(INSTALL_LATER_TEXT, "info");
       return;
     }
-    await installRelease(releaseId, ctx);
+    let install = releaseId;
+    if (pending) {
+      // A promote republishes the tree as a commit of its own, so the head it mints is what gets installed.
+      const head = await promoteRelease(releaseId, ctx);
+      if (!head) return; // the failure was notified; nothing was installed
+      install = head;
+    }
+    await installRelease(install, ctx);
   };
 
-  const promotedText = (step, headId) =>
-    `Promoted step ${step}: the head is now ${headId}; the update notice offers it at the next session start.`;
-
-  // The promote of a pending row: a promote republishes the tree as a commit of its own, so the answer names the
-  // new head, which is what to install. A failure is notified here and answers null.
-  const promoteRelease = async (step, row, ctx) => {
+  // The promote behind an install of a pending release: the served head moves to it, so later sessions are
+  // offered the same version. A failure is notified here and answers null.
+  const promoteRelease = async (releaseId, ctx) => {
     let response;
     try {
       response = await fetchWithTimeout(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote`, {
         method: "POST",
         headers: { ...reefHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ release_id: row.release_id }),
+        body: JSON.stringify({ release_id: releaseId }),
       });
     } catch (error) {
       ctx.ui.notify(`reef unreachable at ${serviceUrl}: ${message(error)}`, "error");
@@ -522,14 +530,20 @@ export default function requests(pi) {
       return null;
     }
     const answer = await response.json();
-    ctx.ui.notify(promotedText(step, answer.release_id), "info");
     return typeof answer.release_id === "string" && answer.release_id ? answer.release_id : null;
   };
 
-  // An explicit promote command also offers the install of the head it made.
-  const promoteThenInstall = async (step, row, ctx) => {
-    const headId = await promoteRelease(step, row, ctx);
-    if (headId) await offerInstall(headId, promotedText(step, headId), ctx);
+  // The install offered the moment a step settles, so a win reaches the session that asked for it without the
+  // person going looking. Only a step that produced a tree has one to offer; the rest end at their report.
+  const offerSettledInstall = async (step, rows, ctx) => {
+    const row = rows[step];
+    const selectionResult = resultOf(row, rows);
+    if (selectionResult !== "selected" && selectionResult !== "pending") return;
+    const why =
+      selectionResult === "pending"
+        ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step)} first.`
+        : `Read the change first: ${stepPageLink(step)}`;
+    await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
   };
 
   // The watch: one at a time, so a second filing replaces the first; session_shutdown clears it.
@@ -617,7 +631,9 @@ export default function requests(pi) {
         stopWatch(ctx);
         forgetRequest(recordId);
         deliverReport(step, rows, text, ctx);
-        // A background result never opens a dialog: the report names the commands for when the person is ready.
+        // The install is offered here only between turns: a dialog mid turn would take the person's input away.
+        // A busy session keeps the report's commands, and the next session start offers the same release.
+        if (ctx.isIdle()) await offerSettledInstall(step, rows, ctx);
         await resumeStored(rows, ctx); // another filed request still waiting takes the watch over
         return;
       }
@@ -867,79 +883,44 @@ export default function requests(pi) {
       .filter(Boolean)
       .join("  ");
 
-  // What the proposer planned and what its review left uncovered, when the step recorded them.
-  const notesLines = (row) => {
-    const notes = metricsOf(row).proposal_notes;
-    const design = notes && typeof notes.design === "string" ? notes.design.trim() : "";
-    const lines = design ? [`design: ${clip(design, 200)}`] : [];
-    const uncovered = uncoveredOf(row);
-    if (uncovered.length) lines.push(`not covered: ${uncovered.join("; ")}`);
-    return lines;
+  // The page in the person's browser. pi opens its own links this way and exposes no opener to an extension, so
+  // the launcher is named here per platform. The URL is one argument, never shell source, and a launcher that is
+  // missing (a headless host has no xdg-open) leaves the printed URL as the way in.
+  const openPage = async (url, ctx) => {
+    const [command, args] =
+      process.platform === "darwin"
+        ? ["open", [url]]
+        : process.platform === "win32"
+          ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
+          : ["xdg-open", [url]];
+    try {
+      const opened = await pi.exec(command, args);
+      if (opened.code !== 0) ctx.ui.notify(`reef: open it yourself: ${url}`, "info");
+    } catch {
+      ctx.ui.notify(`reef: open it yourself: ${url}`, "info");
+    }
   };
 
-  // What the step's model calls cost in tokens, when the endpoint reported them: the proposer's and the evaluation's.
-  const tokenText = (row) => {
-    const metrics = metricsOf(row);
-    const over = (side, key) =>
-      Object.values(side || {}).reduce((total, agent) => total + (Number(agent && agent[key]) || 0), 0);
-    const proposerIn = Number(metrics.proposer_input_tokens) || 0;
-    const proposerOut = Number(metrics.proposer_output_tokens) || 0;
-    const evaluationIn = over(metrics.candidate_agents, "input_tokens") + over(metrics.current_agents, "input_tokens");
-    const evaluationOut = over(metrics.candidate_agents, "output_tokens") + over(metrics.current_agents, "output_tokens");
-    if (!proposerIn && !proposerOut && !evaluationIn && !evaluationOut) return "";
-    return `tokens: proposer ${proposerIn} in / ${proposerOut} out, evaluation ${evaluationIn} in / ${evaluationOut} out`;
-  };
-
-  const pageUrl = (step) => `${serviceUrl}/reef/harness/releases/${step}/page`;
-  // The token stays in the environment: the printed command names it as the variable, never its value.
-  const curl = () =>
-    `curl -fsS -H 'x-reef-scenario: ${scenario}' ` + (process.env.REEF_TOKEN ? '-H "Authorization: Bearer $REEF_TOKEN" ' : "");
-
-  const installLine = (releaseId) =>
-    `${curl()}'${serviceUrl}/reef/harness/install?adapter=pi&release_id=${encodeURIComponent(releaseId)}'` +
-    ` | bash -s -- '${destDir}'`;
-
-  const stepLines = (step, rows) => {
-    const row = rows[step];
+  // One line naming what the step is, for the dialog that offers its page: the result and where it sits.
+  const stepSummary = (step, rows) => {
     const head = headStep(rows);
     const installed = installedStep(rows);
-    const selectionResult = resultOf(row, rows);
-    const marks = [selectionResult];
+    const marks = [resultOf(rows[step], rows)];
     if (step === installed) marks.push(step === head ? `${INSTALLED_MARK}, current` : INSTALLED_MARK);
     else if (step === head) marks.push("current");
-    const lines = [
-      `Harness step ${step}: ${row.release_id} (${marks.join(", ")})`,
-      ...notesLines(row),
-      `page: ${stepPageLink(step)}`,
-      `read it: ${curl()}'${pageUrl(step)}' > harness-step-${step}.html`,
-    ];
-    if (selectionResult === "pending") {
-      const body = JSON.stringify({ release_id: row.release_id });
-      lines.push(
-        `promote: ${curl()}-X POST -H 'content-type: application/json' -d '${body}' ` +
-          `'${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote'`,
-        `or from here: /reef-versions ${step} promote`,
-        `trial install (replaces the tree at ${destDir}): ${installLine(row.release_id)}`,
-      );
-      if (head >= 0) lines.push(`back to the head: ${installLine(rows[head].release_id)}`);
-    }
-    const tokens = tokenText(row);
-    if (tokens) lines.push(tokens);
-    return lines;
+    return `${rows[step].release_id} (${marks.join(", ")})`;
   };
 
   pi.registerCommand("reef-versions", {
-    description: "List this harness's versions, or show one: /reef-versions [step] [promote|install]",
+    description: "List this harness's versions, or open one: /reef-versions [step] [install]",
     handler: async (args, ctx) => {
       const words = (args || "").trim().split(/\s+/).filter(Boolean);
-      const promote = words[1] === "promote";
       const install = words[1] === "install";
       // Digits only before Number(): "1e1" and "0x3" are numbers to it and no step to the catalog.
       const usable =
-        words.length === 0 ||
-        (/^\d+$/.test(words[0]) && (words.length === 1 || ((promote || install) && words.length === 2)));
+        words.length === 0 || (/^\d+$/.test(words[0]) && (words.length === 1 || (install && words.length === 2)));
       if (!usable) {
-        ctx.ui.notify("Usage: /reef-versions [step] [promote|install]", "warning");
+        ctx.ui.notify("Usage: /reef-versions [step] [install]", "warning");
         return;
       }
       const step = words.length ? Number(words[0]) : null;
@@ -967,41 +948,42 @@ export default function requests(pi) {
       }
       const selectionResult = resultOf(row, rows);
       if (install) {
-        if (["pending", "rejected", "skipped"].includes(selectionResult) || selectionResult.startsWith("promoted")) {
-          ctx.ui.notify(`step ${step} is ${selectionResult}; choose a published step to install with /reef-versions`, "warning");
+        // A pending step installs: the confirmation promotes it first. Only a step with no tree of its own refuses.
+        if (["rejected", "skipped"].includes(selectionResult)) {
+          ctx.ui.notify(
+            `step ${step} is ${selectionResult} and published no tree; /reef-versions lists the ones that did`,
+            "warning",
+          );
           return;
         }
-        await offerInstall(String(row.release_id), `Read the change first: ${stepPageLink(step)}`, ctx);
+        const why =
+          selectionResult === "pending"
+            ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step)} first.`
+            : `Read the change first: ${stepPageLink(step)}`;
+        await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
         return;
       }
-      if (!promote) {
-        ctx.ui.notify(stepLines(step, rows).join("\n"), "info");
+      // The page holds the design, the review and the numbers, so the command offers it rather than reprinting it.
+      const url = stepPageLink(step);
+      const summary = stepSummary(step, rows);
+      if (!ctx.hasUI) {
+        ctx.ui.notify(`Harness step ${step}: ${summary}\npage: ${url}`, "info");
         return;
       }
-      if (selectionResult.startsWith("promoted")) {
-        ctx.ui.notify(`step ${step} is already ${selectionResult}; nothing to promote`, "warning");
+      const read = await ctx.ui.confirm(`Open harness step ${step}?`, summary);
+      if (!read) {
+        ctx.ui.notify(`page: ${url}`, "info");
         return;
       }
-      if (selectionResult !== "pending") {
-        ctx.ui.notify(`step ${step} is not pending (${selectionResult}); nothing to promote`, "warning");
-        return;
-      }
-      const confirmed = await ctx.ui.confirm(
-        `Promote harness step ${step}?`,
-        `Release ${row.release_id} then serves every session that installs the head. Read ${stepPageLink(step)} first.`,
-      );
-      if (!confirmed) {
-        ctx.ui.notify(`step ${step} not promoted`, "info");
-        return;
-      }
-      await promoteThenInstall(step, row, ctx);
+      await openPage(url, ctx);
     },
   });
 
-  // How to see and promote what waits for a review: one step names itself; several share the placeholder.
+  // What is ready to install and not installed yet: one step names itself; several share the placeholder. The
+  // update notice offers the newest of them; this line names the rest, which a person installs by step.
   const reviewLine = (steps) => {
-    const promote = steps.length === 1 ? `/reef-versions ${steps[0]} promote` : "/reef-versions <step> promote";
-    return `${steps.length} release(s) await your review: /reef-versions ${steps.join(", ")} (promote with ${promote})`;
+    const install = steps.length === 1 ? `/reef-versions ${steps[0]} install` : "/reef-versions <step> install";
+    return `${steps.length} release(s) ready to install: /reef-versions ${steps.join(", ")} (install with ${install})`;
   };
 
   // Said once per session start with a UI: the two commands exist, what waits for a review, and the result of

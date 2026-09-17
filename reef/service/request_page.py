@@ -215,8 +215,8 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
     # Carry the scenario and authentication to the version page without displaying the token.
     href = step_href(step, link_query)
     if selection_result == "pending":
-        command = f"/reef-versions {step} promote"
-        action = "Review, then promote"
+        command = f"/reef-versions {step} install"
+        action = "Read this page, then install"
     elif selection_result == "selected":
         command = f"/reef-versions {step} install"
         action = "Install when ready"

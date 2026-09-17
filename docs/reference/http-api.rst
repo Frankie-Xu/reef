@@ -738,9 +738,9 @@ than nine digits, is HTTP 404 too. The row itself rides in a
      "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
 
 On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
-``/reef-versions 3`` prints this URL with the promote command, the trial
-install (which replaces the installed tree) and the head's reinstall beside
-it when the release is pending; a promoted release gets none of them.
+``/reef-versions 3`` offers to open this page in the browser, printing the URL
+when the offer is declined. ``/reef-versions 3 install`` installs that release,
+promoting it first when it is still held back from the served head.
 
 Request page
 ~~~~~~~~~~~~

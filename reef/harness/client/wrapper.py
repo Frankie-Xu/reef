@@ -989,8 +989,8 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
         return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
     if selection_result == "pending":
         return (
-            f"'{ask}' is ready as release {release}. This release changes an extension, so it is not installed "
-            f"until you promote it: /reef-versions {step} promote. Page: {page}"
+            f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
+            f"runs: /reef-versions {step} opens the page, /reef-versions {step} install serves it. Page: {page}"
         )
     if selection_result == "rejected":
         selection = metrics.get("selection")
@@ -1115,7 +1115,7 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
 def _next_commands(adapter: str, step: int, selection_result: str) -> str:
     """The commands that take the next step by hand, for a person who declined it or has no terminal."""
     if selection_result == "pending":
-        return f"/reef-versions {step} promote in a reef-{adapter} session, then reef-{adapter} setup and reef-{adapter} update"
+        return f"/reef-versions {step} install in a reef-{adapter} session, or reef-{adapter} setup and reef-{adapter} update"
     return f"reef-{adapter} setup, then reef-{adapter} update"
 
 
