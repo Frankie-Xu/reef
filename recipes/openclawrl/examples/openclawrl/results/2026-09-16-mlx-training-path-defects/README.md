@@ -83,50 +83,82 @@ training step in between. The cost is that a finished session waits that long
 before its last turn retires, delaying a step; the short value silently dropped
 the data instead.
 
-## What the run with fixes 1 and 2 shows
+## Fixing the TTL recovered every severed pair and changed nothing
 
-`gate.csv` and `sessions.csv` hold the first 21 sessions of a stream run with
-the KL term active and the probe corrected, but **still on the 45s TTL** — so it
-is not the experiment that answers whether the method learns here. It is
-recorded because it is the evidence the first two fixes hold, and because its
-flat probe is what the third defect predicts.
+Two runs differing in one setting, everything else identical — same KL term,
+same corrected probe, same timeouts, same base weights, same 72-problem stream
+in the same order.
 
-| | |
-| --- | --- |
-| sessions | 21 |
-| optimizer steps | 25 |
-| `kl_coef` in step metrics | `0.05` on every step |
-| probe `clean_rate` | 0.000 throughout |
-| probe `mean_violations` | 3.38 → 3.38 (range 3.12–3.38) |
-| probe `answered_rate` | 1.00 throughout |
-| gate | 25 selected, 0 held out |
-| accepts | 3 (s006, s016, s020) |
-| sessions with no turn at all | 1 |
+| | `session-ttl-s: 45` | `session-ttl-s: 1800` |
+| --- | --- | --- |
+| sessions | 24 | 19 |
+| optimizer steps | 27 | 31 |
+| steps by session 4 / 5 / 8 | 1 / 2 / 3 | 6 / 7 / 14 |
+| request gaps exceeding the TTL | 22 of 54 (40%) | **0 of 54** |
+| sessions expiring unbound vs binding | 70 : 69 | no warning ever fired |
+| sessions with no turn at all | 1 | 0 |
 
-Twenty-five optimizer steps move the weights substantially and move the probe
-not at all. Adapter displacement from base grows monotonically — `||lora_b||`
-from 0.84 to 8.43 over 24 steps, read straight from the safetensors — so the
-updates are real and are not being pinned back by the newly active KL term.
-That rules out the reading that `kl_coef: 0.05` is too strong.
+The fix works on its own terms, on two measurements that do not share a failure
+mode: no gap in the run comes near the 1800s window (the largest is 1091s, a
+training-step block, leaving 40% headroom), and the same agent work yields
+roughly five times the optimizer steps.
 
-**The three accepts are not evidence of adaptation.** At 3/21 against the
-withdrawn runs' pooled 2/144 a one-sided Fisher test gives p = 0.015, and
-against the closer of the two alone p = 0.074. Both are unreliable here for a
-reason visible in `sessions.csv`: **all three accepts are 2-turn sessions**,
-the shortest in the run, while every non-accepting session ran 3 to 7 turns.
-That pattern fits "a subset of problems is easy and the base model answers them
-cleanly first try" at least as well as it fits a changed policy — and the probe,
-which is a fixed problem set and immune to problem-difficulty confounds, has not
-moved at all. The control that would separate them is the base model on those
-same three problems, which has not been run.
+It did not change what the policy learned. Over the first 26 steps of each arm:
 
-The gate selecting 25 of 25 is also not a result. With `clean_rate` pinned at
-the floor the running best is 0.0, so every candidate reads "within margin of
-best" and is selected. The gate is correctly implemented and has no signal to
-act on until the rate lifts off the floor.
+| | mean `mean_violations` | range |
+| --- | --- | --- |
+| 45s TTL — half the pairs | 3.306 | 3.12–3.38 |
+| 1800s TTL — all the pairs | 3.293 | 3.12–3.50 |
+
+A difference of 0.013 against a step-to-step jitter of ±0.13. Both series
+oscillate among the same three values with no trend, and `clean_rate` is 0.000
+on every step of both. Twenty-six steps on complete data look exactly like
+twenty-six on half.
+
+So the TTL was a real defect and was not the reason the policy does not learn.
+
+**Accepts are not a usable signal at this scale.** The 45s arm took three
+(s006, s016, s020) and the 1800s arm none. Problem s006 accepted on one arm and
+failed on the other from the same base weights, which is sampling noise at
+temperature 0.6 rather than a property of either configuration. An earlier draft
+of this file reasoned that all three accepts being 2-turn sessions implied an
+easy-problem subset; s006 disproves that — the session is short *because* the
+reply happened to come out clean, not the other way round.
+
+## What is ruled out, and what is not
+
+Measured, on the 1800s arm:
+
+- The training signal has contrast: 139 positive advantages against 76 negative
+  over 27 steps, with only 2 of 27 steps carrying no contrast at all. The
+  objective is not starved of direction.
+- Adapter displacement from base grows monotonically — `||lora_b||` from 0.84 to
+  8.43 over 24 steps, read straight from the safetensors. The updates are real
+  and the newly active KL term is not pinning them back, which rules out
+  `kl_coef: 0.05` being too strong.
+- 86.4% of judged turns are followed by a tool result and 13.6% by the student,
+  so the evaluative judge mostly scores tool progress rather than the style the
+  task rewards.
+
+That last figure is **not** an explanation for the failure. The seven-GPU
+reference run drives the same 72-session stream through the same hermes harness,
+so it carries the same split, and it reached adaptation at session 14. A
+property shared by the run that learns cannot be why this one does not.
+
+What still differs from the run that learned, none of it isolated by any
+measurement here: a `Qwen3-4B-Thinking-2507` policy trained full-parameter
+across four tensor-parallel GPUs against a 4-bit quantised `Qwen3.5-9B` trained
+through a rank-64 LoRA; 16 judged turns per step against 8; learning rate 1e-5
+against 3e-5; a local PRM and student against hosted ones.
+
+Also unfixed: the MLX tool-call parser rejects a sample whose `<tool_call>` never
+closes, which happens roughly twice every three sessions on deep transcripts.
+The governing cap is the client's `max_tokens: 8192`, not the deployment's, and
+whether these samples reach it cannot be read from the records — the streaming
+hold buffers everything after the marker by design.
 
 ## Files
 
-- `gate.csv` — per step: loss, `kl_coef`, adapter delta, probe metrics, gate outcome.
-- `sessions.csv` — per session: reward, turns, violation count.
+- `gate-ttl45.csv`, `gate-ttl1800.csv` — per step: loss, `kl_coef`, adapter delta, probe metrics, gate outcome.
+- `sessions-ttl45.csv`, `sessions-ttl1800.csv` — per session: reward, turns, violation count.
 - [runtime notes](../mlx-runtime-notes.md) — topology, training metrics, capacity.
