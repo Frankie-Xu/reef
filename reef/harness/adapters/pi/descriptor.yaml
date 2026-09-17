@@ -78,6 +78,20 @@ model_binding:
       data:
         defaultModel: "reef/{model}"
         defaultProvider: reef
+  responses:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: openai-responses
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}/v1"
+            models:
+              - id: "{model}"
+    - target: primary
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
   anthropic:
     - target: models
       data:

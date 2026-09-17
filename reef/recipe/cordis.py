@@ -29,6 +29,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, Mod
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
+from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
@@ -565,14 +566,18 @@ class CordisRecipe(Recipe):
 
     def build_surface(self, scenario: str) -> Surface:
         model = self.model_name or getattr(self.runtime, "model_path", None)
+        # Only a provider proxy has a dialect; a local engine serves Chat Completions.
+        api = self.runtime.api if isinstance(self.runtime, InferenceProxyRuntime) else "openai"
         client_models = self.client_models
         override = self.scenario_model.runtime if self.scenario_model is not None else None
         if override is not None:
             model = override.model_path
+            api = override.api
             client_models = ()
         return create_harness_surface(
             seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
+            served_api=api,
             client_models=client_models,
         )
 

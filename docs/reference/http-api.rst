@@ -1,8 +1,9 @@
 HTTP API: inference, feedback, and releases
 ===========================================
 
-Reef serves the provider's own inference routes: OpenAI at
-``/v1/chat/completions`` and Anthropic at ``/v1/messages``. It forwards each
+Reef serves the provider's own inference routes: OpenAI Chat Completions at
+``/v1/chat/completions``, OpenAI Responses at ``/v1/responses``, and Anthropic
+at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
@@ -26,6 +27,8 @@ Routes
 | ``GET /healthz``                                       | readiness; the only unauthenticated route         |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/chat/completions``                          | OpenAI-format inference                           |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/responses``                                 | OpenAI Responses-format inference                 |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages``                                  | Anthropic-format inference                        |
 +--------------------------------------------------------+---------------------------------------------------+
