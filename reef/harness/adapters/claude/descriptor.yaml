@@ -25,6 +25,11 @@ env:
   DISABLE_AUTOUPDATER: "1"
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+# --resume and --continue read the transcripts under projects/, which
+# reef-claude would otherwise leave in the temp copy it removes.
+client_state:
+  - path: "claude/projects"
+    kind: directory
 files:
   config:
     primary:

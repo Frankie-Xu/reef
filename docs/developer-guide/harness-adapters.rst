@@ -500,6 +500,7 @@ agent.
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
+   client_state | the session state the ``reef-<adapter>`` wrapper creates in the installed tree before a run, as ``{path, kind}`` below the relocated composition: ``kind`` is ``directory`` or ``sqlite`` (an empty database). The wrapper runs the binary on a temp copy of links that it removes afterwards, so state the binary creates there itself is lost and its resume finds no earlier session
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations
 

@@ -146,12 +146,14 @@ and ``setup`` from the session.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -765,11 +767,22 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     except WrapperError as exc:
         sys.exit(f"reef-{adapter}: {exc}")
 
+    descriptor = get_adapter(adapter)
+    # The temp copy is removed after the run: session state kept in the installed tree
+    # is linked into it instead, so the binary's resume finds what an earlier run saved.
+    for state in descriptor.client_state:
+        path = Path(compose_dir) / PurePosixPath(state.path).relative_to(descriptor.compose_relocation()[1])
+        if state.kind == "directory":
+            path.mkdir(parents=True, exist_ok=True)
+        elif not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.closing(sqlite3.connect(path)) as database:
+                database.execute("VACUUM")  # writes the database header, so the file is a database
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
     env = os.environ.copy()
     env[env_var] = temp_dir
     # What an interactive run needs beyond the episode env; the person's own setting wins.
-    for key, value in get_adapter(adapter).client_env.items():
+    for key, value in descriptor.client_env.items():
         env.setdefault(key, value)
     # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
     for key, value in stored.items():
