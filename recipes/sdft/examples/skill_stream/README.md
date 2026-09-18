@@ -32,7 +32,6 @@ serve.yaml            the stack config: full fine-tuning, the reference's Figure
 docker-compose.yaml   the stack in the reef image: four GPUs, the engines colocated with the actor
 plot.py               Figure 3 from the Lab store: both skills' accuracy against gradient steps, the SFT control beside
 run.sh                checks the setup, mints the token, runs run.py in an ephemeral uv environment
-results/figure3/      the recorded runs, and the SFT control's scores (sft-control.csv)
 ```
 
 ## The protocol
@@ -92,10 +91,8 @@ demonstration as the assistant turn of the recorded request and trained
 those tokens with Slime's stock `sft_loss`, ignoring the student's samples,
 so the stage runner and the judge drove both runs unchanged (the same
 prompts in the same order, the same 32-prompt steps). Reef does not ship
-that recipe; its judge scores are recorded in `results/figure3/sft-control.csv`
-in the columns `plot.py` uses, and the figure draws them beside the SDFT
-stream. Its Science Q&A stage was stopped at step 108 of 167 to free its
-GPUs, so that curve ends at the judge's score after step 100.
+that recipe; `plot.py --control` takes its judge scores as a CSV in the
+columns `plot.py` writes and draws them beside the SDFT stream.
 
 What differs from the reference: sampling goes through SGLang instead of
 vLLM (the same settings: temperature 1, top-p 1, no top-k, no repetition
@@ -122,7 +119,7 @@ cd recipes/sdft/examples/skill_stream
 ./run.sh                                     # Tool Use (252 steps), then Science Q&A (167)
 SKILLS_STEPS=2 SKILLS_GPUS=4,5,6,7 SKILLS_PORT=28903 ./run.sh --stream smoke   # two steps per stage, beside a full run
 uv run --no-project --python 3.12 --with reef-eval --with matplotlib plot.py \
-    --lab work/lab --control results/figure3/sft-control.csv --out results/figure3
+    --lab work/lab --out figure3
 ```
 
 `run.sh` reads `REEF_IMAGE` (default `reef`), `MODEL_DIR` (default
@@ -140,17 +137,5 @@ size in `serve.yaml`), `SKILLS_MAX_TOKENS`, `SKILLS_EVAL_EVERY` and
 
 ## Results
 
-The SDFT stream is in progress. The SFT control (seed 42,
-`results/figure3/sft-control.csv`):
-
-| after | Tool Use | Science Q&A |
-|---|---|---|
-| the base model (step 0) | 41.2% (40/97) | 29.2% (148/507) |
-| Tool Use, 252 steps | 68.0% (66/97) | 26.6% (135/507) |
-| Science Q&A, 100 of 167 steps | 48.5% (47/97) | 69.6% (353/507) |
-
-Tool Use climbs from 41% to 68% over its stage and Science Q&A stays near
-the base model's 29%. Twenty steps into the Science Q&A stage Science is at
-55% and reaches 70% by step 100, while Tool Use falls from 68% to about
-48% by step 60 and stays there: the forgetting the paper's Figure 3 shows
-for SFT, on the same protocol.
+The Figure 3 runs (the SDFT stream and the SFT control, seed 42) are in
+progress; their scores and the figure follow.

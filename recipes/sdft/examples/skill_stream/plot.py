@@ -8,7 +8,7 @@ recorded by a run outside this example), writes ``figure3.png`` and
 results share with the docs site.
 
     uv run --no-project --python 3.12 --with reef-eval --with matplotlib plot.py \\
-        --lab work/lab --control results/figure3/sft-control.csv --out results/figure3
+        --lab work/lab --control control.csv --out figure3
 """
 
 from __future__ import annotations
