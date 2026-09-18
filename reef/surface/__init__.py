@@ -26,6 +26,7 @@ from reef.surface.base import (
     Surface,
     WeightRuntime,
 )
+from reef.surface.config import ConfigInferenceHooks, ConfigValidator, create_config_surface
 from reef.surface.files import TextFileTree
 from reef.surface.harnesses import create_harness_surface
 from reef.surface.skills import RequestSkillLayer, SkillLayer, create_skill_surface, validate_tree
@@ -36,6 +37,8 @@ __all__ = [
     "ArtifactActivator",
     "ArtifactLoader",
     "ComponentSurface",
+    "ConfigInferenceHooks",
+    "ConfigValidator",
     "FileTree",
     "InferenceHooks",
     "InferenceLease",
@@ -50,6 +53,7 @@ __all__ = [
     "WeightLoader",
     "WeightRuntime",
     "adapter_name",
+    "create_config_surface",
     "create_harness_surface",
     "create_skill_surface",
     "create_weight_surface",

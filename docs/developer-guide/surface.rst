@@ -112,6 +112,8 @@ Built-in surfaces
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 | ``create_skill_surface(...)``          | ``skills``  | ``SkillValidator`` | none                    | optional ``SkillInferenceHooks`` | ``TextFileTree`` |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
+| ``create_config_surface()``            | ``config``  | ``ConfigValidator``| none                    | ``ConfigInferenceHooks``         | none             |
++----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 
 **Weights.** ``WeightLoader`` probes whether an in-memory live runtime load ID
 survived a restart and restores durable checkpoints during rollback.
@@ -132,6 +134,14 @@ engine-global, not per surface: the training bridge owns one
 UTF-8 text files through ``TextFileTree``, excluding repository bookkeeping
 and binary files. Paths and text are otherwise unchanged, because the harness
 client owns how the tree is installed and interpreted.
+
+**Configuration.** ``create_config_surface()`` serves the ``config``
+component: one ``config.json`` object whose ``request_defaults`` fill
+provider request fields the caller left unset (``temperature``,
+``max_tokens``, ...). A change of defaults is a release like any other,
+frozen per request and recorded against the release that served it. The
+service applies it; it exposes no pulled tree, so it composes beside a
+harness component.
 
 **Skill trees.** ``create_skill_surface()`` adds optional server-side
 injection to the same ``TextFileTree``. A ``SkillLayer`` owns one top-level
@@ -190,7 +200,10 @@ committer carries the other forward from the previous checkpoint:
 The base artifact of such a scenario keeps one directory per component
 (``weights/``, ``harness/``), and every step must publish a durable
 checkpoint: a live weight release names only an engine load, so it cannot
-carry the other components.
+carry the other components. ``CompositeRecipe`` (``reef.recipe.composite``)
+builds exactly this from existing flat recipes, one per component, and runs
+each one's trainer as its own worker; see `configuration
+<../reference/configuration.rst#recipe-configuration>`__ for its layout.
 
 Add a small factory function when a composition is reused. Add a new
 capability protocol only when no existing call site can express the consumer

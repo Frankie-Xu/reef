@@ -162,6 +162,9 @@ recipe to remain record-only.
 | serve an externally produced    | subclass ``Recipe``, override ``build_surface()``    |
 | artifact                        | only                                                 |
 +---------------------------------+------------------------------------------------------+
+| evolve weights and a harness    | configure ``CompositeRecipe`` with one recipe per    |
+| (or configuration) together     | component; each trainer runs as its own worker       |
++---------------------------------+------------------------------------------------------+
 
 Common members
 ~~~~~~~~~~~~~~
@@ -1015,7 +1018,8 @@ Surface
 .. code:: python
 
    from reef.surface import (
-       ComponentSurface, Surface, create_harness_surface, create_skill_surface, create_weight_surface,
+       ComponentSurface, Surface, create_config_surface, create_harness_surface,
+       create_skill_surface, create_weight_surface,
    )
 
 A surface binds one frozen release to its consumers.

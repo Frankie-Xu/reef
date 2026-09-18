@@ -226,6 +226,11 @@ class Scenario:
                 return False
             return record.operation == "training" and record.operation_verified and record.training_job_id is None
 
+    def last_commit_for(self, component: str | None) -> CommitRecord | None:
+        """The newest durable commit made by ``component``'s trainer."""
+        with self._committer.lock:
+            return self._committer.last_record_for(component)
+
     def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
         """Metrics of the training step that published ``release_id``, if logged."""
         return self._committer.metrics_for_version(release_id)

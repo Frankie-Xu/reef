@@ -971,6 +971,27 @@ class Dispatcher:
             and current.training_runtime.concurrent_training_scenarios
         ):
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
+        if len(current.component_trainers) > 1:
+            # Each component's trainer commits on its own; report each one beside the scenario-wide step.
+            components: dict[str, Any] = {}
+            for bound in current.component_trainers:
+                last = current.last_commit_for(bound.component)
+                components[str(bound.component)] = {
+                    "batch_ready": bound.trainer.batch_ready(),
+                    "training_mode": bound.trainer.training_mode,
+                    "processor": dict(bound.trainer.processor_status()),
+                    "last_committed_step": (
+                        None
+                        if last is None
+                        else {
+                            "step": last.step,
+                            "recorded_at": last.recorded_at,
+                            "base_release_id": last.base_release_id,
+                            "metrics": None if last.metrics is None else dict(last.metrics),
+                        }
+                    ),
+                }
+            block["components"] = components
         return block
 
     def _training_errors(self) -> list[str]:

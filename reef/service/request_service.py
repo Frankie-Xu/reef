@@ -533,7 +533,7 @@ class RequestService:
                 "been published yet. The scenario's initial artifact carries no files "
                 "until the trainer publishes its first step (see docs/user-guide/evolve-your-harness)."
             )
-        return {
+        manifest = {
             "release_id": artifact.ref.release_id,
             "parent_release_id": artifact.ref.parent_release_id,
             "content_id": artifact.ref.content_id,
@@ -543,6 +543,11 @@ class RequestService:
             # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
         }
+        components = artifact.materialize().components
+        if components is not None:
+            # The whole combination the pulled tree belongs to, by component content id.
+            manifest["components"] = {name: entry.content_id for name, entry in components.entries.items()}
+        return manifest
 
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
         """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""

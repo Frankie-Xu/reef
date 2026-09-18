@@ -9,6 +9,8 @@ weights or the harness*. This package holds everything a method binds to:
   ``WeightTrainingSpec`` (training objective and data processor).
 - ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
+- ``composite`` — ``CompositeRecipe`` binds one recipe per release component
+  and runs their trainers side by side in one scenario.
 - ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement,
   gated by a health floor.
 - ``registry`` — dotted class resolution (``recipe_class_for``) and
@@ -38,12 +40,14 @@ weight backends are loaded only when a weight-training recipe builds them.
 """
 
 from reef.recipe.base import Recipe, WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 
 __all__ = [
+    "CompositeRecipe",
     "Recipe",
     "RecipeConfigError",
     "WeightTrainingRecipe",
