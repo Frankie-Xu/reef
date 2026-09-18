@@ -51,7 +51,7 @@ class _ArtifactHeadSync:
     error: str | None = None
 
 
-class StaleTrainingResult(ReefError):
+class StaleTrainingResultError(ReefError):
     """A result was prepared against a release that another component's commit has since replaced.
 
     The result is not attached to the newer combination. The caller keeps
@@ -370,7 +370,7 @@ class ScenarioCommitter:
         Several trainers of one scenario meet here: the scenario lock serializes
         their commits, and a result whose batch was reserved against a release
         that another trainer has since replaced is refused as
-        :class:`StaleTrainingResult` rather than attached to a combination it
+        :class:`StaleTrainingResultError` rather than attached to a combination it
         was never evaluated with.
         """
         with self._lock, self._publication_lock:
@@ -388,7 +388,7 @@ class ScenarioCommitter:
             base = trainer.pending_base_release_id
             served = self._artifacts.current.release_id
             if not retrying and len(self._trainers) > 1 and base is not None and base != served:
-                raise StaleTrainingResult(
+                raise StaleTrainingResultError(
                     f"scenario {self._name!r} component {component!r} prepared its result against release "
                     f"{base!r} but {served!r} is served now"
                 )
@@ -766,5 +766,5 @@ class ScenarioCommitter:
 
 __all__ = [
     "ScenarioCommitter",
-    "StaleTrainingResult",
+    "StaleTrainingResultError",
 ]

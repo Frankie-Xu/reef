@@ -16,7 +16,7 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.committer import ScenarioCommitter, StaleTrainingResult
+from reef.scenario.committer import ScenarioCommitter, StaleTrainingResultError
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -263,7 +263,7 @@ class Scenario:
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record.
 
-        Raises :class:`StaleTrainingResult` when the result was prepared
+        Raises :class:`StaleTrainingResultError` when the result was prepared
         against a release another component has since replaced; the caller
         then calls :meth:`retry_pending` and prepares the batch again.
         """
@@ -333,6 +333,6 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ReleaseNotRestorable",
     "Scenario",
-    "StaleTrainingResult",
+    "StaleTrainingResultError",
     "validate_component_trainers",
 ]

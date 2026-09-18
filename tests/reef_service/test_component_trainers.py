@@ -17,7 +17,7 @@ from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.scenario import Scenario, StaleTrainingResult
+from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
 from reef.storage.commits import CommitLogError, CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -161,7 +161,7 @@ def test_component_trainers_meet_at_the_commit_boundary(tmp_path: Path) -> None:
         assert _component_files(scenario, after_harness) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
 
         # The weights result was prepared against the base, which the harness commit replaced.
-        with pytest.raises(StaleTrainingResult, match=WEIGHTS):
+        with pytest.raises(StaleTrainingResultError, match=WEIGHTS):
             scenario.commit(weights, component=WEIGHTS)
         assert scenario.scenario_step == 1
         scenario.retry_pending(WEIGHTS)

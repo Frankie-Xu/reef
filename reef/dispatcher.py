@@ -37,7 +37,7 @@ from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import Scenario, StaleTrainingResult
+from reef.scenario.scenario import Scenario, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.train.types import TrainStepResult
@@ -692,7 +692,7 @@ class Dispatcher:
                 raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
             try:
                 self._commit_result(scenario, result, component)
-            except StaleTrainingResult as stale:
+            except StaleTrainingResultError as stale:
                 # Another component's commit replaced the release this result
                 # was prepared against. Keep the batch and prepare it again
                 # against the release served now; the loop comes straight back.

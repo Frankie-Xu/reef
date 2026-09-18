@@ -138,7 +138,7 @@ recipe builds one trainer per component runs those trainers as independent
 workers; the harness worker and the weights worker never wait for each
 other's preparation. They meet only at this commit boundary: the scenario
 lock serializes their commits, and a result whose base another trainer's
-commit has replaced is refused (``StaleTrainingResult``) instead of being
+commit has replaced is refused (``StaleTrainingResultError``) instead of being
 attached to a combination it was never evaluated with. A lone trainer is
 never refused: only its own retried attempt can have moved the head. The worker keeps its batch and prepares it again
 against the release served now. Rows every trainer consumes are retired only
