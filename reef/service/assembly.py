@@ -18,6 +18,7 @@ from typing import Any
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.openrouter import OpenRouterHandler, openrouter_api_key
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
@@ -251,6 +252,7 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
         timeout_s=settings.inference_retry_timeout_s,
     )
     dispatcher = build_dispatcher(settings, environ=environ, connector=connector)
+    openrouter_key = openrouter_api_key(settings.openrouter_api_key, settings.upstream_url, settings.upstream_api_key)
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
@@ -261,6 +263,11 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
             record_retention=record_retention,
+            openrouter_handler=(
+                None
+                if openrouter_key is None
+                else OpenRouterHandler(openrouter_key, timeout_s=settings.inference_timeout_s)
+            ),
         )
     except BaseException:
         with suppress(Exception):

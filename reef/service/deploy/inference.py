@@ -136,6 +136,7 @@ _ENVIRONMENT_FIELDS = {
     "upstream_url": "REEF_UPSTREAM_URL",
     "upstream_model": "REEF_UPSTREAM_MODEL",
     "upstream_api_key": "REEF_UPSTREAM_API_KEY",
+    "openrouter_api_key": "OPENROUTER_API_KEY",
     "token": "REEF_TOKEN",
 }
 _CONFIGURED_FIELDS = {

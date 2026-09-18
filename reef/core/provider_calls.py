@@ -2,11 +2,12 @@
 
 A harness reaches image, embedding, speech and decision models through the same
 Reef service, scenario and token as its chat calls. Reef forwards the request body
-unchanged to the scenario's provider and relays the response byte for byte; the
-record keeps a summary instead of the body, so generated media and embedding
-vectors never enter record storage or a proposer's prompt. The record names its
-route under ``metadata.reef_endpoint``, which is how trajectories and processors
-tell a provider call from a chat exchange.
+unchanged to OpenRouter (see :mod:`reef.inference.openrouter`), whatever serves
+the chat, and relays the response byte for byte; the record keeps a summary
+instead of the body, so generated media and embedding vectors never enter record
+storage or a proposer's prompt. The record names its route under
+``metadata.reef_endpoint``, which is how trajectories and processors tell a
+provider call from a chat exchange.
 """
 
 from __future__ import annotations
@@ -14,28 +15,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
-
-@dataclass(frozen=True)
-class ProviderRoute:
-    """One relayed route: the path a client calls on Reef and the provider path it reaches."""
-
-    path: str
-    upstream_path: str
-
-
-#: The upstream path is appended to the provider base URL (``https://openrouter.ai/api``
-#: for OpenRouter), so a route outside ``/v1`` such as OpenRouter's decisions maps here.
-PROVIDER_ROUTES: tuple[ProviderRoute, ...] = (
-    ProviderRoute("/v1/images", "/v1/images"),
-    ProviderRoute("/v1/embeddings", "/v1/embeddings"),
-    ProviderRoute("/v1/audio/speech", "/v1/audio/speech"),
-    ProviderRoute("/v1/decisions", "/alpha/decisions"),
-)
-PROVIDER_ROUTE_PATHS = frozenset(route.path for route in PROVIDER_ROUTES)
-UPSTREAM_PATHS = {route.path: route.upstream_path for route in PROVIDER_ROUTES}
+#: The routes a client calls on Reef for a provider call.
+PROVIDER_ROUTE_PATHS: tuple[str, ...] = ("/v1/images", "/v1/embeddings", "/v1/audio/speech", "/v1/decisions")
 
 #: The record metadata key naming a provider call's route.
 ENDPOINT_KEY = "reef_endpoint"
@@ -109,10 +92,7 @@ def provider_call_endpoint(payload: Mapping[str, Any]) -> str | None:
 
 __all__ = [
     "ENDPOINT_KEY",
-    "PROVIDER_ROUTES",
     "PROVIDER_ROUTE_PATHS",
-    "UPSTREAM_PATHS",
-    "ProviderRoute",
     "compact",
     "provider_call_endpoint",
     "provider_call_payload",

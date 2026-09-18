@@ -127,7 +127,7 @@ Models beyond the session's chat model are reached through process.env.REEF_INFE
 - /v1/audio/speech: text to speech; the response body is the audio bytes.
 - /v1/decisions: a fast structured choice (routing, classification) from a decision model such as ~typesafe/jev-latest.
 
-Name the model in the body. These routes do not stream. REEF_INFERENCE_URL is unset outside a session the wrapper runs.
+Name the model in the body. These routes do not stream, and answer 501 when the Reef deployment has no OpenRouter key. REEF_INFERENCE_URL is unset outside a session the wrapper runs.
 
 ## Rules for a reef tree entry
 

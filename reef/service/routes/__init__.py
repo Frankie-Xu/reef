@@ -15,12 +15,14 @@ def register_routes(
     *,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
+    openrouter_handler: InferenceHandler | None = None,
 ) -> None:
     register_health_route(app)
     register_inference_routes(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
+        openrouter_handler=openrouter_handler,
     )
     register_scenario_routes(app, request_service=request_service)
     register_system_routes(app, request_service=request_service)

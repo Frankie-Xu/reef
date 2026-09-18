@@ -176,7 +176,7 @@ from typing import Any
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
-from reef.core.provider_calls import PROVIDER_ROUTES
+from reef.core.provider_calls import PROVIDER_ROUTE_PATHS
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -494,7 +494,7 @@ CAPTURE_PATHS = (
     "/v1/responses",
     "/v1/messages",
     "/v1/messages?beta=true",
-    *(route.path for route in PROVIDER_ROUTES),
+    *PROVIDER_ROUTE_PATHS,
 )
 
 

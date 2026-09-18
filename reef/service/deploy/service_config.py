@@ -107,6 +107,14 @@ class ServiceConfig:
     upstream_api: str = config_option(
         "openai", public_path=("inference", "upstream_api"), help="Provider API dialect."
     )
+    #: The key provider calls (images, embeddings, speech, decisions) reach
+    #: OpenRouter with, whatever the upstream is; unset, a deployment whose
+    #: upstream is OpenRouter uses ``upstream_api_key``, and any other serves none.
+    openrouter_api_key: str | None = config_option(
+        None,
+        public_path=("inference", "openrouter_api_key"),
+        help="OpenRouter key for image, embedding, speech and decision calls.",
+    )
     inference_timeout_s: float = config_option(
         300.0, public_path=("inference", "timeout_s"), help="Inference request timeout in seconds."
     )

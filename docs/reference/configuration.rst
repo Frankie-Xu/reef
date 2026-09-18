@@ -41,8 +41,9 @@ readiness, runs in the foreground, and cleans up its process on Ctrl-C;
 it does not launch or stop the upstream provider. Readiness does not verify
 provider credentials or model availability.
 
-``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and
-``REEF_TOKEN`` supply optional environment fallbacks for this mode. Explicit
+``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY``,
+``OPENROUTER_API_KEY`` and ``REEF_TOKEN`` supply optional environment fallbacks
+for this mode. Explicit
 CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
 model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
 with any other prefix still needs an upstream URL.
@@ -574,6 +575,7 @@ shown above; the repository examples all use version 2.
    reef.upstream_api_key | its credential. Reef is the only party that sees it.
    reef.upstream_model | the model to request upstream
    reef.upstream_api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
+   reef.openrouter_api_key | the upstream key when the upstream is OpenRouter | the OpenRouter key provider calls (``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech``, ``/v1/decisions``) use, whatever the upstream is; unset, those routes answer 501
    reef.inference_url | the address the training backend reports | the local engine; set only to front the engines with something else
    reef.inference_timeout_s | 300.0 | per-request timeout
    reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404

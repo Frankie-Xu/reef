@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, PROVIDER_ROUTES, provider_call_response
+from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_response
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
@@ -169,7 +169,10 @@ def register_inference_routes(
     *,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
+    openrouter_handler: InferenceHandler | None = None,
 ) -> None:
+    """Serve chat through the scenario's handler (or ``inference_handler``) and provider calls through OpenRouter."""
+
     async def inference(request: web.Request) -> web.StreamResponse:
         payload = await read_object(request)
         if payload.get("stream") is True:
@@ -190,6 +193,10 @@ def register_inference_routes(
         return web.json_response(response_payload, headers=headers)
 
     async def provider_call(request: web.Request) -> web.StreamResponse:
+        if openrouter_handler is None:
+            raise web.HTTPNotImplemented(
+                text=f"{request.path} needs an OpenRouter key: set inference.openrouter_api_key (OPENROUTER_API_KEY)"
+            )
         payload = await read_object(request)
         if payload.get("stream") is True:
             raise web.HTTPBadRequest(text=f"{request.path} does not stream; send the request without stream")
@@ -197,15 +204,15 @@ def register_inference_routes(
             request,
             payload,
             request_service=request_service,
-            inference_handler=inference_handler,
+            inference_handler=openrouter_handler,
         )
 
     app.router.add_post("/v1/chat/completions", inference)
     app.router.add_post("/v1/responses", inference)
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
-    for route in PROVIDER_ROUTES:
-        app.router.add_post(route.path, provider_call)
+    for path in PROVIDER_ROUTE_PATHS:
+        app.router.add_post(path, provider_call)
 
 
 __all__ = ["register_inference_routes"]

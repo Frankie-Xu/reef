@@ -21,8 +21,10 @@ from reef.core.provider_calls import compact, provider_call_endpoint
 from reef.core.trajectories import make_trajectory, provider_calls, recorded_payload
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.client.wrapper import CAPTURE_PATHS, run_agent
-from reef.inference.http import HttpInferenceHandler, provider_request_headers
+from reef.inference.http import HttpInferenceHandler
+from reef.inference.openrouter import OpenRouterHandler, openrouter_api_key
 from reef.recipe.reefine.evolution import failures_text
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
@@ -44,6 +46,7 @@ def provider_upstream(received: list[dict]) -> web.Application:
                 "payload": await request.json(),
                 "authorization": request.headers.get("Authorization"),
                 "accept_encoding": request.headers.get("Accept-Encoding"),
+                "reef_headers": sorted(name.lower() for name in request.headers if name.lower().startswith("x-reef")),
             }
         )
         if request.path == "/v1/images":
@@ -60,12 +63,14 @@ def provider_upstream(received: list[dict]) -> web.Application:
     return app
 
 
-async def reef_client(upstream: TestServer) -> tuple[TestClient, object]:
-    handler = HttpInferenceHandler(
-        str(upstream.make_url("")).rstrip("/"), request_headers=provider_request_headers("provider-key")
+async def reef_client(
+    openrouter: TestServer | None, chat: InferenceHandler | None = None
+) -> tuple[TestClient, object]:
+    handler = (
+        None if openrouter is None else OpenRouterHandler("openrouter-key", base_url=str(openrouter.make_url("")))
     )
     dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-    client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))
+    client = TestClient(TestServer(create_app(dispatcher, inference_handler=chat, openrouter_handler=handler)))
     await client.start_server()
     return client, dispatcher
 
@@ -112,8 +117,9 @@ def test_provider_calls_reach_their_provider_paths_and_are_recorded_as_summaries
                 "/alpha/decisions",
             ]
             assert received[0]["payload"] == {"model": "google/image", "prompt": "a reef at dawn"}
-            assert {request["authorization"] for request in received} == {"Bearer provider-key"}
+            assert {request["authorization"] for request in received} == {"Bearer openrouter-key"}
             assert {request["accept_encoding"] for request in received} == {"identity"}
+            assert all(request["reef_headers"] == [] for request in received)
 
             records = {
                 record.agent_record_id: record.payload
@@ -173,6 +179,63 @@ def test_a_provider_call_does_not_stream() -> None:
 
 
 @pytest.mark.unit
+def test_provider_calls_reach_openrouter_while_chat_stays_on_the_scenarios_upstream() -> None:
+    async def run() -> None:
+        received: list[dict] = []
+        openrouter = TestServer(provider_upstream(received))
+        await openrouter.start_server()
+        chat_paths: list[str] = []
+
+        async def chat_upstream(request: web.Request) -> web.Response:
+            chat_paths.append(request.path)
+            return web.json_response({"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
+
+        chat_app = web.Application()
+        chat_app.router.add_post("/v1/chat/completions", chat_upstream)
+        chat = TestServer(chat_app)
+        await chat.start_server()
+        client, _ = await reef_client(openrouter, HttpInferenceHandler(str(chat.make_url("")).rstrip("/")))
+        headers = {"x-reef-scenario": "media"}
+        try:
+            reply = await client.post("/v1/chat/completions", headers=headers, json={"model": "local", "messages": []})
+            assert reply.status == 200
+            speech = await client.post("/v1/audio/speech", headers=headers, json={"model": "tts", "input": "hi"})
+            assert await speech.read() == AUDIO_BYTES
+            assert chat_paths == ["/v1/chat/completions"]
+            assert [request["path"] for request in received] == ["/v1/audio/speech"]
+        finally:
+            await client.close()
+            await openrouter.close()
+            await chat.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_without_an_openrouter_key_a_provider_call_says_what_to_set() -> None:
+    async def run() -> None:
+        client, _ = await reef_client(None)
+        try:
+            response = await client.post(
+                "/v1/images", headers={"x-reef-scenario": "media"}, json={"model": "google/image", "prompt": "reef"}
+            )
+            assert response.status == 501
+            assert "OPENROUTER_API_KEY" in await response.text()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_the_openrouter_key_is_the_configured_one_else_an_openrouter_upstreams() -> None:
+    assert openrouter_api_key("configured", "https://openrouter.ai/api", "upstream") == "configured"
+    assert openrouter_api_key(None, "https://openrouter.ai/api", "upstream") == "upstream"
+    assert openrouter_api_key(None, "http://127.0.0.1:11434", "ollama") is None
+    assert openrouter_api_key("", None, None) is None
+
+
+@pytest.mark.unit
 def test_a_training_runtime_does_not_serve_provider_calls(tmp_path) -> None:
     async def run() -> None:
         received: list[dict] = []
@@ -186,8 +249,8 @@ def test_a_training_runtime_does_not_serve_provider_calls(tmp_path) -> None:
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(),
         )
-        handler = HttpInferenceHandler(str(upstream.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))
+        handler = OpenRouterHandler("openrouter-key", base_url=str(upstream.make_url("")))
+        client = TestClient(TestServer(create_app(dispatcher, openrouter_handler=handler)))
         await client.start_server()
         try:
             response = await client.post(
