@@ -4,8 +4,8 @@ A recipe is *how records and their feedback become a new version of the
 weights or the harness*. This package holds everything a method binds to:
 
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
-  ``build``, ``build_artifact_validator``, ``build_surface``, the
-  ``CheckpointStrategy``) and ``WeightTrainingRecipe`` with its
+  ``build``, ``build_surface``, the ``CheckpointStrategy``) and
+  ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (training objective and data processor).
 - ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
@@ -30,8 +30,8 @@ them at boot nor ships them in its wheel. Deployments select one explicitly by
 its dotted ``package.module:ClassName`` reference.
 
 The recipe decides; it does not execute or deliver. ``build`` returns a
-``Trainer``, ``build_artifact_validator`` an admission policy,
-``build_surface`` serving capabilities, and the scenario binds them with the
+``Trainer``, ``build_surface`` the release's components with their serving
+capabilities and admission checks, and the scenario binds them with the
 runtime as peers. Scenario coordination consumes recipes. Recipes depend on ``train``, ``harness``,
 ``surface``, ``storage``, and ``runtime``; none imports this package. Concrete
 weight backends are loaded only when a weight-training recipe builds them.

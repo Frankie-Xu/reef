@@ -1,8 +1,8 @@
 """Serving capabilities a scenario exposes for its frozen release.
 
-``Surface`` is a frozen composition of optional capabilities — ``loader``,
-``inference``, ``files`` — and callers inspect fields, never subclass
-identity. The invariant is version fidelity: the consumer observes exactly
+``Surface`` is a frozen composition of named components, each binding
+optional capabilities — ``validator``, ``loader``, ``inference``, ``files`` —
+and callers inspect fields, never subclass identity. The invariant is version fidelity: the consumer observes exactly
 the frozen version, and Reef records the exchange against it. The design,
 every call site, and the bundled surfaces are documented at
 https://reefinfra.ai/docs/developer-guide/surface/.
@@ -17,6 +17,7 @@ from reef.surface.base import (
     AdapterWeightRuntime,
     ArtifactActivator,
     ArtifactLoader,
+    ComponentSurface,
     FileTree,
     InferenceHooks,
     InferenceLease,
@@ -34,6 +35,7 @@ __all__ = [
     "AdapterWeightRuntime",
     "ArtifactActivator",
     "ArtifactLoader",
+    "ComponentSurface",
     "FileTree",
     "InferenceHooks",
     "InferenceLease",

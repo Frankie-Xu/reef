@@ -32,7 +32,6 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
-from reef.surface.base import ArtifactActivator
 from reef.train.trainer import Trainer
 from reef.train.types import (
     DurableWeightsPublication,
@@ -186,14 +185,26 @@ class ScenarioCommitter:
             source = artifacts.resolve(target_ref)
             durable = self._store.durable
             surface = self._binding.surface
-            self._binding.artifact_validator.validate(source)
-            if self._binding.training_runtime is not None:
+            surface.validate(source)
+            # A flat release is always restored. A composed one restores its
+            # runtime-loaded component only when the engine serves other content.
+            loaded_component = surface.loader_component
+            served: Artifact | None = None
+            restore_weights = True
+            if not surface.single:
+                served = artifacts.resolve(current_ref)
+                restore_weights = loaded_component is not None and surface.component_changed(
+                    source, served, loaded_component
+                )
+            if self._binding.training_runtime is not None and restore_weights:
                 if self._binding.runtime is None:
                     raise ReefError("training checkpoint restore requires an inference runtime")
                 self._binding.runtime.pause_admission()
-                self._binding.training_runtime.restore_checkpoint(source)
-            if surface.loader is not None:
-                surface.loader.load(source, self._binding.runtime)
+                self._binding.training_runtime.restore_checkpoint(
+                    source if loaded_component is None else surface.component_artifact(source, loaded_component)
+                )
+            if restore_weights:
+                surface.load(source, self._binding.runtime)
             staged = artifacts.stage(next_step, source, parent=checkpoint)
             try:
                 commit_metadata = scenario_metadata_for(
@@ -224,8 +235,9 @@ class ScenarioCommitter:
                     },
                     advance_heads=not durable,
                 )
-                if isinstance(surface.loader, ArtifactActivator):
-                    surface.loader.activate(artifacts.resolve(published_ref), self._binding.runtime, source=source)
+                surface.activate(
+                    artifacts.resolve(published_ref), self._binding.runtime, source=source, previous=served
+                )
                 record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=published_ref,
@@ -259,7 +271,12 @@ class ScenarioCommitter:
                 return None
             if self._store.durable:
                 self._synchronize_checkpoint()
-            published_tree = self._artifacts.resolve(current_ref).local_path
+            surface = self._binding.surface
+            served = self._artifacts.resolve(current_ref)
+            files_component = surface.files_component
+            published_tree = (
+                served if files_component is None else surface.component_artifact(served, files_component)
+            ).local_path
             if published_tree is None:
                 return None
             result = self._trainer.shipped_content_update(published_tree)
@@ -294,6 +311,7 @@ class ScenarioCommitter:
 
             if self._store.durable:
                 self._synchronize_checkpoint()
+            surface = self._binding.surface
             publication = result.publication
             if isinstance(publication, DurableWeightsPublication):
                 # Checkpoint policy lives here, so a backend that exported
@@ -304,12 +322,20 @@ class ScenarioCommitter:
                         Artifact.local(
                             Path(publication.checkpoint_path),
                             metadata={"runtime_load_id": publication.runtime_load_id},
-                        )
+                        ),
+                        surface.loader_component,
                     )
                 else:
                     publication = LiveWeightPublication(publication.runtime_load_id)
 
             if isinstance(publication, LiveWeightPublication):
+                if not surface.single:
+                    # A live release names an engine load and nothing else, so it
+                    # cannot carry the other components; every step must checkpoint.
+                    raise ReefError(
+                        f"scenario {self._name!r} serves components {list(surface.names)}: "
+                        "live weights cannot be published without a checkpoint"
+                    )
                 return self._commit_live_weights(result, publication, prepared)
             if isinstance(publication, NoArtifactPublication):
                 return self._commit_without_artifact(result, prepared)
@@ -369,11 +395,10 @@ class ScenarioCommitter:
         next_step = self._step + 1
         checkpoint = artifacts.checkpoint
         head = artifacts.current
-        self._binding.artifact_validator.validate(publication.artifact)
         pending = result.pending
         durable = self._store.durable
         checkpointed = pending or self._should_checkpoint(result)
-        local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
+        local_artifact = self._stage_publication(next_step, publication, checkpoint)
         try:
             # A pending release is recorded but never activated and moves no head.
             # The engine must confirm the new revision before anything moves
@@ -399,8 +424,10 @@ class ScenarioCommitter:
                 published_ref = artifacts.publish(
                     local_artifact,
                     expected_parent=checkpoint,
+                    # The staged release's metadata: the publication's own for a
+                    # flat release, the component manifest for a composed one.
                     metadata={
-                        **dict(publication.artifact.metadata),
+                        **dict(local_artifact.metadata),
                         SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not pending and not durable,
@@ -469,10 +496,39 @@ class ScenarioCommitter:
         finally:
             self._commit_status = (self._step, self._latest_training_record, self._artifact_head_sync)
 
+    def _stage_publication(
+        self, next_step: int, publication: SavedArtifactPublication, checkpoint: ArtifactRef
+    ) -> Artifact:
+        """Admit the published component and stage the release it belongs to.
+
+        A flat scenario stages the artifact as published. A multi-component
+        scenario replaces the named component and carries every other
+        component forward from the checkpoint, so one step changes one
+        component and the release still binds the whole combination.
+        """
+        surface = self._binding.surface
+        component = publication.component
+        if component is not None and component not in surface.names:
+            raise ReefError(f"scenario {self._name!r} serves no component {component!r}")
+        if surface.single:
+            surface.validate(publication.artifact)
+            return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
+        if component is None:
+            raise ReefError(
+                f"scenario {self._name!r} serves components {list(surface.names)}: a step must name the one it publishes"
+            )
+        surface.components[component].validator.validate(publication.artifact)
+        carried = self._artifacts.resolve(checkpoint)
+        components = {name: carried.component(name) for name in surface.names}
+        components[component] = publication.artifact
+        return self._artifacts.stage_composed(next_step, components, parent=checkpoint)
+
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
-        loader = self._binding.surface.loader
-        if isinstance(loader, ArtifactActivator):
-            loader.activate(artifact, self._binding.runtime, source=source)
+        surface = self._binding.surface
+        # A flat release always activates; a composed one skips a component
+        # the engine already serves, so a harness step never reloads weights.
+        previous = None if surface.single else self._artifacts.resolve(self._artifacts.current)
+        surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
 
     def _settle_trainer_commit(self, prepared: PreparedCommit, record: CommitRecord, next_step: int) -> None:
         """Finish recoverable effects before exposing the prepared state."""

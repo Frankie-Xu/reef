@@ -170,6 +170,21 @@ class _GitWorkspace:
         return self._git_client.run(command, cwd=cwd, source_error=source_error)
 
 
+def _materialized_metadata(checkout: Path) -> Mapping[str, object]:
+    """The release metadata recorded in a materialized checkout's manifest; a bootstrap tree has none."""
+    manifest_path = checkout / _MANIFEST
+    if not manifest_path.is_file():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ArtifactMaterializationError(f"invalid artifact manifest in {checkout}") from exc
+    metadata = manifest.get("metadata", {}) if isinstance(manifest, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        raise ArtifactMaterializationError(f"invalid artifact metadata in {checkout}")
+    return dict(metadata)
+
+
 class _ArtifactManifest:
     """Read and write the reef-artifact.json manifest inside a git work tree."""
 
@@ -345,7 +360,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
     def materialize(self, ref: ArtifactRef) -> Artifact:
         destination = self.cache_dir / ref.release_id
         if destination.is_dir():
-            return Artifact(ref, None, local_path=destination)
+            return Artifact(ref, None, local_path=destination, metadata=_materialized_metadata(destination))
         temporary = Path(tempfile.mkdtemp(prefix=f".{ref.release_id}-", dir=self.cache_dir))
         checkout = temporary / "artifact"
         try:
@@ -366,7 +381,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             shutil.rmtree(temporary, ignore_errors=True)
         if not destination.is_dir():
             raise ArtifactMaterializationError(f"artifact cache was not created: {ref.release_id}")
-        return Artifact(ref, None, local_path=destination)
+        return Artifact(ref, None, local_path=destination, metadata=_materialized_metadata(destination))
 
     def publish(
         self,

@@ -184,12 +184,10 @@ Common members
 | ``build(scenario, records, algorithm_state=...)`` | ``Trainer``                 | construct the scenario trainer |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_surface(scenario)``                       | ``Surface``                 | the delivery contract for one  |
-|                                                   |                             | named scenario                 |
-+---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_artifact_validator()``                    | ``ArtifactValidator``       | artifact admission, enforced   |
-|                                                   |                             | before publication and         |
-|                                                   |                             | rollback; defaults to          |
-|                                                   |                             | ``AcceptAnyArtifact()``        |
+|                                                   |                             | named scenario: its release    |
+|                                                   |                             | components, each with its      |
+|                                                   |                             | admission check (default       |
+|                                                   |                             | ``AcceptAnyArtifact()``)       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``serving_status()``                              | ``Mapping | None``          | runtime-wide state for         |
 |                                                   |                             | ``/reef/status``               |
@@ -1012,7 +1010,7 @@ Surface
 .. code:: python
 
    from reef.surface import (
-       Surface, create_harness_surface, create_skill_surface, create_weight_surface,
+       ComponentSurface, Surface, create_harness_surface, create_skill_surface, create_weight_surface,
    )
 
 A surface binds one frozen release to its consumers.
@@ -1020,20 +1018,27 @@ A surface binds one frozen release to its consumers.
 ``create_weight_surface()``, and ``CordisRecipe`` calls
 ``create_harness_surface()``, so most methods never touch this.
 
-``Surface`` is a frozen dataclass whose capabilities are fields, not subclass
-identity. ``None`` means the capability is absent, and bare ``Surface()`` is the
-complete record-only configuration.
+``Surface`` is a frozen dataclass mapping each named release component to a
+``ComponentSurface``, whose capabilities are fields, not subclass identity.
+``None`` means the capability is absent, and bare ``Surface()`` is the
+complete record-only configuration. A one-component surface serves a flat
+release; a surface with several components serves a release with one
+directory per component, and ``Surface.loader``, ``inference``, and ``files``
+route to their components.
 
-+---------------+---------------------------+----------------------------------------------+
-| Field         | Type                      | Contract                                     |
-+===============+===========================+==============================================+
-| ``loader``    | ``ArtifactLoader | None`` | recover the serving head, load rollback      |
-|               |                           | checkpoints                                  |
-+---------------+---------------------------+----------------------------------------------+
-| ``inference`` | ``InferenceHooks | None`` | prepare provider requests, verify responses  |
-+---------------+---------------------------+----------------------------------------------+
-| ``files``     | ``FileTree | None``       | back client pulls                            |
-+---------------+---------------------------+----------------------------------------------+
++---------------+-----------------------------+----------------------------------------------+
+| Field         | Type                        | Contract                                     |
++===============+=============================+==============================================+
+| ``validator`` | ``ArtifactValidator``       | admit the component before publication and   |
+|               |                             | rollback; the default accepts any artifact   |
++---------------+-----------------------------+----------------------------------------------+
+| ``loader``    | ``ArtifactLoader | None``   | recover the serving head, load rollback      |
+|               |                             | checkpoints                                  |
++---------------+-----------------------------+----------------------------------------------+
+| ``inference`` | ``InferenceHooks | None``   | prepare provider requests, verify responses  |
++---------------+-----------------------------+----------------------------------------------+
+| ``files``     | ``FileTree | None``         | back client pulls                            |
++---------------+-----------------------------+----------------------------------------------+
 
 Two optional protocols extend those structurally, and the scenario checks for
 them with ``isinstance``. ``ArtifactActivator`` adds ``loader.activate(artifact,
@@ -1043,8 +1048,7 @@ returning a lease the service releases when the attempt ends, so serving state
 such as a resident adapter stays protected for its duration.
 
 A surface does not decide which records train, compute candidates, execute a
-training job, admit an artifact, or mutate the release chain. Artifact admission
-is separate, through ``Recipe.build_artifact_validator()``. Native streaming
+training job, or mutate the release chain. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.
 

@@ -23,7 +23,7 @@ from reef.recipe.config_fields import config_field, parse_int, recipe_config_fie
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
+from reef.surface.base import Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
@@ -159,8 +159,11 @@ class Recipe:
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.
 
-        Most recipes ignore ``scenario``; recipes whose serving state is
-        scenario-specific (an adapter on a shared engine) route by it.
+        The surface names the release's components and binds each one's
+        capabilities, including the admission check run before that component
+        is published or restored. Most recipes ignore ``scenario``; recipes
+        whose serving state is scenario-specific (an adapter on a shared
+        engine) route by it.
         """
         return Surface()
 
@@ -175,10 +178,6 @@ class Recipe:
         state to report.
         """
         return None
-
-    def build_artifact_validator(self) -> ArtifactValidator:
-        """Build the artifact admission policy for one scenario."""
-        return AcceptAnyArtifact()
 
 
 @dataclass(frozen=True)

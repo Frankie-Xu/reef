@@ -25,6 +25,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker
@@ -33,7 +34,7 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
-from reef.surface.base import ArtifactActivator
+from reef.surface.base import Surface
 from reef.train.trainer import Trainer
 
 
@@ -98,17 +99,24 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
+        recipe = self._recipe.with_model_config(model_config)
+        surface = recipe.build_surface(scenario)
         if registration is None:
             selected = backend.resolve_release(release_id)
-            backend.fork(
-                selected.release_id,
-                metadata={
-                    SCENARIO_METADATA_KEY: scenario_metadata_for(
-                        name=scenario,
-                        base_artifact=selected,
-                    )
-                },
-            )
+            registration_metadata: dict[str, object] = {
+                SCENARIO_METADATA_KEY: scenario_metadata_for(
+                    name=scenario,
+                    base_artifact=selected,
+                )
+            }
+            if not surface.single:
+                # The base release of a multi-component scenario already keeps
+                # one directory per component; name them so every later step
+                # can carry the unchanged ones forward.
+                registration_metadata[COMPONENTS_METADATA_KEY] = ReleaseComponents(
+                    {name: ComponentEntry(f"{selected.content_id}:{name}") for name in surface.names}
+                ).to_dict()
+            backend.fork(selected.release_id, metadata=registration_metadata)
 
             # fork() is the atomic registration point. Another caller may have
             # won it, so always rebuild from the durable registration instead of
@@ -121,7 +129,9 @@ class ScenarioFactory:
             # for this attempt, even if another creator won registration.
             release_id = selected.release_id
 
-        return self._recover(scenario, backend, registration, release_id=release_id, model_config=model_config)
+        return self._recover(
+            scenario, backend, registration, release_id=release_id, model_config=model_config, surface=surface
+        )
 
     def validate_existing(
         self,
@@ -143,6 +153,7 @@ class ScenarioFactory:
         *,
         release_id: str | None,
         model_config: ModelConfig,
+        surface: Surface,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
@@ -161,7 +172,6 @@ class ScenarioFactory:
             release_id,
         )
         recipe = self._recipe.with_model_config(model_config)
-        surface = recipe.build_surface(name)
         runtime = recipe.runtime
         store = self._storage.open(name)
         scenario: Scenario | None = None
@@ -192,11 +202,7 @@ class ScenarioFactory:
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].artifact_ref
 
-            current_artifact = (
-                checkpoint_head
-                if surface.loader is None
-                else surface.loader.recover(committed_artifact, checkpoint_head, runtime)
-            )
+            current_artifact = surface.recover(committed_artifact, checkpoint_head, runtime)
 
             repository = Repository(
                 backend,
@@ -206,12 +212,10 @@ class ScenarioFactory:
                 local_dir=self._local_artifact_dir,
             )
             repository.synchronize_checkpoint()
-            if isinstance(surface.loader, ArtifactActivator) and not isinstance(
-                current_artifact, LiveWeightArtifactRef
-            ):
+            if not isinstance(current_artifact, LiveWeightArtifactRef):
                 # Traffic must not reach a recovered scenario before its committed
                 # head is servable; a failed activation leaves the scenario unloaded.
-                surface.loader.activate(Artifact(current_artifact, repository), runtime)
+                surface.activate(Artifact(current_artifact, repository), runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,
@@ -238,7 +242,6 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_runtime=recipe.training_runtime,
                     inference_handler=recipe.inference_handler,
-                    artifact_validator=recipe.build_artifact_validator(),
                     report_type=trainer.report_type,
                 ),
                 repository=repository,
