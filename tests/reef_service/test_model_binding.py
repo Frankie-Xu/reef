@@ -455,12 +455,15 @@ def test_unknown_api_is_refused() -> None:
 def test_episode_templates_follow_the_dialect() -> None:
     pi = get_adapter("pi")
     openai = render_composition(ModelBinding("http://up", "m", api_key="k").compose_nodes(pi), pi)
+    responses = render_composition(ModelBinding("http://up", "m", api_key="k", api="responses").compose_nodes(pi), pi)
     anthropic = render_composition(ModelBinding("http://up", "m", api_key="k", api="anthropic").compose_nodes(pi), pi)
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-completions"
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up/v1"
+    assert json.loads(responses["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-responses"
+    assert json.loads(responses["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up/v1"
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["api"] == "anthropic-messages"
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up"
-    for files in (openai, anthropic):
+    for files in (openai, responses, anthropic):
         assert json.loads(files["pi-agent/settings.json"])["defaultModel"] == "reef/m"
 
 

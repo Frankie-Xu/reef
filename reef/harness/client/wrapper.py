@@ -484,9 +484,8 @@ def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
 #: The response header Reef sets on every inference answer of a file serving scenario: the head release id.
 RELEASE_HEADER = "x-reef-release-id"
 #: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
-#: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed. Reef has no
-#: Responses route yet, so a codex tree bound to Reef sends its calls to a path nothing answers.
-CAPTURE_PATHS = ("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true")
+#: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
+CAPTURE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages?beta=true")
 
 
 class ReleaseObserver(ABC):

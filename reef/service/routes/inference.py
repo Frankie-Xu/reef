@@ -184,6 +184,7 @@ def register_inference_routes(
         return web.json_response(response_payload, headers=headers)
 
     app.router.add_post("/v1/chat/completions", inference)
+    app.router.add_post("/v1/responses", inference)
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
 

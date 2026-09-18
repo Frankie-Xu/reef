@@ -25,7 +25,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import ReefClient
 
 import reef.harness.adapters
-from reef.artifact import InMemoryRepositoryBackend
+import reef.service.routes.system as system_routes
+from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -41,10 +42,14 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.install_script import (
     HARNESS_RELEASE_FILE,
+    PREAMBLE_MIN_BYTES,
     TOKEN_PLACEHOLDER,
     composition_checksum,
+    render_install_preamble,
     render_install_script,
+    render_streamed_install,
 )
+from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import tree_files
@@ -154,6 +159,7 @@ def _dispatcher(
     batch_policy: str = "reports",
     batch_size: int = 1,
     seed: tuple[dict, ...] = (),
+    api: str = "openai",
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -164,7 +170,7 @@ def _dispatcher(
         resolve_episode_scorer(evaluate),
         ("task one",),
         binary=str(binary),
-        runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000"),
+        runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
         batch_policy=batch_policy,
         batch_size=batch_size,
         seed=seed,
@@ -1538,6 +1544,28 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("api", "pi_api"), [("responses", "openai-responses"), ("anthropic", "anthropic-messages")])
+def test_install_script_binds_the_client_in_the_served_models_dialect(tmp_path, api: str, pi_api: str) -> None:
+    """Reef forwards a call to the upstream unchanged, so an installed reef-pi must speak the upstream's API."""
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed, api=api)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/reef/harness/install", params={"adapter": "pi"}, headers={"x-reef-scenario": "delivery"}
+            )
+            assert response.status == 200
+            assert f'"api": "{pi_api}"' in await response.text()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(tmp_path) -> None:
     """Behind a gateway the client reached ``https://api.example.test``, not this process: the
     binding takes the forwarded host and scheme, so reef-pi calls back through the gateway."""
@@ -2213,3 +2241,62 @@ def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_an
         else:
             assert "    notify (permission): true" in result.stderr and _files_under(dest) == {release_file.name}
     assert not npm_log.exists()
+
+
+@pytest.mark.unit
+def test_a_slow_install_render_starts_the_script_with_a_spinner_and_keeps_a_failure_the_scripts_exit(
+    tmp_path, monkeypatch
+) -> None:
+    """A render past the delay (a new scenario is created first) sends a preamble at once, so ``curl | bash``
+    shows progress; the script follows in one brace group, a failure becomes its message and exit 1, and a
+    connection that drops mid-script runs none of it."""
+    monkeypatch.setattr(system_routes, "INSTALL_PREAMBLE_DELAY_SECONDS", 0.05)
+    answers = iter(["#!/bin/sh\nset -eu\necho 'reef: done'\n", ArtifactNotFound("no release 'r9'")])
+
+    def slow_render(self, headers, adapter, release_id=None):
+        answer = next(answers)
+        Event().wait(0.3)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(RequestService, "harness_install_script", slow_render)
+
+    def run_shell(script: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["sh"], input=script, capture_output=True, text=True, timeout=10)
+
+    async def run() -> tuple[tuple[int, str], tuple[int, str]]:
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            texts = []
+            for _ in range(2):
+                response = await client.get("/reef/harness/install", params={"adapter": "pi"})
+                texts.append((response.status, await response.text()))
+            return texts[0], texts[1]
+        finally:
+            await client.close()
+
+    (status, script), (failed_status, failed) = asyncio.run(run())
+    assert status == 200 and script.startswith(render_install_preamble())
+    # curl passes a short first chunk into a pipe only with the next one and holds back its last partial block, so
+    # the preamble is padded past that buffer with comments that come after its commands.
+    preamble = render_install_preamble()
+    commands, _, padding = preamble.partition("\nfi\n")
+    assert len(preamble.encode()) >= PREAMBLE_MIN_BYTES and "if [ -t 1 ]" in commands
+    assert padding and all(line.startswith("#") for line in padding.splitlines())
+    assert script.endswith("echo 'reef: done'\n}\n")
+    ran = run_shell(script)
+    # Off a terminal the preamble says one static line instead of spinning.
+    assert ran.returncode == 0 and ran.stdout == "reef: preparing the harness install\nreef: done\n"
+
+    # The HTTP status went out with the preamble, so the failure is the script's message and exit status.
+    assert failed_status == 200
+    ran = run_shell(failed)
+    assert ran.returncode == 1
+    assert ran.stderr == "reef: the harness install failed (HTTP 404): no release 'r9'\n"
+
+    # A dropped connection leaves an unclosed group: the shell refuses it and runs nothing inside.
+    truncated = render_install_preamble() + render_streamed_install("echo 'reef: partial'\n").removesuffix("}\n")
+    ran = run_shell(truncated)
+    assert ran.returncode != 0 and "reef: partial" not in ran.stdout

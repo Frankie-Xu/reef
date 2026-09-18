@@ -816,7 +816,7 @@ class RequestService:
         if not host or not model or not entries:
             return {}
         scheme = normalized.get("x-forwarded-proto") or "http"
-        api = "openai"
+        api = "openai" if info is None else info.served_api
         client_models = () if info is None else info.client_models
         override = scenario.model_config.runtime
         if override is not None:

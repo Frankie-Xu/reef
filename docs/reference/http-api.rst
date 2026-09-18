@@ -1,8 +1,9 @@
 HTTP API: inference, feedback, and releases
 ===========================================
 
-Reef serves the provider's own inference routes: OpenAI at
-``/v1/chat/completions`` and Anthropic at ``/v1/messages``. It forwards each
+Reef serves the provider's own inference routes: OpenAI Chat Completions at
+``/v1/chat/completions``, OpenAI Responses at ``/v1/responses``, and Anthropic
+at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
@@ -26,6 +27,8 @@ Routes
 | ``GET /healthz``                                       | readiness; the only unauthenticated route         |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/chat/completions``                          | OpenAI-format inference                           |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/responses``                                 | OpenAI Responses-format inference                 |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages``                                  | Anthropic-format inference                        |
 +--------------------------------------------------------+---------------------------------------------------+
@@ -529,6 +532,17 @@ script. If install omits ``x-reef-scenario``, Reef creates a scenario with a
 generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe
 automatically.
+
+Creating that scenario takes a few seconds, and ``curl ... | bash`` shows
+nothing until the first bytes arrive. So when the script is not ready within
+half a second, the response starts at once with a short preamble that shows
+``reef: preparing the harness install`` (a spinner on a terminal). The script
+follows inside one ``{ ... }`` group that first stops the spinner, so a
+connection that drops mid-script runs none of it. In that case the HTTP
+status is already 200: a failure while preparing arrives as a script that
+prints ``reef: the harness install failed (HTTP <status>): <message>`` and
+exits 1. A script ready within the half second is sent as before, with the
+failure's own HTTP status.
 
 ``files`` is the rendered tree, path to text. An adapter whose descriptor
 declares ``files.tree`` (``native`` does: ``native/tree.json``) adds one more
