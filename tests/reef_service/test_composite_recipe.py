@@ -117,6 +117,8 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     }
     assert recipe.checkpoint_strategy == EveryNVersions(1)
     assert recipe.report_type is None
+    # No weight-training component: a bootstrap model snapshot would sit at the release root.
+    assert recipe.bootstrap_artifact_component() is None
     trainers = recipe.build_trainers("agent", SQLiteScenarioStorage().open("agent").records, algorithm_states={})
     assert [bound.component for bound in trainers] == ["harness", "config"]
     assert trainers[0].trainer.candidate_backend is not None

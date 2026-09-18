@@ -35,7 +35,7 @@ from reef.core.components import validate_component_name
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
@@ -172,6 +172,12 @@ class CompositeRecipe(Recipe):
             if seed:
                 files.update({f"{component}/{path}": text for path, text in seed.items()})
         return files or None
+
+    def bootstrap_artifact_component(self) -> str | None:
+        """The weight-training component: a bootstrap model snapshot is that component's base content."""
+        return next(
+            (name for name, recipe in self.components.items() if isinstance(recipe, WeightTrainingRecipe)), None
+        )
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         return tuple(path for recipe in self.components.values() for path in recipe.scenario_state_dirs(scenario))

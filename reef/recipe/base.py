@@ -200,6 +200,10 @@ class Recipe:
         """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
         return None
 
+    def bootstrap_artifact_component(self) -> str | None:
+        """The release component a bootstrap model snapshot belongs to; ``None`` places it at the release root."""
+        return None
+
     def serving_status(self) -> Mapping[str, Any] | None:
         """Runtime-wide serving state this recipe owns, for ``/reef/status``.
 

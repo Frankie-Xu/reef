@@ -22,6 +22,7 @@ from reef.artifact.artifact import (
 from reef.artifact.git_client import GitClient
 from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
 from reef.artifact.sources import GitVersionSource, download_huggingface_snapshot, parse_artifact_source
+from reef.core.components import validate_component_name
 
 _MANIFEST = "reef-artifact.json"
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
@@ -97,7 +98,8 @@ class _GitWorkspace:
         self.git("rm", "-rf", "--ignore-unmatch", ".")
         self.git("clean", "-fdx")
 
-    def replace_tree(self, source: Path) -> None:
+    def replace_tree(self, source: Path, *, subdirectory: str | None = None) -> None:
+        """Replace the work tree with ``source``, placed under ``subdirectory`` when one is named."""
         for child in self.clone_dir.iterdir():
             if child.name == ".git":
                 continue
@@ -105,8 +107,10 @@ class _GitWorkspace:
                 shutil.rmtree(child)
             else:
                 child.unlink()
+        target = self.clone_dir if subdirectory is None else self.clone_dir / subdirectory
+        target.mkdir(parents=True, exist_ok=True)
         for child in source.iterdir():
-            destination = self.clone_dir / child.name
+            destination = target / child.name
             if child.is_dir():
                 shutil.copytree(child, destination, symlinks=False)
             else:
@@ -246,9 +250,12 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         cache_dir: Path,
         snapshot_download: Callable[..., str] | None = None,
         bootstrap_files: Mapping[str, str] | None = None,
+        bootstrap_subdirectory: str | None = None,
     ) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
+        if bootstrap_subdirectory is not None:
+            validate_component_name(bootstrap_subdirectory)
         _check_tools()
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         self.ref_name = f"refs/reef/scenarios/{encoded}"
@@ -269,7 +276,12 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         self._manifest = _ArtifactManifest(self._workspace)
         self._open_repository()
         if bootstrap_artifact is not None:
-            self._bootstrap(bootstrap_artifact, snapshot_download=snapshot_download)
+            self._bootstrap(
+                bootstrap_artifact,
+                snapshot_download=snapshot_download,
+                subdirectory=bootstrap_subdirectory,
+                files=bootstrap_files or {},
+            )
         elif local_repository is not None:
             self._bootstrap_empty(bootstrap_files or {})
 
@@ -283,7 +295,15 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         cache_dir: Path,
         snapshot_download: Callable[..., str] | None = None,
         bootstrap_files: Mapping[str, str] | None = None,
+        bootstrap_subdirectory: str | None = None,
     ) -> CachedRepositoryBackendFactory:
+        """A factory of scenario backends over one repository.
+
+        ``bootstrap_subdirectory`` names the release component a bootstrap
+        model snapshot belongs to: a multi-component scenario keeps one
+        directory per component, so the snapshot goes under that directory
+        while ``bootstrap_files`` seed the others beside it.
+        """
         _check_tools()
         return _GitLFSRepositoryBackendFactory(
             cls,
@@ -293,6 +313,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             cache_dir=cache_dir,
             snapshot_download=snapshot_download,
             bootstrap_files=bootstrap_files,
+            bootstrap_subdirectory=bootstrap_subdirectory,
         )
 
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
@@ -452,7 +473,10 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         artifact_source: str,
         *,
         snapshot_download: Callable[..., str] | None,
+        subdirectory: str | None = None,
+        files: Mapping[str, str] = {},
     ) -> ArtifactRef:
+        """The base release from a model snapshot, under ``subdirectory`` when named, with ``files`` beside it."""
         source = parse_artifact_source(artifact_source)
         if isinstance(source, GitVersionSource):
             version = self._workspace.fetch_version(source.version)
@@ -469,7 +493,11 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         )
         with self._workspace.lock:
             self._workspace.orphan_checkout()
-            self._workspace.replace_tree(downloaded.local_path)
+            self._workspace.replace_tree(downloaded.local_path, subdirectory=subdirectory)
+            for relative, text in files.items():
+                target = self._workspace.clone_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
             self._workspace.write_lfs_attributes()
             self._manifest.write(
                 content_id=f"content:{uuid.uuid4().hex}",
@@ -478,6 +506,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                     "kind": "huggingface",
                     "name": source.model_name,
                     "version": downloaded.version,
+                    **({} if subdirectory is None else {"component": subdirectory}),
                 },
                 metadata={},
             )
@@ -562,6 +591,7 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
         cache_dir: Path,
         snapshot_download: Callable[..., str] | None,
         bootstrap_files: Mapping[str, str] | None = None,
+        bootstrap_subdirectory: str | None = None,
     ) -> None:
         super().__init__()
         self._backend_type = backend_type
@@ -571,6 +601,7 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
         self._cache_dir = Path(cache_dir)
         self._snapshot_download = snapshot_download
         self._bootstrap_files = None if bootstrap_files is None else dict(bootstrap_files)
+        self._bootstrap_subdirectory = bootstrap_subdirectory
 
     def _build_backend(self, scenario: str) -> GitLFSRepositoryBackend:
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
@@ -582,6 +613,7 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
             cache_dir=self._cache_dir,
             snapshot_download=self._snapshot_download,
             bootstrap_files=self._bootstrap_files,
+            bootstrap_subdirectory=self._bootstrap_subdirectory,
         )
 
     def _has_persisted_registration(self, scenario: str) -> bool:
