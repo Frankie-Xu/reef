@@ -13,6 +13,7 @@ import pytest
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
@@ -79,7 +80,7 @@ class _TwoTrainerRecipe(Recipe):
             }
         )
 
-    def build_trainers(self, scenario, records, *, algorithm_states, experiment_logger=None):
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
         return tuple(
             ComponentTrainer(
                 component,
@@ -269,13 +270,17 @@ def test_component_trainers_must_match_the_surface() -> None:
 
     flat = Surface(components={HARNESS: ComponentSurface(files=TextFileTree())})
     composed = Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface(files=TextFileTree())})
-    unnamed = (ComponentTrainer(None, trainer()),)
-    assert validate_component_trainers(unnamed, flat) == unnamed
-    assert validate_component_trainers(unnamed, composed) == unnamed
+    harness_only = (ComponentTrainer(HARNESS, trainer()),)
+    assert validate_component_trainers(harness_only, flat) == harness_only
+    assert validate_component_trainers(harness_only, composed) == harness_only
     named = (ComponentTrainer(WEIGHTS, trainer()), ComponentTrainer(HARNESS, trainer()))
     assert validate_component_trainers(named, composed) == named
-    with pytest.raises(ReefError, match="flat scenario"):
-        validate_component_trainers((ComponentTrainer(HARNESS, trainer()),), flat)
+    records_only = (ComponentTrainer(RECORDS_COMPONENT, trainer()),)
+    assert validate_component_trainers(records_only, Surface()) == records_only
+    with pytest.raises(ReefError, match="serving no component"):
+        validate_component_trainers(harness_only, Surface())
+    with pytest.raises(ValueError, match="non-empty"):
+        ComponentTrainer("", trainer())
     with pytest.raises(ReefError, match="does not serve"):
         validate_component_trainers((ComponentTrainer("config", trainer()),), composed)
     with pytest.raises(ReefError, match="distinct"):

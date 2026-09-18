@@ -27,7 +27,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
-from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
+from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ComponentEntry, ReleaseComponents
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker
@@ -65,31 +65,26 @@ class _RecoveredTrainerState:
 
 def _recovered_trainer_states(
     store: ScenarioStore, head_record: CommitRecord | None, surface: Surface
-) -> dict[str | None, _RecoveredTrainerState]:
-    """What each possible trainer recovers.
+) -> dict[str, _RecoveredTrainerState]:
+    """What each component's trainer recovers from its own commits.
 
-    A trainer bound to no component recovers from the head commit and every
-    committed step; a trainer bound to a component recovers from that
-    component's own commits. The recipe decides which trainers it builds.
+    The only trainer of a one-component (or record-only) scenario also owns
+    every commit that named no trainer: the records made before commits
+    carried a component, and rollbacks, which carry its state.
     """
     records = store.history()
     if not records and head_record is not None:
         # No durable log: the head adopted from checkpoint metadata is the
         # only committed step there is.
         records = (head_record,)
-    states: dict[str | None, _RecoveredTrainerState] = {
-        None: _RecoveredTrainerState(
-            algorithm_state=None if head_record is None else head_record.algorithm_state,
-            high_water=(
-                None if head_record is None else (head_record.high_water_sequence, head_record.high_water_offset)
-            ),
-            consumed_ids=_consumed_by_committed_steps(records),
+    components = surface.names or (RECORDS_COMPONENT,)
+    states: dict[str, _RecoveredTrainerState] = {}
+    for component in components:
+        own = tuple(
+            record
+            for record in records
+            if record.component == component or (len(components) == 1 and record.component is None)
         )
-    }
-    if surface.single:
-        return states
-    for component in surface.names:
-        own = tuple(record for record in records if record.component == component)
         last = own[-1] if own else None
         states[component] = _RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
@@ -148,12 +143,17 @@ class ScenarioFactory:
                     base_artifact=selected,
                 )
             }
-            if not surface.single:
-                # The base release of a multi-component scenario already keeps
-                # one directory per component; name them so every later step
-                # can carry the unchanged ones forward.
+            if surface.names:
+                # Name the base release's components: a flat release is its one
+                # component, a composed base already keeps one directory per
+                # component, and every later step carries the unchanged ones forward.
                 registration_metadata[COMPONENTS_METADATA_KEY] = ReleaseComponents(
-                    {name: ComponentEntry(f"{selected.content_id}:{name}") for name in surface.names}
+                    {
+                        name: ComponentEntry(
+                            selected.content_id if surface.single else f"{selected.content_id}:{name}"
+                        )
+                        for name in surface.names
+                    }
                 ).to_dict()
             backend.fork(selected.release_id, metadata=registration_metadata)
 
@@ -265,6 +265,7 @@ class ScenarioFactory:
             trainers = recipe.build_trainers(
                 name,
                 store.records,
+                surface=surface,
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
             )

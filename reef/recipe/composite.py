@@ -148,7 +148,8 @@ class CompositeRecipe(Recipe):
         scenario: str,
         records: RecordStore,
         *,
-        algorithm_states: Mapping[str | None, Mapping[str, Any] | None],
+        surface: Surface,
+        algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         return tuple(

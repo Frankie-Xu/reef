@@ -28,6 +28,7 @@ from reef.surface import (
     TextFileTree,
     WeightLoader,
 )
+from reef.train import ComponentTrainer
 from reef.train.types import TrainStepResult
 
 WEIGHTS = "weights"
@@ -266,7 +267,7 @@ def test_surface_chains_inference_hooks_and_leases_in_component_order(tmp_path: 
 
 
 class _TwoComponentRecipe(Recipe):
-    """A record-only recipe whose scenario serves weights and a harness tree."""
+    """A record-only recipe whose scenario serves weights and a harness tree through one trainer."""
 
     activator = _RecordingActivator()
 
@@ -276,6 +277,20 @@ class _TwoComponentRecipe(Recipe):
                 WEIGHTS: ComponentSurface(loader=self.activator),
                 HARNESS: ComponentSurface(files=TextFileTree()),
             }
+        )
+
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        # One trainer, bound to the harness, publishes whichever component a step names.
+        return (
+            ComponentTrainer(
+                HARNESS,
+                self.build(
+                    scenario,
+                    records,
+                    algorithm_state=algorithm_states.get(HARNESS),
+                    experiment_logger=experiment_logger,
+                ),
+            ),
         )
 
 
@@ -330,11 +345,12 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert activator.activated[0] == base_weights
         assert set(activator.activated[1:]) == {trained.ref.content_id}
 
-        # A step must name its component, and live weights cannot carry the harness.
-        with pytest.raises(ReefError, match="must name"):
-            scenario.commit(
-                TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "x"})))
-            )
+        # A publication naming no component replaces the committing trainer's own; unknown names are refused,
+        # and live weights cannot carry the harness.
+        scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "x"}))))
+        assert surface.files.read_files(scenario.repository.materialize(scenario.current_artifact_ref())) == {
+            "AGENTS.md": "x"
+        }
         with pytest.raises(ReefError, match="serves no component"):
             scenario.commit(TrainStepResult(state={}, artifact=evolved, component="config"))
         with pytest.raises(ReefError, match="live weights"):

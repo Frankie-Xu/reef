@@ -309,13 +309,14 @@ class Surface:
     def component_changed(self, artifact: Artifact, previous: Artifact, name: str) -> bool:
         """Whether ``name``'s content differs between two releases.
 
-        A flat release is always a change, as every publication was before
-        components existed; a release without a manifest counts as changed.
+        A flat release's content id is its one component's, so the refs
+        answer without materializing anything. A composed release answers from
+        its manifest; a release without one counts as changed.
         """
         if self.single:
-            return True
-        current = artifact.components
-        before = previous.components
+            return artifact.ref.content_id != previous.ref.content_id
+        current = artifact.materialize().components if not artifact.is_live else None
+        before = previous.materialize().components if not previous.is_live else None
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
         return current.entries[name].content_id != before.entries[name].content_id

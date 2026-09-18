@@ -26,6 +26,7 @@ from reef.artifact.artifact import (
     LiveWeightArtifactRef,
 )
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 from reef.core.errors import ReefError
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.binding import ScenarioBinding
@@ -85,8 +86,7 @@ class ScenarioCommitter:
         self._artifacts = artifacts
         self._checkpoint_strategy = checkpoint_strategy
         self._trainers = trainers
-        # The first trainer answers commits made on the scenario's behalf, such
-        # as rollback; a flat scenario has no other.
+        # The first trainer answers commits made on the scenario's behalf, such as rollback.
         self._trainer = trainers[0].trainer
         self._step = scenario_step
         self._store = store
@@ -163,17 +163,23 @@ class ScenarioCommitter:
         with self._publication_lock:
             return self._releases.releases(self._step)
 
-    def _trainer_for(self, component: str | None) -> Trainer:
-        if self._flat:
-            return self._trainer
+    def _bound_trainer(self, component: str | None) -> ComponentTrainer:
+        """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
+        if component is None:
+            return self._trainers[0]
         for bound in self._trainers:
             if bound.component == component:
-                return bound.trainer
+                return bound
         raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
 
-    @property
-    def _flat(self) -> bool:
-        return len(self._trainers) == 1 and self._trainers[0].component is None
+    def _trainer_for(self, component: str | None) -> Trainer:
+        return self._bound_trainer(component).trainer
+
+    def _own_record(self, record: CommitRecord, component: str | None) -> bool:
+        """Whether ``component``'s trainer made ``record``; a record naming no trainer belongs to the only one."""
+        if record.component == component:
+            return True
+        return record.component is None and record.operation == "training" and len(self._trainers) == 1
 
     def _compactable_for(self, component: str | None) -> frozenset[str] | None:
         """The rows every other trainer has released; ``None`` when there is no other trainer.
@@ -182,7 +188,7 @@ class ScenarioCommitter:
         only when no trainer still needs it.
         """
         others = [bound.trainer for bound in self._trainers if bound.component != component]
-        if self._flat or not others:
+        if not others:
             return None
         released: frozenset[str] | None = None
         for trainer in others:
@@ -193,14 +199,23 @@ class ScenarioCommitter:
     def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
         """Drop ``component``'s reserved batch, retiring only rows every trainer has released."""
         with self._lock:
-            self._trainer_for(component).reject_pending(metrics, compactable=self._compactable_for(component))
+            bound = self._bound_trainer(component)
+            bound.trainer.reject_pending(metrics, compactable=self._compactable_for(bound.component))
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
-        """The newest durable commit made by ``component``'s trainer; the newest of all for a flat scenario."""
+        """The newest durable commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
-        if self._flat:
-            return records[-1] if records else None
-        return next((record for record in reversed(records) if record.component == component), None)
+        name = self._bound_trainer(component).component
+        return next((record for record in reversed(records) if self._own_record(record, name)), None)
+
+    def _release_manifest(self, artifact: Artifact) -> ReleaseComponents:
+        """The manifest a release carries: its own, or the one-component manifest a flat release implies."""
+        manifest = artifact.components
+        if manifest is not None:
+            return manifest
+        surface = self._binding.surface
+        name = surface.names[0] if surface.names else self._trainers[0].component
+        return ReleaseComponents({name: ComponentEntry(artifact.ref.content_id)})
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
@@ -239,23 +254,17 @@ class ScenarioCommitter:
             durable = self._store.durable
             surface = self._binding.surface
             surface.validate(source)
-            # A flat release is always restored. A composed one restores its
-            # runtime-loaded component only when the engine serves other content.
+            # The runtime-loaded component is restored only when the engine serves other content.
             loaded_component = surface.loader_component
-            served: Artifact | None = None
-            restore_weights = True
-            if not surface.single:
-                served = artifacts.resolve(current_ref)
-                restore_weights = loaded_component is not None and surface.component_changed(
-                    source, served, loaded_component
-                )
-            if self._binding.training_runtime is not None and restore_weights:
+            served = Artifact(current_ref, artifacts.repository)
+            restore_weights = loaded_component is not None and surface.component_changed(
+                source, served, loaded_component
+            )
+            if self._binding.training_runtime is not None and loaded_component is not None and restore_weights:
                 if self._binding.runtime is None:
                     raise ReefError("training checkpoint restore requires an inference runtime")
                 self._binding.runtime.pause_admission()
-                self._binding.training_runtime.restore_checkpoint(
-                    source if loaded_component is None else surface.component_artifact(source, loaded_component)
-                )
+                self._binding.training_runtime.restore_checkpoint(surface.component_artifact(source, loaded_component))
             if restore_weights:
                 surface.load(source, self._binding.runtime)
             staged = artifacts.stage(next_step, source, parent=checkpoint)
@@ -284,6 +293,7 @@ class ScenarioCommitter:
                     expected_parent=checkpoint,
                     metadata={
                         **dict(source.metadata),
+                        COMPONENTS_METADATA_KEY: self._release_manifest(source).to_dict(),
                         SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not durable,
@@ -332,7 +342,7 @@ class ScenarioCommitter:
             ).local_path
             if published_tree is None:
                 return None
-            component = None if surface.single else files_component
+            component = self._trainers[0].component if files_component is None else files_component
             trainer = self._trainer_for(component)
             result = trainer.shipped_content_update(published_tree)
             if result is None:
@@ -343,6 +353,8 @@ class ScenarioCommitter:
             prepared = replace(
                 trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
             )
+            if publication.component is None:
+                publication = SavedArtifactPublication(publication.artifact, component)
             self._commit_saved_artifact(result, publication, prepared, trainer, component)
             trainer.apply_committed_state(result.state)
             return self._artifacts.current
@@ -363,16 +375,19 @@ class ScenarioCommitter:
         """
         with self._lock, self._publication_lock:
             next_step = self._step + 1
-            trainer = self._trainer_for(component)
+            bound = self._bound_trainer(component)
+            trainer, component = bound.trainer, bound.component
             surface = self._binding.surface
             # Refuse a stale base before the trainer acknowledges its batch, so
-            # the batch stays whole for another preparation. A step already in
-            # the log is a retry after a lost acknowledgment, never stale.
+            # the batch stays whole for another preparation. Only another
+            # trainer can move the head under a reserved batch: a lone trainer
+            # finds its own failed attempt's head, and a step already in the
+            # log is a retry after a lost acknowledgment. Neither is stale.
             records = self._store.history()
             retrying = bool(records) and records[-1].step == next_step
             base = trainer.pending_base_release_id
             served = self._artifacts.current.release_id
-            if not retrying and not surface.single and base is not None and base != served:
+            if not retrying and len(self._trainers) > 1 and base is not None and base != served:
                 raise StaleTrainingResult(
                     f"scenario {self._name!r} component {component!r} prepared its result against release "
                     f"{base!r} but {served!r} is served now"
@@ -414,7 +429,7 @@ class ScenarioCommitter:
                 return self._commit_live_weights(result, publication, prepared, trainer)
             if isinstance(publication, NoArtifactPublication):
                 return self._commit_without_artifact(result, prepared, trainer, component)
-            if not surface.single and publication.component is None:
+            if publication.component is None:
                 publication = SavedArtifactPublication(publication.artifact, component)
             return self._commit_saved_artifact(result, publication, prepared, trainer, component)
 
@@ -507,10 +522,11 @@ class ScenarioCommitter:
                 published_ref = artifacts.publish(
                     local_artifact,
                     expected_parent=checkpoint,
-                    # The staged release's metadata: the publication's own for a
-                    # flat release, the component manifest for a composed one.
+                    # The staged release's metadata (the publication's own for a
+                    # flat release) plus the manifest naming its components.
                     metadata={
                         **dict(local_artifact.metadata),
+                        COMPONENTS_METADATA_KEY: self._release_manifest(local_artifact).to_dict(),
                         SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not pending and not durable,
@@ -593,15 +609,13 @@ class ScenarioCommitter:
         """
         surface = self._binding.surface
         component = publication.component
-        if component is not None and component not in surface.names:
+        if component is None:
+            raise ReefError(f"scenario {self._name!r}: a publication names the component it replaces")
+        if surface.names and component not in surface.names:
             raise ReefError(f"scenario {self._name!r} serves no component {component!r}")
         if surface.single:
             surface.validate(publication.artifact)
             return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
-        if component is None:
-            raise ReefError(
-                f"scenario {self._name!r} serves components {list(surface.names)}: a step must name the one it publishes"
-            )
         surface.components[component].validator.validate(publication.artifact)
         carried = self._artifacts.resolve(checkpoint)
         components = {name: carried.component(name) for name in surface.names}
@@ -609,11 +623,11 @@ class ScenarioCommitter:
         return self._artifacts.stage_composed(next_step, components, parent=checkpoint)
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
-        surface = self._binding.surface
-        # A flat release always activates; a composed one skips a component
-        # the engine already serves, so a harness step never reloads weights.
-        previous = None if surface.single else self._artifacts.resolve(self._artifacts.current)
-        surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
+        # A component the engine already serves is not activated again, so a
+        # harness step never reloads weights; the served head is compared by
+        # identity and materialized only when a composed manifest is needed.
+        previous = Artifact(self._artifacts.current, self._artifacts.repository)
+        self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
 
     def _settle_trainer_commit(
         self, prepared: PreparedCommit, record: CommitRecord, next_step: int, trainer: Trainer
@@ -644,7 +658,7 @@ class ScenarioCommitter:
         matches = (
             record.operation == "training"
             and record.pending == result.pending
-            and record.component == component
+            and self._own_record(record, component)
             and self._record_matches_prepared(record, prepared)
         )
         if not matches:

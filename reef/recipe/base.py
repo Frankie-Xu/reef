@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from reef.core.components import RECORDS_COMPONENT
 from reef.core.reports import ReportBase
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
@@ -152,25 +153,33 @@ class Recipe:
         scenario: str,
         records: RecordStore,
         *,
-        algorithm_states: Mapping[str | None, Mapping[str, Any] | None],
+        surface: Surface,
+        algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
-        A flat scenario has one trainer bound to no component, built by
-        :meth:`build`. A recipe whose surface declares several components
-        overrides this to return one trainer per component it evolves; the
-        scenario runs them as independent workers that meet at the commit
-        boundary, and ``algorithm_states`` carries each one's recovered state
-        under its component name.
+        The default builds the one trainer :meth:`build` returns and binds it
+        to the surface's only component (``records`` when the surface serves
+        none). A recipe whose surface declares several components overrides
+        this to return one trainer per component; the scenario runs them as
+        independent workers that meet at the commit boundary, and
+        ``algorithm_states`` carries each one's recovered state under its
+        component name.
         """
+        if len(surface.names) > 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} serves components {list(surface.names)}: override build_trainers "
+                "to bind one trainer per component"
+            )
+        component = surface.names[0] if surface.names else RECORDS_COMPONENT
         return (
             ComponentTrainer(
-                None,
+                component,
                 self.build(
                     scenario,
                     records,
-                    algorithm_state=algorithm_states.get(None),
+                    algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                 ),
             ),

@@ -56,14 +56,14 @@ class _PendingStep:
 
 @dataclass(frozen=True)
 class ComponentTrainer:
-    """One trainer and the release component it evolves; ``None`` for a flat scenario's only trainer."""
+    """One trainer and the release component it evolves."""
 
-    component: str | None
+    component: str
     trainer: Trainer
 
     def __post_init__(self) -> None:
-        if self.component is not None and (not isinstance(self.component, str) or not self.component):
-            raise ValueError("component must be a non-empty string or None")
+        if not isinstance(self.component, str) or not self.component:
+            raise ValueError("component must be a non-empty string")
         if not isinstance(self.trainer, Trainer):
             raise TypeError("trainer must be a Trainer")
 

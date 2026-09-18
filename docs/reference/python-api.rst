@@ -187,9 +187,10 @@ Common members
 | ``build(scenario, records, algorithm_state=...)`` | ``Trainer``                 | construct the scenario trainer |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
-| ``algorithm_states=...)``                         | ...]``                      | component; defaults to the     |
+| ``surface=..., algorithm_states=...)``            | ...]``                      | component; defaults to the     |
 |                                                   |                             | single trainer ``build``       |
-|                                                   |                             | returns, bound to no component |
+|                                                   |                             | returns, bound to the          |
+|                                                   |                             | surface's one component        |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_surface(scenario)``                       | ``Surface``                 | the delivery contract for one  |
 |                                                   |                             | named scenario: its release    |

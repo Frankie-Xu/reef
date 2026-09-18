@@ -890,9 +890,10 @@ A scenario whose recipe runs one trainer per release component adds a
 ``components`` object: for each component, its own ``batch_ready``,
 ``training_mode``, ``processor`` status, and ``last_committed_step`` (with
 the ``base_release_id`` that step was prepared against); the scenario-wide
-fields describe the first trainer. Release rows from
-``GET /reef/scenarios/{scenario}/releases`` carry ``component`` and
-``base_release_id`` for a training row made by such a trainer.
+fields describe the first trainer. Every new training row from
+``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
+trainer that made it, and ``base_release_id``, the release its batch was
+reserved against; rows written before Reef named components carry neither.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed

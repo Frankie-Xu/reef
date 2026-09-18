@@ -8,6 +8,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
@@ -134,8 +135,8 @@ class Scenario:
         return self._trainers[0].trainer
 
     def trainer_for(self, component: str | None) -> Trainer:
-        """The trainer evolving ``component``; a flat scenario's only trainer answers every name."""
-        if len(self._trainers) == 1 and self._trainers[0].component is None:
+        """The trainer evolving ``component``; ``None`` selects the first trainer, for scenario-wide operations."""
+        if component is None:
             return self._trainers[0].trainer
         for bound in self._trainers:
             if bound.component == component:
@@ -302,22 +303,19 @@ class Scenario:
 def validate_component_trainers(
     trainers: tuple[ComponentTrainer, ...], surface: Surface
 ) -> tuple[ComponentTrainer, ...]:
-    """Check that the trainers match the surface.
-
-    One trainer bound to no component evolves the whole release, whatever its
-    components: a flat scenario, or one worker publishing a different
-    component each step. Several trainers each name a component the surface
-    serves and run as independent workers.
-    """
+    """Check that the trainers match the surface: each names a component it serves, and a surface serving
+    no component has exactly one trainer, bound to ``records``."""
     if not trainers or any(not isinstance(bound, ComponentTrainer) for bound in trainers):
         raise ReefError("a scenario requires at least one ComponentTrainer")
     names = [bound.component for bound in trainers]
     if len(set(names)) != len(names):
         raise ReefError(f"scenario trainers must evolve distinct components, not {names}")
-    if names == [None]:
+    if not surface.names:
+        if names != [RECORDS_COMPONENT]:
+            raise ReefError(
+                f"a scenario serving no component has one trainer bound to {RECORDS_COMPONENT!r}, not {names}"
+            )
         return trainers
-    if surface.single:
-        raise ReefError(f"a flat scenario has one trainer bound to no component, not {names}")
     unknown = [name for name in names if name not in surface.names]
     if unknown:
         raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")

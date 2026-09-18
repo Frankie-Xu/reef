@@ -24,6 +24,9 @@ from typing import Any
 
 COMPONENTS_METADATA_KEY = "components"
 
+#: The component a scenario's only trainer is bound to when its surface serves no component at all.
+RECORDS_COMPONENT = "records"
+
 #: The prefix of a derived multi-component ``content_id``.
 COMPOSITE_CONTENT_PREFIX = "composite:"
 
@@ -136,6 +139,7 @@ def release_components(metadata: Mapping[str, object] | None) -> ReleaseComponen
 __all__ = [
     "COMPONENTS_METADATA_KEY",
     "COMPOSITE_CONTENT_PREFIX",
+    "RECORDS_COMPONENT",
     "ComponentEntry",
     "ReleaseComponents",
     "release_components",
