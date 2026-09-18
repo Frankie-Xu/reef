@@ -29,7 +29,7 @@ from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
-from reef.train.trainer import Trainer
+from reef.train.trainer import ComponentTrainer, Trainer
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -145,6 +145,35 @@ class Recipe:
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+        )
+
+    def build_trainers(
+        self,
+        scenario: str,
+        records: RecordStore,
+        *,
+        algorithm_states: Mapping[str | None, Mapping[str, Any] | None],
+        experiment_logger: ExperimentLogger | None = None,
+    ) -> tuple[ComponentTrainer, ...]:
+        """Build every trainer of the named scenario, each bound to the component it evolves.
+
+        A flat scenario has one trainer bound to no component, built by
+        :meth:`build`. A recipe whose surface declares several components
+        overrides this to return one trainer per component it evolves; the
+        scenario runs them as independent workers that meet at the commit
+        boundary, and ``algorithm_states`` carries each one's recovered state
+        under its component name.
+        """
+        return (
+            ComponentTrainer(
+                None,
+                self.build(
+                    scenario,
+                    records,
+                    algorithm_state=algorithm_states.get(None),
+                    experiment_logger=experiment_logger,
+                ),
+            ),
         )
 
     @property

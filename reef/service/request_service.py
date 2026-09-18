@@ -38,6 +38,7 @@ from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -508,6 +509,11 @@ class RequestService:
         return self._harness_manifest_for_scenario(scenario, release_id)
 
     @staticmethod
+    def _files_trainer(scenario: Scenario) -> Trainer:
+        """The trainer evolving the component a client pulls; a flat scenario's only trainer."""
+        return scenario.trainer_for(scenario.surface.files_component)
+
+    @staticmethod
     def _harness_manifest_for_scenario(
         scenario: Scenario,
         release_id: str | None = None,
@@ -557,7 +563,7 @@ class RequestService:
         """
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
-        backend = scenario.trainer.candidate_backend
+        backend = self._files_trainer(scenario).candidate_backend
         if not isinstance(backend, ProposalValidator) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
@@ -566,7 +572,7 @@ class RequestService:
         head = scenario.repository.require_current_artifact().release_id
         proposal_id = ProposalInbox.new_id()
         # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if scenario.trainer.training_mode == "manual":
+        if self._files_trainer(scenario).training_mode == "manual":
             return {
                 "proposal_id": proposal_id,
                 "admitted": False,
@@ -611,7 +617,7 @@ class RequestService:
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = scenario.trainer.candidate_backend
+        backend = self._files_trainer(scenario).candidate_backend
         if not directory or not isinstance(backend, StepRecords):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
@@ -656,7 +662,7 @@ class RequestService:
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None
-        descriptor = getattr(scenario.trainer.candidate_backend, "descriptor", None)
+        descriptor = getattr(self._files_trainer(scenario).candidate_backend, "descriptor", None)
         return build_release_page(
             step,
             rows,
@@ -686,9 +692,9 @@ class RequestService:
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
         rows = list(reversed(scenario.releases()))
-        backend = scenario.trainer.candidate_backend
+        backend = self._files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = scenario.trainer.pending_batch
+        reserved = self._files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(record, rows, progress=progress, consumed=consumed, link_query=link_query)
 
@@ -720,9 +726,9 @@ class RequestService:
                 "episodes_total": None,
                 "step_record": None,
             }
-        backend = scenario.trainer.candidate_backend
+        backend = self._files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = scenario.trainer.pending_batch
+        reserved = self._files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)
         mine = progress if progress is not None and progress.request_id == record_id else None

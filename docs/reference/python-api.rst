@@ -183,6 +183,11 @@ Common members
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...)`` | ``Trainer``                 | construct the scenario trainer |
 +---------------------------------------------------+-----------------------------+--------------------------------+
+| ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
+| ``algorithm_states=...)``                         | ...]``                      | component; defaults to the     |
+|                                                   |                             | single trainer ``build``       |
+|                                                   |                             | returns, bound to no component |
++---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_surface(scenario)``                       | ``Surface``                 | the delivery contract for one  |
 |                                                   |                             | named scenario: its release    |
 |                                                   |                             | components, each with its      |

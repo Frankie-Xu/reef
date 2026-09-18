@@ -32,7 +32,7 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
-from reef.train.trainer import Trainer
+from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import (
     DurableWeightsPublication,
     LiveWeightPublication,
@@ -50,6 +50,15 @@ class _ArtifactHeadSync:
     error: str | None = None
 
 
+class StaleTrainingResult(ReefError):
+    """A result was prepared against a release that another component's commit has since replaced.
+
+    The result is not attached to the newer combination. The caller keeps
+    the batch, drops the result, and prepares it again against the release
+    served now.
+    """
+
+
 class ScenarioCommitter:
     """Order one scenario's commit, rollback, and retry effects; delegate release queries."""
 
@@ -60,7 +69,7 @@ class ScenarioCommitter:
         binding: ScenarioBinding,
         artifacts: ArtifactReleaseChain,
         checkpoint_strategy: CheckpointStrategy,
-        trainer: Trainer,
+        trainers: tuple[ComponentTrainer, ...],
         scenario_step: int = 0,
         store: ScenarioStore,
         recovered_head_record: CommitRecord | None = None,
@@ -69,11 +78,16 @@ class ScenarioCommitter:
             raise ValueError("scenario_step must be non-negative")
         if store.durable:
             artifacts.repository.require_staged_commit_support()
+        if not trainers:
+            raise ValueError("a scenario commits through at least one trainer")
         self._name = name
         self._binding = binding
         self._artifacts = artifacts
         self._checkpoint_strategy = checkpoint_strategy
-        self._trainer = trainer
+        self._trainers = trainers
+        # The first trainer answers commits made on the scenario's behalf, such
+        # as rollback; a flat scenario has no other.
+        self._trainer = trainers[0].trainer
         self._step = scenario_step
         self._store = store
         self._lock = RLock()
@@ -149,6 +163,45 @@ class ScenarioCommitter:
         with self._publication_lock:
             return self._releases.releases(self._step)
 
+    def _trainer_for(self, component: str | None) -> Trainer:
+        if self._flat:
+            return self._trainer
+        for bound in self._trainers:
+            if bound.component == component:
+                return bound.trainer
+        raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
+
+    @property
+    def _flat(self) -> bool:
+        return len(self._trainers) == 1 and self._trainers[0].component is None
+
+    def _compactable_for(self, component: str | None) -> frozenset[str] | None:
+        """The rows every other trainer has released; ``None`` when there is no other trainer.
+
+        Trainers of one scenario consume the same records, so a row is retired
+        only when no trainer still needs it.
+        """
+        others = [bound.trainer for bound in self._trainers if bound.component != component]
+        if self._flat or not others:
+            return None
+        released: frozenset[str] | None = None
+        for trainer in others:
+            ids = trainer.releasable_agent_record_ids()
+            released = ids if released is None else released & ids
+        return frozenset() if released is None else released
+
+    def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
+        """Drop ``component``'s reserved batch, retiring only rows every trainer has released."""
+        with self._lock:
+            self._trainer_for(component).reject_pending(metrics, compactable=self._compactable_for(component))
+
+    def last_record_for(self, component: str | None) -> CommitRecord | None:
+        """The newest durable commit made by ``component``'s trainer; the newest of all for a flat scenario."""
+        records = self._store.history() if self._store.durable else ()
+        if self._flat:
+            return records[-1] if records else None
+        return next((record for record in reversed(records) if record.component == component), None)
+
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
         if not isinstance(release_id, str) or not release_id.strip():
@@ -166,7 +219,7 @@ class ScenarioCommitter:
                 raise ReleaseNotRestorable(
                     f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
                 )
-            if self._trainer.pending_batch is not None:
+            if any(bound.trainer.pending_batch is not None for bound in self._trainers):
                 raise ReefError("cannot rollback while a training result is pending commit")
 
             artifacts = self._artifacts
@@ -177,7 +230,7 @@ class ScenarioCommitter:
             if recorded is not None:
                 recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
                 self._reconcile_recorded_artifact(recorded)
-                self._settle_trainer_commit(prepared, recorded, next_step)
+                self._settle_trainer_commit(prepared, recorded, next_step, self._trainer)
                 self._resume_restored_weights()
                 return recorded.artifact_ref
             if self._store.durable:
@@ -253,7 +306,7 @@ class ScenarioCommitter:
             except Exception:
                 artifacts.discard(staged)
                 raise
-            self._settle_trainer_commit(prepared, record, next_step)
+            self._settle_trainer_commit(prepared, record, next_step, self._trainer)
             self._resume_restored_weights()
             return published_ref
 
@@ -279,17 +332,19 @@ class ScenarioCommitter:
             ).local_path
             if published_tree is None:
                 return None
-            result = self._trainer.shipped_content_update(published_tree)
+            component = None if surface.single else files_component
+            trainer = self._trainer_for(component)
+            result = trainer.shipped_content_update(published_tree)
             if result is None:
                 return None
             publication = result.publication
             if not isinstance(publication, SavedArtifactPublication) or result.pending or result.state is None:
                 raise ReefError("a shipped content update must publish durable bytes at once, with its state")
             prepared = replace(
-                self._trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
+                trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
             )
-            self._commit_saved_artifact(result, publication, prepared)
-            self._trainer.apply_committed_state(result.state)
+            self._commit_saved_artifact(result, publication, prepared, trainer, component)
+            trainer.apply_committed_state(result.state)
             return self._artifacts.current
 
     def _resume_restored_weights(self) -> None:
@@ -297,21 +352,41 @@ class ScenarioCommitter:
             self._binding.runtime.mark_published()
             self._binding.runtime.resume_admission()
 
-    def commit(self, result: TrainStepResult) -> Any:
-        """Commit a pending training result as one atomic version record."""
+    def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
+        """Commit ``component``'s pending training result as one atomic version record.
+
+        Several trainers of one scenario meet here: the scenario lock serializes
+        their commits, and a result whose batch was reserved against a release
+        that another trainer has since replaced is refused as
+        :class:`StaleTrainingResult` rather than attached to a combination it
+        was never evaluated with.
+        """
         with self._lock, self._publication_lock:
             next_step = self._step + 1
-            prepared = self._trainer.prepare_commit(result)
-            recorded = self._recorded_training_retry(prepared, result, next_step)
+            trainer = self._trainer_for(component)
+            surface = self._binding.surface
+            # Refuse a stale base before the trainer acknowledges its batch, so
+            # the batch stays whole for another preparation. A step already in
+            # the log is a retry after a lost acknowledgment, never stale.
+            records = self._store.history()
+            retrying = bool(records) and records[-1].step == next_step
+            base = trainer.pending_base_release_id
+            served = self._artifacts.current.release_id
+            if not retrying and not surface.single and base is not None and base != served:
+                raise StaleTrainingResult(
+                    f"scenario {self._name!r} component {component!r} prepared its result against release "
+                    f"{base!r} but {served!r} is served now"
+                )
+            prepared = trainer.prepare_commit(result, compactable=self._compactable_for(component))
+            recorded = self._recorded_training_retry(prepared, result, next_step, component)
             if recorded is not None:
                 recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
                 self._reconcile_recorded_artifact(recorded)
-                self._settle_trainer_commit(prepared, recorded, next_step)
+                self._settle_trainer_commit(prepared, recorded, next_step, trainer)
                 return result.state
 
             if self._store.durable:
                 self._synchronize_checkpoint()
-            surface = self._binding.surface
             publication = result.publication
             if isinstance(publication, DurableWeightsPublication):
                 # Checkpoint policy lives here, so a backend that exported
@@ -336,10 +411,12 @@ class ScenarioCommitter:
                         f"scenario {self._name!r} serves components {list(surface.names)}: "
                         "live weights cannot be published without a checkpoint"
                     )
-                return self._commit_live_weights(result, publication, prepared)
+                return self._commit_live_weights(result, publication, prepared, trainer)
             if isinstance(publication, NoArtifactPublication):
-                return self._commit_without_artifact(result, prepared)
-            return self._commit_saved_artifact(result, publication, prepared)
+                return self._commit_without_artifact(result, prepared, trainer, component)
+            if not surface.single and publication.component is None:
+                publication = SavedArtifactPublication(publication.artifact, component)
+            return self._commit_saved_artifact(result, publication, prepared, trainer, component)
 
     def _should_checkpoint(self, result: TrainStepResult) -> bool:
         return self._checkpoint_strategy.should_checkpoint(self._name, self._step + 1, result)
@@ -349,6 +426,7 @@ class ScenarioCommitter:
         result: TrainStepResult,
         publication: LiveWeightPublication,
         prepared: PreparedCommit,
+        trainer: Trainer,
     ) -> Any:
         artifacts = self._artifacts
         next_step = self._step + 1
@@ -370,10 +448,12 @@ class ScenarioCommitter:
         )
         if self._store.durable:
             artifacts.advance(live_ref, expected=head)
-        self._settle_trainer_commit(prepared, record, next_step)
+        self._settle_trainer_commit(prepared, record, next_step, trainer)
         return result.state
 
-    def _commit_without_artifact(self, result: TrainStepResult, prepared: PreparedCommit) -> Any:
+    def _commit_without_artifact(
+        self, result: TrainStepResult, prepared: PreparedCommit, trainer: Trainer, component: str | None
+    ) -> Any:
         # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
         record = self._append_commit_record(
@@ -381,8 +461,9 @@ class ScenarioCommitter:
             artifact_ref=self._artifacts.current,
             checkpoint=False,
             prepared=prepared,
+            component=component,
         )
-        self._settle_trainer_commit(prepared, record, next_step)
+        self._settle_trainer_commit(prepared, record, next_step, trainer)
         return result.state
 
     def _commit_saved_artifact(
@@ -390,6 +471,8 @@ class ScenarioCommitter:
         result: TrainStepResult,
         publication: SavedArtifactPublication,
         prepared: PreparedCommit,
+        trainer: Trainer,
+        component: str | None = None,
     ) -> Any:
         artifacts = self._artifacts
         next_step = self._step + 1
@@ -440,6 +523,7 @@ class ScenarioCommitter:
                     checkpoint=True,
                     prepared=prepared,
                     pending=pending,
+                    component=component,
                 )
             else:
                 if not durable:
@@ -451,6 +535,7 @@ class ScenarioCommitter:
                     artifact_ref=local_artifact.ref,
                     checkpoint=False,
                     prepared=prepared,
+                    component=component,
                 )
             if not pending:
                 if checkpointed and durable:
@@ -464,7 +549,7 @@ class ScenarioCommitter:
                 artifacts.discard(local_artifact)
             raise
 
-        self._settle_trainer_commit(prepared, record, next_step)
+        self._settle_trainer_commit(prepared, record, next_step, trainer)
         return result.state
 
     def _install_committed_checkpoint(
@@ -530,11 +615,15 @@ class ScenarioCommitter:
         previous = None if surface.single else self._artifacts.resolve(self._artifacts.current)
         surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
 
-    def _settle_trainer_commit(self, prepared: PreparedCommit, record: CommitRecord, next_step: int) -> None:
+    def _settle_trainer_commit(
+        self, prepared: PreparedCommit, record: CommitRecord, next_step: int, trainer: Trainer
+    ) -> None:
         """Finish recoverable effects before exposing the prepared state."""
-        self._trainer.commit_applied(prepared.algorithm_state)
-        self._trainer.compaction_applied(prepared.compacted_ids)
-        self._trainer.commit(prepared)
+        trainer.commit_applied(prepared.algorithm_state)
+        # Retired rows leave every trainer's processor memory, not only the committing one's.
+        for bound in self._trainers:
+            bound.trainer.compaction_applied(prepared.compacted_ids)
+        trainer.commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
         if record.operation == "training":
@@ -546,6 +635,7 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         result: TrainStepResult,
         next_step: int,
+        component: str | None,
     ) -> CommitRecord | None:
         records = self._store.history()
         if not records or records[-1].step != next_step:
@@ -554,6 +644,7 @@ class ScenarioCommitter:
         matches = (
             record.operation == "training"
             and record.pending == result.pending
+            and record.component == component
             and self._record_matches_prepared(record, prepared)
         )
         if not matches:
@@ -621,6 +712,7 @@ class ScenarioCommitter:
         operation: str = "training",
         rollback_target_release_id: str | None = None,
         pending: bool = False,
+        component: str | None = None,
     ) -> CommitRecord:
         record = CommitRecord(
             scenario=self._name,
@@ -637,6 +729,8 @@ class ScenarioCommitter:
             rollback_target_release_id=rollback_target_release_id,
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
+            component=component,
+            base_release_id=prepared.base_release_id if operation == "training" else None,
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
 
@@ -658,4 +752,5 @@ class ScenarioCommitter:
 
 __all__ = [
     "ScenarioCommitter",
+    "StaleTrainingResult",
 ]

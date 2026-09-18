@@ -131,6 +131,19 @@ durable store, the order is:
      - Publish durable bytes, commit the store, apply trainer state;
        leave serving and checkpoint heads in place.
 
+A scenario whose recipe builds one trainer per release component runs those
+trainers as independent workers; the harness worker and the weights worker
+never wait for each other's preparation. They meet only at this commit
+boundary: the scenario lock serializes their commits, each commit record names
+the ``component`` that made it and the ``base_release_id`` its batch was
+reserved against, and a result whose base is no longer the served release is
+refused (``StaleTrainingResult``) instead of being attached to a combination
+it was never evaluated with. The worker keeps its batch and prepares it again
+against the release served now. Rows every trainer consumes are retired only
+once every trainer has released them, and on restart each trainer recovers
+its state and read cursor from its own commits, which needs durable commit
+storage.
+
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore
 rejects the step before its records are compacted. In-memory commit history
