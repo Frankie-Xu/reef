@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
+from reef.core.provider_calls import provider_call_endpoint
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import make_trajectory, source_record_id
 from reef.train.processors.base import DataProcessor, RetentionDecision
@@ -50,7 +51,9 @@ class RecordDrivenTraceProcessor(DataProcessor):
     still evolves. Each recorded inference is one unit, in arrival order;
     when ``batch_size`` have accumulated they batch as trace samples with
     ``score=None``, and the proposer contract requires handling unscored
-    samples. Reports that arrive under this policy are released untouched;
+    samples. A provider call (an image or speech request the agent made inside
+    a turn) is not a unit of its own and is released untouched, as are
+    reports that arrive under this policy;
     a deployment with real outcome signal selects the reported policy
     instead, because a measured result beats model self judgment. In ``hybrid``
     a queued instruction batches with the oldest held records, up to
@@ -75,7 +78,7 @@ class RecordDrivenTraceProcessor(DataProcessor):
     def ingest(self, item: AgentRecord) -> None:
         if item.request_type is RequestType.TRAIN:
             super().ingest(item)
-        elif item.request_type is RequestType.INFERENCE:
+        elif item.request_type is RequestType.INFERENCE and provider_call_endpoint(item.payload) is None:
             self._records.append(item)
         else:
             self._released.add(item.agent_record_id)

@@ -34,6 +34,14 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/images``                                    | provider call: image generation                   |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/embeddings``                                | provider call: embeddings                         |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/audio/speech``                              | provider call: text to speech, audio bytes        |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/decisions``                                 | provider call: a structured decision model        |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                   | enqueue one training instruction                  |
@@ -108,6 +116,29 @@ Headers
 |                                   | on the record under ``metadata.tags``, for a processor  |
 |                                   | to correlate on. Reef never reads a value.              |
 +-----------------------------------+---------------------------------------------------------+
+
+Provider calls
+--------------
+
+``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions``
+forward the JSON request body unchanged to the scenario's provider, with its
+credential, and relay the response byte for byte, so an agent reaches models
+other than its chat model without holding the provider key. ``/v1/decisions``
+reaches the provider's ``/alpha/decisions`` (OpenRouter's structured decision
+API); the others keep their path. The response carries
+``x-reef-agent-record-id`` like any inference, and a report may reference it.
+
+These routes do not stream (``stream: true`` is HTTP 400) and are served only
+by a provider-backed scenario, not a training runtime. Their record keeps a
+summary instead of the body: the request and a JSON response with every string
+longer than 2048 characters replaced by its length and SHA-256, and every number
+list longer than 64 items by its length; any other response as its size and
+SHA-256. The record names the route under ``metadata.reef_endpoint``. In a
+trajectory a provider call is one agent step whose tool is the route, and
+harness evolution shows it to the proposer beside the chat exchange it belongs
+to. A session the harness wrapper runs exports the capture proxy's address as
+``REEF_INFERENCE_URL``, so an extension's provider calls carry receipts into the
+run's report.
 
 Scenario model settings
 -----------------------

@@ -7,6 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
+from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, PROVIDER_ROUTES, provider_call_response
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
@@ -78,13 +79,24 @@ async def _relay_inference_stream(
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
 ) -> web.StreamResponse:
-    """Stream one upstream inference to the client and record what it sent."""
+    """Stream one upstream inference to the client and record what it sent.
+
+    A provider call's body is relayed the same way but recorded as a summary.
+    """
     upstream, pending = await request_service.start_stream(
         request.headers,
         payload,
         request.path,
         inference_handler,
     )
+
+    def recorded_response(*, complete: bool, error: str | None = None) -> dict[str, Any]:
+        if request.path in PROVIDER_ROUTE_PATHS:
+            return provider_call_response(
+                upstream.status, upstream.headers, bytes(body), complete=complete, error=error
+            )
+        return stream_record(upstream, bytes(body), complete=complete, error=error)
+
     response_headers = {
         name: value
         for name, value in upstream.headers.items()
@@ -117,10 +129,7 @@ async def _relay_inference_stream(
                 error = "upstream SSE ended without a terminal event"
             else:
                 record_attempted = True
-                item = request_service.record_stream(
-                    pending,
-                    stream_record(upstream, bytes(body), complete=True),
-                )
+                item = request_service.record_stream(pending, recorded_response(complete=True))
                 for frame in receipt_sse_events(
                     request.path,
                     relay.chat_identity,
@@ -151,10 +160,7 @@ async def _relay_inference_stream(
             await upstream.close()
         finally:
             if not record_attempted:
-                request_service.record_stream(
-                    pending,
-                    stream_record(upstream, bytes(body), complete=complete, error=error),
-                )
+                request_service.record_stream(pending, recorded_response(complete=complete, error=error))
     return response
 
 
@@ -183,10 +189,23 @@ def register_inference_routes(
         headers.update(await _release_header(request_service, request.headers))
         return web.json_response(response_payload, headers=headers)
 
+    async def provider_call(request: web.Request) -> web.StreamResponse:
+        payload = await read_object(request)
+        if payload.get("stream") is True:
+            raise web.HTTPBadRequest(text=f"{request.path} does not stream; send the request without stream")
+        return await _relay_inference_stream(
+            request,
+            payload,
+            request_service=request_service,
+            inference_handler=inference_handler,
+        )
+
     app.router.add_post("/v1/chat/completions", inference)
     app.router.add_post("/v1/responses", inference)
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
+    for route in PROVIDER_ROUTES:
+        app.router.add_post(route.path, provider_call)
 
 
 __all__ = ["register_inference_routes"]

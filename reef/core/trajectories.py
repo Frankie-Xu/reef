@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.batches import TrajectoryItem
+from reef.core.provider_calls import provider_call_endpoint
 from reef.core.records_types import AgentRecord
 
 
@@ -56,8 +57,18 @@ def recorded_payloads(item: TrajectoryItem) -> tuple[Mapping[str, Any], ...]:
 
 
 def recorded_payload(item: TrajectoryItem) -> Mapping[str, Any]:
-    """The last captured exchange, retaining the original provider request body."""
-    return recorded_payloads(item)[-1]
+    """The last captured chat exchange, retaining the original provider request body.
+
+    Provider calls (images, speech, ...) the agent made along the way are read with
+    :func:`provider_calls`; the last exchange of a sample made only of them is returned as is.
+    """
+    payloads = recorded_payloads(item)
+    return next((payload for payload in reversed(payloads) if provider_call_endpoint(payload) is None), payloads[-1])
+
+
+def provider_calls(item: TrajectoryItem) -> tuple[Mapping[str, Any], ...]:
+    """The recorded provider calls of a sample, in reference order, as their summarized payloads."""
+    return tuple(payload for payload in recorded_payloads(item) if provider_call_endpoint(payload) is not None)
 
 
 def make_trajectory(
@@ -71,6 +82,12 @@ def make_trajectory(
     steps: list[dict[str, Any]] = []
     history: list[Mapping[str, Any]] = []
     for record in records:
+        endpoint = provider_call_endpoint(record.payload)
+        if endpoint is not None:
+            # A provider call is one agent action with its result; it is not a turn of the chat, so the
+            # chat history the next exchange is compared against stays as it was.
+            steps.append(provider_call_step(len(steps) + 1, endpoint, record))
+            continue
         request, responses = _exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(history, request, strict=False):
@@ -86,7 +103,10 @@ def make_trajectory(
         steps.append({"step_id": 1, "source": "agent", "message": "", "extra": {"reef": {"text_available": False}}})
     primary = records[-1].agent_record_id
     agent: dict[str, Any] = {"name": "recorded-agent", "version": "unknown"}
-    model = records[-1].payload.get("model")
+    chat = next(
+        (record for record in reversed(records) if provider_call_endpoint(record.payload) is None), records[-1]
+    )
+    model = chat.payload.get("model")
     if isinstance(model, str):
         agent["model_name"] = model
     return TrajectoryItem(
@@ -114,6 +134,26 @@ def make_trajectory(
         },
         source_agent_record_ids=tuple(record.agent_record_id for record in records),
     )
+
+
+def provider_call_step(step_id: int, endpoint: str, record: AgentRecord) -> dict[str, Any]:
+    """One ATIF agent step for a provider call: the route as the tool, the request as its arguments."""
+    arguments = {key: value for key, value in record.payload.items() if key not in ("response", "metadata")}
+    return {
+        "step_id": step_id,
+        "source": "agent",
+        "message": "",
+        "tool_calls": [{"tool_call_id": record.agent_record_id, "function_name": endpoint, "arguments": arguments}],
+        "observation": {
+            "results": [
+                {
+                    "source_call_id": record.agent_record_id,
+                    "content": json.dumps(record.payload.get("response", {}), ensure_ascii=False),
+                }
+            ]
+        },
+        "extra": {"reef": {"provider_call": endpoint}},
+    }
 
 
 def _exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:

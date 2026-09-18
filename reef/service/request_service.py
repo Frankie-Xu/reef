@@ -18,6 +18,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
+from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_payload
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import TrainingRequest
@@ -277,6 +278,9 @@ class RequestService:
             admission = prepared.admission
             lease = prepared.lease
             try:
+                if path in PROVIDER_ROUTE_PATHS and prepared.durable:
+                    # A training runtime records serving versions a provider response cannot carry.
+                    raise ReefError(f"{path} is served only by a provider-backed scenario, not a training runtime")
                 stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
@@ -309,11 +313,12 @@ class RequestService:
                         if admission is not None:
                             admission.release()
                 raise
+            recorded = _with_tags(payload, prepared.parsed)
             pending = PendingInference(
                 item=AgentRecord.create(
                     scenario=prepared.parsed.scenario,
                     request_type=RequestType.INFERENCE,
-                    payload=_with_tags(payload, prepared.parsed),
+                    payload=provider_call_payload(path, recorded) if path in PROVIDER_ROUTE_PATHS else recorded,
                     artifact_ref=prepared.artifact.ref,
                 ),
                 release_id=prepared.parsed.release_id,

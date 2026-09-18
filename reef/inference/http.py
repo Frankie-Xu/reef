@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
+from reef.core.provider_calls import UPSTREAM_PATHS
 from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
 
@@ -139,11 +140,18 @@ class HttpInferenceHandler(InferenceHandler):
         self._upstream_url = upstream_url.rstrip("/")
 
     def _post_arguments(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Keyword arguments of one ``session.post`` call."""
+        """Keyword arguments of one ``session.post`` call.
+
+        A provider call reaches its provider path, which may lie outside ``/v1``,
+        and asks for an unencoded body so Reef can record a JSON response.
+        """
+        headers = dict(self._request_headers.headers(artifact, path))
+        if path in UPSTREAM_PATHS:
+            headers["Accept-Encoding"] = "identity"
         return {
-            "url": f"{self._upstream_url}{path}",
+            "url": f"{self._upstream_url}{UPSTREAM_PATHS.get(path, path)}",
             "json": payload,
-            "headers": dict(self._request_headers.headers(artifact, path)),
+            "headers": headers,
         }
 
     def _status_error(self, status: int, body: str) -> UpstreamStatusError:

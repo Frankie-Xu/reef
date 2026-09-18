@@ -140,7 +140,9 @@ wrapper gets each variable unless the shell already sets it (the shell
 wins); the values never enter the tree and are never sent anywhere. The
 wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>``
 script at the install root, so an extension in the agent can run ``update``
-and ``setup`` from the session.
+and ``setup`` from the session, and ``REEF_INFERENCE_URL``, the capture
+proxy's address, so the model calls an extension makes itself (images,
+speech, embeddings, decisions) carry receipts into the run's report.
 """
 
 from __future__ import annotations
@@ -174,6 +176,7 @@ from typing import Any
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
+from reef.core.provider_calls import PROVIDER_ROUTES
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -484,8 +487,15 @@ def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
 #: The response header Reef sets on every inference answer of a file serving scenario: the head release id.
 RELEASE_HEADER = "x-reef-release-id"
 #: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
-#: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
-CAPTURE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages?beta=true")
+#: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed. The provider
+#: routes (images, speech, ...) an extension calls through ``REEF_INFERENCE_URL`` are captured the same way.
+CAPTURE_PATHS = (
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/messages",
+    "/v1/messages?beta=true",
+    *(route.path for route in PROVIDER_ROUTES),
+)
 
 
 class ReleaseObserver(ABC):
@@ -795,6 +805,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     # and the true install root; the relocated temp copy carries none of them.
     install_root = Path(compose_dir).resolve().parent
     env["REEF_SERVICE_URL"] = upstream
+    # Model calls an extension makes itself go through the proxy, so their receipts join the run's report.
+    env["REEF_INFERENCE_URL"] = f"http://{proxy.listen_host}:{proxy.port}"
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(install_root)
     wrapper = install_root / f"reef-{adapter}"
