@@ -221,6 +221,12 @@ configuration). To change anything else, copy
 [the deployment configuration](reef/service/profiles/reefine.yaml) and pass
 your copy with `-c`.
 
+To let the harness's extensions generate images and speech, embed text, or
+call decision models, set `REEF_MULTIMODAL_API_KEY` to an OpenRouter key before
+starting Reef; Reef holds the key and the extensions never see it. An upstream
+at OpenRouter already lends its key. For another gateway, set
+`evolution.multimodal` in your copy of the configuration.
+
 In another terminal with the same Python environment activated (the install
 bakes that terminal's `python3` into `reef-pi`), create a scenario, install the
 harness, and ask for a change:
@@ -236,7 +242,10 @@ reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test f
 
 Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
-extension, and the next session's update notice offers the install; a step that
+extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
+non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
+works as a coding agent that runs the changed harness before handing the change
+back. The next session's update notice offers the install; a step that
 settles while you are between turns offers its install right away. Review the
 versions with `/reef-versions`, which opens a step's page, and install one with
 `/reef-versions <step> install`. To change the model, restart
