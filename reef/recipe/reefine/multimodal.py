@@ -87,12 +87,14 @@ class MultimodalSettings:
 
     @classmethod
     def from_config(cls, section: Any, environ: Mapping[str, str]) -> MultimodalSettings | None:
-        """``{preset, url, api_key_env}``: the preset (``openrouter`` by default), the gateway's address when not
-        the preset's, and the environment variable holding its key; no section is no settings."""
+        """``{preset, url, api_key}``: the preset (``openrouter`` by default), the gateway's address when not the
+        preset's, and its key, as ``inference.upstream_api_key`` takes the chat key (``${REEF_MULTIMODAL_API_KEY}``
+        in the profile, or ``--recipe.config.evolution.multimodal.api_key`` on the command line); empty is no key.
+        ``api_key_env`` names a variable instead, as for ``evolution.models``. No section is no settings."""
         if section is None:
             return None
         if not isinstance(section, Mapping):
-            raise ValueError("multimodal must be a mapping of preset, url and api_key_env")
+            raise ValueError("multimodal must be a mapping of preset, url and api_key")
         name = str(section.get("preset") or DEFAULT_PRESET).strip()
         preset = PRESETS.get(name)
         if preset is None:
@@ -100,10 +102,15 @@ class MultimodalSettings:
         address = str(section.get("url") or preset.base_url or "").strip().rstrip("/")
         if not address:
             raise ValueError(f"the {name} multimodal preset needs url: the gateway's address, no /v1")
+        key = section.get("api_key")
+        if key is not None and not isinstance(key, str):
+            raise ValueError("multimodal.api_key must be a string")
         key_env = section.get("api_key_env")
         if key_env is not None and (not isinstance(key_env, str) or not key_env.isidentifier()):
             raise ValueError("multimodal.api_key_env must name an environment variable")
-        return cls(preset=preset, base_url=address, api_key=(environ.get(key_env) or "").strip() if key_env else "")
+        if key is None and key_env:
+            key = environ.get(key_env)
+        return cls(preset=preset, base_url=address, api_key=(key or "").strip())
 
     def provider(self, upstream_url: str | None, upstream_api_key: str | None) -> MultimodalProvider | None:
         """The provider, its key the configured one, else the chat upstream's when the upstream is the same

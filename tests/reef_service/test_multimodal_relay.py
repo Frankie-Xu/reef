@@ -147,15 +147,22 @@ def test_a_recipe_without_a_relay_serves_no_multimodal_call(tmp_path) -> None:
 @pytest.mark.unit
 def test_multimodal_settings_read_the_preset_address_and_key() -> None:
     assert MultimodalSettings.from_config(None, {}) is None
-    settings = MultimodalSettings.from_config({"api_key_env": "MM_KEY"}, {"MM_KEY": " sk-or "})
+    settings = MultimodalSettings.from_config({"api_key": " sk-or "}, {})
     assert (settings.preset.name, settings.base_url, settings.api_key) == (
         "openrouter",
         "https://openrouter.ai/api",
         "sk-or",
     )
     assert "sk-or" not in repr(settings)
-    # No key of its own: the upstream's, only when the upstream is the same gateway.
-    keyless = MultimodalSettings.from_config({"api_key_env": "MM_KEY"}, {})
+    # A variable instead, as evolution.models take one; a literal wins.
+    assert MultimodalSettings.from_config({"api_key_env": "MM_KEY"}, {"MM_KEY": "sk-env"}).api_key == "sk-env"
+    assert (
+        MultimodalSettings.from_config({"api_key": "sk-lit", "api_key_env": "MM_KEY"}, {"MM_KEY": "x"}).api_key
+        == "sk-lit"
+    )
+    # No key of its own (the profile's ${REEF_MULTIMODAL_API_KEY} unset is empty): the upstream's, only when the
+    # upstream is the same gateway.
+    keyless = MultimodalSettings.from_config({"api_key": ""}, {})
     assert keyless.provider("https://openrouter.ai/api/", "upstream").api_key == "upstream"
     assert keyless.provider("http://127.0.0.1:11434", "ollama") is None
     compatible = MultimodalSettings.from_config({"preset": "openai-compatible", "url": "https://gw.example/"}, {})

@@ -10,16 +10,18 @@ Start the bundled profile with an OpenAI-compatible endpoint:
 
 .. code:: bash
 
-   REEF_MULTIMODAL_API_KEY=sk-or-... reef serve --recipe reefine \
+   reef serve --recipe reefine \
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b \
-     --inference.upstream-api-key dummy
+     --inference.upstream-api-key dummy \
+     --recipe.config.evolution.multimodal.api_key sk-or-...
 
 For an OpenAI Responses or Anthropic endpoint, add
 ``--inference.upstream-api responses`` or ``--inference.upstream-api anthropic``.
-``REEF_MULTIMODAL_API_KEY``, an OpenRouter key, gives the harness image, speech,
-embedding and decision models (see `Images, speech, embeddings and decisions`_);
-leave it out to go without them, or when the upstream is OpenRouter.
+The last line, an OpenRouter key (or ``REEF_MULTIMODAL_API_KEY``), gives the
+harness image, speech, embedding and decision models (see
+`Images, speech, embeddings and decisions`_); leave it out to go without them,
+or when the upstream is OpenRouter.
 
 The profile listens on ``127.0.0.1:8901``, requires no token unless ``REEF_TOKEN`` is set, and keeps
 state under ``.reef/reefine/``. For custom deployments, copy
@@ -181,11 +183,13 @@ calls what the harness will call.
      multimodal:
        preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
        url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
-       api_key_env: REEF_MULTIMODAL_API_KEY
+       api_key: ${REEF_MULTIMODAL_API_KEY}   # or api_key_env: NAME
 
-The key is the variable's value, else the upstream key when the upstream is
-the same address, so a deployment that chats through OpenRouter needs nothing
-more. The profile sets ``api_key_env: REEF_MULTIMODAL_API_KEY``. Without a key,
+``api_key`` takes the key the way ``inference.upstream_api_key`` takes the chat
+key; the profile sets it to ``${REEF_MULTIMODAL_API_KEY}``, and
+``--recipe.config.evolution.multimodal.api_key`` sets it on the command line.
+Empty, the upstream key serves when the upstream is the same address, so a
+deployment that chats through OpenRouter needs nothing more. Without a key,
 or for a route the preset does not serve (``openai-compatible`` has no
 decisions), those routes answer 501. Recipes other than reefine offer none.
 
