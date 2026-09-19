@@ -63,7 +63,7 @@ inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}
   upstream-model: ${REEF_UPSTREAM_MODEL:?}
   upstream-api-key: ${REEF_UPSTREAM_API_KEY}
-  openrouter-api-key: ${OPENROUTER_API_KEY}
+  provider-calls-api-key: ${REEF_PROVIDER_CALLS_API_KEY}
 storage:
   agent-record-dir: .reef/reefine/agent-record
   artifact-repository: .reef/reefine/artifacts.git

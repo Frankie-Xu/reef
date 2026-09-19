@@ -8,8 +8,9 @@ credential of their own. Behind it:
 - the model routes go to the served model with the served binding's key, one
   call from the step's budget each, recorded in the step's ``proposer.json``;
   the request's ``model`` is always the served one;
-- the provider-call routes (images, embeddings, speech, decisions) go to
-  OpenRouter, recorded as the summaries Reef records;
+- the provider-call routes (images, embeddings, speech, decisions) go to the
+  deployment's multimodal provider, recorded as the summaries Reef records;
+- ``GET /models?modality=`` lists the provider's models, fetched with its key;
 - ``/check`` and ``/trial`` run the agent's workspace through admission and
   through a real run of the candidate harness (:class:`WorkspaceTools`);
 - everything else, Reef's own routes included, is 404.
@@ -23,15 +24,20 @@ import secrets
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_payload, provider_call_response
+from reef.core.provider_calls import (
+    PROVIDER_ROUTE_PATHS,
+    MultimodalProvider,
+    provider_call_payload,
+    provider_call_response,
+)
 from reef.harness.episodes.model_binding import ModelBinding, usage_of
-from reef.inference.openrouter import OPENROUTER_BASE_URL, OPENROUTER_PATHS
 from reef.train.cordis_backend.strategies import ProposerCalls
 
 logger = logging.getLogger(__name__)
@@ -64,14 +70,14 @@ class AgentGateway:
         served: ModelBinding,
         calls: ProposerCalls,
         tools: WorkspaceTools,
-        openrouter_key: str | None,
+        provider: MultimodalProvider | None,
         *,
         host: str = "127.0.0.1",
     ) -> None:
         self._served = served
         self._calls = calls
         self._tools = tools
-        self._openrouter_key = openrouter_key
+        self._provider = provider
         self._host = host
         self._token = secrets.token_urlsafe(24)
         self._lock = threading.Lock()
@@ -90,7 +96,7 @@ class AgentGateway:
         return f"http://{self._host}:{self.port}/t/{self._token}"
 
     def provider_calls_since(self, index: int) -> list[dict[str, Any]]:
-        """The provider calls made after the first ``index``: what one trial's harness asked of OpenRouter."""
+        """The provider calls made after the first ``index``: what one trial's harness asked of the provider."""
         with self._lock:
             return list(self._provider_calls[index:])
 
@@ -147,7 +153,12 @@ class AgentGateway:
                     self._answer(404, {"error": f"the gateway serves no {route}"})
 
             def do_GET(self) -> None:
-                self._answer(404, {"error": "not found"})
+                path, _, query = self.path.partition("?")
+                if not secrets.compare_digest(path[: len(prefix)], prefix) or path[len(prefix) :] != "/models":
+                    self._answer(404, {"error": "not found"})
+                    return
+                modality = urllib.parse.parse_qs(query).get("modality", ["text"])[0]
+                gateway.relay_models(self, modality)
 
             def _answer(self, status: int, body: Mapping[str, Any]) -> None:
                 data = json.dumps(body, default=str).encode()
@@ -199,9 +210,20 @@ class AgentGateway:
             entry["usage"] = usage
         self._calls.record(entry)
 
+    def relay_models(self, client: BaseHTTPRequestHandler, modality: str) -> None:
+        """The provider's models of one output modality, so the agent picks a real one without holding the key."""
+        if self._provider is None:
+            refuse(client, 501, "the Reef deployment has no multimodal provider")
+            return
+        relay_models_request(client, self._provider.models_url(modality), self._provider.api_key)
+
     def relay_provider_call(self, client: BaseHTTPRequestHandler, route: str, payload: dict[str, Any]) -> None:
-        if self._openrouter_key is None:
-            refuse(client, 501, f"{route} needs an OpenRouter key on the Reef deployment")
+        if self._provider is None:
+            refuse(client, 501, f"{route} needs a multimodal provider key on the Reef deployment")
+            return
+        upstream_path = self._provider.upstream_path(route)
+        if upstream_path is None:
+            refuse(client, 501, f"the deployment's {self._provider.preset.name} provider serves no {route}")
             return
         try:
             self._calls.spend()
@@ -211,9 +233,9 @@ class AgentGateway:
         headers = {
             "Content-Type": "application/json",
             "Accept-Encoding": "identity",
-            "Authorization": f"Bearer {self._openrouter_key}",
+            "Authorization": f"Bearer {self._provider.api_key}",
         }
-        url = f"{OPENROUTER_BASE_URL}{OPENROUTER_PATHS[route]}"
+        url = f"{self._provider.base_url}{upstream_path}"
         started = time.monotonic()
         status, body, response_headers = relay(client, url, headers, payload, timeout_s=300.0)
         summary = provider_call_response(status, response_headers, body, complete=True)
@@ -229,6 +251,24 @@ class AgentGateway:
                 "seconds": round(time.monotonic() - started, 3),
             }
         )
+
+
+def relay_models_request(client: BaseHTTPRequestHandler, url: str, api_key: str) -> None:
+    """Relay the provider's model list, fetched with its key, whole."""
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as upstream:
+            status, body = upstream.status, upstream.read()
+    except urllib.error.HTTPError as error:
+        status, body = error.code, error.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        refuse(client, 502, f"the provider did not answer: {error}")
+        return
+    client.send_response(status)
+    client.send_header("Content-Type", "application/json")
+    client.send_header("Content-Length", str(len(body)))
+    client.end_headers()
+    client.wfile.write(body)
 
 
 def refuse(client: BaseHTTPRequestHandler, status: int, message: str) -> None:

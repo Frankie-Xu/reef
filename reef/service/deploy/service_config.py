@@ -107,13 +107,25 @@ class ServiceConfig:
     upstream_api: str = config_option(
         "openai", public_path=("inference", "upstream_api"), help="Provider API dialect."
     )
-    #: The key provider calls (images, embeddings, speech, decisions) reach
-    #: OpenRouter with, whatever the upstream is; unset, a deployment whose
-    #: upstream is OpenRouter uses ``upstream_api_key``, and any other serves none.
-    openrouter_api_key: str | None = config_option(
+    #: The multimodal provider that serves provider calls (images, embeddings,
+    #: speech, decisions), whatever the upstream is: a preset (``openrouter``,
+    #: the default, or ``openai-compatible``), its address when not the preset's
+    #: (no ``/v1``), and its key. Unset, a deployment whose upstream is the same
+    #: gateway uses ``upstream_api_key``, and any other serves none.
+    provider_calls_preset: str = config_option(
+        "openrouter",
+        public_path=("inference", "provider_calls_preset"),
+        help="Multimodal provider preset: openrouter or openai-compatible.",
+    )
+    provider_calls_url: str | None = config_option(
         None,
-        public_path=("inference", "openrouter_api_key"),
-        help="OpenRouter key for image, embedding, speech and decision calls.",
+        public_path=("inference", "provider_calls_url"),
+        help="Multimodal provider base URL, when not the preset's.",
+    )
+    provider_calls_api_key: str | None = config_option(
+        None,
+        public_path=("inference", "provider_calls_api_key"),
+        help="Multimodal provider key for image, embedding, speech and decision calls.",
     )
     inference_timeout_s: float = config_option(
         300.0, public_path=("inference", "timeout_s"), help="Inference request timeout in seconds."

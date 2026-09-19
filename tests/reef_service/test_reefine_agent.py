@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.provider_calls import PRESETS, MultimodalProvider
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.recipe.reefine import agent as reefine_agent
-from reef.recipe.reefine import agent_gateway
-from reef.recipe.reefine.agent import propose, workspace_mutations, write_workspace
+from reef.recipe.reefine.agent import AgentProposer, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
@@ -37,10 +37,11 @@ NODES = tuple((entry["name"], entry["config"]) for entry in ENTRIES)
 
 
 class Upstream:
-    """A served model and an OpenRouter in one server, remembering what reached it."""
+    """A served model and a multimodal provider in one server, remembering what reached it."""
 
     def __init__(self) -> None:
         self.requests: list[dict] = []
+        self.gets: list[tuple[str, str | None]] = []
         upstream = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -65,6 +66,10 @@ class Upstream:
                 reply["usage"] = {"prompt_tokens": 7, "completion_tokens": 3}
                 self.reply(200, json.dumps(reply).encode(), "application/json")
 
+            def do_GET(self) -> None:
+                upstream.gets.append((self.path, self.headers.get("Authorization")))
+                self.reply(200, json.dumps({"data": [{"id": "real/tts"}]}).encode(), "application/json")
+
             def reply(self, status: int, body: bytes, content_type: str) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
@@ -85,12 +90,14 @@ class Upstream:
 
 
 @pytest.fixture
-def upstream(monkeypatch):
+def upstream():
     server = Upstream()
-    monkeypatch.setattr(agent_gateway, "OPENROUTER_BASE_URL", f"{server.url}/api")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     yield server
     server.close()
+
+
+def provider_of(upstream: Upstream) -> MultimodalProvider:
+    return MultimodalProvider(PRESETS["openrouter"], f"{upstream.url}/api", "sk-or-test")
 
 
 def post(url: str, body: dict) -> tuple[int, bytes]:
@@ -139,11 +146,11 @@ def test_the_workspace_round_trip_gives_only_the_changes_and_never_touches_reefs
 
 
 @pytest.mark.unit
-def test_the_gateway_serves_the_served_model_and_openrouter_and_nothing_else(upstream) -> None:
+def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(upstream) -> None:
     record: list[dict] = []
     calls = _StepCalls(3, record)
     served = ModelBinding(base_url=upstream.url, model="served-model", api_key="served-key")
-    gateway = AgentGateway(served, calls, NoTools(), "sk-or-test")
+    gateway = AgentGateway(served, calls, NoTools(), provider_of(upstream))
     gateway.start()
     try:
         base = gateway.base_url
@@ -161,6 +168,10 @@ def test_the_gateway_serves_the_served_model_and_openrouter_and_nothing_else(ups
         assert record[-1]["provider_call"]["metadata"]["reef_endpoint"] == "/v1/audio/speech"
         assert gateway.provider_calls_since(0) == [{"path": "/v1/audio/speech", "model": "real/tts", "status": 200}]
 
+        models = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(f"{base}/models?modality=speech")
+        assert json.loads(models.read()) == {"data": [{"id": "real/tts"}]}
+        assert upstream.gets[-1] == ("/api/v1/models?output_modalities=speech", "Bearer sk-or-test")
+
         assert post(f"{base}/trial", {"task": "say hi"}) == (200, b'{"task": "say hi"}')
         assert post(f"{base}/reef/scenarios/s/promote", {})[0] == 404
         wrong = base.replace(base.rsplit("/", 1)[1], "not-the-token")
@@ -174,7 +185,7 @@ def test_the_gateway_serves_the_served_model_and_openrouter_and_nothing_else(ups
 
 
 @pytest.mark.unit
-def test_without_an_openrouter_key_a_provider_call_is_501(upstream, monkeypatch) -> None:
+def test_without_a_provider_a_provider_call_is_501(upstream) -> None:
     gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), _StepCalls(0, []), NoTools(), None)
     gateway.start()
     try:
@@ -258,7 +269,7 @@ def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_pat
     record: list[dict] = []
     host = agent_host(tmp_path, record)
     request = {"id": "r1", "text": "Read my answers aloud with a natural voice", "requires": []}
-    proposal = propose(
+    proposal = AgentProposer(provider_of(upstream))(
         NODES, (), served_models(upstream, record, host), requests=[request], entries=ENTRIES, agent_host=host
     )
     assert isinstance(proposal, StepProposal)
@@ -270,7 +281,7 @@ def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_pat
     assert request["requires"] == [
         {"name": "afplay", "kind": "service", "check": "command -v afplay", "prompt": "Install a player"}
     ]
-    # The trial's speech call reached OpenRouter and its refusal is on record for the agent to read.
+    # The trial's speech call reached the provider and its refusal is on record for the agent to read.
     speech = [r for r in upstream.requests if r["path"] == "/api/v1/audio/speech"]
     assert speech and speech[0]["body"]["model"] == "not/real"
     assert any(entry.get("provider_call", {}).get("response", {}).get("status") == 400 for entry in record)
@@ -284,6 +295,7 @@ def test_an_agent_that_changes_nothing_or_runs_out_of_time_hands_back_no_mutatio
     models = served_models(upstream, record, host)
     mode = Path(host.binary).with_name("mode")
     mode.write_text("idle")
+    propose = AgentProposer(provider_of(upstream))
     idle = propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=host)
     assert idle.mutations == () and idle.notes["failure"] == "the agent changed no entry"
 
@@ -303,6 +315,7 @@ def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) ->
 
     monkeypatch.setattr(reefine_agent.evolution, "propose", text_proposer)
     models = ModelBindings(served=ModelBinding(base_url="http://127.0.0.1:9", model="m"))
+    propose = AgentProposer()
     assert propose(NODES, (), models, entries=ENTRIES).id == "tone"
     assert propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=None).id == "tone"
     assert seen == [(), ({"text": "x"},)]
@@ -356,3 +369,27 @@ def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
     assert proposer_agent_settings({}, {})[0] is None
     with pytest.raises(RecipeConfigError, match="no bwrap here"):
         proposer_agent_settings({"sandbox": "bwrap"}, {})
+
+
+@pytest.mark.unit
+def test_the_agent_is_told_what_its_deployments_provider_serves() -> None:
+    from reef.recipe.reefine.agent import agent_rules
+
+    assert "no multimodal provider" in agent_rules(None)
+    compatible = MultimodalProvider(PRESETS["openai-compatible"], "https://gateway.example", "k")
+    rules = agent_rules(compatible)
+    assert "openai-compatible (https://gateway.example)" in rules and "`/v1/decisions`" not in rules
+    assert "$REEF_INFERENCE_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
+
+
+@pytest.mark.unit
+def test_the_reefine_recipe_hands_its_agent_the_services_provider() -> None:
+    from reef.recipe.reefine import ReefineRecipe
+
+    settings = {"evolution": {"tasks": ["[health] reply reef-ok"]}}
+    values = {"REEF_PROVIDER_CALLS_PRESET": "openai-compatible", "REEF_PROVIDER_CALLS_URL": "https://gw.example"}
+    kwargs = ReefineRecipe._recipe_kwargs(settings, {**values, "REEF_PROVIDER_CALLS_API_KEY": "k"})
+    proposer = kwargs["propose"]
+    assert isinstance(proposer, AgentProposer) and proposer.runs_agent and proposer.reads_requests
+    assert (proposer.provider.preset.name, proposer.provider.base_url) == ("openai-compatible", "https://gw.example")
+    assert ReefineRecipe._recipe_kwargs(settings, values)["propose"].provider is None  # no key, no provider

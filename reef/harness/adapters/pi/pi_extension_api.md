@@ -120,14 +120,14 @@ Pass values as arguments, never as shell source. The directory of this harness's
 
 fetch is global. Pass signal. Reef's own routes take the headers { "x-reef-scenario": process.env.REEF_SCENARIO } and, when set, { authorization: `Bearer ${process.env.REEF_TOKEN}` }; the service is at process.env.REEF_SERVICE_URL.
 
-Models beyond the session's chat model are reached through process.env.REEF_INFERENCE_URL, which adds the scenario and token itself and keeps each call's receipt for the run's report. POST a JSON body in OpenRouter's format with { "content-type": "application/json" } to one of:
+Models beyond the session's chat model are reached through process.env.REEF_INFERENCE_URL, which adds the scenario and token itself and keeps each call's receipt for the run's report. POST a JSON body in the format of the deployment's multimodal provider (OpenRouter by default) with { "content-type": "application/json" } to one of:
 
 - /v1/images: generate an image from a prompt.
 - /v1/embeddings: embed text.
 - /v1/audio/speech: text to speech; the response body is the audio bytes.
-- /v1/decisions: a fast structured choice (routing, classification) from a decision model such as ~typesafe/jev-latest.
+- /v1/decisions: a fast structured choice (routing, classification) from a decision model such as ~typesafe/jev-latest, where the provider serves one.
 
-Name the model in the body. These routes do not stream, and answer 501 when the Reef deployment has no OpenRouter key. REEF_INFERENCE_URL is unset outside a session the wrapper runs.
+Name the model in the body. These routes do not stream, and answer 501 when the Reef deployment has no multimodal provider or its provider serves no such route. REEF_INFERENCE_URL is unset outside a session the wrapper runs.
 
 ## Rules for a reef tree entry
 

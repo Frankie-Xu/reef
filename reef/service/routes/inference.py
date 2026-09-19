@@ -8,6 +8,7 @@ from typing import Any
 from aiohttp import web
 
 from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_response
+from reef.inference.multimodal import ProviderCallHandler
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
@@ -169,9 +170,10 @@ def register_inference_routes(
     *,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
-    openrouter_handler: InferenceHandler | None = None,
+    provider_handler: ProviderCallHandler | None = None,
 ) -> None:
-    """Serve chat through the scenario's handler (or ``inference_handler``) and provider calls through OpenRouter."""
+    """Serve chat through the scenario's handler (or ``inference_handler``) and provider calls through the
+    deployment's multimodal provider."""
 
     async def inference(request: web.Request) -> web.StreamResponse:
         payload = await read_object(request)
@@ -193,9 +195,14 @@ def register_inference_routes(
         return web.json_response(response_payload, headers=headers)
 
     async def provider_call(request: web.Request) -> web.StreamResponse:
-        if openrouter_handler is None:
+        if provider_handler is None:
             raise web.HTTPNotImplemented(
-                text=f"{request.path} needs an OpenRouter key: set inference.openrouter_api_key (OPENROUTER_API_KEY)"
+                text=f"{request.path} needs a multimodal provider key: set inference.provider_calls_api_key "
+                "(REEF_PROVIDER_CALLS_API_KEY)"
+            )
+        if provider_handler.provider.upstream_path(request.path) is None:
+            raise web.HTTPNotImplemented(
+                text=f"the deployment's {provider_handler.provider.preset.name} provider serves no {request.path}"
             )
         payload = await read_object(request)
         if payload.get("stream") is True:
@@ -204,7 +211,7 @@ def register_inference_routes(
             request,
             payload,
             request_service=request_service,
-            inference_handler=openrouter_handler,
+            inference_handler=provider_handler,
         )
 
     app.router.add_post("/v1/chat/completions", inference)

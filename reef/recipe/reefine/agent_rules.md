@@ -54,11 +54,15 @@ Leave the array empty when the change needs nothing.
 ## Models beyond the chat model
 
 An extension reaches image, speech, embedding and decision models through `process.env.REEF_INFERENCE_URL`
-(see the Network section of `reserved/reef-pi-extension-api.md`): no key, Reef adds it. The provider is
-OpenRouter. Never guess a model name or a parameter: list the real ones first, for example
-`curl -s 'https://openrouter.ai/api/v1/models?output_modalities=speech'` (or `image`, `embeddings`), and read
-the model's page or OpenRouter's API documentation for its parameters and formats. Let the user override the
-model with an environment variable the extension reads, with a working default.
+(see the Network section of `reserved/reef-pi-extension-api.md`): no key, Reef adds it. Requests use the
+provider's own JSON format.
+
+<!-- provider -->
+
+Never guess a model name or a parameter: list the real models first, and read the provider's documentation
+for a model's parameters and formats (a failed trial call shows the provider's error, which usually names
+what is wrong). Let the user override the model with an environment variable the extension reads, with a
+working default.
 
 ## Prove it works
 

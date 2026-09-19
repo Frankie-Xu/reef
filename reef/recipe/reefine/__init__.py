@@ -13,9 +13,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.provider_calls import provider_from_environment
 from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.reefine.agent import AgentProposer
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -53,4 +55,11 @@ class ReefineRecipe(CordisRecipe):
             "review_kinds": ["code_extension"],
             "selection": "floor",
         }
-        return super()._recipe_kwargs({**settings, "evolution": {**defaults, **evolution}}, values)
+        kwargs = super()._recipe_kwargs({**settings, "evolution": {**defaults, **evolution}}, values)
+        if isinstance(kwargs["propose"], AgentProposer):
+            # The agent's trials reach the multimodal provider the service serves, handed over as REEF_PROVIDER_CALLS_*.
+            try:
+                kwargs["propose"] = AgentProposer(provider_from_environment(values))
+            except ValueError as exc:
+                raise RecipeConfigError(str(exc)) from exc
+        return kwargs

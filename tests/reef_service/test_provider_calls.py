@@ -17,12 +17,12 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.provider_calls import compact, provider_call_endpoint
+from reef.core.provider_calls import PRESETS, MultimodalProvider, compact, provider_call_endpoint, resolve_provider
 from reef.core.trajectories import make_trajectory, provider_calls, recorded_payload
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.client.wrapper import CAPTURE_PATHS, run_agent
 from reef.inference.http import HttpInferenceHandler
-from reef.inference.openrouter import OpenRouterHandler, openrouter_api_key
+from reef.inference.multimodal import ProviderCallHandler
 from reef.recipe.reefine.evolution import failures_text
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
@@ -63,14 +63,16 @@ def provider_upstream(received: list[dict]) -> web.Application:
     return app
 
 
+def provider_at(server: TestServer, preset: str = "openrouter") -> MultimodalProvider:
+    return MultimodalProvider(PRESETS[preset], str(server.make_url("")).rstrip("/"), "openrouter-key")
+
+
 async def reef_client(
-    openrouter: TestServer | None, chat: InferenceHandler | None = None
+    provider_server: TestServer | None, chat: InferenceHandler | None = None, preset: str = "openrouter"
 ) -> tuple[TestClient, object]:
-    handler = (
-        None if openrouter is None else OpenRouterHandler("openrouter-key", base_url=str(openrouter.make_url("")))
-    )
+    handler = None if provider_server is None else ProviderCallHandler(provider_at(provider_server, preset))
     dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-    client = TestClient(TestServer(create_app(dispatcher, inference_handler=chat, openrouter_handler=handler)))
+    client = TestClient(TestServer(create_app(dispatcher, inference_handler=chat, provider_handler=handler)))
     await client.start_server()
     return client, dispatcher
 
@@ -179,7 +181,7 @@ def test_a_provider_call_does_not_stream() -> None:
 
 
 @pytest.mark.unit
-def test_provider_calls_reach_openrouter_while_chat_stays_on_the_scenarios_upstream() -> None:
+def test_provider_calls_reach_the_provider_while_chat_stays_on_the_scenarios_upstream() -> None:
     async def run() -> None:
         received: list[dict] = []
         openrouter = TestServer(provider_upstream(received))
@@ -212,7 +214,7 @@ def test_provider_calls_reach_openrouter_while_chat_stays_on_the_scenarios_upstr
 
 
 @pytest.mark.unit
-def test_without_an_openrouter_key_a_provider_call_says_what_to_set() -> None:
+def test_without_a_provider_key_a_provider_call_says_what_to_set() -> None:
     async def run() -> None:
         client, _ = await reef_client(None)
         try:
@@ -220,7 +222,7 @@ def test_without_an_openrouter_key_a_provider_call_says_what_to_set() -> None:
                 "/v1/images", headers={"x-reef-scenario": "media"}, json={"model": "google/image", "prompt": "reef"}
             )
             assert response.status == 501
-            assert "OPENROUTER_API_KEY" in await response.text()
+            assert "REEF_PROVIDER_CALLS_API_KEY" in await response.text()
         finally:
             await client.close()
 
@@ -228,11 +230,50 @@ def test_without_an_openrouter_key_a_provider_call_says_what_to_set() -> None:
 
 
 @pytest.mark.unit
-def test_the_openrouter_key_is_the_configured_one_else_an_openrouter_upstreams() -> None:
-    assert openrouter_api_key("configured", "https://openrouter.ai/api", "upstream") == "configured"
-    assert openrouter_api_key(None, "https://openrouter.ai/api", "upstream") == "upstream"
-    assert openrouter_api_key(None, "http://127.0.0.1:11434", "ollama") is None
-    assert openrouter_api_key("", None, None) is None
+def test_the_provider_takes_the_configured_key_else_a_same_address_upstreams() -> None:
+    configured = resolve_provider(None, None, "configured", "https://openrouter.ai/api", "upstream")
+    assert (configured.preset.name, configured.base_url, configured.api_key) == (
+        "openrouter",
+        "https://openrouter.ai/api",
+        "configured",
+    )
+    assert resolve_provider("openrouter", None, None, "https://openrouter.ai/api/", "upstream").api_key == "upstream"
+    assert resolve_provider(None, None, None, "http://127.0.0.1:11434", "ollama") is None
+    gateway = resolve_provider("openai-compatible", "https://gateway.example/", "key")
+    assert gateway.base_url == "https://gateway.example"
+    with pytest.raises(ValueError, match="needs provider_calls_url"):
+        resolve_provider("openai-compatible", None, "key")
+    with pytest.raises(ValueError, match="unknown provider_calls preset"):
+        resolve_provider("nope", None, "key")
+
+
+@pytest.mark.unit
+def test_an_openai_compatible_provider_gets_its_own_paths_and_no_decisions() -> None:
+    async def run() -> None:
+        received: list[dict] = []
+        app = web.Application()
+
+        async def handle(request: web.Request) -> web.Response:
+            received.append({"path": request.path, "payload": await request.json()})
+            return web.json_response({"data": [{"b64_json": "aW1n"}]})
+
+        app.router.add_post("/v1/images/generations", handle)
+        upstream = TestServer(app)
+        await upstream.start_server()
+        client, _ = await reef_client(upstream, preset="openai-compatible")
+        headers = {"x-reef-scenario": "media"}
+        try:
+            image = await client.post("/v1/images", headers=headers, json={"model": "img", "prompt": "reef"})
+            assert image.status == 200
+            assert received == [{"path": "/v1/images/generations", "payload": {"model": "img", "prompt": "reef"}}]
+            decision = await client.post("/v1/decisions", headers=headers, json={"model": "jev"})
+            assert decision.status == 501
+            assert "openai-compatible provider serves no /v1/decisions" in await decision.text()
+        finally:
+            await client.close()
+            await upstream.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit
@@ -249,8 +290,8 @@ def test_a_training_runtime_does_not_serve_provider_calls(tmp_path) -> None:
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(),
         )
-        handler = OpenRouterHandler("openrouter-key", base_url=str(upstream.make_url("")))
-        client = TestClient(TestServer(create_app(dispatcher, openrouter_handler=handler)))
+        handler = ProviderCallHandler(provider_at(upstream))
+        client = TestClient(TestServer(create_app(dispatcher, provider_handler=handler)))
         await client.start_server()
         try:
             response = await client.post(

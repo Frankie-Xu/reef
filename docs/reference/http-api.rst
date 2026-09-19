@@ -34,13 +34,13 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/images``                                    | OpenRouter call: image generation                 |
+| ``POST /v1/images``                                    | provider call: image generation                   |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/embeddings``                                | OpenRouter call: embeddings                       |
+| ``POST /v1/embeddings``                                | provider call: embeddings                         |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/audio/speech``                              | OpenRouter call: text to speech, audio bytes      |
+| ``POST /v1/audio/speech``                              | provider call: text to speech, audio bytes        |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/decisions``                                 | OpenRouter call: a structured decision model      |
+| ``POST /v1/decisions``                                 | provider call: a structured decision model        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
@@ -121,16 +121,23 @@ Provider calls
 --------------
 
 ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions``
-forward the JSON request body unchanged to OpenRouter, the one provider that
-serves all of these modalities, and relay the response byte for byte, so an
-agent reaches models other than its chat model without holding the key. They go
-to OpenRouter whatever serves the scenario's chat: a deployment can chat through
-a local Ollama and still generate speech. The key is
-``inference.openrouter_api_key`` (``OPENROUTER_API_KEY``); a deployment whose
-upstream is OpenRouter reuses the upstream key. Without a key the routes answer
-HTTP 501. ``/v1/decisions`` reaches OpenRouter's ``/alpha/decisions`` (its
-structured decision API); the others keep their path. Only the key is sent to
-OpenRouter, never Reef's ``x-reef-*`` headers. The response carries
+forward the JSON request body unchanged to the deployment's multimodal
+provider, one gateway that serves these modalities behind a single key, and
+relay the response byte for byte, so an agent reaches models other than its
+chat model without holding the key. They go there whatever serves the
+scenario's chat: a deployment can chat through a local Ollama and still
+generate speech. The provider is ``inference.provider_calls_preset``
+(``openrouter``, the default, or ``openai-compatible`` for gateways such as
+OrcaRouter or LiteLLM), ``inference.provider_calls_url`` when not the preset's
+address, and ``inference.provider_calls_api_key``
+(``REEF_PROVIDER_CALLS_API_KEY``); a deployment whose upstream is the same
+gateway reuses the upstream key. The preset maps each route to the provider's
+path: ``openrouter`` sends ``/v1/decisions`` to ``/alpha/decisions`` (its
+structured decision API) and keeps the others; ``openai-compatible`` sends
+``/v1/images`` to ``/v1/images/generations`` and serves no decisions. Without
+a key, or for a route the provider does not serve, the routes answer HTTP 501.
+Bodies are the provider's own format. Only the key is sent to the provider,
+never Reef's ``x-reef-*`` headers. The response carries
 ``x-reef-agent-record-id`` like any inference, and a report may reference it.
 
 These routes do not stream (``stream: true`` is HTTP 400) and a scenario with a

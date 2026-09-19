@@ -132,8 +132,10 @@ The agent holds no credential. It and its trials reach models through a
 loopback gateway whose address carries a random token: the served model
 with the served key (always the served model, whatever a request names),
 and ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and
-``/v1/decisions`` on OpenRouter (the served key when the served upstream is
-OpenRouter, else ``OPENROUTER_API_KEY``). Every call spends from
+``/v1/decisions`` on the deployment's multimodal provider
+(``inference.provider_calls_*``, OpenRouter by default), and the provider's
+model list (``GET /models?modality=``, fetched with its key), so the agent picks
+a model that exists without holding a key. Every call spends from
 ``evolution.max_model_calls_per_step`` and is recorded in the step's
 ``proposer.json``. Nothing else is reachable through it, Reef's own routes
 included.
