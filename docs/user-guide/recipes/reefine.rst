@@ -10,13 +10,16 @@ Start the bundled profile with an OpenAI-compatible endpoint:
 
 .. code:: bash
 
-   reef serve --recipe reefine \
+   REEF_MULTIMODAL_API_KEY=sk-or-... reef serve --recipe reefine \
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b \
      --inference.upstream-api-key dummy
 
 For an OpenAI Responses or Anthropic endpoint, add
 ``--inference.upstream-api responses`` or ``--inference.upstream-api anthropic``.
+``REEF_MULTIMODAL_API_KEY``, an OpenRouter key, gives the harness image, speech,
+embedding and decision models (see `Images, speech, embeddings and decisions`_);
+leave it out to go without them, or when the upstream is OpenRouter.
 
 The profile listens on ``127.0.0.1:8901``, requires no token unless ``REEF_TOKEN`` is set, and keeps
 state under ``.reef/reefine/``. For custom deployments, copy
