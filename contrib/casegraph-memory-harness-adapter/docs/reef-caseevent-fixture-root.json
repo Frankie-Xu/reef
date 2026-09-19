@@ -1,0 +1,442 @@
+{
+  "artifact_version": "casegraph-synthetic-v1",
+  "event_digest": "aec88a050f4812a672d40670cc5dcd2bb2e11e07784886ac90b3333c4adebd0d",
+  "events": [
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-00",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "46dc3231ae18becb8d5354262bd7d6d672e44fe8b63add11f75241ec7c705875",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-01",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-00",
+      "text_ref": "synthetic://syn-case-00/observation/green",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-01",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-00",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "8ab149f9f6a6b668008da97f82aca54b8d6e3866b739030740f967aebb3db09e",
+      "event_type": "feedback",
+      "feedback_type": "fact_error",
+      "observed_at": "2026-01-02",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-00",
+      "text_ref": "synthetic://syn-case-00/feedback/fact_error",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-02",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-01",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "cdb98fc4235dd4323579067fee14fe331a23e1277216e93fdbf7819d9969fd44",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-03",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-01",
+      "text_ref": "synthetic://syn-case-01/observation/amber",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-03",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-01",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "41b79d67f28218b66a8b4d3dab36f3c5d4f1e49eb083b40002736eecaaa908f8",
+      "event_type": "feedback",
+      "feedback_type": "retrieval_omission",
+      "observed_at": "2026-01-04",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-01",
+      "text_ref": "synthetic://syn-case-01/feedback/retrieval_omission",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-04",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-02",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "7644a8a89672030ac62ae0c7900109ab71abf0c7659c22b0e3ff8f9bd8ae00ab",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-05",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-02",
+      "text_ref": "synthetic://syn-case-02/observation/blue",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-05",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-02",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "1ce56899bb53bc32a132ac05bef849dc0b2037e3efd619ccfd826d460f2d675c",
+      "event_type": "feedback",
+      "feedback_type": "execution_strategy_failure",
+      "observed_at": "2026-01-06",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-02",
+      "text_ref": "synthetic://syn-case-02/feedback/execution_strategy_failure",
+      "update_surface": "procedural_harness",
+      "valid_from": "2026-01-06",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-03",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "3a0de69faba2dd83e9ee9a1d98e2c876c35c664a175a1be2bf06f3f8ec824487",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-07",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-03",
+      "text_ref": "synthetic://syn-case-03/observation/amber",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-07",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-03",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "bc5f7853e9d690f6a0e9ddaa85906419a8ef982799d498f1f434047cbac89809",
+      "event_type": "feedback",
+      "feedback_type": "verifier_error",
+      "observed_at": "2026-01-08",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-03",
+      "text_ref": "synthetic://syn-case-03/feedback/verifier_error",
+      "update_surface": "procedural_harness",
+      "valid_from": "2026-01-08",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-04",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "a3629fbea33494d46ae468ae8fbd8e05e787ae65f924e5d3dfde718e25c4897f",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-09",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-04",
+      "text_ref": "synthetic://syn-case-04/observation/green",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-09",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-04",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "fda6199e661a65eee29f18b232c4d4baee09a8675dff6156b5db7a481675e0aa",
+      "event_type": "feedback",
+      "feedback_type": "fact_error",
+      "observed_at": "2026-01-10",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-04",
+      "text_ref": "synthetic://syn-case-04/feedback/fact_error",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-10",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-05",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "f81a76a5566a9d51f3942a25165020681bf31b0167357dcb50218cdc0e28d9bf",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-11",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-05",
+      "text_ref": "synthetic://syn-case-05/observation/green",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-11",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-05",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "ad55f7a3b65d70c23eda662d6f96300cec9b571c16b54fd7308e3faacb2c1f7e",
+      "event_type": "feedback",
+      "feedback_type": "retrieval_omission",
+      "observed_at": "2026-01-12",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-05",
+      "text_ref": "synthetic://syn-case-05/feedback/retrieval_omission",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-12",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-06",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "c30e674ea953a644a7fffbfdefe4ef10d47e97b3c49c4b34f5e42a144a1c2aee",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-13",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-06",
+      "text_ref": "synthetic://syn-case-06/observation/blue",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-13",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-06",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "c22dfb7d10e50b7468cd034dd94f15ba989ae1714498816bacb21b66c119cdab",
+      "event_type": "feedback",
+      "feedback_type": "execution_strategy_failure",
+      "observed_at": "2026-01-14",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-06",
+      "text_ref": "synthetic://syn-case-06/feedback/execution_strategy_failure",
+      "update_surface": "procedural_harness",
+      "valid_from": "2026-01-14",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-07",
+      "confidence": 0.9,
+      "cost": {
+        "compute_ms": 1.0,
+        "human_intervention_seconds": 0.0,
+        "reviewer_seconds": 0.0
+      },
+      "event_id": "6f39cdfca1fc9da56cdc74e3140ef1e3f8614098f9aaa2269dc3faf9eda4c687",
+      "event_type": "observation",
+      "feedback_type": null,
+      "observed_at": "2026-01-15",
+      "outcome": "observed",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-07",
+      "text_ref": "synthetic://syn-case-07/observation/blue",
+      "update_surface": "episodic_memory",
+      "valid_from": "2026-01-15",
+      "valid_to": null
+    },
+    {
+      "artifact_version": "casegraph-synthetic-v1",
+      "case_id": "syn-case-07",
+      "confidence": 0.95,
+      "cost": {
+        "compute_ms": 2.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "event_id": "13ba0771087fc17a461e82cd207982122cbc3ff4ae5a4f8d38f0c9192204dd95",
+      "event_type": "feedback",
+      "feedback_type": "verifier_error",
+      "observed_at": "2026-01-16",
+      "outcome": "corrective",
+      "provenance": {
+        "generator": "reef_casegraph_adapter",
+        "kind": "synthetic",
+        "seed": 20260919,
+        "source": "fixture"
+      },
+      "source_id": "synthetic-source-07",
+      "text_ref": "synthetic://syn-case-07/feedback/verifier_error",
+      "update_surface": "procedural_harness",
+      "valid_from": "2026-01-16",
+      "valid_to": null
+    }
+  ],
+  "fixture_name": "reef-casegraph-synthetic-v1",
+  "seed": 20260919,
+  "splits": {
+    "adapt": [
+      "syn-case-04",
+      "syn-case-05"
+    ],
+    "drift": [
+      "syn-case-07"
+    ],
+    "replay": [
+      "syn-case-00",
+      "syn-case-01",
+      "syn-case-02",
+      "syn-case-03"
+    ],
+    "retained": [
+      "syn-case-06"
+    ]
+  }
+}
