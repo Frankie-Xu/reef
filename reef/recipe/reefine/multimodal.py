@@ -1,12 +1,13 @@
-"""A multimodal provider and the relay that sends a recipe's multimodal calls to it.
+"""Reefine's multimodal gateway and the relay that sends a scenario's multimodal calls to it.
 
 One gateway that serves images, embeddings, speech and decisions behind a
 single key: OpenRouter by default, or an OpenAI-compatible one (OrcaRouter,
-LiteLLM, ...). A recipe that offers multimodal calls configures its provider
-(reefine's ``evolution.multimodal``) and hands Reef a :class:`ProviderRelay`,
-which keeps the key the way the upstream runtime keeps the chat key: the request
-bodies pass through unchanged, in the provider's own format, and the preset only
-decides where each of Reef's routes lands and how an agent lists the models.
+LiteLLM, ...). Reefine reads it from ``evolution.multimodal``, hands Reef a
+:class:`ProviderRelay` for its scenarios, and gives the same gateway to its
+agent proposer. The relay keeps the key the way the upstream runtime keeps the
+chat key: request bodies pass through unchanged, in the gateway's own format,
+and the preset only decides where each of Reef's routes lands and how an agent
+lists the models.
 """
 
 from __future__ import annotations
@@ -15,12 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.inference.http import HOP_BY_HOP_HEADERS
 from reef.runtime.interfaces import InferenceStream, MultimodalRelay, UpstreamStatusError
-
-#: Hop-by-hop headers that describe one connection and are never relayed.
-HOP_BY_HOP_HEADERS = frozenset(
-    {"connection", "content-length", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"}
-)
 
 
 @dataclass(frozen=True)

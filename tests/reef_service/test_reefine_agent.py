@@ -18,10 +18,10 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
-from reef.inference.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
+from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
 

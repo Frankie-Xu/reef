@@ -12,9 +12,9 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.multimodal import PRESETS, MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.runtime.interfaces import MultimodalRelay
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage

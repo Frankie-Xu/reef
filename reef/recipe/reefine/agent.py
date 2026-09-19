@@ -38,9 +38,9 @@ from reef.harness.episodes.trajectory import reader_for
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition
-from reef.inference.multimodal import MultimodalProvider
 from reef.recipe.reefine import evolution
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
+from reef.recipe.reefine.multimodal import MultimodalProvider
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal, untrusted_text
 from reef.train.types import TrajectoryItem
