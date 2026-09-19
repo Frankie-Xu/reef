@@ -17,12 +17,12 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.provider_calls import PRESETS, MultimodalProvider, compact, provider_call_endpoint, resolve_provider
+from reef.core.provider_calls import compact, provider_call_endpoint
 from reef.core.trajectories import make_trajectory, provider_calls, recorded_payload
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.client.wrapper import CAPTURE_PATHS, run_agent
 from reef.inference.http import HttpInferenceHandler
-from reef.inference.multimodal import ProviderCallHandler
+from reef.inference.multimodal import PRESETS, MultimodalProvider, ProviderCallHandler, resolve_provider
 from reef.recipe.reefine.evolution import failures_text
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app

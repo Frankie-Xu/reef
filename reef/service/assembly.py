@@ -16,10 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
-from reef.core.provider_calls import MultimodalProvider, resolve_provider
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.multimodal import ProviderCallHandler
+from reef.inference.multimodal import MultimodalProvider, ProviderCallHandler, resolve_provider
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values

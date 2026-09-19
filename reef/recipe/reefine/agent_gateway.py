@@ -31,13 +31,9 @@ from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from reef.core.provider_calls import (
-    PROVIDER_ROUTE_PATHS,
-    MultimodalProvider,
-    provider_call_payload,
-    provider_call_response,
-)
+from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_payload, provider_call_response
 from reef.harness.episodes.model_binding import ModelBinding, usage_of
+from reef.inference.multimodal import MultimodalProvider
 from reef.train.cordis_backend.strategies import ProposerCalls
 
 logger = logging.getLogger(__name__)

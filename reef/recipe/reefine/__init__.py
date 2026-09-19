@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from reef.core.provider_calls import provider_from_environment
+from reef.inference.multimodal import provider_from_environment
 from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError

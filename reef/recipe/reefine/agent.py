@@ -32,13 +32,13 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from reef.core.provider_calls import MultimodalProvider
 from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.trajectory import reader_for
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition
+from reef.inference.multimodal import MultimodalProvider
 from reef.recipe.reefine import evolution
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.train.cordis_backend.manifest import FailureManifest

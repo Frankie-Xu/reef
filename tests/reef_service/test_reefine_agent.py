@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.provider_calls import PRESETS, MultimodalProvider
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
+from reef.inference.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
