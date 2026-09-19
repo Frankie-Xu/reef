@@ -18,7 +18,6 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
-from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_payload
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import TrainingRequest
@@ -278,9 +277,6 @@ class RequestService:
             admission = prepared.admission
             lease = prepared.lease
             try:
-                if path in PROVIDER_ROUTE_PATHS and prepared.durable:
-                    # A training runtime records serving versions a provider response cannot carry.
-                    raise ReefError(f"{path} is served only by a provider-backed scenario, not a training runtime")
                 stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
@@ -313,12 +309,11 @@ class RequestService:
                         if admission is not None:
                             admission.release()
                 raise
-            recorded = _with_tags(payload, prepared.parsed)
             pending = PendingInference(
                 item=AgentRecord.create(
                     scenario=prepared.parsed.scenario,
                     request_type=RequestType.INFERENCE,
-                    payload=provider_call_payload(path, recorded) if path in PROVIDER_ROUTE_PATHS else recorded,
+                    payload=_with_tags(payload, prepared.parsed),
                     artifact_ref=prepared.artifact.ref,
                 ),
                 release_id=prepared.parsed.release_id,
@@ -334,6 +329,25 @@ class RequestService:
             if isinstance(exc, RuntimeLoadMismatch):
                 operations.increment("serve/version_mismatch_total")
             raise
+
+    async def relay_multimodal(
+        self, headers: Mapping[str, str], payload: dict[str, Any], path: str
+    ) -> InferenceStream:
+        """A multimodal call, relayed by the scenario's recipe to the provider it configured; nothing is recorded."""
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
+        scenario = await asyncio.to_thread(
+            self._dispatcher.get_or_create_scenario,
+            parsed.scenario,
+            release_id=parsed.release_id,
+        )
+        if scenario is None:
+            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        relay = scenario.multimodal_relay
+        if relay is None:
+            raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
+        if not relay.serves(path):
+            raise NotImplementedError(f"the recipe's multimodal provider serves no {path}")
+        return await relay.relay(path, payload)
 
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
         succeeded = False

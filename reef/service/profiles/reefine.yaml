@@ -21,6 +21,12 @@ recipe:
       proposer_agent:
         timeout_s: 1800
         trial_timeout_s: 300
+      # Images, embeddings, speech and decisions: Reef relays the harness's calls to this gateway with its key,
+      # unrecorded. The key is REEF_MULTIMODAL_API_KEY, else the upstream's when the upstream is this gateway;
+      # without one those routes answer 501. For another gateway: preset: openai-compatible and its url.
+      multimodal:
+        preset: openrouter
+        api_key_env: REEF_MULTIMODAL_API_KEY
       evaluate: reef.recipe.reefine.evolution:evaluate
       # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
       requests: true
@@ -63,7 +69,6 @@ inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}
   upstream-model: ${REEF_UPSTREAM_MODEL:?}
   upstream-api-key: ${REEF_UPSTREAM_API_KEY}
-  provider-calls-api-key: ${REEF_PROVIDER_CALLS_API_KEY}
 storage:
   agent-record-dir: .reef/reefine/agent-record
   artifact-repository: .reef/reefine/artifacts.git

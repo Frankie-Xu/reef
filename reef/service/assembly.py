@@ -18,7 +18,6 @@ from typing import Any
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.multimodal import MultimodalProvider, ProviderCallHandler, resolve_provider
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
@@ -190,26 +189,11 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
     )
 
 
-def multimodal_provider(settings: ServiceConfig) -> MultimodalProvider | None:
-    """The deployment's multimodal provider for provider calls, or ``None`` when it has no key."""
-    return resolve_provider(
-        settings.provider_calls_preset,
-        settings.provider_calls_url,
-        settings.provider_calls_api_key,
-        settings.upstream_url,
-        settings.upstream_api_key,
-    )
-
-
 def build_dispatcher(
     settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None
 ) -> Dispatcher:
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
-    provider = multimodal_provider(settings)
-    if provider is not None:
-        # A recipe that runs an agent reaches the same provider the service serves (as REEF_PROVIDER_CALLS_*).
-        env = {**env, **provider.environment()}
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
@@ -267,7 +251,6 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
         timeout_s=settings.inference_retry_timeout_s,
     )
     dispatcher = build_dispatcher(settings, environ=environ, connector=connector)
-    provider = multimodal_provider(settings)
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
@@ -278,9 +261,6 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
             record_retention=record_retention,
-            provider_handler=(
-                None if provider is None else ProviderCallHandler(provider, timeout_s=settings.inference_timeout_s)
-            ),
         )
     except BaseException:
         with suppress(Exception):

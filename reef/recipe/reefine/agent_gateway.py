@@ -8,8 +8,8 @@ credential of their own. Behind it:
 - the model routes go to the served model with the served binding's key, one
   call from the step's budget each, recorded in the step's ``proposer.json``;
   the request's ``model`` is always the served one;
-- the provider-call routes (images, embeddings, speech, decisions) go to the
-  deployment's multimodal provider, recorded as the summaries Reef records;
+- the multimodal routes (images, embeddings, speech, decisions) go to the
+  recipe's multimodal provider, and the step record keeps their status only;
 - ``GET /models?modality=`` lists the provider's models, fetched with its key;
 - ``/check`` and ``/trial`` run the agent's workspace through admission and
   through a real run of the candidate harness (:class:`WorkspaceTools`);
@@ -31,9 +31,9 @@ from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from reef.core.provider_calls import PROVIDER_ROUTE_PATHS, provider_call_payload, provider_call_response
 from reef.harness.episodes.model_binding import ModelBinding, usage_of
 from reef.inference.multimodal import MultimodalProvider
+from reef.runtime.interfaces import MULTIMODAL_ROUTES
 from reef.train.cordis_backend.strategies import ProposerCalls
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ class AgentGateway:
                     return
                 if route in MODEL_PATHS:
                     gateway.relay_model_call(self, route, payload)
-                elif route in PROVIDER_ROUTE_PATHS:
+                elif route in MULTIMODAL_ROUTES:
                     gateway.relay_provider_call(self, route, payload)
                 elif route == "/check":
                     self._answer(200, gateway._tools.check())
@@ -233,20 +233,14 @@ class AgentGateway:
         }
         url = f"{self._provider.base_url}{upstream_path}"
         started = time.monotonic()
-        status, body, response_headers = relay(client, url, headers, payload, timeout_s=300.0)
-        summary = provider_call_response(status, response_headers, body, complete=True)
+        status, body, _ = relay(client, url, headers, payload, timeout_s=300.0)
         call: dict[str, Any] = {"path": route, "model": payload.get("model"), "status": status}
         if status >= 400:
             call["error"] = body.decode("utf-8", errors="replace")[:MAX_ERROR_CHARS]
         with self._lock:
             self._provider_calls.append(call)
-        self._calls.record(
-            {
-                "source": "agent",
-                "provider_call": provider_call_payload(route, {**payload, "response": summary}),
-                "seconds": round(time.monotonic() - started, 3),
-            }
-        )
+        # The step record keeps what was asked of the provider and how it answered, never the media itself.
+        self._calls.record({"source": "agent", **call, "seconds": round(time.monotonic() - started, 3)})
 
 
 def relay_models_request(client: BaseHTTPRequestHandler, url: str, api_key: str) -> None:

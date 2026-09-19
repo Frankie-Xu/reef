@@ -41,10 +41,8 @@ readiness, runs in the foreground, and cleans up its process on Ctrl-C;
 it does not launch or stop the upstream provider. Readiness does not verify
 provider credentials or model availability.
 
-``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY``,
-``REEF_PROVIDER_CALLS_PRESET``, ``REEF_PROVIDER_CALLS_URL``,
-``REEF_PROVIDER_CALLS_API_KEY`` and ``REEF_TOKEN`` supply optional environment
-fallbacks for this mode. Explicit
+``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and
+``REEF_TOKEN`` supply optional environment fallbacks for this mode. Explicit
 CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
 model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
 with any other prefix still needs an upstream URL.
@@ -576,9 +574,6 @@ shown above; the repository examples all use version 2.
    reef.upstream_api_key | its credential. Reef is the only party that sees it.
    reef.upstream_model | the model to request upstream
    reef.upstream_api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
-   reef.provider_calls_preset | openrouter | the multimodal provider that provider calls (``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech``, ``/v1/decisions``) reach, whatever the upstream is: ``openrouter`` or ``openai-compatible`` (OrcaRouter, LiteLLM, ...); the preset maps each route to the provider's path
-   reef.provider_calls_url | the preset's address | the provider's base URL, no ``/v1``; required for ``openai-compatible``
-   reef.provider_calls_api_key | the upstream key when the upstream is the same address | the provider's key; unset, provider calls answer 501
    reef.inference_url | the address the training backend reports | the local engine; set only to front the engines with something else
    reef.inference_timeout_s | 300.0 | per-request timeout
    reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
@@ -838,6 +833,7 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
+   evolution.multimodal | | reefine only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key_env`` (the variable holding its key; unset or empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
    evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer that takes ``agent_host`` runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple

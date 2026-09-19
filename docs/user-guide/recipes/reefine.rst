@@ -132,8 +132,8 @@ The agent holds no credential. It and its trials reach models through a
 loopback gateway whose address carries a random token: the served model
 with the served key (always the served model, whatever a request names),
 and ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and
-``/v1/decisions`` on the deployment's multimodal provider
-(``inference.provider_calls_*``, OpenRouter by default), and the provider's
+``/v1/decisions`` on the recipe's multimodal gateway (``evolution.multimodal``,
+see below), and the provider's
 model list (``GET /models?modality=``, fetched with its key), so the agent picks
 a model that exists without holding a key. Every call spends from
 ``evolution.max_model_calls_per_step`` and is recorded in the step's
@@ -159,6 +159,32 @@ each trial. A run past its limit hands back no change. Set
 ``evolution.max_model_calls_per_step`` to bound what one request may spend:
 an agent run makes a model call per turn and may probe several provider
 models before it settles on one.
+
+Images, speech, embeddings and decisions
+----------------------------------------
+
+``evolution.multimodal`` names one gateway that serves these modalities behind
+a single key. Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``,
+``/v1/audio/speech`` and ``/v1/decisions`` to it with the key, the way the
+upstream serves chat: an extension calls them at ``REEF_SERVICE_URL`` with the
+scenario and token headers, in the provider's own format, and holds no provider
+key. Nothing is recorded, so these calls are not learning signal. The agent
+proposer's trials reach the same gateway, so an extension it proves in a trial
+calls what the harness will call.
+
+.. code:: yaml
+
+   evolution:
+     multimodal:
+       preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
+       url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
+       api_key_env: REEF_MULTIMODAL_API_KEY
+
+The key is the variable's value, else the upstream key when the upstream is
+the same address, so a deployment that chats through OpenRouter needs nothing
+more. The profile sets ``api_key_env: REEF_MULTIMODAL_API_KEY``. Without a key,
+or for a route the preset does not serve (``openai-compatible`` has no
+decisions), those routes answer 501. Recipes other than reefine offer none.
 
 The health floor
 ----------------

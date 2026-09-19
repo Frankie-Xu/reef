@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from reef.inference.multimodal import ProviderCallHandler
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.inference import register_inference_routes
@@ -16,14 +15,12 @@ def register_routes(
     *,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
-    provider_handler: ProviderCallHandler | None = None,
 ) -> None:
     register_health_route(app)
     register_inference_routes(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
-        provider_handler=provider_handler,
     )
     register_scenario_routes(app, request_service=request_service)
     register_system_routes(app, request_service=request_service)

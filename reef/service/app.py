@@ -7,7 +7,6 @@ from collections.abc import Iterable
 from aiohttp import web
 
 from reef.dispatcher import Dispatcher
-from reef.inference.multimodal import ProviderCallHandler
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
@@ -43,13 +42,8 @@ def create_app(
     inference_retry_policy: InferenceRetryPolicy | None = None,
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
-    provider_handler: ProviderCallHandler | None = None,
 ) -> web.Application:
-    """Build the HTTP app around an existing dispatcher; close it only when requested.
-
-    ``provider_handler`` serves provider calls (images, embeddings, speech,
-    decisions); without one those routes answer 501.
-    """
+    """Build the HTTP app around an existing dispatcher; close it only when requested."""
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     request_service_key = web.AppKey("reef_request_service", RequestService)
     app = web.Application(middlewares=[create_authentication_middleware(tokens), translate_errors])
@@ -59,7 +53,6 @@ def create_app(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
-        provider_handler=provider_handler,
     )
     if record_retention is not None:
 

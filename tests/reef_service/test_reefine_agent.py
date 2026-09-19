@@ -165,7 +165,7 @@ def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(u
         status, body = post(f"{base}/v1/audio/speech", {"model": "real/tts", "input": "hi"})
         assert (status, body) == (200, b"ID3audio")
         assert upstream.requests[-1]["auth"] == "Bearer sk-or-test"
-        assert record[-1]["provider_call"]["metadata"]["reef_endpoint"] == "/v1/audio/speech"
+        assert (record[-1]["path"], record[-1]["status"], record[-1]["source"]) == ("/v1/audio/speech", 200, "agent")
         assert gateway.provider_calls_since(0) == [{"path": "/v1/audio/speech", "model": "real/tts", "status": 200}]
 
         models = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(f"{base}/models?modality=speech")
@@ -231,8 +231,8 @@ FAKE_PI = textwrap.dedent(
             print(post(base + "/trial", {{"task": "Say hello out loud"}}))
         text = "done"
     else:
-        # The candidate harness: its extension calls the TTS route through REEF_INFERENCE_URL.
-        status, body = post(os.environ["REEF_INFERENCE_URL"] + "/v1/audio/speech",
+        # The candidate harness: its extension calls the TTS route at REEF_SERVICE_URL, as in a user's session.
+        status, body = post(os.environ["REEF_SERVICE_URL"] + "/v1/audio/speech",
                             {{"model": "not/real", "input": sys.argv[-1]}})
         text = "spoke with status %d" % status
     event = {{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "text", "text": text}}]}}}}
@@ -284,7 +284,7 @@ def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_pat
     # The trial's speech call reached the provider and its refusal is on record for the agent to read.
     speech = [r for r in upstream.requests if r["path"] == "/api/v1/audio/speech"]
     assert speech and speech[0]["body"]["model"] == "not/real"
-    assert any(entry.get("provider_call", {}).get("response", {}).get("status") == 400 for entry in record)
+    assert any(entry.get("path") == "/v1/audio/speech" and entry.get("status") == 400 for entry in record)
     assert (host.step_dir / "agent-session.jsonl").read_text().count('"done"') == 1
 
 
@@ -379,17 +379,4 @@ def test_the_agent_is_told_what_its_deployments_provider_serves() -> None:
     compatible = MultimodalProvider(PRESETS["openai-compatible"], "https://gateway.example", "k")
     rules = agent_rules(compatible)
     assert "openai-compatible (https://gateway.example)" in rules and "`/v1/decisions`" not in rules
-    assert "$REEF_INFERENCE_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
-
-
-@pytest.mark.unit
-def test_the_reefine_recipe_hands_its_agent_the_services_provider() -> None:
-    from reef.recipe.reefine import ReefineRecipe
-
-    settings = {"evolution": {"tasks": ["[health] reply reef-ok"]}}
-    values = {"REEF_PROVIDER_CALLS_PRESET": "openai-compatible", "REEF_PROVIDER_CALLS_URL": "https://gw.example"}
-    kwargs = ReefineRecipe._recipe_kwargs(settings, {**values, "REEF_PROVIDER_CALLS_API_KEY": "k"})
-    proposer = kwargs["propose"]
-    assert isinstance(proposer, AgentProposer) and proposer.runs_agent and proposer.reads_requests
-    assert (proposer.provider.preset.name, proposer.provider.base_url) == ("openai-compatible", "https://gw.example")
-    assert ReefineRecipe._recipe_kwargs(settings, values)["propose"].provider is None  # no key, no provider
+    assert "$REEF_PROPOSER_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules

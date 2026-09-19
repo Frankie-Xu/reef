@@ -53,9 +53,10 @@ Leave the array empty when the change needs nothing.
 
 ## Models beyond the chat model
 
-An extension reaches image, speech, embedding and decision models through `process.env.REEF_INFERENCE_URL`
-(see the Network section of `reserved/reef-pi-extension-api.md`): no key, Reef adds it. Requests use the
-provider's own JSON format.
+An extension reaches image, speech, embedding and decision models through Reef, at
+`process.env.REEF_SERVICE_URL` with Reef's scenario and token headers (see the Network section of
+`reserved/reef-pi-extension-api.md`): no provider key, Reef adds it. Requests use the provider's own JSON
+format.
 
 <!-- provider -->
 

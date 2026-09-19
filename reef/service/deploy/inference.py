@@ -136,9 +136,6 @@ _ENVIRONMENT_FIELDS = {
     "upstream_url": "REEF_UPSTREAM_URL",
     "upstream_model": "REEF_UPSTREAM_MODEL",
     "upstream_api_key": "REEF_UPSTREAM_API_KEY",
-    "provider_calls_preset": "REEF_PROVIDER_CALLS_PRESET",
-    "provider_calls_url": "REEF_PROVIDER_CALLS_URL",
-    "provider_calls_api_key": "REEF_PROVIDER_CALLS_API_KEY",
     "token": "REEF_TOKEN",
 }
 _CONFIGURED_FIELDS = {

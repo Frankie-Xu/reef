@@ -238,6 +238,7 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_runtime=recipe.training_runtime,
                     inference_handler=recipe.inference_handler,
+                    multimodal_relay=recipe.multimodal_relay,
                     artifact_validator=recipe.build_artifact_validator(),
                     report_type=trainer.report_type,
                 ),

@@ -77,17 +77,29 @@ def agent_rules(provider: MultimodalProvider | None) -> str:
     """The agent's AGENTS.md, with what this deployment's multimodal provider serves and how to list its models."""
     if provider is None:
         note = (
-            "This deployment has no multimodal provider: those routes answer 501. A change that needs one cannot "
-            "be delivered here; say so in design.md."
+            "This deployment configures no multimodal provider: those routes answer 501. A change that needs one "
+            "cannot be delivered here; say so in design.md."
         )
     else:
         routes = ", ".join(f"`{route}`" for route in provider.preset.paths)
         note = (
-            f"This deployment's provider is {provider.preset.name} ({provider.base_url}); it serves {routes}, and "
+            f"This deployment's multimodal provider is {provider.preset.name} ({provider.base_url}); it serves "
+            f"{routes}, and "
             "any other of these routes answers 501. List its models with "
-            '`curl -s "$REEF_INFERENCE_URL/models?modality=speech"` (or `image`, `embeddings`).'
+            '`curl -s "$REEF_PROPOSER_URL/models?modality=speech"` (or `image`, `embeddings`).'
         )
     return AGENT_RULES.read_text(encoding="utf-8").replace("<!-- provider -->", note)
+
+
+def trial_env(gateway_url: str) -> dict[str, str]:
+    """Reef's address as a session sees it, pointed at the gateway: an extension calls the multimodal routes at
+    ``REEF_SERVICE_URL`` with the scenario and token headers as it will in a user's session, and the gateway
+    answers them without reading either."""
+    return {
+        "REEF_SERVICE_URL": gateway_url,
+        "REEF_SCENARIO": "reef-proposer-trial",
+        "REEF_TOKEN": "reef-proposer-trial",
+    }
 
 
 def body_field(kind: str) -> str:
@@ -330,7 +342,7 @@ class AgentRun(WorkspaceTools):
                 self.executor(),
                 files,
                 task,
-                {"REEF_INFERENCE_URL": self.gateway.base_url},
+                trial_env(self.gateway.base_url),
                 root=root,
                 timeout=self.host.trial_timeout_s,
             )
@@ -424,7 +436,7 @@ def answer_with_agent(
                 request=untrusted_text(str(request.get("text", "")), "user request"),
                 failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
             )
-            env = {"REEF_PROPOSER_URL": gateway.base_url, "REEF_INFERENCE_URL": gateway.base_url}
+            env = {"REEF_PROPOSER_URL": gateway.base_url, **trial_env(gateway.base_url)}
             outcome, _ = launch_pi(
                 host,
                 run.executor(),
