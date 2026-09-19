@@ -42,7 +42,11 @@ How it works
    reloads every five seconds, naming the step's state, until the result
    is on it.
 2. Step. In ``training-mode: manual`` the service runs one evolve step for
-   each accepted instruction. The served model writes a design first (the
+   each accepted instruction. Where the host can isolate it, a coding agent
+   answers the instruction (see `The agent proposer`_): it edits the tree,
+   runs the changed harness for real and hands the entries back, and a
+   review call reads them against the request. Otherwise the served model
+   answers it in a few calls: it writes a design first (the
    request in one sentence, what triggers the behavior, what state the
    harness must know and where it comes from, what only you can provide as
    ``requires`` items with a ``prompt`` each), then the entries, and a
@@ -81,7 +85,8 @@ Behavior and configuration
 
 * ``training-mode: manual`` runs one step for each accepted instruction on
   ``POST /reef/train``. Use ``hybrid`` to also learn from failing reports.
-* The served model proposes skills, rules, agent commands, or pi extensions.
+* The agent proposer, or the served model where the host cannot isolate the
+  agent, proposes skills, rules, agent commands, or pi extensions.
   Requests and update notices are enabled in the seed by default.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
@@ -98,6 +103,60 @@ Behavior and configuration
   you for it in the session, never stores it in a file of its own and never
   hardcodes it, and its review lists a value the extension asks for or
   stores itself as uncovered.
+
+The agent proposer
+------------------
+
+The text proposer writes an extension it never runs, so a model name it
+guessed or a parameter a provider refuses only shows once you use the
+change. The agent proposer runs the served model as a pi coding agent
+instead. Its working directory holds the tree as one file per entry
+(``harness/skills``, ``rules``, ``commands`` and ``extensions``, plus
+``requires.json`` and ``design.md``), with Reef's own entries, the
+extension API reference among them, read-only beside it. It may read
+documentation on the network, and two tools of its own:
+
+* ``harness_check`` runs the working directory through Reef's admission, as
+  the step will.
+* ``harness_trial`` runs the changed harness for real, online, on a task the
+  agent writes, and returns the session's final text, the tools it called,
+  every image, speech, embedding or decision call it made with the
+  provider's error when one failed, and the end of its stderr.
+
+When the agent stops, its files are read back into the step's mutations,
+``requires`` items and design, and the review runs as for the text
+proposer. The agent's session log lands in the step record as
+``agent-session.jsonl``.
+
+The agent holds no credential. It and its trials reach models through a
+loopback gateway whose address carries a random token: the served model
+with the served key (always the served model, whatever a request names),
+and ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and
+``/v1/decisions`` on OpenRouter (the served key when the served upstream is
+OpenRouter, else ``OPENROUTER_API_KEY``). Every call spends from
+``evolution.max_model_calls_per_step`` and is recorded in the step's
+``proposer.json``. Nothing else is reachable through it, Reef's own routes
+included.
+
+Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
+
+* ``bwrap`` (the default where the host can): the agent and its trials run in
+  a bubblewrap jail with an empty environment, a read-only system and only
+  the working directory writable, in a network namespace pasta connects to
+  the internet with no host address reachable but the gateway's port. It
+  needs ``bwrap`` and ``pasta`` (the ``passt`` package) and a service that
+  runs as a non-root user with user namespaces allowed.
+* ``none``: no isolation. The agent runs with the service's user and full
+  network access, fed your clients' text. Choose it only where you trust
+  every client, such as your own machine.
+* Left unset on a host that cannot isolate, the agent is off and the text
+  proposer answers; the service logs why.
+
+``timeout_s`` (1800) bounds the whole agent run and ``trial_timeout_s`` (300)
+each trial. A run past its limit hands back no change. Set
+``evolution.max_model_calls_per_step`` to bound what one request may spend:
+an agent run makes a model call per turn and may probe several provider
+models before it settles on one.
 
 The health floor
 ----------------

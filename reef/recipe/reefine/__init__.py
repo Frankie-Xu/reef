@@ -22,7 +22,9 @@ from reef.recipe.errors import RecipeConfigError
 class ReefineRecipe(CordisRecipe):
     """Refine a pi harness once per instruction, with extensions held for review.
 
-    Configuration defaults enable harness requests and update notices.
+    Configuration defaults enable harness requests and update notices, and
+    answer a request with the agent proposer (:mod:`reef.recipe.reefine.agent`)
+    where the host can isolate it (``evolution.proposer_agent``).
     Selection is ``floor``: the evaluation runs the candidate alone on the
     profile's health task and publishes it when every task scores at least
     ``evolution.floor_score``. The floor checks that the tree still works
@@ -42,7 +44,9 @@ class ReefineRecipe(CordisRecipe):
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("reefine requires an 'evolution' config mapping")
         defaults = {
-            "propose": "reef.recipe.reefine.evolution:propose",
+            # A request goes to the agent proposer where the host can jail it; otherwise to the text proposer.
+            "propose": "reef.recipe.reefine.agent:propose",
+            "proposer_agent": {},
             "evaluate": "reef.recipe.reefine.evolution:evaluate",
             "requests": True,
             "version_check": True,

@@ -68,9 +68,11 @@ from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  #
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import (
+    AgentHost,
     EpisodeScorer,
     Promoter,
     Proposer,
+    ProposerCalls,
     StepProposal,
     accepts_keyword,
     accepts_manifest,
@@ -346,6 +348,26 @@ def _admit_promoted(
     return promoted
 
 
+class _StepCalls(ProposerCalls):
+    """One step's model-call budget and record, shared by the budgeted bindings and an agent's gateway.
+
+    A cap of 0 is no budget; the record is the list the step writes to ``proposer.json``.
+    """
+
+    def __init__(self, cap: int, record: list[dict[str, Any]]) -> None:
+        self._cap = cap
+        self._spent = 0
+        self._record = record
+
+    def spend(self) -> None:
+        if self._cap and self._spent >= self._cap:
+            raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
+        self._spent += 1
+
+    def record(self, entry: Mapping[str, Any]) -> None:
+        self._record.append(dict(entry))
+
+
 class _BudgetedBinding(ModelBinding):
     """A ModelBinding that delegates ``chat`` to a wrapped binding under a
     shared per-step call budget and records every call in the step record.
@@ -361,11 +383,9 @@ class _BudgetedBinding(ModelBinding):
     """
 
     _inner: ModelBinding
-    _spent: list[int]
-    _cap: int
-    _record: list[dict[str, Any]]
+    _calls: _StepCalls
 
-    def __init__(self, inner: ModelBinding, spent: list[int], cap: int, record: list[dict[str, Any]]) -> None:
+    def __init__(self, inner: ModelBinding, calls: _StepCalls) -> None:
         super().__init__(
             base_url=inner.base_url,
             model=inner.model,
@@ -374,17 +394,10 @@ class _BudgetedBinding(ModelBinding):
             timeout_s=inner.timeout_s,
         )
         object.__setattr__(self, "_inner", inner)
-        object.__setattr__(self, "_spent", spent)
-        object.__setattr__(self, "_cap", cap)
-        object.__setattr__(self, "_record", record)
-
-    def _spend(self) -> None:
-        if self._cap and self._spent[0] >= self._cap:
-            raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
-        self._spent[0] += 1
+        object.__setattr__(self, "_calls", calls)
 
     def chat(self, messages: Sequence[Mapping[str, Any]], *, timeout_s: float | None = None, **params: Any) -> str:
-        self._spend()
+        self._calls.spend()
         kwargs: dict[str, Any] = dict(params)
         if timeout_s is not None:
             kwargs["timeout_s"] = timeout_s
@@ -412,11 +425,11 @@ class _BudgetedBinding(ModelBinding):
             usage = self._inner.last_usage() if isinstance(self._inner, ModelBinding) else None
             if usage is not None:
                 entry["usage"] = usage
-            self._record.append(entry)
+            self._calls.record(entry)
 
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """A method's raw request goes through the same budget and record as ``chat``: ``body`` in, ``response`` out."""
-        self._spend()
+        self._calls.spend()
         kwargs: dict[str, Any] = {} if timeout_s is None else {"timeout_s": timeout_s}
         entry: dict[str, Any] = {"model": self.model, "body": _bounded(body), "params": _bounded(kwargs)}
         started = time.monotonic()
@@ -425,14 +438,14 @@ class _BudgetedBinding(ModelBinding):
         except BaseException as exc:
             entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
             entry["seconds"] = round(time.monotonic() - started, 3)
-            self._record.append(entry)
+            self._calls.record(entry)
             raise
         entry["response"] = _bounded(response)
         entry["seconds"] = round(time.monotonic() - started, 3)
         usage = usage_of(response)
         if usage is not None:
             entry["usage"] = usage
-        self._record.append(entry)
+        self._calls.record(entry)
         return response
 
 
@@ -445,17 +458,16 @@ def _proposer_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     )
 
 
-def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, Any]]) -> ModelBindings:
-    """The proposer's view: every ``chat`` shares one per-step budget and lands in ``record``.
+def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBindings:
+    """The proposer's view: every ``chat`` shares the step's budget and lands in its record.
 
     The bindings are wrapped whatever the cap, so the record sees every call;
-    with ``cap`` 0 nothing is refused. The counter is per prepare_step call,
+    with a cap of 0 nothing is refused. ``calls`` is per prepare_step call,
     so a cap bounds one step's model bill, never the campaign's.
     """
-    spent: list[int] = [0]
 
     def wrap(binding: ModelBinding) -> ModelBinding:
-        return _BudgetedBinding(binding, spent, cap, record)
+        return _BudgetedBinding(binding, calls)
 
     return ModelBindings(
         served=wrap(models.served),
@@ -650,6 +662,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         step_record_dir: str | Path | None = None,
         worker_executor: ExecutorSettings | None = None,
         worker_gpus: float | None = None,
+        agent_executor: EpisodeExecutor | None = None,
+        agent_timeout_s: float = 1800.0,
+        agent_trial_timeout_s: float = 300.0,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -752,6 +767,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # Bind the whole install: npm launchers are symlinks into packages,
             # and git installs need both their editable source and their venv.
             self._executor = replace(self._executor, base_paths=(*self._executor.base_paths, str(prefix)))
+        for label, timeout in (("agent_timeout_s", agent_timeout_s), ("agent_trial_timeout_s", agent_trial_timeout_s)):
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+                raise ValueError(f"{label} must be a positive number")
+        # The agent proposer runs the same installed binary as the episodes, under its own isolation.
+        if binary is None and descriptor.install is not None and isinstance(agent_executor, SandboxExecutor):
+            agent_executor = replace(agent_executor, base_paths=(*agent_executor.base_paths, str(prefix)))
+        self._agent_executor = agent_executor
+        self._agent_timeout_s = float(agent_timeout_s)
+        self._agent_trial_timeout_s = float(agent_trial_timeout_s)
         self._evaluation_pool = EvaluationWorkerPool(
             self._worker_selection,
             self._worker_requirements,
@@ -1057,8 +1081,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 self._write_record(step_dir, RECORD_MUTATIONS_FILE, [])
                 return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": str(error)})
         else:
-            models = _budgeted_bindings(self._models, self._max_model_calls_per_step, record)
+            calls = _StepCalls(self._max_model_calls_per_step, record)
+            models = _budgeted_bindings(self._models, calls)
             extra: dict[str, Any] = {}
+            if self._propose.runs_agent:
+                # No agent executor configured: the proposer gets None and answers without an agent.
+                extra["agent_host"] = self._agent_host(step_dir, calls)
             if self._propose_accepts_manifest:
                 extra["manifest"] = manifest
             if self._propose_accepts_rejected:
@@ -1350,6 +1378,20 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     def failed_step_metrics(self) -> Mapping[str, Any]:
         """Keep the failed attempt's exact directory when the trainer consumes its instruction after reload."""
         return {} if self._current_step_record is None else {"step_record": str(self._current_step_record)}
+
+    def _agent_host(self, step_dir: Path | None, calls: ProposerCalls) -> AgentHost | None:
+        """What an agent proposer runs in this step, or ``None`` when the deployment configured no agent."""
+        if self._agent_executor is None:
+            return None
+        return AgentHost(
+            descriptor=self._descriptor,
+            binary=self._binary,
+            executor=self._agent_executor,
+            step_dir=step_dir,
+            calls=calls,
+            timeout_s=self._agent_timeout_s,
+            trial_timeout_s=self._agent_trial_timeout_s,
+        )
 
     def _claim_step_dir(self, step: int) -> Path | None:
         """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
