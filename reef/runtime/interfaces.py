@@ -440,12 +440,9 @@ class MultimodalRelay(ABC):
     """
 
     @abstractmethod
-    def serves(self, path: str) -> bool:
-        """Whether the provider serves Reef's route ``path``."""
-
-    @abstractmethod
     async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
-        """Forward one request body to the provider and return its answer as a stream."""
+        """Forward one request body to the provider and return its answer as a stream; raise
+        :class:`NotImplementedError` for a route the provider does not serve."""
 
 
 # -- Runtime contracts --------------------------------------------------------

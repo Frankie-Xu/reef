@@ -121,9 +121,6 @@ class ProviderRelay(MultimodalRelay):
         self.provider = provider
         self._timeout_s = timeout_s
 
-    def serves(self, path: str) -> bool:
-        return self.provider.upstream_path(path) is not None
-
     async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
         from aiohttp import ClientSession, ClientTimeout
 

@@ -345,8 +345,6 @@ class RequestService:
         relay = scenario.multimodal_relay
         if relay is None:
             raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
-        if not relay.serves(path):
-            raise NotImplementedError(f"the recipe's multimodal provider serves no {path}")
         return await relay.relay(path, payload)
 
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
