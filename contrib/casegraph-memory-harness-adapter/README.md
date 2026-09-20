@@ -1,46 +1,61 @@
-# Reef CaseGraph adapter draft
+# Synthetic CaseGraph report/record adapter
 
-This is an independent, projectless contribution draft for Reef. It uses only fabricated `syn-case-*` records and synthetic provenance. It does not copy Reef source code, call a production service, or modify the upstream checkout.
+This contribution contains deterministic synthetic CaseEvents, a local memory/harness
+state prototype, and a thin bridge to the checked-out Reef report and record APIs.
+All data is fabricated. No model calls, PHI, GPU work or production writes are involved.
 
-The adapter demonstrates:
+## Implemented boundary
 
-- deterministic `CaseEvent` generation with a fixed seed;
-- temporal and case-disjoint replay/adapt/retained/drift splits;
-- feedback credit assignment across fact, retrieval, execution, and verifier failures;
-- episodic-memory versus procedural-harness update surfaces;
-- versioned candidate artifacts with retained-score rollback;
-- idempotent replay and stable state digests.
+`reef_record_bridge.py` defines a recipe-local `CaseEventReport(ReportBase)`.
+Its metadata contains the canonical serialized event, preserving provenance,
+validity dates, observation time, feedback, artifact version and cost estimates.
+`event_to_record()` returns a real `AgentRecord` of type `REPORT`. Feedback
+references an observation receipt from the same case, scenario and artifact version.
+Record IDs include scenario and event identity. This is report-to-report linkage;
+there is no fabricated inference receipt or rollout score.
 
-Each event has a stable `event_id = sha256(canonical_event_json)`. The JSON
-fixture includes that ID, and `CaseEvent.from_dict()` / `deserialize()` reject a
-payload whose ID no longer matches. The canonical payload carries
-`provenance`, `valid_from`/`valid_to`, `feedback_type`, `update_surface`,
-`artifact_version`, and the compute/reviewer/human cost fields.
+The bridge does not append records. The integration test appends only replay/adapt
+to a disposable real `SQLiteRecordStore`, closes/reopens it, and checks receipt
+linkage, idempotency, conflict rejection, scenario isolation and adapter replay.
+Retained/drift events must stay outside training-visible storage; callers own this
+boundary. The bridge alone does not enforce split admission.
 
-`retained_evaluation_report.json` is a synthetic report for the four arms. It
-records quality, traceability, review time, compute, human cost, and negative
-transfer. Its retained-floor decision selects a candidate at equal retained
-quality while recording drift degradation as a follow-up signal; a future
-upstream gate should rollback when retained quality falls below the allowed
-floor.
+No Reef recipe registration, HTTP ingress, processor, memory node, reader surface,
+training, candidate evaluation plugin, artifact publication or observe/grow/commit
+lifecycle is implemented. `CaseGraphAdapter` memory entries and harness counters are
+local Python state. `VersionedArtifact` and numeric `select_or_rollback()` are local
+prototypes, not Reef artifacts or measured selection outcomes.
 
-## Mapping to Reef surfaces
+## Split and report protocol
 
-| Draft contract | Reef surface to discuss with maintainers | Deliberate boundary |
-| --- | --- | --- |
-| `CaseEvent` append/replay and provenance | `reef/storage/records.py` and report references | Do not change `RecordStore` persistence or make retained data training-visible |
-| memory entries vs harness failure counters | #522 memory node / recipe surface | Keep schema and reader recipe-owned until the RFC is accepted |
-| retained-floor evaluation | `reef/train/evaluation` and #514 | Use candidate `evaluate/decide`; keep retained cases independent and read-only |
-| parented candidate, select/rollback | `reef/artifact` and `reef/surface` | Stage candidates, publish only after the gate, discard rejected artifacts |
-| training schedule | #532 `TrainingTrigger` | Do not couple feedback attribution to when training starts |
+The splitter materializes an iterable once, groups complete cases chronologically,
+and allocates half to replay, a quarter to adapt, an eighth (at least one) to
+retained, and the remainder to drift. Fractions round down. At least eight cases
+are required; the original 4/2/1/1 split is preserved. All input events are assigned
+exactly once. Both valid_from and observed_at in an earlier arm must precede both
+clocks in the next arm. `valid_to` describes expiry and may extend across arms;
+this is a case-disjoint protocol, not an as-of clinical validity evaluator.
 
-The table is an integration plan, not copied Reef implementation. The draft
-does not call Reef, start a service, or alter a production model endpoint.
+`build_report.py` verifies event hashes, fixture digest and split manifest, then
+rebuilds `retained_evaluation_report.json`. Only replay/adapt update candidate
+state. The report measures serialization round trips and synthetic-reference
+coverage. Costs are sums of fixture estimates, not measured runtime or review time.
+Quality and negative transfer remain null; selection is `not_evaluated`.
+These protocol proxies are not clinical or model benchmark results.
 
-Run from this directory:
+Earlier hand-filled report scores and duplicated JSON under `docs/` were removed.
+The root fixture and generated report in this directory are the only current copies.
+The previous brief was replaced with an implementation boundary note.
+
+## Reproduce from the repository root
+
+Use the repository Python 3.12 environment with Reef dependencies and dev tools
+installed, as described in the root contribution guide:
 
 ```bash
-uv run --with pytest --python python3 -m pytest -q
+.venv/bin/python contrib/casegraph-memory-harness-adapter/build_report.py
+.venv/bin/python -m pytest -q contrib/casegraph-memory-harness-adapter
+.venv/bin/python -m mypy contrib/casegraph-memory-harness-adapter/reef_casegraph_adapter.py contrib/casegraph-memory-harness-adapter/reef_record_bridge.py contrib/casegraph-memory-harness-adapter/build_report.py
 ```
 
-The current draft passes eleven tests. Upstream integration remains blocked until a maintainer-approved checkout and contribution boundary are available.
+See `verification_report.md` for the checks actually run and their limitations.

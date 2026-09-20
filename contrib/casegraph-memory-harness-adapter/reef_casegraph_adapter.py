@@ -1,8 +1,7 @@
 """Synthetic CaseGraph -> Reef memory/harness adapter prototype.
 
-This module is intentionally independent of Reef.  It supplies a reviewable
-fixture and contract that can later be mapped onto Reef's recipe, record,
-evaluation, artifact, and surface APIs after an upstream checkout is available.
+The local state prototype is complemented by a thin Reef report/record bridge.
+It does not implement a recipe or the observe/grow/commit lifecycle.
 It never contains patient data, model prompts, or production service calls.
 """
 
@@ -11,9 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
-from typing import Any, Iterable, Mapping
+from itertools import pairwise
+from typing import Any
 
 FEEDBACK_TYPES = (
     "fact_error",
@@ -24,7 +25,7 @@ FEEDBACK_TYPES = (
 UPDATE_SURFACES = ("episodic_memory", "procedural_harness")
 
 
-def _digest(value: Any) -> str:
+def digest(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -61,6 +62,7 @@ class CaseEvent:
             raise ValueError(f"unknown update surface: {self.update_surface}")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be in [0, 1]")
+        date.fromisoformat(self.observed_at)
         start = date.fromisoformat(self.valid_from)
         if self.valid_to is not None and date.fromisoformat(self.valid_to) < start:
             raise ValueError("valid_to must not precede valid_from")
@@ -77,7 +79,7 @@ class CaseEvent:
     def event_id(self) -> str:
         """Stable identity over the canonical event payload, excluding the ID."""
 
-        return _digest(self.canonical())
+        return digest(self.canonical())
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the event with its explicit, verifiable ``event_id``."""
@@ -87,7 +89,7 @@ class CaseEvent:
         return value
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "CaseEvent":
+    def from_dict(cls, value: Mapping[str, Any]) -> CaseEvent:
         """Deserialize and reject a tampered or stale event identity."""
 
         payload = dict(value)
@@ -101,7 +103,7 @@ class CaseEvent:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
     @classmethod
-    def deserialize(cls, value: str) -> "CaseEvent":
+    def deserialize(cls, value: str) -> CaseEvent:
         return cls.from_dict(json.loads(value))
 
 
@@ -175,19 +177,25 @@ class SyntheticCaseEventGenerator:
     def split(self, events: Iterable[CaseEvent]) -> dict[str, tuple[CaseEvent, ...]]:
         """Return replay/adapt/retained/drift arms with no case overlap."""
 
+        items = tuple(events)
+        cases: dict[str, list[CaseEvent]] = {}
+        for event in items:
+            cases.setdefault(event.case_id, []).append(event)
+        if len(cases) < 8:
+            raise ValueError("the fixture needs at least 8 cases for all split arms")
+        ordered = sorted(cases, key=lambda case: (min(e.valid_from for e in cases[case]), case))
+        # Preserve the original 4/2/1/1 split at eight cases, allocating every
+        # additional case chronologically. Never iterate the caller's input twice.
+        replay_end = len(ordered) // 2
+        adapt_end = replay_end + len(ordered) // 4
+        retained_end = adapt_end + max(1, len(ordered) // 8)
         groups = {
-            "replay": {f"syn-case-{i:02d}" for i in range(0, 4)},
-            "adapt": {f"syn-case-{i:02d}" for i in range(4, 6)},
-            "retained": {"syn-case-06"},
-            "drift": {"syn-case-07"},
+            "replay": set(ordered[:replay_end]),
+            "adapt": set(ordered[replay_end:adapt_end]),
+            "retained": set(ordered[adapt_end:retained_end]),
+            "drift": set(ordered[retained_end:]),
         }
-        result = {name: tuple(event for event in events if event.case_id in ids) for name, ids in groups.items()}
-        seen: dict[str, str] = {}
-        for name, items in result.items():
-            for event in items:
-                previous = seen.setdefault(event.case_id, name)
-                if previous != name:
-                    raise AssertionError(f"case leaked across splits: {event.case_id}")
+        result = {name: tuple(event for event in items if event.case_id in ids) for name, ids in groups.items()}
         validate_temporal_splits(result)
         return result
 
@@ -196,11 +204,25 @@ def validate_temporal_splits(splits: Mapping[str, tuple[CaseEvent, ...]]) -> Non
     """Reject temporal leakage between the ordered benchmark arms."""
 
     order = ("replay", "adapt", "retained", "drift")
-    for left, right in zip(order, order[1:]):
-        if not splits.get(left) or not splits.get(right):
-            raise ValueError(f"temporal split {left!r} and {right!r} must both be non-empty")
-        latest_left = max(date.fromisoformat(event.valid_from) for event in splits[left])
-        earliest_right = min(date.fromisoformat(event.valid_from) for event in splits[right])
+    if set(splits) != set(order):
+        raise ValueError("expected exactly replay/adapt/retained/drift splits")
+    seen: set[str] = set()
+    for name in order:
+        if not splits[name]:
+            raise ValueError(f"temporal split {name!r} must be non-empty")
+        cases = {event.case_id for event in splits[name]}
+        if seen & cases:
+            raise ValueError("case overlap between splits")
+        seen.update(cases)
+    for left, right in pairwise(order):
+        # Both effective time and knowledge availability must precede the next
+        # arm on either clock. valid_to describes expiry, not availability.
+        latest_left = max(
+            max(date.fromisoformat(event.valid_from), date.fromisoformat(event.observed_at)) for event in splits[left]
+        )
+        earliest_right = min(
+            min(date.fromisoformat(event.valid_from), date.fromisoformat(event.observed_at)) for event in splits[right]
+        )
         if latest_left >= earliest_right:
             raise ValueError(f"temporal leakage between {left} and {right}")
 
@@ -234,7 +256,9 @@ class CaseGraphAdapter:
                 {"event_id": event_id, "text_ref": event.text_ref, "kind": event.feedback_type}
             )
         if event.feedback_type in {"execution_strategy_failure", "verifier_error"}:
-            self.state.harness_failures[event.feedback_type] = self.state.harness_failures.get(event.feedback_type, 0) + 1
+            self.state.harness_failures[event.feedback_type] = (
+                self.state.harness_failures.get(event.feedback_type, 0) + 1
+            )
         self.state.applied_event_ids.append(event_id)
 
     def replay(self, events: Iterable[CaseEvent]) -> dict[str, Any]:
@@ -247,9 +271,9 @@ class CaseGraphAdapter:
         }
 
     def state_digest(self) -> str:
-        return _digest(asdict(self.state))
+        return digest(asdict(self.state))
 
-    def candidate(self, version: str, parent_artifact_id: str | None = None) -> "VersionedArtifact":
+    def candidate(self, version: str, parent_artifact_id: str | None = None) -> VersionedArtifact:
         return VersionedArtifact(
             artifact_id=f"artifact:{version}:{self.state_digest()[:12]}",
             version=version,
@@ -288,4 +312,4 @@ def select_or_rollback(
 
 
 def fixture_digest(events: Iterable[CaseEvent]) -> str:
-    return _digest([event.canonical() for event in events])
+    return digest([event.canonical() for event in events])

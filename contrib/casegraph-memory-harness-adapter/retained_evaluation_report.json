@@ -1,75 +1,94 @@
 {
-  "artifact_decision": {
-    "baseline_quality": 0.8,
-    "candidate_quality": 0.8,
-    "decision": "selected_on_retained_floor",
-    "drift_follow_up": "negative_transfer_observed",
-    "policy": "retained-floor",
-    "rollback_boundary": "rollback candidate when retained quality drops below baseline minus allowed_regression"
-  },
-  "artifact_version": "casegraph-synthetic-v1",
-  "fixture_event_digest": "aec88a050f4812a672d40670cc5dcd2bb2e11e07784886ac90b3333c4adebd0d",
-  "metrics": {
+  "arms": {
     "adapt": {
-      "compute_ms": 6.0,
-      "human_cost_seconds": 2.0,
-      "negative_transfer": 0.0,
-      "quality": 0.875,
-      "review_time_seconds": 6.0,
-      "traceability": 1.0
+      "case_ids": [
+        "syn-case-04",
+        "syn-case-05"
+      ],
+      "event_count": 4,
+      "fixture_cost_estimates": {
+        "compute_ms": 6.0,
+        "human_intervention_seconds": 2.0,
+        "reviewer_seconds": 6.0
+      },
+      "negative_transfer": null,
+      "quality": null,
+      "serialization_round_trip_rate": 1.0,
+      "synthetic_reference_coverage": 1.0
     },
     "drift": {
-      "baseline_quality": 0.75,
-      "candidate_quality": 0.7,
-      "compute_ms": 3.0,
-      "human_cost_seconds": 1.0,
-      "negative_transfer": -0.05,
-      "quality": 0.7,
-      "review_time_seconds": 3.0,
-      "traceability": 1.0
+      "case_ids": [
+        "syn-case-07"
+      ],
+      "event_count": 2,
+      "fixture_cost_estimates": {
+        "compute_ms": 3.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "negative_transfer": null,
+      "quality": null,
+      "serialization_round_trip_rate": 1.0,
+      "synthetic_reference_coverage": 1.0
     },
     "replay": {
-      "compute_ms": 12.0,
-      "human_cost_seconds": 4.0,
-      "negative_transfer": 0.0,
-      "quality": 1.0,
-      "review_time_seconds": 0.0,
-      "traceability": 1.0
+      "case_ids": [
+        "syn-case-00",
+        "syn-case-01",
+        "syn-case-02",
+        "syn-case-03"
+      ],
+      "event_count": 8,
+      "fixture_cost_estimates": {
+        "compute_ms": 12.0,
+        "human_intervention_seconds": 4.0,
+        "reviewer_seconds": 12.0
+      },
+      "negative_transfer": null,
+      "quality": null,
+      "serialization_round_trip_rate": 1.0,
+      "synthetic_reference_coverage": 1.0
     },
     "retained": {
-      "baseline_quality": 0.8,
-      "candidate_quality": 0.8,
-      "compute_ms": 3.0,
-      "human_cost_seconds": 1.0,
-      "negative_transfer": 0.0,
-      "quality": 0.8,
-      "review_time_seconds": 3.0,
-      "traceability": 1.0
+      "case_ids": [
+        "syn-case-06"
+      ],
+      "event_count": 2,
+      "fixture_cost_estimates": {
+        "compute_ms": 3.0,
+        "human_intervention_seconds": 1.0,
+        "reviewer_seconds": 3.0
+      },
+      "negative_transfer": null,
+      "quality": null,
+      "serialization_round_trip_rate": 1.0,
+      "synthetic_reference_coverage": 1.0
     }
   },
-  "notes": [
-    "All values are synthetic demonstration metrics, not clinical or production measurements.",
-    "Retained and drift cases are case-disjoint from replay and adapt.",
-    "Traceability is one only because every synthetic event has a generator provenance and stable event_id."
+  "candidate_event_ids": [
+    "46dc3231ae18becb8d5354262bd7d6d672e44fe8b63add11f75241ec7c705875",
+    "8ab149f9f6a6b668008da97f82aca54b8d6e3866b739030740f967aebb3db09e",
+    "cdb98fc4235dd4323579067fee14fe331a23e1277216e93fdbf7819d9969fd44",
+    "41b79d67f28218b66a8b4d3dab36f3c5d4f1e49eb083b40002736eecaaa908f8",
+    "7644a8a89672030ac62ae0c7900109ab71abf0c7659c22b0e3ff8f9bd8ae00ab",
+    "1ce56899bb53bc32a132ac05bef849dc0b2037e3efd619ccfd826d460f2d675c",
+    "3a0de69faba2dd83e9ee9a1d98e2c876c35c664a175a1be2bf06f3f8ec824487",
+    "bc5f7853e9d690f6a0e9ddaa85906419a8ef982799d498f1f434047cbac89809",
+    "a3629fbea33494d46ae468ae8fbd8e05e787ae65f924e5d3dfde718e25c4897f",
+    "fda6199e661a65eee29f18b232c4d4baee09a8675dff6156b5db7a481675e0aa",
+    "f81a76a5566a9d51f3942a25165020681bf31b0167357dcb50218cdc0e28d9bf",
+    "ad55f7a3b65d70c23eda662d6f96300cec9b571c16b54fd7308e3faacb2c1f7e"
   ],
-  "protocol": "reef-casegraph-retained-evaluation/1",
-  "seed": 20260919,
-  "split_case_ids": {
-    "adapt": [
-      "syn-case-04",
-      "syn-case-05"
-    ],
-    "drift": [
-      "syn-case-07"
-    ],
-    "replay": [
-      "syn-case-00",
-      "syn-case-01",
-      "syn-case-02",
-      "syn-case-03"
-    ],
-    "retained": [
-      "syn-case-06"
-    ]
-  }
+  "candidate_state_digest": "259b14bddb02c27f95010632ff3e04b0c4857a4fc935eac9cb7d38e79b317f26",
+  "fixture_digest": "aec88a050f4812a672d40670cc5dcd2bb2e11e07784886ac90b3333c4adebd0d",
+  "measurement_scope": "Serialization and synthetic provenance proxies; costs are fixture estimates, not timings.",
+  "model_calls": 0,
+  "retained_event_ids": [
+    "c30e674ea953a644a7fffbfdefe4ef10d47e97b3c49c4b34f5e42a144a1c2aee",
+    "c22dfb7d10e50b7468cd034dd94f15ba989ae1714498816bacb21b66c119cdab"
+  ],
+  "schema": "casegraph-protocol-report/1",
+  "selection_decision": "not_evaluated",
+  "synthetic": true,
+  "unmeasured": "Model/clinical quality, evidence correctness, review speed and negative transfer require evaluation."
 }
