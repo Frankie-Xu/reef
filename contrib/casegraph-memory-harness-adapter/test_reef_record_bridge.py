@@ -27,7 +27,8 @@ def test_real_sqlite_report_round_trip_and_receipt_linkage(tmp_path: Path) -> No
             if event.event_type == "observation":
                 observations[event.case_id] = receipt
             else:
-                assert receipt.references == (observations[event.case_id].agent_record_id,)
+                assert receipt.references == ()
+                assert receipt.payload["metadata"]["source_report_id"] == observations[event.case_id].agent_record_id
                 assert receipt.payload["feedback"] == event.feedback_type
             assert receipt.request_type == RequestType.REPORT
             assert not store.append_result(record).inserted
@@ -58,3 +59,35 @@ def test_bridge_rejects_wrong_receipt() -> None:
     ]:
         with pytest.raises(ValueError):
             event_to_record(feedback, scenario=scenario, observation=source)
+
+
+@pytest.mark.integration
+def test_report_lineage_passes_real_dispatcher_ingress(tmp_path: Path) -> None:
+    from reef.artifact import InMemoryRepositoryBackend
+    from reef.core.reports import ReportValidationError
+    from reef.dispatcher import Dispatcher
+    from reef.recipe import Recipe
+    from reef.storage.sqlite import SQLiteScenarioStorage
+
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    dispatcher = Dispatcher(
+        Recipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "artifacts"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+    )
+    try:
+        events = SyntheticCaseEventGenerator().generate()
+        observation = dispatcher.accept_record(event_to_record(events[0], scenario="synthetic-ingress"))
+        feedback = event_to_record(events[1], scenario="synthetic-ingress", observation=observation)
+        # Phase 3 used report-to-report native references: storage accepted them,
+        # but actual ingress correctly refuses to treat reports as inference.
+        legacy = replace(feedback, references=(observation.agent_record_id,))
+        with pytest.raises(ReportValidationError, match="existing inference"):
+            dispatcher.accept_record(legacy)
+        accepted = dispatcher.accept_record(feedback)
+        assert accepted.references == ()
+        assert accepted.payload["metadata"]["source_report_id"] == observation.agent_record_id
+        assert event_from_record(accepted) == events[1]
+    finally:
+        dispatcher.close()

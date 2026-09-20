@@ -1,0 +1,340 @@
+{
+  "actual_interfaces": [
+    "ScenarioFactory.load_or_create",
+    "RecordStore.append",
+    "Scenario.prepare_training_step",
+    "CandidateBackend.prepare_step",
+    "CandidateEvaluationPlugin.evaluate/decide",
+    "CandidateBackend.settle_step",
+    "Scenario.commit"
+  ],
+  "arms": {
+    "drift": {
+      "baseline_tasks": [
+        {
+          "case_id": "syn-case-07",
+          "correct": true,
+          "event_id": "6f39cdfca1fc9da56cdc74e3140ef1e3f8614098f9aaa2269dc3faf9eda4c687",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-07",
+          "correct": true,
+          "event_id": "13ba0771087fc17a461e82cd207982122cbc3ff4ae5a4f8d38f0c9192204dd95",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        }
+      ],
+      "candidate_tasks": [
+        {
+          "case_id": "syn-case-07",
+          "correct": true,
+          "event_id": "6f39cdfca1fc9da56cdc74e3140ef1e3f8614098f9aaa2269dc3faf9eda4c687",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-07",
+          "correct": true,
+          "event_id": "13ba0771087fc17a461e82cd207982122cbc3ff4ae5a4f8d38f0c9192204dd95",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        }
+      ]
+    },
+    "retained": {
+      "baseline_tasks": [
+        {
+          "case_id": "syn-case-06",
+          "correct": true,
+          "event_id": "c30e674ea953a644a7fffbfdefe4ef10d47e97b3c49c4b34f5e42a144a1c2aee",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-06",
+          "correct": true,
+          "event_id": "c22dfb7d10e50b7468cd034dd94f15ba989ae1714498816bacb21b66c119cdab",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        }
+      ],
+      "candidate_tasks": [
+        {
+          "case_id": "syn-case-06",
+          "correct": true,
+          "event_id": "c30e674ea953a644a7fffbfdefe4ef10d47e97b3c49c4b34f5e42a144a1c2aee",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-06",
+          "correct": true,
+          "event_id": "c22dfb7d10e50b7468cd034dd94f15ba989ae1714498816bacb21b66c119cdab",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        }
+      ]
+    },
+    "training": {
+      "baseline_tasks": [
+        {
+          "case_id": "syn-case-00",
+          "correct": true,
+          "event_id": "46dc3231ae18becb8d5354262bd7d6d672e44fe8b63add11f75241ec7c705875",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-00",
+          "correct": false,
+          "event_id": "8ab149f9f6a6b668008da97f82aca54b8d6e3866b739030740f967aebb3db09e",
+          "expected": "episodic_memory",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-01",
+          "correct": true,
+          "event_id": "cdb98fc4235dd4323579067fee14fe331a23e1277216e93fdbf7819d9969fd44",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-01",
+          "correct": false,
+          "event_id": "41b79d67f28218b66a8b4d3dab36f3c5d4f1e49eb083b40002736eecaaa908f8",
+          "expected": "episodic_memory",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-02",
+          "correct": true,
+          "event_id": "7644a8a89672030ac62ae0c7900109ab71abf0c7659c22b0e3ff8f9bd8ae00ab",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-02",
+          "correct": true,
+          "event_id": "1ce56899bb53bc32a132ac05bef849dc0b2037e3efd619ccfd826d460f2d675c",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-03",
+          "correct": true,
+          "event_id": "3a0de69faba2dd83e9ee9a1d98e2c876c35c664a175a1be2bf06f3f8ec824487",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-03",
+          "correct": true,
+          "event_id": "bc5f7853e9d690f6a0e9ddaa85906419a8ef982799d498f1f434047cbac89809",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-04",
+          "correct": true,
+          "event_id": "a3629fbea33494d46ae468ae8fbd8e05e787ae65f924e5d3dfde718e25c4897f",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-04",
+          "correct": false,
+          "event_id": "fda6199e661a65eee29f18b232c4d4baee09a8675dff6156b5db7a481675e0aa",
+          "expected": "episodic_memory",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-05",
+          "correct": true,
+          "event_id": "f81a76a5566a9d51f3942a25165020681bf31b0167357dcb50218cdc0e28d9bf",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-05",
+          "correct": false,
+          "event_id": "ad55f7a3b65d70c23eda662d6f96300cec9b571c16b54fd7308e3faacb2c1f7e",
+          "expected": "episodic_memory",
+          "predicted": "procedural_harness"
+        }
+      ],
+      "candidate_tasks": [
+        {
+          "case_id": "syn-case-00",
+          "correct": true,
+          "event_id": "46dc3231ae18becb8d5354262bd7d6d672e44fe8b63add11f75241ec7c705875",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-00",
+          "correct": true,
+          "event_id": "8ab149f9f6a6b668008da97f82aca54b8d6e3866b739030740f967aebb3db09e",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-01",
+          "correct": true,
+          "event_id": "cdb98fc4235dd4323579067fee14fe331a23e1277216e93fdbf7819d9969fd44",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-01",
+          "correct": true,
+          "event_id": "41b79d67f28218b66a8b4d3dab36f3c5d4f1e49eb083b40002736eecaaa908f8",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-02",
+          "correct": true,
+          "event_id": "7644a8a89672030ac62ae0c7900109ab71abf0c7659c22b0e3ff8f9bd8ae00ab",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-02",
+          "correct": true,
+          "event_id": "1ce56899bb53bc32a132ac05bef849dc0b2037e3efd619ccfd826d460f2d675c",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-03",
+          "correct": true,
+          "event_id": "3a0de69faba2dd83e9ee9a1d98e2c876c35c664a175a1be2bf06f3f8ec824487",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-03",
+          "correct": true,
+          "event_id": "bc5f7853e9d690f6a0e9ddaa85906419a8ef982799d498f1f434047cbac89809",
+          "expected": "procedural_harness",
+          "predicted": "procedural_harness"
+        },
+        {
+          "case_id": "syn-case-04",
+          "correct": true,
+          "event_id": "a3629fbea33494d46ae468ae8fbd8e05e787ae65f924e5d3dfde718e25c4897f",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-04",
+          "correct": true,
+          "event_id": "fda6199e661a65eee29f18b232c4d4baee09a8675dff6156b5db7a481675e0aa",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-05",
+          "correct": true,
+          "event_id": "f81a76a5566a9d51f3942a25165020681bf31b0167357dcb50218cdc0e28d9bf",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        },
+        {
+          "case_id": "syn-case-05",
+          "correct": true,
+          "event_id": "ad55f7a3b65d70c23eda662d6f96300cec9b571c16b54fd7308e3faacb2c1f7e",
+          "expected": "episodic_memory",
+          "predicted": "episodic_memory"
+        }
+      ]
+    }
+  },
+  "fixture_digest": "aec88a050f4812a672d40670cc5dcd2bb2e11e07784886ac90b3333c4adebd0d",
+  "measured_runtime_ms": null,
+  "model_calls": 0,
+  "policy": {
+    "execution_strategy_failure": "procedural_harness",
+    "fact_error": "episodic_memory",
+    "observation": "episodic_memory",
+    "retrieval_omission": "episodic_memory",
+    "verifier_error": "procedural_harness"
+  },
+  "restart_recovered_without_retraining": true,
+  "retained_digest": "865c29c3b298da1d200ee8378470243baca34881e2cecb84a13dd01993e2d01a",
+  "sample_warning": "Retained has one case and two correlated event tasks; diagnostic only.",
+  "schema": "casegraph-lifecycle-report/1",
+  "scope": "Deterministic corrective-surface routing; no clinical/model quality claim.",
+  "selection": {
+    "evaluation": {
+      "evaluator": "synthetic-feedback-routing",
+      "evaluator_version": "1",
+      "metadata": {
+        "baseline_tasks": [
+          {
+            "case_id": "syn-case-06",
+            "correct": true,
+            "event_id": "c30e674ea953a644a7fffbfdefe4ef10d47e97b3c49c4b34f5e42a144a1c2aee",
+            "expected": "episodic_memory",
+            "predicted": "episodic_memory"
+          },
+          {
+            "case_id": "syn-case-06",
+            "correct": true,
+            "event_id": "c22dfb7d10e50b7468cd034dd94f15ba989ae1714498816bacb21b66c119cdab",
+            "expected": "procedural_harness",
+            "predicted": "procedural_harness"
+          }
+        ],
+        "candidate_tasks": [
+          {
+            "case_id": "syn-case-06",
+            "correct": true,
+            "event_id": "c30e674ea953a644a7fffbfdefe4ef10d47e97b3c49c4b34f5e42a144a1c2aee",
+            "expected": "episodic_memory",
+            "predicted": "episodic_memory"
+          },
+          {
+            "case_id": "syn-case-06",
+            "correct": true,
+            "event_id": "c22dfb7d10e50b7468cd034dd94f15ba989ae1714498816bacb21b66c119cdab",
+            "expected": "procedural_harness",
+            "predicted": "procedural_harness"
+          }
+        ],
+        "retained_digest": "865c29c3b298da1d200ee8378470243baca34881e2cecb84a13dd01993e2d01a"
+      },
+      "metrics": {
+        "baseline_accuracy": 1.0,
+        "candidate_accuracy": 1.0
+      }
+    },
+    "metrics": {},
+    "outcome": "select",
+    "policy": "retained-routing-no-regression",
+    "policy_version": "1",
+    "reason": "candidate matches or improves incumbent routing"
+  },
+  "synthetic": true,
+  "training_record_ids": [
+    "caseevent:00f24a142f1dcdb8f7440da6fdc8542a8ee9ad73f0058078fda7cda63aba46b7",
+    "caseevent:24c2915b669ac18dc2b9bf24de508af4051d7530089ff7ea0d7406e58bbe8152",
+    "caseevent:2f70333a6ecf1c54b35cbf145eea67becfb134bb26523e478c978a332e389245",
+    "caseevent:30406b0b8a9adf19d1be786963d69f1c6cd480a2b599dc3f3392f887b071dca4",
+    "caseevent:45fcad741e08a3c83777f332b0d08f05a5d80861e04f038b1b91c3d06bf05ff7",
+    "caseevent:4a2abddc579851b9668c712741ce0a19434fa24aff1ce3ad104478ac7c3d9756",
+    "caseevent:90a8e52ba00e88d148355704458c50f0e641602e54ac715ca8e5daa9d855bd27",
+    "caseevent:9cdfac86c5330b7abda11453e79610c06cf5cbf81ab254b17e6573efadcd8c55",
+    "caseevent:9dfb6dd83a8ebc9bd0bd4bce7c3745c8d76ee68f0df3ae2436b76c5e4e7126ff",
+    "caseevent:be8da3fd8c7e4e00bbc4b6b4c23ce9e5e13f198f5104deccd8f9c32a1f2f6198",
+    "caseevent:fb8c100aec75aaa798d63c2786bb977b85cf2e6b72840e4d06065e2eae13db3f",
+    "caseevent:fdbbf99ac243b736a00f5379e195780ba932ec074e501f310037a55f499cc9ab"
+  ],
+  "verified": {
+    "head_unchanged_before_commit": true,
+    "held_out_absent_from_training_audit": true,
+    "published_after_commit": true
+  }
+}

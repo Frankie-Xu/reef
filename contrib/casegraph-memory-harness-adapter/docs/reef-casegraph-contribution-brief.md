@@ -1,11 +1,15 @@
 # CaseGraph contribution boundary
 
-The current implementation and reproducible commands are documented in
-[the contribution README](../README.md). The fixture and generated protocol report
-live one directory above this note; duplicated historical JSON files were removed.
+The current implementation, actual Reef API mapping, corrected report lineage,
+frozen input policy and reproducible commands are in [the README](../README.md).
 
-The earlier projectless brief described proposed integration and hand-entered scores.
-It is superseded by the real ReportBase/AgentRecord bridge and SQLite integration
-test. The contribution remains a synthetic protocol prototype. Reef's full
-observe/grow/commit flow, memory surface, trained candidate evaluation and publication
-remain unimplemented. No current issue status or maintainer acceptance is asserted.
+Phase 4 adds a real CPU-only recipe lifecycle using ScenarioFactory, Trainer,
+SQLite scenario storage and Git LFS artifacts. The candidate is a deterministic
+feedback-routing table, evaluated on frozen held-out synthetic tasks before the
+real Scenario commit. No model, clinical, neural-training or deployed-inference
+benefit is claimed. Retained has only one case.
+
+The Phase 3 protocol report remains explicitly separate from the new measured
+synthetic lifecycle report. Old hand-entered scores and duplicate JSON snapshots
+were removed in Phase 3. No current RFC acceptance or upstream issue status is
+asserted; this implementation is scoped to the existing fork contribution.

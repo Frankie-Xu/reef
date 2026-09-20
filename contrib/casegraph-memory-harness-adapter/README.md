@@ -1,61 +1,107 @@
-# Synthetic CaseGraph report/record adapter
+# Synthetic CaseGraph recipe
 
-This contribution contains deterministic synthetic CaseEvents, a local memory/harness
-state prototype, and a thin bridge to the checked-out Reef report and record APIs.
-All data is fabricated. No model calls, PHI, GPU work or production writes are involved.
+This contribution runs a CPU-only synthetic corrective-action task through the
+checked-out Reef recipe, Trainer, candidate evaluation, durable scenario commit
+and artifact publication/recovery APIs. It uses fabricated CaseEvents, no external
+model, no neural training, no PHI and no cloud resources.
 
-## Implemented boundary
+## What the task measures
 
-`reef_record_bridge.py` defines a recipe-local `CaseEventReport(ReportBase)`.
-Its metadata contains the canonical serialized event, preserving provenance,
-validity dates, observation time, feedback, artifact version and cost estimates.
-`event_to_record()` returns a real `AgentRecord` of type `REPORT`. Feedback
-references an observation receipt from the same case, scenario and artifact version.
-Record IDs include scenario and event identity. This is report-to-report linkage;
-there is no fabricated inference receipt or rollout score.
+Given an observation or a feedback category, a policy chooses `episodic_memory`
+or `procedural_harness`. The initial policy sends observations to memory and all
+feedback to the procedural harness. The learner updates that finite routing table
+from replay/adapt examples. The verifier executes the table on frozen retained
+inputs and compares its chosen action to the fixture's expected `update_surface`.
+This is actual synthetic task accuracy, not serialization success.
 
-The bridge does not append records. The integration test appends only replay/adapt
-to a disposable real `SQLiteRecordStore`, closes/reopens it, and checks receipt
-linkage, idempotency, conflict rejection, scenario isolation and adapter replay.
-Retained/drift events must stay outside training-visible storage; callers own this
-boundary. The bridge alone does not enforce split admission.
+The default retained arm is **one case with two correlated event tasks**. Its
+baseline and selected candidate both score 1.0. This tiny diagnostic establishes
+lifecycle behavior, not a generalization, model-quality or clinical benefit.
+The rejection test supplies a regressing candidate at the learner boundary:
+retained accuracy is 0.5 and the existing release remains selected. Evaluation
+failures produce no selection. No evaluator result is hard-coded by the recipe.
 
-No Reef recipe registration, HTTP ingress, processor, memory node, reader surface,
-training, candidate evaluation plugin, artifact publication or observe/grow/commit
-lifecycle is implemented. `CaseGraphAdapter` memory entries and harness counters are
-local Python state. `VersionedArtifact` and numeric `select_or_rollback()` are local
-prototypes, not Reef artifacts or measured selection outcomes.
+## Actual interfaces and responsibilities
 
-## Split and report protocol
+| Concept | Current Reef API | Contribution policy |
+| --- | --- | --- |
+| Recipe | `Recipe.build()` → real `Trainer` | `CaseGraphRecipe`, programmatic configuration |
+| Observe | `RecordStore.append()` after recipe admission | Exact frozen training events only |
+| Grow | `Scenario.prepare_training_step()` | Trainer calls `CandidateBackend.prepare_step`, `CandidateEvaluationPlugin.evaluate/decide`, `CandidateBackend.settle_step` |
+| Candidate | `Artifact.local()` → `TrainStepResult` | Real `policy.json` bytes, not a local fake release |
+| Commit | `Scenario.commit()` | Reef stages/publishes bytes, durably logs the decision, compacts consumed records and advances the release |
+| Restore | `ScenarioFactory.load_or_create()` | Reef reconciles the Git artifact head and scenario commit log |
 
-The splitter materializes an iterable once, groups complete cases chronologically,
-and allocates half to replay, a quarter to adapt, an eighth (at least one) to
-retained, and the remainder to drift. Fractions round down. At least eight cases
-are required; the original 4/2/1/1 split is preserved. All input events are assigned
-exactly once. Both valid_from and observed_at in an earlier arm must precede both
-clocks in the next arm. `valid_to` describes expiry and may extend across arms;
-this is a case-disjoint protocol, not an as-of clinical validity evaluator.
+There are no `observe()` or `grow()` methods to emulate in this checkout.
+`open_scenario()` composes the real `ScenarioFactory`, `SQLiteScenarioStorage`
+and `GitLFSRepositoryBackend`. It starts no HTTP server or background dispatcher
+worker. The selected release can be read with `Scenario.artifact_for_version()`.
+No inference engine, model endpoint, Harbor rollout, weight optimizer or serving
+adapter is implemented. This is a programmatic contrib recipe, not a YAML cookbook
+deployment or clinical CaseGraph system. No generic core API was changed.
 
-`build_report.py` verifies event hashes, fixture digest and split manifest, then
-rebuilds `retained_evaluation_report.json`. Only replay/adapt update candidate
-state. The report measures serialization round trips and synthetic-reference
-coverage. Costs are sums of fixture estimates, not measured runtime or review time.
-Quality and negative transfer remain null; selection is `not_evaluated`.
-These protocol proxies are not clinical or model benchmark results.
+`CaseGraphProcessor` declares a typed `RoutingBatch(TrainingBatch)` carrying the
+synthetic events; it does not invent token trajectories or Harbor tasks. The
+backend receives training examples and fixture hashes only. A separate retained
+evaluator owns the held-out inputs. The evaluation plugin is mandatory; the
+backend's default evaluation entry point refuses to bypass it.
 
-Earlier hand-filled report scores and duplicated JSON under `docs/` were removed.
-The root fixture and generated report in this directory are the only current copies.
-The previous brief was replaced with an implementation boundary note.
+## Frozen input and admission
+
+`FrozenFixture.load()` checks event identities, the fixture checksum and split
+manifest, then stores nested event data as immutable JSON strings. The original
+splitter allocates every case once: half replay, a quarter adapt, an eighth
+(at least one) retained and the remainder drift, rounding down. It accepts one-shot
+iterators and at least eight cases. Both effective and observed times must precede
+both clocks in the next arm. `valid_to` is expiry, not knowledge availability.
+
+`ingest_training()` validates the whole submitted batch against the scenario's
+exact frozen training manifest before appending. Split labels alone are not trusted.
+The processor independently rejects held-out or modified content. Both retained
+and drift remain outside training storage and consumed record IDs. An identity
+covering all frozen arms is persisted in the base and candidate artifacts;
+`open_scenario()` rejects changed fixtures even before the first training commit.
+Use this admission path: direct writes to a raw RecordStore bypass its pre-storage
+check, and a generic HTTP endpoint is not configured as a secure deployment here.
+
+## Report linkage correction
+
+`CaseEventReport(ReportBase)` stores the canonical event under metadata.
+`AgentRecord` has type `REPORT`; feedback links its observation report through
+`metadata.source_report_id`, with native `references` empty. Reef reserves native
+references for actual inference receipts; no inference occurred in this example.
+
+Phase 3 used report-to-report native references. SQLite accepted that shape, so
+its storage-only round-trip test did not reveal that actual Dispatcher ingress
+rejects it. A new real `Dispatcher.accept_record()` test verifies that the old
+shape is rejected and the corrected shape accepted. Existing Phase 3 databases
+are not migrated; reproduce with fresh work directories to avoid conflicting
+record IDs whose corrected payload has changed.
 
 ## Reproduce from the repository root
 
-Use the repository Python 3.12 environment with Reef dependencies and dev tools
-installed, as described in the root contribution guide:
+Python 3.12 and Git LFS are required for these lifecycle checks. The isolated
+`.venv-phase4` leaves the existing `.venv` unchanged. Use CPU dependencies only:
 
 ```bash
-.venv/bin/python contrib/casegraph-memory-harness-adapter/build_report.py
-.venv/bin/python -m pytest -q contrib/casegraph-memory-harness-adapter
-.venv/bin/python -m mypy contrib/casegraph-memory-harness-adapter/reef_casegraph_adapter.py contrib/casegraph-memory-harness-adapter/reef_record_bridge.py contrib/casegraph-memory-harness-adapter/build_report.py
+uv venv --python 3.12 .venv-phase4
+git submodule update --init third_party/reef-client
+uv pip install --python .venv-phase4/bin/python -e '.[dev]' -e ./third_party/reef-client
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null .venv-phase4/bin/python -m pytest -q tests/reef_service/test_records.py contrib/casegraph-memory-harness-adapter
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null .venv-phase4/bin/python contrib/casegraph-memory-harness-adapter/run_lifecycle.py --work-dir .venv-phase4/fresh-run --output .venv-phase4/lifecycle-report.json
 ```
 
-See `verification_report.md` for the checks actually run and their limitations.
+Choose a fresh work directory for each run. `lifecycle_report.json` is the committed
+semantic result; tests reproduce it in two independent real repositories. Random
+local Artifact IDs, Git release hashes and timestamps are intentionally absent
+from this deterministic report; tests and the runner verify actual head equality,
+head changes, consumed IDs, materialized policy bytes and restart behavior.
+The runner refuses to overwrite an existing run and performs no failure injection.
+Failure and rejection cases are exercised by integration tests.
+
+`retained_evaluation_report.json` remains the Phase 3 protocol report, rebuilt by
+`build_report.py`. Its serialization/provenance rates are proxies, costs are fixture
+estimates, and quality/negative transfer stay unmeasured there. Use the lifecycle
+report for the synthetic routing task results. Neither report is a model benchmark.
+
+See `verification_report.md` for commands, results and environment limitations.
